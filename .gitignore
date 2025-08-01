@@ -1,0 +1,17 @@
+.*
+!/.gitignore
+!/.dockerignore
+
+**/__pycache__
+**/templates
+**/results
+**/flagged
+**/uploads
+**/logs
+*.log
+*.swp
+*.swo
+*~
+
+**/jupyter_checker/data
+make_api_key.ipynb

@@ -1,0 +1,37 @@
+services:
+  app:
+    build: .
+    ports:
+      - "2300:20142"
+    volumes:
+      - .:/app
+      - /tmp:/tmp
+      - .env:/app/.env
+    command: uvicorn main:app --host 0.0.0.0 --port 20142
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - vllm_network
+
+  gradio:
+    build: .
+    ports:
+      - "2301:20141"
+    volumes:
+      - .:/app
+      - /tmp:/tmp
+      - .env:/app/.env
+    command: python gradio_evaluator/gradio_app.py
+    restart: unless-stopped
+    networks:
+      - vllm_network
+
+networks:
+  vllm_network:
+    external: false
