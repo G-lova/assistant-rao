@@ -7,15 +7,20 @@ import subprocess
 import tempfile
 
 import magic
+import cv2
 import pandas as pd
+import numpy as np
 import PyPDF2
 import rarfile
 import textract
 import yaml
 import zipfile
+import io
 from docx import Document
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from pptx import Presentation
-
+from paddleocr import PaddleOCR
+from pdf2image import convert_from_path
 from dotenv import load_dotenv
 from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -23,14 +28,29 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from configs.config import load_config
 
 
-
 config = load_config("config_model")
 load_dotenv()
 
 logging.getLogger("PyPDF2").setLevel(logging.ERROR)
 
+
 with open("configs/config_model.yaml", "r", encoding="utf-8") as file:
     config = yaml.safe_load(file)
+
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Создаем экземпляр PaddleOCR
+ocr_engine = PaddleOCR(
+    use_angle_cls=True,
+    lang='ru',
+    use_gpu=False,
+    show_log=False,
+    use_doc_orientation_classify=False,
+    use_doc_unwarping=False,
+    use_textline_orientation=False
+)
 
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
@@ -110,41 +130,48 @@ def read_txt_file(file_path: str) -> str:
 
 def read_doc_file(file_path: str) -> str:
     """
-    Читает содержимое DOC или DOCX файла и возвращает его текстовое представление.
+    Читает текст из файла формата .doc или .docx по указанному пути.
+
+    Поддерживает извлечение текста из DOCX (с использованием специальной функции, 
+    извлекающей также изображения) и DOC (через библиотеку textract, без поддержки изображений).
+    Проверяет существование файла, его размер и корректность расширения.
 
     Args:
-        file_path (str): Путь к файлу DOC или DOCX, который нужно прочитать.
+        file_path (str): Путь к файлу документа (.doc или .docx).
 
     Raises:
-        ValueError: Выводится, если файл не является валидным DOC или DOCX файлом.
-        ValueError: Выводится, если произошла ошибка при чтении DOC файла.
-        ValueError: Выводится, если произошла ошибка при чтении DOCX файла.
+        ValueError: Если файл не существует.
+        ValueError: Если файл пустой.
+        ValueError: Если формат файла не поддерживается (не .doc и не .docx).
+        ValueError: Если возникает ошибка при чтении файла DOC.
+        ValueError: Если происходит ошибка обработки файла в целом.
 
     Returns:
-        str: Текстовое содержимое DOC или DOCX файла.
+        str: Извлечённый текст из документа в виде строки.
     """
-    # Проверка MIME-типа файла
-    mime = magic.Magic(mime=True)
-    file_mime_type = mime.from_file(file_path)
-
-    if file_mime_type == "application/msword":  # Валидный .doc файл
-        try:
-            # Использование textract для извлечения текста из DOC файла
-            text_content = textract.process(file_path, encoding='utf-8').decode('utf-8')
-            return text_content
-        except Exception as e:
-            raise ValueError(f"Ошибка при чтении DOC файла {file_path}: {str(e)}")
-    elif file_mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":  # Валидный .doc файл
-        try:
-            document = Document(file_path)
-            full_text = []
-            for para in document.paragraphs:
-                full_text.append(para.text)
-            return "\n".join(full_text)
-        except Exception as e:
-            raise ValueError(f"Ошибка при чтении DOCX файла {file_path}: {str(e)}")
-    else:
-        raise ValueError(f"Файл {file_path} не является валидным DOC или DOCX файлом. MIME-тип: {file_mime_type}")
+    try:
+        if not os.path.exists(file_path):
+            raise ValueError("Файл не существует")
+        
+        if os.path.getsize(file_path) == 0:
+            raise ValueError("Файл пустой")
+        
+        if file_path.lower().endswith('.docx'):
+            return extract_text_and_images_from_docx(file_path)
+        
+        # Для DOC используем textract (без обработки изображений)
+        elif file_path.lower().endswith('.doc'):
+            try:
+                return textract.process(file_path).decode('utf-8')
+            except Exception as e:
+                raise ValueError(f"Ошибка чтения DOC: {str(e)}")
+        
+        else:
+            raise ValueError("Неподдерживаемый формат файла")
+    
+    except Exception as e:
+        logger.error(f"Ошибка обработки документа: {str(e)}")
+        raise ValueError(f"Ошибка обработки файла: {str(e)}")
 
 
 def read_pptx_file(file_path: str) -> str:
@@ -168,22 +195,51 @@ def read_pptx_file(file_path: str) -> str:
 
 def read_pdf_file(file_path: str) -> str:
     """
-    Читает текстовое содержимое из PDF файла.
+    Извлекает текст из PDF-файла с использованием комбинированного подхода.
+
+    Сначала функция пытается извлечь текст напрямую из PDF-документа.
+    Если извлечённый текст слишком короткий (менее 100 символов), 
+    предполагается, что документ сканированный или текст нечитаем, 
+    и тогда применяется OCR-обработка через конвертацию страниц в изображения 
+    и распознавание текста с помощью Tesseract.
 
     Args:
-        file_path (str): Путь к файлу PDF, который нужно прочитать.
+        file_path (str): Путь к PDF-файлу, который необходимо прочитать.
 
     Returns:
-        str: Текстовое содержимое всех страниц PDF файла, объединенное в одну строку.
+        str: Извлечённый текст из всех страниц PDF, объединённый в одну строку.
+             Каждая страница помечена как "Страница X (текст)" или "Страница X (OCR)".
+             Возвращает пустую строку, если текст не был извлечён.
     """
-    text = []
-    with open(file_path, 'rb') as f:
-        reader = PyPDF2.PdfReader(f)
-        for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text.append(page_text)
-    return '\n'.join(text)
+    full_text = []
+    
+    try:
+        # 1. Сначала пробуем извлечь обычный текст
+        with open(file_path, 'rb') as f:
+            reader = PyPDF2.PdfReader(f)
+            for page_num, page in enumerate(reader.pages, 1):
+                page_text = page.extract_text()
+                if page_text and page_text.strip():
+                    full_text.append(f"Страница {page_num} (текст):\n{page_text}\n")
+        
+        # 2. Если текста мало - делаем OCR
+        if len("\n".join(full_text).strip()) < 100:
+            
+            images = convert_from_path(file_path, dpi=300)
+            for img_num, image in enumerate(images, 1):
+                try:
+                    with io.BytesIO() as output:
+                        image.save(output, format='PNG')
+                        ocr_text = extract_text_from_image(output.getvalue())
+                        if ocr_text.strip():
+                            full_text.append(f"Страница {img_num} (OCR):\n{ocr_text}\n")
+                except Exception as e:
+                    logger.error(f"Ошибка страницы {img_num}: {str(e)}")
+        
+        return "\n".join(full_text).strip()
+    
+    except Exception as e:
+        raise ValueError(f"Ошибка чтения PDF: {str(e)}")
 
 
 def read_excel_file(file_path: str) -> str:
@@ -290,6 +346,128 @@ def process_archive(file_path: str, archive_class) -> str:
                     except UnicodeDecodeError:
                         contents.append(f"=== File: {file_info.filename} (binary) ===")
     return '\n'.join(contents)
+
+
+def extract_text_from_image(image_data: bytes) -> str:
+    """
+    Извлекает текст из изображения с использованием OCR-движка PaddleOCR.
+
+    Функция принимает байтовые данные изображения, декодирует их в формат,
+    пригодный для обработки OpenCV, и применяет оптическое распознавание
+    символов для извлечения читаемого текста. Поддерживает распознавание
+    на нескольких языках и классификацию текста (например, поворот).
+
+    Args:
+        image_data (bytes): Байтовое представление изображения (например, PNG, JPG),
+                            из которого необходимо извлечь текст.
+
+    Returns:
+        str: Извлечённый текст в виде одной строки, объединённой через пробел.
+             Возвращает пустую строку, если текст не был распознан или произошла ошибка.
+    """
+
+    try:
+        # Конвертация в numpy array
+        nparr = np.frombuffer(image_data, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
+        # Распознавание текста
+        result = ocr_engine.ocr(img, cls=True)
+        
+        # Обработка результатов
+        texts = []
+        if result and result[0]:
+            for line in result[0]:
+                if line and len(line) >= 2:
+                    text = line[1][0]  # Получаем текст
+                    texts.append(text)
+        
+        return " ".join(texts).strip()
+    
+    except Exception as e:
+        logger.error(f"OCR Error: {str(e)}")
+        return ""
+
+
+def extract_text_and_images_from_docx(file_path: str) -> str:
+    """
+    Извлекает текст и распознаёт текст с изображений из документа формата DOCX.
+
+    Функция извлекает весь текст из абзацев и таблиц документа, а также находит
+    встроенные изображения (PNG, JPG, JPEG) через прямое чтение ZIP-структуры DOCX.
+    Для каждого изображения выполняется OCR с помощью функции extract_text_from_image,
+    и распознанный текст добавляется в результат с пояснением источника.
+
+    Временные файлы изображений сохраняются во временной директории, которая
+    автоматически удаляется после завершения обработки.
+
+    Args:
+        file_path (str): Путь к файлу DOCX, который необходимо обработать.
+
+    Raises:
+        ValueError: Если возникает ошибка при чтении или обработке DOCX-файла.
+
+    Returns:
+        str: Объединённый текст, содержащий:
+             - обычный текст из абзацев и таблиц;
+             - распознанный текст с изображений с пометкой "[Текст с изображения ...]".
+             Все элементы разделены переносами строк. Возвращает пустую строку,
+             если текст и изображения отсутствуют или не были распознаны.
+    """
+
+    try:
+        # Создаем временную директорию для изображений
+        with tempfile.TemporaryDirectory() as temp_dir:
+            doc = Document(file_path)
+            result = []
+            
+            # 1. Извлекаем весь текст
+            for para in doc.paragraphs:
+                if para.text.strip():
+                    result.append(para.text)
+            
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        if cell.text.strip():
+                            result.append(cell.text)
+            
+            # 2. Извлекаем изображения более надежным способом
+            image_texts = []
+            doc_zip = zipfile.ZipFile(file_path)
+            
+            # Ищем все файлы изображений в документе
+            image_files = []
+            for name in doc_zip.namelist():
+                if name.startswith('word/media/') and name.split('.')[-1].lower() in ['png', 'jpg', 'jpeg']:
+                    image_files.append(name)
+            
+            # Обрабатываем найденные изображения
+            for img_file in image_files:
+                try:
+                    # Извлекаем изображение во временную директорию
+                    img_data = doc_zip.read(img_file)
+                    img_path = os.path.join(temp_dir, os.path.basename(img_file))
+                    with open(img_path, 'wb') as f:
+                        f.write(img_data)
+                    
+                    # Распознаем текст
+                    ocr_text = extract_text_from_image(img_data)
+                    if ocr_text.strip():
+                        image_texts.append(f"[Текст с изображения {os.path.basename(img_file)}]: {ocr_text}")
+                except Exception as e:
+                    logger.error(f"Ошибка обработки изображения {img_file}: {str(e)}")
+                    continue
+            
+            # 3. Комбинируем результаты
+            if image_texts:
+                result.append("\n".join(image_texts))
+            
+            return "\n".join(result)
+    
+    except Exception as e:
+        logger.error(f"Полная ошибка обработки DOCX: {str(e)}")
+        raise ValueError(f"Ошибка обработки DOCX: {str(e)}")
 
 
 def read_file(file_path: str) -> str:
