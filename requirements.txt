@@ -28,3 +28,4 @@ pdf2image
 pillow
 opencv-python-headless
 tqdm>=4.66.0
+psycopg2-binary==2.9.9

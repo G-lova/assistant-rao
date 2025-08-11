@@ -1,23 +1,40 @@
 services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: procurement_postgres
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    ports:
+      - "2302:5432"
+    networks:
+      - procurement_network
+
   app:
     build: .
+    environment:
+      DB_HOST: postgres
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      API_URL: ${API_ACCESS}
+    depends_on:
+      - postgres
     ports:
       - "2300:20142"
     volumes:
       - .:/app
       - /tmp:/tmp
       - .env:/app/.env
-    command: uvicorn main:app --host 0.0.0.0 --port 20142
+    command: uvicorn main:app --host 0.0.0.0 --port 20142 --reload
     restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     networks:
-      - vllm_network
+      - procurement_network
 
   gradio:
     build: .
@@ -27,11 +44,18 @@ services:
       - .:/app
       - /tmp:/tmp
       - .env:/app/.env
-    command: python gradio_evaluator/gradio_app.py
+    command: python -m watchfiles "python gradio_evaluator/gradio_app.py"
     restart: unless-stopped
     networks:
-      - vllm_network
+      - procurement_network
+    depends_on:
+      - app
+    environment:
+      API_URL: ${API_ACCESS}
 
 networks:
-  vllm_network:
-    external: false
+  procurement_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
