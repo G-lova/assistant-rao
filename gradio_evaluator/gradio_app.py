@@ -10,135 +10,14 @@ from procurement_requirements import PROCUREMENT_REQUIREMENTS
 from typing import List, Dict
 import shutil
 
+from utils import (get_required_documents, show_documents_content, update_document_list, add_document, clear_documents_list, toggle_explanation_visibility)
+
 load_dotenv()
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def show_documents_content(
-    procurement_id: str,
-    expertise_object: str,
-    legislation: str,
-    procurement_method: str,
-    expertise_details: str,
-    eis_link: str,
-    mass_files: List,
-    docs_json: str
-) -> Dict:
-    try:
-        api_url = os.getenv("API_ACCESS")
-        
-        # Подготавливаем данные формы
-        form_data = {
-            "procurement_id": procurement_id,
-            "expertise_object": expertise_object,
-            "legislation": legislation,
-            "procurement_method": procurement_method,
-            "expertise_details": expertise_details,
-            "eis_link": eis_link or "",
-            "documents": docs_json if docs_json else "[]"
-        }
-        
-        # Подготавливаем файлы для отправки
-        files_data = []
-        if mass_files:
-            for file in mass_files:
-                if hasattr(file, 'name'):
-                    files_data.append(("files", (os.path.basename(file.name), open(file.name, "rb"))))
-        
-        # Отправляем запрос
-        response = requests.post(
-            f"{api_url}/check-procurement-documents",
-            data=form_data,
-            files=files_data,
-            timeout=30
-        )
-        response.raise_for_status()
-        
-        return response.json()
-        
-    except Exception as e:
-        logger.error(f"Error in show_documents_content: {str(e)}")
-        return {
-            "status": "deny", 
-            "error": str(e),
-            "required_documents": [],
-            "provided_documents": [],
-            "missing_documents": [],
-            "documents_content": {}
-        }
-
-def update_document_list(legislation: str, procurement_method: str, expertise_details: str) -> Dict:
-    """Обновляет список документов на основе выбранных параметров"""
-    try:
-        required = (PROCUREMENT_REQUIREMENTS.get(legislation, {})
-                                 .get(procurement_method, {})
-                                 .get(expertise_details, []))
-        return gr.Dropdown.update(choices=required, value=required[0] if required else None)
-    except Exception as e:
-        logger.error(f"Error updating document list: {str(e)}")
-        return gr.Dropdown.update(choices=[], value=None)
-
-def add_document(current_json: str, doc_name: str, explanation: str, doc_file) -> tuple:
-    """Добавляет документ в список (либо как загруженный, либо как отсутствующий)"""
-    if not doc_name:
-        return current_json, []
-    
-    try:
-        current_list = json.loads(current_json) if current_json else []
-    except json.JSONDecodeError:
-        current_list = []
-    
-    # Если файл загружен, сохраняем его во временную директорию
-    file_path = None
-    if doc_file:
-        upload_dir = os.path.join(tempfile.gettempdir(), "procurement_uploads")
-        os.makedirs(upload_dir, exist_ok=True)
-        
-        # Получаем оригинальное имя файла
-        if hasattr(doc_file, 'name'):
-            original_name = os.path.basename(doc_file.name)
-            file_path = os.path.join(upload_dir, original_name)
-            
-            try:
-                with open(file_path, "wb") as f:
-                    if hasattr(doc_file, 'read'):
-                        f.write(doc_file.read())
-                    elif hasattr(doc_file, 'name'):
-                        with open(doc_file.name, "rb") as src:
-                            f.write(src.read())
-            except Exception as e:
-                logger.error(f"Error saving file: {str(e)}")
-                file_path = None
-    
-    # Проверяем, нет ли уже такого документа в списке
-    existing_doc_index = next(
-        (i for i, doc in enumerate(current_list) if doc.get('document_name') == doc_name),
-        None
-    )
-    
-    # Подготавливаем данные документа
-    doc_data = {
-        "document_name": doc_name,
-        "status": "uploaded" if file_path else "missing",
-    }
-    
-    if file_path:
-        doc_data["file_path"] = file_path
-    else:
-        doc_data["explanation"] = explanation or "Не указана причина отсутствия"
-    
-    # Обновляем или добавляем документ
-    if existing_doc_index is not None:
-        current_list[existing_doc_index] = doc_data
-    else:
-        current_list.append(doc_data)
-    
-    return json.dumps(current_list, ensure_ascii=False), current_list
-
-def clear_documents_list() -> tuple:
-    """Очищает список документов"""
-    return None, []
 
 with gr.Blocks(title="Проверка документов закупок") as demo:
     gr.Markdown("## Проверка документов закупок")
@@ -146,13 +25,13 @@ with gr.Blocks(title="Проверка документов закупок") as 
     with gr.Row():
         with gr.Column():
             procurement_id = gr.Textbox(
-                label="ID закупки",
+                label="ID закупки*",
                 placeholder="Введите идентификатор закупки",
                 interactive=True
             )
             
             expertise_object = gr.Dropdown(
-                label="Объект экспертизы",
+                label="Объект экспертизы*",
                 choices=[
                     "Документация о проведении закупки",
                     "Отчетные материалы (результаты исполнения Контракта или Договора)"
@@ -161,13 +40,13 @@ with gr.Blocks(title="Проверка документов закупок") as 
             )
             
             legislation = gr.Dropdown(
-                label="Законодательное регулирование",
+                label="Законодательное регулирование*",
                 choices=["44-ФЗ", "223-ФЗ"],
                 value="44-ФЗ"
             )
             
             procurement_method = gr.Dropdown(
-                label="Способ закупки",
+                label="Способ закупки*",
                 choices=[
                     "Конкурс", "Аукцион", "Запрос котировок", 
                     "Закупка у единственного поставщика", "Выполнение НИР",
@@ -177,7 +56,7 @@ with gr.Blocks(title="Проверка документов закупок") as 
             )
             
             expertise_details = gr.Dropdown(
-                label="Детали экспертизы",
+                label="Детали экспертизы*",
                 choices=[
                     "Полный комплект документов о закупке",
                     "Описание объекта закупки",
@@ -193,24 +72,25 @@ with gr.Blocks(title="Проверка документов закупок") as 
             
             # Блок для работы с документами
             with gr.Group():
-                gr.Markdown("### Документы")
+                gr.Markdown("### Документы*")
                 with gr.Row():
                     doc_name = gr.Dropdown(
-                        label="Документ",
+                        label="Тип документа*",
                         choices=[],
                         interactive=True,
                         allow_custom_value=False
                     )
                     doc_explanation = gr.Textbox(
-                        label="Комментарий (если документ отсутствует)",
+                        label="Комментарий (если документ отсутствует)*",
                         placeholder="Укажите причину отсутствия документа...",
-                        interactive=True
+                        interactive=True,
+                        visible=False
                     )
                 with gr.Row():
                     doc_file = gr.File(
                         label="Загрузить документ",
                         file_count="single",
-                        file_types=[".pdf", ".docx", ".doc", ".xlsx", ".xls", ".txt", ".csv"],
+                        file_types=[".pdf", ".docx", ".doc", ".xlsx", ".xls", ".txt", ".csv", ".zip", ".rar"],
                         interactive=True
                     )
                 with gr.Row():
@@ -224,9 +104,9 @@ with gr.Blocks(title="Проверка документов закупок") as 
             
             # Массовая загрузка файлов
             mass_files = gr.File(
-                label="Массовая загрузка документов",
+                label="Массовая загрузка документов (автоматическое определение типа)",
                 file_count="multiple",
-                file_types=[".pdf", ".docx", ".doc", ".xlsx", ".xls", ".txt", ".csv"]
+                file_types=[".pdf", ".docx", ".doc", ".xlsx", ".xls", ".txt", ".csv", ".zip", ".rar"]
             )
             
             submit_btn = gr.Button("Проверить документы", variant="primary")
@@ -250,7 +130,10 @@ with gr.Blocks(title="Проверка документов закупок") as 
                     missing_docs = gr.JSON(label="Список отсутствующих документов")
                 
                 with gr.Tab("Содержимое документов"):
-                    docs_content = gr.JSON(label="Первые 50 символов каждого документа")
+                    docs_content = gr.JSON(label="Первые 20 символов каждого документа")
+                
+                with gr.Tab("Ошибки"):
+                    errors_output = gr.JSON(label="Ошибки обработки")
 
     # Инициализация списка документов при загрузке
     demo.load(
@@ -265,6 +148,13 @@ with gr.Blocks(title="Проверка документов закупок") as 
             [legislation, procurement_method, expertise_details],
             doc_name
         )
+    
+    # Переключение видимости поля объяснения
+    doc_name.change(
+        toggle_explanation_visibility,
+        inputs=doc_name,
+        outputs=doc_explanation
+    )
     
     # Добавление документа
     add_doc_btn.click(
@@ -319,10 +209,15 @@ with gr.Blocks(title="Проверка документов закупок") as 
         results_output,
         missing_docs
     ).then(
-        lambda x: {k: v[:50] for k, v in x.get("documents_content", {}).items()},
+        lambda x: {k: v[:20] for k, v in x.get("documents_content", {}).items()},
         results_output,
         docs_content
+    ).then(
+        lambda x: x.get("errors", []),
+        results_output,
+        errors_output
     )
+
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=20141)

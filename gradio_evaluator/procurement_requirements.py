@@ -264,3 +264,45 @@ PROCUREMENT_REQUIREMENTS = {
         }
     }
 }
+
+
+
+DOCUMENT_TYPE_MAPPING = {
+    "Объект экспертизы": "expertise_object",
+    "Законодательное регулирование": "legal_regulation",
+    "Способ закупки": "procurement_method",
+    "Заявка на проведение экспертизы": "expertise_request",
+    "Акт о приемке товара": "acceptance_act",
+    "Дата контракта": "contract_date",
+    "Документ о приемке и/или акт сдачи-приемки работ (услуг)": "works_acceptance_doc",
+    "Документ о приемке товара (УПД, Счет-фактура и др.)": "goods_acceptance_doc",
+    "Документация, подтверждающая невозможность использования иных способов определения поставщика": "impossible_alternative_doc",
+    "Документы по взысканию пени и штрафов": "penalty_recovery_docs",
+    "Документы, подтверждающие гарантийные обязательства": "warranty_docs",
+    "Документы, подтверждающие исполнение всех условий контракта": "contract_conditions_docs",
+    "Документы, подтверждающие передачу авторских прав": "ip_rights_transfer_docs",
+    "Документы, подтверждающие страну происхождения товара": "goods_origin_docs",
+    "Дополнительные материалы": "additional_materials",
+    "Дополнительные соглашения к контракту": "contract_amendments",
+    "Извещение": "notice",
+    "Контракт на выполнение НИР (или НИОКР)": "nir_contract",
+    "Контракт на выполнение работ (оказание услуг)": "service_contract",
+    "Контракт на поставку товара": "goods_contract",
+    "Материалы, подтверждающие Обоснование н(м)цк": "price_justification_docs",
+    "Обоснование н(м)цк": "price_justification",
+    "Описание объекта закупки": "procurement_description",
+    "Отчет о выполнении НИР": "nir_report",
+    "Положение о закупках организации": "procurement_policy",
+    "Порядок рассмотрения и оценки заявок на конкурс": "bid_evaluation_procedure",
+    "Предмет контракта": "contract_subject",
+    "Проект контракта": "contract_draft",
+    "Реквизиты контракта": "contract_details",
+    "Сертификаты соответствия": "compliance_certificates",
+    "Ссылка на ЕИС": "eis_link",
+    "Техническая документация, паспорт товара и пр.": "technical_documentation",
+    "Товарная накладная": "goods_invoice",
+    "Требования к содержанию заявки на конкурс": "bid_requirements",
+    "Фото результатов выполнения работ": "work_results_photos",
+    "Фото товара": "goods_photos",
+    "Экспертиза результатов исполнения контракта": "contract_execution_expertise",
+}
