@@ -2,14 +2,15 @@ from pydantic import BaseModel
 from typing import Dict, Optional, List, Union
 from fastapi import UploadFile
 
+
 class DocumentContentResponse(BaseModel):
     procurement_id: str  # ID закупки
     document_type: str   # Тип документа
     filename: str        # Имя файла
     content_type: str    # MIME-тип
-    content: str         # Первые 20 символов
+    content: str         # Первые 20 символов или "Неверный документ"
     size: int            # Размер файла в байтах
-    is_valid: bool       # Успешно ли обработан
+    is_valid: bool       # Соответствует ли документ своему типу
     error: Optional[str] = None  # Сообщение об ошибке
 
 

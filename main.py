@@ -15,7 +15,7 @@ from configs.schemas import DocumentContentResponse, APIError, ProcurementCheckR
 from configs.utils import APIKeyMiddleware, read_file, check_procurement_completeness, get_required_documents
 from configs.procurement_requirements import DOCUMENT_TYPE_MAPPING
 from configs.working_with_db import save_document_content_to_db, ALLOWED_COLUMNS
-
+from src.evaluator import check_documents
 
 app = FastAPI()
 
@@ -43,107 +43,6 @@ async def test_auth():
     response_model=DocumentContentResponse,
     responses={400: {"model": APIError}, 500: {"model": APIError}}
 )
-async def get_documents_content(
-    procurement_id: str = Form(...),
-    document_type: str = Form(...),  # Например: "Акт о приемке товара"
-    file: UploadFile = File(...)
-):
-    """
-    Принимает файл документа закупки, извлекает содержимое,
-    определяет колонку в БД через DOCUMENT_TYPE_MAPPING,
-    сохраняет в report_for_operator.
-    Поддерживает ZIP и RAR архивы.
-    """
-    try:
-        # Ищем соответствие в маппинге
-        if document_type not in DOCUMENT_TYPE_MAPPING:
-            available = ", ".join(DOCUMENT_TYPE_MAPPING.keys())
-            raise HTTPException(
-                status_code=400,
-                detail=f"Неизвестный тип документа. Допустимые типы: {available}"
-            )
-
-        # Получаем техническое имя колонки
-        db_column = DOCUMENT_TYPE_MAPPING[document_type]
-
-        # Защита: убедимся, что колонка разрешена
-        if db_column not in ALLOWED_COLUMNS:
-            logger.error(f"Document type '{db_column}' not in ALLOWED_COLUMNS")
-            raise HTTPException(status_code=500, detail="Внутренняя ошибка: недопустимая колонка БД")
-
-        # Создаём временную директорию
-        temp_dir = tempfile.mkdtemp()
-        file_path = os.path.join(temp_dir, file.filename)
-
-        try:
-            # Сохраняем файл
-            with open(file_path, "wb") as buffer:
-                buffer.write(await file.read())
-
-            content = ""
-
-            # Обработка ZIP
-            if file.filename.lower().endswith('.zip'):
-                with zipfile.ZipFile(file_path, 'r') as zip_ref:
-                    if not zip_ref.namelist():
-                        raise HTTPException(status_code=400, detail="ZIP архив пуст")
-                    first_file = zip_ref.namelist()[0]
-                    with zip_ref.open(first_file) as f:
-                        raw_content = f.read()
-                        content = raw_content.decode('utf-8', errors='ignore')
-
-            # Обработка RAR
-            elif file.filename.lower().endswith('.rar'):
-                try:
-                    with rarfile.RarFile(file_path, 'r') as rar_ref:
-                        if not rar_ref.namelist():
-                            raise HTTPException(status_code=400, detail="RAR архив пуст")
-                        first_file = rar_ref.namelist()[0]
-                        with rar_ref.open(first_file) as f:
-                            raw_content = f.read()
-                            content = raw_content.decode('utf-8', errors='ignore')
-                except rarfile.Error as e:
-                    raise HTTPException(status_code=400, detail=f"Ошибка чтения RAR: {str(e)}")
-
-            # Обычные файлы
-            else:
-                content = read_file(file_path)
-
-            # Сохраняем в БД по найденной колонке
-            success = save_document_content_to_db(
-                procurement_id=procurement_id,
-                document_type=db_column,  # ← техническое имя
-                content=content
-            )
-
-            if not success:
-                raise HTTPException(
-                    status_code=500,
-                    detail="Не удалось сохранить данные в базу"
-                )
-
-            # Возвращаем ответ с исходным именем документа
-            return DocumentContentResponse(
-                procurement_id=procurement_id,
-                document_type=document_type,  # ← человекочитаемое имя
-                filename=file.filename,
-                content_type=file.content_type or "unknown",
-                content=content[:20],
-                size=file.size,
-                is_valid=True
-            )
-
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error processing document: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Ошибка при обработке документа: {str(e)}"
-        )
 
 
 @app.post("/check-procurement-documents", response_model=ProcurementCheckResponse)
@@ -297,6 +196,86 @@ async def check_procurement_documents(
             error=str(e)
         )
 
+
+@app.post("/evaluate-documents", response_model=DocumentContentResponse)
+async def evaluate_documents(
+    procurement_id: str = Form(...),
+    document_type: str = Form(...),
+    legislation: str = Form(...),
+    procurement_method: str = Form(...),
+    expertise_details: str = Form(...),
+    file: UploadFile = File(...)
+):
+    try:
+        # Сохраняем с правильным расширением
+        suffix = os.path.splitext(file.filename)[1] or ".docx"
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        content = await file.read()
+        temp_file.write(content)
+        temp_file.close()
+
+        result = check_documents(
+            files=[temp_file],
+            legislation=legislation,
+            procurement_method=procurement_method,
+            expertise_details=expertise_details
+        )
+        os.unlink(temp_file.name)
+
+        if "error" in result:
+            # fallback
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            try:
+                raw_text = read_file(tmp_path, original_filename=file.filename)
+            finally:
+                os.unlink(tmp_path)
+            short_content = raw_text[:100]
+            is_valid = False
+            response_content = f"Неверный документ: {short_content}"
+        else:
+            analysis = next((da for da in result.get("document_analysis", []) if file.filename in da.get("document_name", "")), None)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            try:
+                raw_text = read_file(tmp_path, original_filename=file.filename)
+            finally:
+                os.unlink(tmp_path)
+            short_content = raw_text[:100]
+            is_valid = analysis and analysis.get("type_compliance", {}).get("status") == "соответствует"
+            response_content = short_content if is_valid else f"Неверный документ: {short_content}"
+
+            col_name = DOCUMENT_TYPE_MAPPING.get(document_type)
+            if col_name and col_name in ALLOWED_COLUMNS:
+                save_document_content_to_db(
+                    procurement_id=procurement_id,
+                    document_type=col_name,
+                    content=raw_text if is_valid else "Неверный документ"
+                )
+
+        return DocumentContentResponse(
+            procurement_id=procurement_id,
+            document_type=document_type,
+            filename=file.filename,
+            content_type=file.content_type or "unknown",
+            content=response_content,
+            size=file.size,
+            is_valid=bool(is_valid)
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при анализе модели: {str(e)}", exc_info=True)
+        return DocumentContentResponse(
+            procurement_id=procurement_id,
+            document_type=document_type,
+            filename=file.filename,
+            content_type=file.content_type or "unknown",
+            content="Неверный документ: Ошибка анализа",
+            size=file.size,
+            is_valid=False
+        )
+    
 
 if __name__ == "__main__":
     import uvicorn

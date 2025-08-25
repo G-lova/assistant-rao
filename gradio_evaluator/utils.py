@@ -135,20 +135,19 @@ def show_documents_content(
                     try:
                         with open(file_path, "rb") as f:
                             response = requests.post(
-                                f"{api_url}/get-documents-content",
+                                f"{api_url}/evaluate-documents",
                                 files={
-                                    "file": (
-                                        os.path.basename(file_path),
-                                        f,
-                                        "application/octet-stream"
-                                    )
+                                    "file": (os.path.basename(file_path), f, "application/octet-stream")
                                 },
                                 data={
                                     "procurement_id": procurement_id,
-                                    "document_type": doc_name
+                                    "document_type": doc_name,
+                                    "legislation": legislation,
+                                    "procurement_method": procurement_method,
+                                    "expertise_details": expertise_details
                                 },
                                 headers={"X-API-Key": api_key},
-                                timeout=30
+                                timeout=60
                             )
                         if response.status_code == 200:
                             doc_data = response.json()
@@ -202,20 +201,19 @@ def show_documents_content(
                 try:
                     with open(file_path, "rb") as f:
                         response = requests.post(
-                            f"{api_url}/get-documents-content",
+                            f"{api_url}/evaluate-documents",
                             files={
-                                "file": (
-                                    filename,
-                                    f,
-                                    "application/octet-stream"
-                                )
+                                "file": (os.path.basename(file_path), f, "application/octet-stream")
                             },
                             data={
                                 "procurement_id": procurement_id,
-                                "document_type": doc_type
+                                "document_type": doc_name,
+                                "legislation": legislation,
+                                "procurement_method": procurement_method,
+                                "expertise_details": expertise_details
                             },
                             headers={"X-API-Key": api_key},
-                            timeout=30
+                            timeout=60
                         )
                     if response.status_code == 200:
                         doc_data = response.json()

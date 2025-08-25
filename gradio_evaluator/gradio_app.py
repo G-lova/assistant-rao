@@ -209,7 +209,7 @@ with gr.Blocks(title="Проверка документов закупок") as 
         results_output,
         missing_docs
     ).then(
-        lambda x: {k: v[:20] for k, v in x.get("documents_content", {}).items()},
+        lambda x: {k: v[:200] for k, v in x.get("documents_content", {}).items()},
         results_output,
         docs_content
     ).then(
