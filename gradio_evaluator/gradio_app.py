@@ -1,16 +1,13 @@
-import os
-import json
-import gradio as gr
 import logging
-import tempfile
-import time
-from dotenv import load_dotenv
-import requests
-from procurement_requirements import PROCUREMENT_REQUIREMENTS
-from typing import List, Dict
-import shutil
 
-from utils import (get_required_documents, show_documents_content, update_document_list, add_document, clear_documents_list, toggle_explanation_visibility)
+import gradio as gr
+from dotenv import load_dotenv
+
+from utils import (show_documents_content, 
+                   update_document_list, 
+                   add_document, 
+                   clear_documents_list, 
+                   toggle_explanation_visibility)
 
 load_dotenv()
 

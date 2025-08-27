@@ -1,7 +1,7 @@
 import os
 import logging
-from typing import List
 
+from typing import List
 import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
@@ -67,32 +67,30 @@ def save_document_content_to_db(procurement_id: str, document_type: str, content
             host=os.getenv("DB_HOST"),
             port=os.getenv("DB_PORT", "5432")
         )
-
         with conn.cursor() as cursor:
-            # Проверяем, существует ли запись
             cursor.execute("SELECT 1 FROM report_for_operator WHERE procurement_id = %s", (procurement_id,))
             if cursor.fetchone() is None:
-                # Создаём новую запись
                 cursor.execute(
                     "INSERT INTO report_for_operator (procurement_id) VALUES (%s)",
                     (procurement_id,)
                 )
-                logger.info(f"Created new record for procurement_id={procurement_id}")
+                logger.info(f"Создана новая запись в БД для procurement_id={procurement_id}")
 
-            # Обновляем нужную колонку
             query = sql.SQL("""
                 UPDATE report_for_operator 
                 SET {} = %s 
                 WHERE procurement_id = %s
             """).format(sql.Identifier(document_type.lower()))
 
+            # Логируем обновление
+            logger.info(f"Обновление колонки '{document_type}' для procurement_id={procurement_id}, длина контента: {len(content)}")
             cursor.execute(query, (content, procurement_id))
             conn.commit()
-
-            return True  # Мы либо вставили, либо обновили — успех
+            logger.info(f"Успешно сохранено в БД: {document_type} ({len(content)} символов)")
+            return True
 
     except Exception as e:
-        logger.error(f"Error saving to DB: {str(e)}", exc_info=True)
+        logger.error(f"Ошибка сохранения в БД: {str(e)}", exc_info=True)
         return False
 
     finally:
@@ -100,4 +98,4 @@ def save_document_content_to_db(procurement_id: str, document_type: str, content
             try:
                 conn.close()
             except Exception as ex:
-                logger.error(f"Error closing DB connection: {ex}")
+                logger.error(f"Ошибка закрытия соединения с БД: {ex}")
