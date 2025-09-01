@@ -11,8 +11,9 @@ from dotenv import load_dotenv
 
 from configs.utils import read_file
 from configs.procurement_requirements import DOCUMENT_TYPE_MAPPING
-from search_engine.service import search_similar_documents as sync_search_similar
+from search_engine.service import search_similar_documents
 from src.prompts import RESPONSE_JSON_SCHEMA, SYSTEM_PROMPT
+from configs.working_with_db import save_raw_data, save_clean_conclusion
 
 
 load_dotenv()
@@ -29,160 +30,235 @@ client = OpenAI(
 model_name = os.getenv("M_MODEL_NAME")
 
 
-def extract_json_safely(text: str) -> dict:
+def clean_json_response(text: str) -> str:
     """
-    Извлекает и парсит JSON из строки, содержащей дополнительный текст или форматирование.
+    Очищает строку, извлекая из неё корректный JSON-объект.
 
-    Функция пытается найти JSON-объект в "грязной" строке, например, в ответе языковой модели,
-    который может содержать Markdown-разметку (````json```), лишние запятые, одинарные кавычки
-    и другие нестандартные элементы. Очищает строку и преобразует её в валидный словарь Python.
+    Функция находит первый полный JSON-объект (ограниченный фигурными скобками `{}`),
+    удаляя всё содержимое до первой открывающей скобки и после последней закрывающей.
+    Также удаляются комментарии в стиле C/JavaScript: многострочные `/* ... */` и однострочные `// ...`.
 
     Args:
-        text (str): Входная строка, содержащая JSON (возможно, вместе с дополнительным текстом).
+        text (str): Входной текст, потенциально содержащий JSON с посторонними символами или комментариями.
 
     Raises:
-        ValueError: Если в строке не удаётся найти корректный JSON-объект.
-        json.JSONDecodeError: Если очищенная строка не является валидным JSON.
+        ValueError: Если в тексте не найдена ни одна пара фигурных скобок, определяющих JSON-объект.
 
     Returns:
-        dict: Распарсенный JSON как словарь Python.
+        str: Очищенная строка, содержащая только валидный JSON.
     """
+    # Удаляем всё до первой { и после последней }
     try:
-        text = re.sub(r'```json\s*', '', text)
-        text = re.sub(r'```\s*', '', text)
-        first_brace = text.find('{')
-        last_brace = text.rfind('}')
+        start = text.index('{')
+        end = text.rindex('}') + 1
+        text = text[start:end]
+    except ValueError:
+        raise ValueError("Не найден JSON в ответе")
 
-        if first_brace == -1 or last_brace == -1:
-            raise ValueError("No JSON object found")
-        
-        text = text[first_brace:last_brace + 1]
-        text = re.sub(r',\s*}', '}', text)
-        text = re.sub(r',\s*\]', ']', text)
-        text = re.sub(r"'([^']+)'(?=\s*:)", r'"\1"', text)
-        text = re.sub(r":\s*'([^']*)'", r': "\1"', text)
-        return json.loads(text)
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON Decode Error: {e} | Raw: {repr(text)}")
-        raise
+    # Убираем комментарии /* ... */ и // ...
+    text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
+    text = re.sub(r'//.*$', '', text, flags=re.MULTILINE)
 
+    return text
 
-async def analyze_single_document(content: str, doc_name: str, doc_type: str, law_type: str, procurement_method: str) -> Dict[str, Any]:
+def robust_json_parse(text: str) -> dict:
     """
-    Анализирует отдельный документ на соответствие типу, структуре и читаемости.
+    Надёжно парсит строку в словарь Python, даже при наличии ошибок форматирования.
 
-    Функция использует LLM для оценки:
-    - соответствия содержания документа ожидаемому типу (например, спецификация, смета);
-    - читаемости текста (наличие шрифтов, язык, повреждённые фрагменты);
-    - соответствия требованиям законодательства и способу закупки.
-
-    Перед анализом выполняется поиск похожих документов в векторной базе для контекстного улучшения.
-    Ответ модели ожидается в строгом JSON-формате, который проходит валидацию и очистку.
+    Функция пытается распарсить строку как JSON. Если прямой парсинг не удаётся,
+    она применяет несколько стратегий очистки и нормализации: удаляет комментарии,
+    исправляет кавычки, экранирует переносы строк и заменяет одинарные кавычки на двойные.
+    Использует вспомогательную функцию `clean_json_response` для извлечения JSON-объекта.
 
     Args:
-        content (str): Текстовое содержимое документа (полное или частичное).
-        doc_name (str): Оригинальное имя файла, используется для логирования и анализа.
-        doc_type (str): Ожидаемый тип документа (например, "Спецификация", "Смета").
-        law_type (str): Тип законодательства (например, "44-ФЗ", "223-ФЗ").
-        procurement_method (str): Способ закупки (например, "Конкурс", "Котировка").
+        text (str): Строка, содержащая JSON или неформатированный JSON-подобный текст.
+
+    Raises:
+        ValueError: Если после всех попыток очистки и парсинга валидный JSON не был получен.
 
     Returns:
-        Dict[str, Any]: Словарь с результатами анализа, содержащий:
-            - type_compliance: статус соответствия, выявленные проблемы и рекомендации;
-            - readability: оценка читаемости, язык текста, проблемные фрагменты.
-            В случае ошибки возвращается шаблон с ошибкой и статусом "не соответствует".
+        dict: Словарь, полученный в результате парсинга JSON.
+    """
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        print(f"Прямой парсинг не удался: {e}")
+
+    # Пробуем почистить
+    try:
+        cleaned = clean_json_response(text)
+        return json.loads(cleaned)
+    except Exception:
+        pass
+
+    try:
+        # Заменяем \n на \\n, если они не экранированы
+        text = re.sub(r'(?<!\\)\n', '\\n', text)
+        # Заменяем одинарные кавычки на двойные (если модель использует)
+        text = text.replace("‘", "'").replace("’", "'").replace("`", "'")
+        text = re.sub(r"(\w)'(\w)", r"\1\'\2", text)  # экранируем апострофы
+        text = re.sub(r'([^{,:\[])\s*\'', r'\1"', text)  # ' -> " в начале строки
+        text = re.sub(r'\'\s*([,}\]\s])', r'"\1', text)  # ' -> " в конце строки
+
+        cleaned = clean_json_response(text)
+        return json.loads(cleaned)
+    except Exception as e:
+        raise ValueError(f"Не удалось распарсить JSON даже после очистки: {e}")
+
+
+async def analyze_single_document(
+    content: str,
+    document_name: str,
+    document_type: str,
+    law_type: str,
+    procurement_method: str
+) -> Dict[str, Any]:
+    """
+    Асинхронно анализирует содержимое одного документа с помощью LLM.
+
+    Функция отправляет содержимое документа в языковую модель с системным промптом,
+    ожидая структурированный JSON-ответ, соответствующий заданной схеме.
+    Выполняет парсинг, валидацию и постобработку результата: проверку соответствия типа,
+    восстановление при повреждённом JSON и сохранение результатов в базу данных.
+    В случае ошибки возвращает отчёт с диагностикой.
+
+    Args:
+        content (str): Текстовое содержимое документа (например, извлечённое из PDF).
+        document_name (str): Имя документа для логирования и отчёта.
+        document_type (str): Ожидаемый тип документа (например, 'contract', 'act', 'specification').
+        law_type (str): Тип законодательства, к которому относится закупка (например, '44-ФЗ', '223-ФЗ').
+        procurement_method (str): Способ закупки (например, 'запрос котировок', 'аукцион').
+
+    Raises:
+        ValueError: Если не удаётся извлечь или распарсить JSON из ответа модели, и все попытки восстановления провалились.
+
+    Returns:
+        Dict[str, Any]: Словарь с результатом анализа, содержащий:
+            - status (str): 'success' или 'error'
+            - document_name (str): Имя документа
+            - document_type (str): Тип документа
+            - analysis (dict): Данные анализа, включая:
+                - type_compliance: Соответствие типа документа
+                - readability: Оценка читаемости
+                - raw_data: Извлечённые структурированные данные
+                - conclusion: Текстовое заключение
     """
     try:
-        # Поиск похожих документов
-        search_text = content[:1000]
+        logger.info(f"Анализ документа: {document_name} | Тип: {document_type}")
+
+        prompt = SYSTEM_PROMPT.format(document_type=document_type)
+
         try:
-            loop = asyncio.get_event_loop()
-            similar_docs = await loop.run_in_executor(None, sync_search_similar, search_text, law_type)
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": f"Проанализируй следующий документ:\n\n{content}"}
+                ],
+                extra_body={
+                    "guided_json": RESPONSE_JSON_SCHEMA
+                }
+            )
+            raw_response = response.choices[0].message.content.strip()
         except Exception as e:
-            logger.warning(f"Поиск похожих документов не удался: {e}")
-            similar_docs = []
+            logger.error(f"Ошибка вызова LLM API для {document_name}: {e}")
+            raise
 
-        similar_text = "\n".join([
-            f"- {doc['name']} (схожесть: {doc['score']:.3f}): {doc['text_snippet']}"
-            for doc in similar_docs
-        ])
+        logger.debug(f"Raw LLM response: {raw_response[:1000]}...")
 
-        # Логируем контекст похожих документов
-        logger.info(f"Похожие документы для {doc_name}:\n{similar_text if similar_text else 'Нет'}")
+        # Теперь парсим — ответ должен быть валидным JSON
+        try:
+            result = json.loads(raw_response)
+        except json.JSONDecodeError as e:
+            logger.error(f"Ошибка парсинга JSON: {e}")
+            # Попробуем извлечь JSON вручную
+            try:
+                start = raw_response.find("{")
+                end = raw_response.rfind("}") + 1
+                if start == -1 or end == 0:
+                    raise ValueError("JSON не найден")
+                partial = raw_response[start:end]
+                result = json.loads(partial)
+            except Exception as e2:
+                logger.error(f"Не удалось восстановить JSON: {e2}")
+                return {"status": "error", "analysis": { ... }}
 
-        prompt = f"""
-Тип закупки: {law_type}
-Способ закупки: {procurement_method}
-Имя файла: {doc_name}
-Ожидаемый тип: {doc_type}
-Контекст похожих документов:
-{similar_text if similar_text else 'Нет похожих документов'}
 
-Содержимое (первые 4000 символов):
-{content[:4000]}
-"""
+        # Проверка обязательных полей
+        required_keys = ["type_compliance", "readability", "raw_data", "conclusion"]
+        for key in required_keys:
+            if key not in result:
+                result[key] = {} if key in ["type_compliance", "readability", "raw_data"] else "Заключение недоступно."
 
-        # Логируем промпт
-        logger.info(f"Промпт для модели (первые 800 символов):\n{prompt[:800]}")
+        # Проверка соответствия типа
+        type_compliance = result["type_compliance"]
+        actual_type = type_compliance.get("actual_type", "").strip().lower()
+        expected_type = document_type.strip().lower()
 
-        completion = client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT.format(similar_docs=similar_text)},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            max_tokens=1024,
-            extra_body={"guided_json": RESPONSE_JSON_SCHEMA}
-        )
+        if actual_type and actual_type != expected_type:
+            type_compliance["status"] = "не соответствует"
+            issues = type_compliance.get("issues", [])
+            issues.append(
+                f"Документ определён как '{actual_type}', но ожидается тип '{document_type}'."
+            )
+            type_compliance["issues"] = issues
+            result["conclusion"] = (
+                f"Документ не соответствует заявленному типу. "
+                f"Определён как: '{actual_type}', ожидался: '{document_type}'."
+            )
 
-        raw_content = completion.choices[0].message.content.strip()
-        
-        # Логируем сырой ответ модели
-        logger.info(f"Сырой ответ модели для {doc_name}:\n{raw_content}")
+        # Формируем полный анализ
+        full_analysis = {
+            "raw_data": result["raw_data"],
+            "conclusion": result["conclusion"],
+            "readability": result["readability"],
+            "type_compliance": result["type_compliance"]
+        }
 
-        result = extract_json_safely(raw_content)
+        # Сохранение в БД
+        try:
+            save_raw_data(
+                procurement_id=0,
+                document_type=document_type,
+                full_analysis=full_analysis
+            )
+            save_clean_conclusion(
+                procurement_id=0,
+                document_type=document_type,
+                conclusion=result["conclusion"]
+            )
+        except Exception as e:
+            logger.error(f"Ошибка сохранения в БД для {document_name}: {e}")
 
-        # Логируем распарсенный JSON
-        logger.info(f"Распарсенный результат для {doc_name}:\n{json.dumps(result, ensure_ascii=False, indent=2)}")
-
-        # Валидация...
-        if not isinstance(result, dict):
-            raise ValueError("Response is not a JSON object")
-        if "type_compliance" not in result or "readability" not in result:
-            raise ValueError("Missing required fields")
-
-        status = result["type_compliance"].get("status", "не соответствует")
-        if status not in ["соответствует", "не соответствует"]:
-            result["type_compliance"]["status"] = "не соответствует"
-
-        for field in ["issues", "recommendations"]:
-            if not isinstance(result["type_compliance"].get(field, []), list):
-                result["type_compliance"][field] = []
-
-        for field in ["issues", "problematic_fragments"]:
-            if not isinstance(result["readability"].get(field, []), list):
-                result["readability"][field] = []
-
-        lang = result["readability"].get("language", "неизвестно")
-        if lang not in ["русский", "английский", "смешанный"]:
-            result["readability"]["language"] = "неизвестно"
-
-        return result
+        logger.info(f"Анализ завершён: {document_name}")
+        return {
+            "status": "success",
+            "document_name": document_name,
+            "document_type": document_type,
+            "analysis": result
+        }
 
     except Exception as e:
-        logger.error(f"Ошибка при анализе документа {doc_name}: {e}", exc_info=True)
+        logger.error(f"Критическая ошибка при анализе {document_name}: {str(e)}", exc_info=True)
         return {
-            "type_compliance": {
-                "status": "не соответствует",
-                "issues": ["Ошибка анализа: не удалось получить ответ от модели"],
-                "recommendations": ["Проверьте документ вручную"]
-            },
-            "readability": {
-                "is_readable": False,
-                "language": "неизвестно",
-                "issues": ["Ошибка обработки"],
-                "problematic_fragments": []
+            "status": "error",
+            "document_name": document_name,
+            "document_type": document_type,
+            "analysis": {
+                "type_compliance": {
+                    "status": "не соответствует",
+                    "issues": [f"Ошибка анализа: {str(e)}"],
+                    "expected_type": document_type,
+                    "actual_type": "неизвестно",
+                    "confidence": 0.0
+                },
+                "readability": {
+                    "status": "неудовлетворительно",
+                    "issues": ["Не удалось распознать содержимое"]
+                },
+                "raw_data": {},
+                "conclusion": f"Анализ не выполнен: {str(e)}"
             }
         }
 

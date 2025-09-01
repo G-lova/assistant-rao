@@ -127,7 +127,7 @@ with gr.Blocks(title="Проверка документов закупок") as 
                     missing_docs = gr.JSON(label="Список отсутствующих документов")
                 
                 with gr.Tab("Содержимое документов"):
-                    docs_content = gr.JSON(label="Первые 20 символов каждого документа")
+                    docs_content = gr.JSON(label="Первые 200 символов каждого документа")
                 
                 with gr.Tab("Ошибки"):
                     errors_output = gr.JSON(label="Ошибки обработки")

@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Dict, Optional, List, Union
+from typing import Dict, Optional, List, Union, Any
 from fastapi import UploadFile
 
 
@@ -141,3 +141,104 @@ class DocumentForm(BaseModel):
     status: str
     explanation: Optional[str] = None
     file: Optional[UploadFile] = None
+
+
+class DateExtraction(BaseModel):
+    """
+    Извлечение даты из документа.
+
+    Представляет собой структуру для хранения информации о найденной дате в документе,
+    включая имя поля, значение даты и номер страницы, на которой она указана.
+
+    Args:
+        field (str): Название поля, содержащего дату (например, 'дата подписания').
+        value (str): Значение извлечённой даты в виде строки.
+        page (int): Номер страницы документа, на которой найдена дата.
+    """
+    field: str
+    value: str
+    page: int
+
+
+class AmountExtraction(BaseModel):
+    """
+    Извлечение суммы из документа.
+
+    Структура для хранения информации о денежной сумме, найденной в документе,
+    включая название поля, значение суммы, валюту и номер страницы.
+
+    Args:
+        field (str): Название поля, содержащего сумму (например, 'сумма контракта').
+        value (str): Значение суммы в виде строки (может включать форматирование).
+        currency (str): Валюта суммы (например, 'RUB', 'USD').
+        page (int): Номер страницы документа, на которой найдена сумма.
+    """
+    field: str
+    value: str
+    currency: str
+    page: int
+
+
+class LegalEntity(BaseModel):
+    """
+    Юридическое лицо, участвующее в документе.
+
+    Описывает информацию о компании или организации, указанной в документе,
+    включая её роль, наименование, реквизиты и адрес.
+
+    Args:
+        role (str): Роль юридического лица в документе (например, 'заказчик', 'исполнитель').
+        name (str): Полное наименование юридического лица.
+        inn (Optional[str]): ИНН организации. По умолчанию — None.
+        kpp (Optional[str]): КПП организации. По умолчанию — None.
+        ogrn (Optional[str]): ОГРН организации. По умолчанию — None.
+        address (Optional[str]): Юридический или фактический адрес организации. По умолчанию — None.
+        page (int): Номер страницы, на которой указано данное юридическое лицо.
+    """
+    role: str
+    name: str
+    inn: Optional[str] = None
+    kpp: Optional[str] = None
+    ogrn: Optional[str] = None
+    address: Optional[str] = None
+    page: int
+
+
+class RawData(BaseModel):
+    """
+    Сырые извлечённые данные из документа.
+
+    Содержит списки извлечённой информации: дат, сумм, юридических лиц,
+    а также дополнительные поля, такие как номер договора и ссылки на законодательство.
+
+    Args:
+        dates (List[DateExtraction]): Список объектов с извлечёнными датами. По умолчанию — пустой список.
+        amounts (List[AmountExtraction]): Список объектов с извлечёнными суммами. По умолчанию — пустой список.
+        legal_entities (List[LegalEntity]): Список объектов с информацией о юридических лицах. По умолчанию — пустой список.
+        contract_number (Optional[str]): Номер договора, если указан. По умолчанию — None.
+        law_references (List[str]): Список ссылок на нормативные правовые акты, упомянутые в документе. По умолчанию — пустой список.
+    """
+    dates: List[DateExtraction] = []
+    amounts: List[AmountExtraction] = []
+    legal_entities: List[LegalEntity] = []
+    contract_number: Optional[str] = None
+    law_references: List[str] = []
+
+
+class DocumentConclusion(BaseModel):
+    """
+    Заключение по анализу документа.
+
+    Содержит результаты анализа документа, включая проверку соответствия типу,
+    оценку читаемости, извлечённые сырые данные и общий вывод.
+
+    Args:
+        type_compliance (Dict[str, Any]): Оценка соответствия документа ожидаемому типу (например, по шаблону). Ключи могут включать 'score', 'details'.
+        readability (Dict[str, Any]): Оценка читаемости документа (например, качество сканирования, наличие повреждений). Может содержать метрики и комментарии.
+        raw_data (RawData): Объект с извлечёнными данными из документа.
+        conclusion (str): Текстовый вывод по результатам анализа документа.
+    """
+    type_compliance: Dict[str, Any]
+    readability: Dict[str, Any]
+    raw_data: RawData
+    conclusion: str

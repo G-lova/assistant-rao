@@ -9,8 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from configs.schemas import DocumentContentResponse
 from configs.utils import APIKeyMiddleware, read_file
 from configs.procurement_requirements import DOCUMENT_TYPE_MAPPING
-from configs.working_with_db import save_document_content_to_db, ALLOWED_COLUMNS
 from src.evaluator import check_documents
+from src.evaluator import analyze_single_document
+from configs.working_with_db import save_raw_data, save_clean_conclusion
 
 
 app = FastAPI()
@@ -41,24 +42,21 @@ async def evaluate_documents(
     """
     Оценивает загруженный документ на соответствие типу, содержанию и требованиям закупки.
 
-    Эндпоинт принимает файл и метаданные, извлекает текст, проверяет соответствие ожидаемому
-    типу документа и сохраняет результат в базу данных при успешной валидации.
-    Используется для автоматической экспертизы документов закупок.
+    Эндпоинт принимает файл и метаданные, извлекает текст через OCR, анализирует документ
+    и сохраняет результат в две таблицы БД:
+    - raw_document_data: извлечённые структурированные данные (даты, суммы, юрлица)
+    - clean_document_conclusions: итоговое заключение модели
 
     Args:
-        procurement_id (str, optional): Уникальный идентификатор закупки.
-        document_type (str, optional): Ожидаемый тип документа (например, "Извещение").
-        legislation (str, optional): Тип законодательства (например, "44-ФЗ").
-        procurement_method (str, optional): Способ закупки (например, "Конкурс").
-        expertise_details (str, optional): Детали экспертизы, определяющие набор требований.
-        file (UploadFile, optional): Загруженный файл документа (PDF, DOCX, XLSX и др.).
+        procurement_id (str): Уникальный идентификатор закупки.
+        document_type (str): Ожидаемый тип документа (например, "Проект договора").
+        legislation (str): Тип законодательства (например, "44-ФЗ").
+        procurement_method (str): Способ закупки (например, "Конкурс").
+        expertise_details (str): Детали экспертизы.
+        file (UploadFile): Загруженный файл (PDF, DOCX и др.).
 
     Returns:
-        DocumentContentResponse: Объект с результатами обработки, включающий:
-            - procurement_id, document_type, filename, content_type, size — метаданные;
-            - content — краткое содержание (первые 100 символов) или сообщение об ошибке;
-            - is_valid — статус валидации (соответствует/не соответствует).
-            В случае ошибки возвращается ответ с is_valid=False и описанием проблемы.
+        DocumentContentResponse: Результат с метаданными, фрагментом текста и статусом.
     """
     try:
         suffix = os.path.splitext(file.filename)[1] or ".bin"
@@ -68,53 +66,78 @@ async def evaluate_documents(
             tmp_path = tmp.name
 
         try:
-            # Логируем имя и размер файла
-            logger.info(f"Обработка файла: {file.filename}, размер: {len(content)} байт, тип: {file.content_type}")
+            logger.info(f"Обработка файла: {file.filename}, размер: {len(content)} байт")
 
-            # Извлечение текста
+            # Извлечение текста (все PDF проходят через OCR)
             extracted_text = read_file(tmp_path, original_filename=file.filename)
-            logger.info(f"Извлечённый текст из {file.filename} (первые 500 символов):\n{extracted_text[:500]}")
+            if not extracted_text or "[Нет читаемого текста]" in extracted_text:
+                raise ValueError("Не удалось извлечь текст из документа")
 
-            # Запуск анализа
-            result = await check_documents(
-                file_paths=[tmp_path],
-                original_filenames=[file.filename],
-                legislation=legislation,
-                procurement_method=procurement_method,
-                expertise_details=expertise_details
+            logger.info(f"Извлечено {len(extracted_text)} символов из {file.filename}")
+
+            # Анализ документа (возвращает результат с raw_data и conclusion)
+            result = await analyze_single_document(
+                content=extracted_text,
+                document_name=file.filename,
+                document_type=document_type,
+                law_type=legislation,
+                procurement_method=procurement_method
             )
-
-            # Логируем результат анализа
-            logger.info(f"Результат анализа {file.filename}: {json.dumps(result, ensure_ascii=False, indent=2)}")
 
         finally:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
-        if "error" in result:
-            short_content = extracted_text[:100]
+        # Обработка результата
+        if result["status"] == "error":
+            short_content = extracted_text[:300]
             is_valid = False
             response_content = f"Неверный документ: {short_content}"
-            logger.warning(f"Ошибка анализа {file.filename}: {result['error']}")
+            logger.warning(f"Ошибка анализа {file.filename}: {result['analysis']['conclusion']}")
         else:
-            analysis = next((da for da in result.get("document_analysis", []) if file.filename in da.get("document_name", "")), None)
-            short_content = extracted_text[:100]
-            is_valid = analysis and analysis.get("type_compliance", {}).get("status") == "соответствует"
-            response_content = short_content if is_valid else f"Неверный документ: {short_content}"
+            analysis = result["analysis"]
+            type_compliance = analysis["type_compliance"]
+            
+            # Проверяем соответствие типа документа
+            is_valid = (type_compliance["status"] == "соответствует" and 
+                       type_compliance.get("confidence", 0) >= 0.7)
+            
+            short_content = extracted_text[:300]
+            
+            if not is_valid:
+                expected = type_compliance.get("expected_type", document_type)
+                actual = type_compliance.get("actual_type", "неизвестно")
+                confidence = type_compliance.get("confidence", 0)
+                
+                response_content = f"НЕСООТВЕТСТВИЕ ТИПА: Ожидался '{expected}', получен '{actual}' (уверенность: {confidence:.2f})\n\n{short_content}"
+                
+                # Обновляем заключение
+                analysis["conclusion"] = f"Документ не соответствует заявленному типу. {analysis['conclusion']}"
+            else:
+                response_content = short_content
 
-            # Логируем статус соответствия
-            status = analysis.get("type_compliance", {}).get("status", "неизвестно")
-            logger.info(f"Статус соответствия для {file.filename}: {status}")
-
-            col_name = DOCUMENT_TYPE_MAPPING.get(document_type)
-            if col_name and col_name in ALLOWED_COLUMNS:
-                # Логируем сохранение в БД
-                logger.info(f"Сохранение в БД: procurement_id={procurement_id}, колонка={col_name}, длина текста={len(extracted_text)}")
-                save_document_content_to_db(
+            # Сохранение в БД
+            try:
+                # 1. Сохраняем сырые данные (извлечённые сущности)
+                save_raw_data(
                     procurement_id=procurement_id,
-                    document_type=col_name,
-                    content=extracted_text
+                    document_type=document_type,
+                    full_analysis=analysis,
                 )
+
+                # 2. Сохраняем чистое заключение
+                save_clean_conclusion(
+                    procurement_id=procurement_id,
+                    document_type=document_type,
+                    conclusion=analysis["conclusion"]
+                )
+
+                logger.info(f"Успешно сохранены raw и clean данные для {document_type} (закупка: {procurement_id})")
+
+            except Exception as db_error:
+                logger.error(f"Ошибка сохранения в БД: {str(db_error)}", exc_info=True)
+                # Не прерываем процесс — продолжаем с ответом, но помечаем предупреждение
+                response_content += " [Предупреждение: не удалось сохранить в БД]"
 
         return DocumentContentResponse(
             procurement_id=procurement_id,
@@ -135,5 +158,6 @@ async def evaluate_documents(
             content_type=file.content_type or "unknown",
             content="Неверный документ: Ошибка анализа",
             size=file.size,
-            is_valid=False
+            is_valid=False,
+            error=str(e)
         )

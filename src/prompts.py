@@ -1,16 +1,75 @@
-SYSTEM_PROMPT = """
-Ты — эксперт по проверке документов закупок. Проанализируй документ и ответь в JSON.
-Проверь:
-1. **ТИП ДОКУМЕНТА**: соответствует ли содержимое типу (например, «Извещение», «Проект контракта»)?
+SYSTEM_PROMPT = """Ты — эксперт по проверке документов закупок. Проанализируй документ и верни **только чистый JSON**, строго соблюдая указанную схему.
+
+### КРИТИЧЕСКИ ВАЖНО: ПРОВЕРКА СООТВЕТСТВИЯ ТИПУ ДОКУМЕНТА
+Ты должен определить, соответствует ли содержимое документа заявленному типу "{document_type}". 
+
+Характерные признаки для основных типов документов:
+- **Извещение**: содержит слова "извещение", "закупка", "размещение", даты проведения, реквизиты заказчика
+- **Проект контракта**: содержит "контракт", "договор", условия поставки, сроки, ответственность сторон
+- **Обоснование НМЦК**: содержит расчеты, формулы, рыночные цены, обоснование стоимости
+- **Техническое задание**: содержит технические требования, характеристики, спецификации
+- **Акт приемки**: содержит "акт", "приемка", подписи сторон, дату приемки
+
+### Требования к анализу:
+1. **ТИП ДОКУМЕНТА**: соответствует ли содержимое ожидаемому типу "{document_type}"?
 2. **ЯЗЫК**: основной язык — русский?
-3. **ЧИТАЕМОСТЬ**: есть ли страницы с размытым текстом, водяными знаками, низким качеством?
-4. **ПРОБЛЕМНЫЕ ФРАГМЕНТЫ**: укажи, где текст нечитаем (например, «страница 5 — размыто», «фрагмент 3 — OCR не распознал»).
+3. **ЧИТАЕМОСТЬ**: есть ли размытый текст, водяные знаки, низкое качество?
+4. **ПРОБЛЕМНЫЕ ФРАГМЕНТЫ**: укажи, где текст нечитаем (например, «страница 5 — размыто»).
 5. **СТРУКТУРА**: содержит ли документ обязательные разделы?
+6. **ИЗВЛЕЧЕНИЕ ДАННЫХ**: извлеки:
+   - даты (дата контракта, извещения и т.д.),
+   - суммы (цена, НМЦК),
+   - юридические лица (заказчик, поставщик) с ИНН, КПП, ОГРН, адресом,
+   - номер контракта,
+   - ссылки на законодательство (например, «44-ФЗ, ст. 56»).
 
-Учти контекст похожих документов:
-{similar_docs}
+### Обязательные поля в JSON:
+Ты **должен вернуть все следующие поля**:
+- `type_compliance`: статус соответствия и список проблем.
+- `readability`: статус читаемости и список проблем.
+- `raw_data`: структурированные данные (даты, суммы, юрлица и т.д.).
+- `conclusion`: итоговое заключение — текст на русском.
 
-Формат вывода: только чистый JSON.
+### Формат вывода:
+Верни **только чистый JSON-объект**, без комментариев, пояснений или Markdown. Пример:
+
+{{
+  "type_compliance": {{
+    "status": "соответствует",
+    "issues": [],
+    "expected_type": "{document_type}",
+    "actual_type": "извещение",
+    "confidence": 0.95
+  }},
+  "readability": {{
+    "status": "удовлетворительно",
+    "issues": []
+  }},
+  "raw_data": {{
+    "dates": [
+      {{"field": "Дата извещения", "value": "2025-03-15", "page": 1}}
+    ],
+    "amounts": [
+      {{"field": "НМЦК", "value": "1 500 000", "currency": "RUB", "page": 2}}
+    ],
+    "legal_entities": [
+      {{
+        "role": "заказчик",
+        "name": "ГКУ РО 'Центр жилищного контроля'",
+        "inn": "6163000123",
+        "kpp": "616401001",
+        "ogrn": "1146163000123",
+        "address": "г. Ростов-на-Дону, ул. Темерницкая, 10",
+        "page": 1
+      }}
+    ],
+    "contract_number": "К-123-2025",
+    "law_references": ["44-ФЗ ст. 56"]
+  }},
+  "conclusion": "Документ соответствует требованиям. Все обязательные реквизиты присутствуют."
+}}
+
+Убедись, что все обязательные поля присутствуют, даже если данные отсутствуют — используй пустые массивы или строки.
 """
 
 
@@ -21,24 +80,80 @@ RESPONSE_JSON_SCHEMA = {
             "type": "object",
             "properties": {
                 "status": {"type": "string", "enum": ["соответствует", "не соответствует"]},
-                "issues": {"type": "array", "items": {"type": "string"}},
-                "recommendations": {"type": "array", "items": {"type": "string"}}
+                "issues": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": []
+                },
+                "expected_type": {"type": "string"},
+                "actual_type": {"type": "string"},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1}
             },
-            "required": ["status", "issues", "recommendations"]
+            "required": ["status", "expected_type", "actual_type", "confidence"],
+            "additionalProperties": False
         },
-        "readability": {
+        "raw_data": {
             "type": "object",
             "properties": {
-                "is_readable": {"type": "boolean"},
-                "language": {"type": "string", "enum": ["русский", "английский", "смешанный"]},
-                "issues": {"type": "array", "items": {"type": "string"}},
-                "problematic_fragments": {
+                "dates": {
                     "type": "array",
-                    "items": {"type": "string"}
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "field": {"type": "string"},
+                            "value": {"type": "string"},
+                            "page": {"type": "integer"}
+                        },
+                        "required": ["field", "value", "page"]
+                    },
+                    "default": []
+                },
+                "amounts": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "field": {"type": "string"},
+                            "value": {"type": "string"},
+                            "currency": {"type": "string"},
+                            "page": {"type": "integer"}
+                        },
+                        "required": ["field", "value", "currency", "page"]
+                    },
+                    "default": []
+                },
+                "legal_entities": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "role": {"type": "string", "enum": ["заказчик", "поставщик", "участник"]},
+                            "name": {"type": "string"},
+                            "inn": {"type": "string", "default": ""},
+                            "kpp": {"type": "string", "default": ""},
+                            "ogrn": {"type": "string", "default": ""},
+                            "address": {"type": "string", "default": ""},
+                            "page": {"type": "integer"}
+                        },
+                        "required": ["role", "name", "page"]
+                    },
+                    "default": []
+                },
+                "contract_number": {"type": "string", "default": ""},
+                "law_references": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": []
                 }
             },
-            "required": ["is_readable", "language", "issues", "problematic_fragments"]
+            "required": [],
+            "additionalProperties": False
+        },
+        "conclusion": {
+            "type": "string",
+            "description": "Итоговое заключение по документу"
         }
     },
-    "required": ["type_compliance", "readability"]
+    "required": ["type_compliance", "readability", "raw_data", "conclusion"],
+    "additionalProperties": False
 }

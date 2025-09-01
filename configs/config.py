@@ -24,7 +24,11 @@ class Config:
     # Security
     API_KEY = os.getenv("API_KEY")
     API_KEY_HASH = os.getenv("API_KEY_HASH")
-    
+
+    # Model qwen-vl
+    M_MODEL_API_URL = os.getenv("M_MODEL_API_URL")
+    M_MODEL_NAME = os.getenv("M_MODEL_NAME")
+
     @classmethod
     def get_model_config(cls):
         """

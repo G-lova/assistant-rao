@@ -128,6 +128,7 @@ def show_documents_content(
             - missing_documents: список недостающих документов с пояснениями;
             - documents_content: словарь с кратким содержанием каждого обработанного документа (первые 100 символов);
             - errors: список сообщений об ошибках (проблемы с файлами, API и т.д.).
+            - type_compliance_issues: список проблем с соответствием типов документов.
             В случае критической ошибки возвращается шаблон с "status": "deny" и деталями.
     """
     try:
@@ -148,6 +149,7 @@ def show_documents_content(
             "provided_documents": [],
             "missing_documents": [],
             "documents_content": {},
+            "type_compliance_issues": [],
             "errors": []
         }
 
@@ -194,6 +196,30 @@ def show_documents_content(
                             doc_data = response.json()
                             results["provided_documents"].append(doc_name)
                             results["documents_content"][doc_name] = doc_data.get("content", "")[:100]
+                            
+                            # Проверяем соответствие типа документа
+                            if not doc_data.get("is_valid", False):
+                                expected_type = doc_name
+                                actual_type = "неизвестно"
+                                content = doc_data.get("content", "")
+                                
+                                # Пытаемся извлечь информацию о несоответствии типа
+                                if "НЕСООТВЕТСТВИЕ ТИПА:" in content:
+                                    type_info = content.split("НЕСОТВЕТСТВИЕ ТИПА:")[1].split("\n")[0].strip()
+                                    results["type_compliance_issues"].append({
+                                        "document_name": doc_name,
+                                        "issue": type_info,
+                                        "severity": "high"
+                                    })
+                                else:
+                                    results["type_compliance_issues"].append({
+                                        "document_name": doc_name,
+                                        "issue": "Документ не соответствует заявленному типу",
+                                        "severity": "high"
+                                    })
+                                
+                                results["errors"].append(f"Документ {doc_name} не соответствует заявленному типу")
+                            
                         else:
                             error_msg = f"Ошибка API для {doc_name}: {response.status_code} — {response.text}"
                             results["errors"].append(error_msg)
@@ -248,7 +274,7 @@ def show_documents_content(
                             },
                             data={
                                 "procurement_id": procurement_id,
-                                "document_type": doc_name,
+                                "document_type": doc_type,
                                 "legislation": legislation,
                                 "procurement_method": procurement_method,
                                 "expertise_details": expertise_details
@@ -260,6 +286,28 @@ def show_documents_content(
                         doc_data = response.json()
                         results["provided_documents"].append(doc_type)
                         results["documents_content"][doc_type] = doc_data.get("content", "")[:100]
+                        
+                        # Проверяем соответствие типа документа
+                        if not doc_data.get("is_valid", False):
+                            expected_type = doc_type
+                            content = doc_data.get("content", "")
+                            
+                            if "НЕСООТВЕТСТВИЕ ТИПА:" in content:
+                                type_info = content.split("НЕСОТВЕТСТВИЕ ТИПА:")[1].split("\n")[0].strip()
+                                results["type_compliance_issues"].append({
+                                    "document_name": doc_type,
+                                    "issue": type_info,
+                                    "severity": "high"
+                                })
+                            else:
+                                results["type_compliance_issues"].append({
+                                    "document_name": doc_type,
+                                    "issue": "Документ не соответствует заявленному типу",
+                                    "severity": "high"
+                                })
+                            
+                            results["errors"].append(f"Документ {doc_type} не соответствует заявленному типу")
+                            
                     else:
                         error_msg = f"Ошибка API (масс.) для {filename}: {response.status_code} — {response.text}"
                         results["errors"].append(error_msg)
@@ -279,8 +327,16 @@ def show_documents_content(
                 })
 
         # --- 4. Финальный статус ---
-        if results["missing_documents"] or results["errors"]:
+        if (results["missing_documents"] or 
+            results["errors"] or 
+            results["type_compliance_issues"]):
             results["status"] = "deny"
+            
+        # Добавляем детализированную информацию о проблемах
+        if results["type_compliance_issues"]:
+            results["feedback"] = "Обнаружены проблемы с соответствием типов документов:"
+            for issue in results["type_compliance_issues"]:
+                results["feedback"] += f"\n- {issue['document_name']}: {issue['issue']}"
 
         return results
 
@@ -292,6 +348,7 @@ def show_documents_content(
             "required_documents": [],
             "provided_documents": [],
             "missing_documents": [],
+            "type_compliance_issues": [],
             "documents_content": {},
             "errors": [str(e)]
         }

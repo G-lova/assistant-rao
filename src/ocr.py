@@ -17,17 +17,13 @@ client = OpenAI(
 def ocr_image_with_qwen_vl(image_path: str) -> str:
     """
     Распознаёт текст на изображении с использованием мультимодальной модели Qwen-VL.
-
-    Функция кодирует изображение в формат Base64 и отправляет его вместе с запросом
-    на распознавание текста в модель Qwen-VL через API. Ожидается, что модель вернёт
-    извлечённый текст.
+    Дополнительно возвращает мета-информацию о качестве изображения и процессе распознавания.
 
     Args:
-        image_path (str): Путь к файлу изображения (поддерживаются, например, JPEG, PNG).
+        image_path (str): Путь к файлу изображения.
 
     Returns:
-        str: Распознанный и отредактированный текст с изображения.
-             В случае ошибки возвращается сообщение об ошибке в квадратных скобках.
+        str: JSON-строка с распознанным текстом и метаданными о качестве обработки.
     """
     with open(image_path, "rb") as image_file:
         base64_image = base64.b64encode(image_file.read()).decode('utf-8')
@@ -39,7 +35,16 @@ def ocr_image_with_qwen_vl(image_path: str) -> str:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Распознай текст на этом изображении. Верни только текст и отредактируй его по необходимости."},
+                        {"type": "text", "text": """Ты выполняешь OCR-обработку документа. Проанализируй изображение и верни ответ в формате JSON со следующей структурой:
+                        {
+                          "raw_text": "весь распознанный текст, объединенный в одну строку",
+                          "processing_quality": {
+                            "status": "high|medium|low",
+                            "issues": ["список проблем", "например: низкая контрастность, размытый текст на странице 2"]
+                          },
+                          "language_hints": ["русский", "английский"]
+                        }
+                        Не добавляй никакого форматирования в raw_text."""},
                         {
                             "type": "image_url",
                             "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
@@ -47,9 +52,10 @@ def ocr_image_with_qwen_vl(image_path: str) -> str:
                     ]
                 }
             ],
-            max_tokens=1024
+            max_tokens=4096  # Увеличил лимит для длинных документов
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
         logger.error(f"OCR ошибка при обработке {image_path}: {e}")
-        return "[Ошибка при распознавании изображения]"
+        # Возвращаем JSON с ошибкой для сохранения структуры
+        return '{"raw_text": "", "processing_quality": {"status": "error", "issues": ["Ошибка при распознавании изображения"]}, "language_hints": []}'

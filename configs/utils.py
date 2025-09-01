@@ -6,13 +6,13 @@ import shutil
 import subprocess
 import tempfile
 
-from typing import Dict, List
 import pandas as pd
 import numpy as np
 import PyPDF2
 import rarfile
 import textract
 import zipfile
+from typing import Dict, List
 from docx import Document
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from pptx import Presentation
@@ -204,11 +204,11 @@ def read_pptx_file(file_path: str) -> str:
 
 def read_pdf_file(file_path: str) -> str:
     """
-    Извлекает текст из PDF-файла, комбинируя прямое извлечение и OCR для всех страниц.
+    Извлекает текст из PDF-файла ТОЛЬКО с помощью OCR для каждой страницы.
 
-    Сначала функция пытается извлечь текст напрямую из каждой страницы.
-    Затем, независимо от успеха, запускает OCR на всех страницах (преобразованных в изображения)
-    с помощью модели Qwen-VL, чтобы распознать текст на сканированных или графических страницах.
+    Все страницы PDF конвертируются в изображения и обрабатываются через OCR (Qwen-VL),
+    независимо от наличия встроенного текста. Это гарантирует единообразную обработку:
+    сканы, защищённые PDF, многослойные документы — всё проходит через распознавание образа.
 
     Args:
         file_path (str): Путь к PDF-файлу.
@@ -217,38 +217,30 @@ def read_pdf_file(file_path: str) -> str:
         ValueError: Если произошла ошибка при чтении или обработке файла.
 
     Returns:
-        str: Объединённый текст, содержащий:
-             - извлечённый текст (с пометкой "текст");
-             - результаты OCR (с пометкой "OCR").
-             Если текст не обнаружен, возвращает "[Нет читаемого текста]".
+        str: Объединённый текст всех страниц с пометкой "OCR".
+             Если текст не распознан, возвращает "[Нет читаемого текста]".
     """
-    full_text = []
     ocr_texts = []
 
     try:
-        with open(file_path, 'rb') as f:
-            reader = PyPDF2.PdfReader(f)
-            for page_num, page in enumerate(reader.pages, 1):
-                page_text = page.extract_text()
-                if page_text and page_text.strip():
-                    full_text.append(f"Страница {page_num} (текст):\n{page_text}\n")
-                else:
-                    full_text.append(f"Страница {page_num} (нет текста)")
-
-        # ВСЕГДА запускаем OCR для изображений
+        # Конвертируем PDF в список изображений
         with tempfile.TemporaryDirectory() as temp_dir:
             images = convert_from_path(file_path, output_folder=temp_dir)
             for i, image in enumerate(images):
                 img_path = os.path.join(temp_dir, f"page_{i}.jpg")
                 image.save(img_path, "JPEG")
+
+                # OCR через Qwen-VL
                 ocr_text = ocr_image_with_qwen_vl(img_path)
+
+                # Добавляем с пометкой страницы
                 ocr_texts.append(f"Страница {i+1} (OCR): {ocr_text}")
 
-        result = "\n".join(full_text + ocr_texts)
+        result = "\n".join(ocr_texts)
         return result.strip() if result.strip() else "[Нет читаемого текста]"
 
     except Exception as e:
-        raise ValueError(f"Ошибка чтения PDF: {str(e)}")
+        raise ValueError(f"Ошибка при обработке PDF через OCR: {str(e)}")
 
 
 def read_excel_file(file_path: str) -> str:

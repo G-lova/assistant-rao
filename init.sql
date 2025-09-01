@@ -1,42 +1,91 @@
-CREATE TABLE report_for_operator (
-    procurement_id SERIAL PRIMARY KEY, -- id закупки
-    expertise_object TEXT, -- Объект экспертизы
-    legal_regulation TEXT, -- Законодательное регулирование
-    procurement_method TEXT, -- Способ закупки
-    expertise_request TEXT, -- Заявка на проведение экспертизы
-    acceptance_act TEXT, -- Акт о приемке товара
-    contract_date DATE, -- Дата контракта
-    works_acceptance_doc TEXT, -- Документ о приемке и/или акт сдачи-приемки работ (услуг)
-    goods_acceptance_doc TEXT, -- Документ о приемке товара (УПД, Счет-фактура и др.)
-    impossible_alternative_doc TEXT, -- Документация, подтверждающая невозможность (нецелесообразность) использования иных способов определения поставщика
-    penalty_recovery_docs TEXT, -- Документы по взысканию пени и штрафов
-    warranty_docs TEXT, -- Документы, подтверждающие гарантийные обязательства
-    contract_conditions_docs TEXT, -- Документы, подтверждающие исполнение всех условий контракта
-    ip_rights_transfer_docs TEXT, -- Документы, подтверждающие передачу авторских прав на результаты интеллектуальной собственности
-    goods_origin_docs TEXT, -- Документы, подтверждающие страну происхождения товара
-    additional_materials TEXT, -- Дополнительные материалы
-    contract_amendments TEXT, -- Дополнительные соглашения к контракту
-    notice TEXT, -- Извещение
-    nir_contract TEXT, -- Контракт на выполнение НИР (или НИОКР)
-    service_contract TEXT, -- Контракт на выполнение работ (оказание услуг)
-    goods_contract TEXT, -- Контракт на поставку товара
-    price_justification_docs TEXT, -- Материалы, подтверждающие Обоснование н(м)цк
-    price_justification TEXT, -- Обоснование н(м)цк
-    procurement_description TEXT, -- Описание объекта закупки
-    nir_report TEXT, -- Отчет о выполнении НИР
-    procurement_policy TEXT, -- Положение о закупках организации
-    bid_evaluation_procedure TEXT, -- Порядок рассмотрения и оценки заявок на конкурс
-    contract_subject TEXT, -- Предмет контракта
-    contract_draft TEXT, -- Проект контракта
-    contract_details TEXT, -- Реквизиты контракта
-    compliance_certificates TEXT, -- Сертификаты соответствия
-    eis_link TEXT, -- Ссылка на ЕИС
-    technical_documentation TEXT, -- Техническая документация, паспорт товара и пр.
-    goods_invoice TEXT, -- Товарная накладная
-    bid_requirements TEXT, -- Требования к содержанию заявки на конкурс
-    work_results_photos TEXT, -- Фото результатов выполнения работ (оказания услуг)
-    goods_photos TEXT, -- Фото товара
-    contract_execution_expertise TEXT -- Экспертиза результатов исполнения контракта
+-- Таблица для хранения извлечённых "сырых" данных из документов (соответствует report_for_operator)
+CREATE TABLE raw_document_data (
+    procurement_id SERIAL PRIMARY KEY,
+    expertise_object JSONB,
+    legal_regulation JSONB,
+    procurement_method JSONB,
+    expertise_request JSONB,
+    acceptance_act JSONB,
+    contract_date DATE,
+    works_acceptance_doc JSONB,
+    goods_acceptance_doc JSONB,
+    impossible_alternative_doc JSONB,
+    penalty_recovery_docs JSONB,
+    warranty_docs JSONB,
+    contract_conditions_docs JSONB,
+    ip_rights_transfer_docs JSONB,
+    goods_origin_docs JSONB,
+    additional_materials JSONB,
+    contract_amendments JSONB,
+    notice JSONB,
+    nir_contract JSONB,
+    service_contract JSONB,
+    goods_contract JSONB,
+    price_justification_docs JSONB,
+    price_justification JSONB,
+    procurement_description JSONB,
+    nir_report JSONB,
+    procurement_policy JSONB,
+    bid_evaluation_procedure JSONB,
+    contract_subject JSONB,
+    contract_draft JSONB,
+    contract_details JSONB,
+    compliance_certificates JSONB,
+    eis_link JSONB,
+    technical_documentation JSONB,
+    goods_invoice JSONB,
+    bid_requirements JSONB,
+    work_results_photos JSONB,
+    goods_photos JSONB,
+    contract_execution_expertise JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
-CREATE INDEX idx_procurement_id ON report_for_operator (procurement_id);
+-- Таблица для хранения итогового "чистого" заключения модели (соответствует report_for_operator)
+CREATE TABLE clean_document_conclusions (
+    procurement_id SERIAL PRIMARY KEY,
+    expertise_object TEXT,
+    legal_regulation TEXT,
+    procurement_method TEXT,
+    expertise_request TEXT,
+    acceptance_act TEXT,
+    contract_date DATE,
+    works_acceptance_doc TEXT,
+    goods_acceptance_doc TEXT,
+    impossible_alternative_doc TEXT,
+    penalty_recovery_docs TEXT,
+    warranty_docs TEXT,
+    contract_conditions_docs TEXT,
+    ip_rights_transfer_docs TEXT,
+    goods_origin_docs TEXT,
+    additional_materials TEXT,
+    contract_amendments TEXT,
+    notice TEXT,
+    nir_contract TEXT,
+    service_contract TEXT,
+    goods_contract TEXT,
+    price_justification_docs TEXT,
+    price_justification TEXT,
+    procurement_description TEXT,
+    nir_report TEXT,
+    procurement_policy TEXT,
+    bid_evaluation_procedure TEXT,
+    contract_subject TEXT,
+    contract_draft TEXT,
+    contract_details TEXT,
+    compliance_certificates TEXT,
+    eis_link TEXT,
+    technical_documentation TEXT,
+    goods_invoice TEXT,
+    bid_requirements TEXT,
+    work_results_photos TEXT,
+    goods_photos TEXT,
+    contract_execution_expertise TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Индексы для производительности
+CREATE INDEX idx_raw_procurement_id ON raw_document_data (procurement_id);
+CREATE INDEX idx_clean_procurement_id ON clean_document_conclusions (procurement_id);
