@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from configs.config import Config
-from configs.procurement_requirements import PROCUREMENT_REQUIREMENTS
+from configs.procurement_requirements import PROCUREMENT_REQUIREMENTS, DOCUMENT_TYPE_MAPPING
 from src.ocr import ocr_image_with_qwen_vl
 
 
@@ -580,3 +580,52 @@ def check_procurement_completeness(law_type: str, procurement_type: str, check_t
         "invalid_files": invalid_files,
         "feedback": "\n".join(feedback_parts)
     }
+
+
+def normalize_document_type(doc_type: str) -> str:
+    """
+    Нормализует тип документа, приводя его к единому стандартному наименованию.
+
+    Функция принимает строку с названием типа документа (возможно, в неформатном виде),
+    очищает и преобразует её, затем сопоставляет с эталонными типами из маппинга.
+    Проверка выполняется в порядке: точное совпадение → частичные вхождения по приоритетным ключам.
+    Если соответствие не найдено, возвращается тип по умолчанию.
+
+    Args:
+        doc_type (str): Исходное название типа документа (например, из метаданных или OCR).
+
+    Returns:
+        str: Нормализованное название типа документа, соответствующее одному из стандартных значений,
+             или "Дополнительные материалы", если тип не распознан.
+    """
+    if not doc_type or not isinstance(doc_type, str):
+        return "Дополнительные материалы"
+
+    clean = doc_type.strip().lower()
+
+    # 1. Точное совпадение
+    for key in DOCUMENT_TYPE_MAPPING:
+        if clean == key.lower():
+            return key
+
+    # 2. Частичные совпадения с приоритетом
+    priority_matches = [
+        ("требования к содержанию заявки на конкурс", "Требования к содержанию заявки на конкурс"),
+        ("техническое задание", "Техническое задание"),
+        ("извещение", "Извещение"),
+        ("проект контракта", "Проект контракта"),
+        ("обоснование нмцк", "Обоснование н(м)цк"),
+        ("акт о приемке", "Акт о приемке товара"),
+        ("счет-фактура", "Документ о приемке товара (УПД, Счет-фактура и др.)"),
+        ("дополнительное соглашение", "Дополнительные соглашения к контракту"),
+        ("расчёт нмцк", "Обоснование н(м)цк"),
+        ("обоснование начальной", "Обоснование н(м)цк"),
+        ("нмцк", "Обоснование н(м)цк"),
+        ("тз", "Техническое задание"),
+    ]
+
+    for substr, full_type in priority_matches:
+        if substr in clean:
+            return full_type
+
+    return "Дополнительные материалы"

@@ -1,3 +1,8 @@
+from configs.procurement_requirements import DOCUMENT_TYPE_MAPPING
+
+ALLOWED_DOC_TYPES = list(DOCUMENT_TYPE_MAPPING.keys())
+
+
 SYSTEM_PROMPT = """Ты — эксперт по проверке документов закупок. Проанализируй документ и верни **только чистый JSON**, строго соблюдая указанную схему.
 
 ### КРИТИЧЕСКИ ВАЖНО: ПРОВЕРКА СООТВЕТСТВИЯ ТИПУ ДОКУМЕНТА
@@ -79,17 +84,46 @@ RESPONSE_JSON_SCHEMA = {
         "type_compliance": {
             "type": "object",
             "properties": {
-                "status": {"type": "string", "enum": ["соответствует", "не соответствует"]},
+                "status": {
+                    "type": "string",
+                    "enum": ["соответствует", "не соответствует"]
+                },
                 "issues": {
                     "type": "array",
                     "items": {"type": "string"},
                     "default": []
                 },
-                "expected_type": {"type": "string"},
-                "actual_type": {"type": "string"},
-                "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+                "expected_type": {
+                    "type": "string",
+                    "enum": ALLOWED_DOC_TYPES
+                },
+                "actual_type": {
+                    "type": "string",
+                    "enum": ALLOWED_DOC_TYPES
+                },
+                "confidence": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1
+                }
             },
             "required": ["status", "expected_type", "actual_type", "confidence"],
+            "additionalProperties": False
+        },
+        "readability": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["удовлетворительно", "неудовлетворительно", "частично читаем"]
+                },
+                "issues": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": []
+                }
+            },
+            "required": ["status"],
             "additionalProperties": False
         },
         "raw_data": {

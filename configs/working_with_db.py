@@ -7,6 +7,8 @@ from psycopg2.extras import RealDictCursor
 from typing import Dict, Any, Optional
 from psycopg2 import sql
 
+from configs.procurement_requirements import DOCUMENT_TYPE_MAPPING
+
 
 logger = logging.getLogger(__name__)
 
@@ -42,45 +44,7 @@ def map_document_type_to_column(document_type: str) -> str:
     Returns:
         str: Имя колонки в таблице БД
     """
-    mapping = {
-        "Объект экспертизы": "expertise_object",
-        "Законодательное регулирование": "legal_regulation",
-        "Способ закупки": "procurement_method",
-        "Заявка на проведение экспертизы": "expertise_request",
-        "Акт о приемке товара": "acceptance_act",
-        "Дата контракта": "contract_date",
-        "Документ о приемке и/или акт сдачи-приемки работ (услуг)": "works_acceptance_doc",
-        "Документ о приемке товара (УПД, Счет-фактура и др.)": "goods_acceptance_doc",
-        "Документация, подтверждающая невозможность использования иных способов определения поставщика": "impossible_alternative_doc",
-        "Документы по взысканию пени и штрафов": "penalty_recovery_docs",
-        "Документы, подтверждающие гарантийные обязательства": "warranty_docs",
-        "Документы, подтверждающие исполнение всех условий контракта": "contract_conditions_docs",
-        "Документы, подтверждающие передачу авторских прав": "ip_rights_transfer_docs",
-        "Документы, подтверждающие страну происхождения товара": "goods_origin_docs",
-        "Дополнительные материалы": "additional_materials",
-        "Дополнительные соглашения к контракту": "contract_amendments",
-        "Извещение": "notice",
-        "Контракт на выполнение НИР (или НИОКР)": "nir_contract",
-        "Контракт на выполнение работ (оказание услуг)": "service_contract",
-        "Контракт на поставку товара": "goods_contract",
-        "Материалы, подтверждающие Обоснование н(м)цк": "price_justification_docs",
-        "Обоснование н(м)цк": "price_justification",
-        "Описание объекта закупки": "procurement_description",
-        "Отчет о выполнении НИР": "nir_report",
-        "Положение о закупках организации": "procurement_policy",
-        "Порядок рассмотрения и оценки заявок на конкурс": "bid_evaluation_procedure",
-        "Предмет контракта": "contract_subject",
-        "Проект контракта": "contract_draft",
-        "Реквизиты контракта": "contract_details",
-        "Сертификаты соответствия": "compliance_certificates",
-        "Ссылка на ЕИС": "eis_link",
-        "Техническая документация, паспорт товара и пр.": "technical_documentation",
-        "Товарная накладная": "goods_invoice",
-        "Требования к содержанию заявки на конкурс": "bid_requirements",
-        "Фото результатов выполнения работ": "work_results_photos",
-        "Фото товара": "goods_photos",
-        "Экспертиза результатов исполнения контракта": "contract_execution_expertise"
-    }
+    mapping = DOCUMENT_TYPE_MAPPING
     return mapping.get(document_type, "additional_materials")  # fallback
 
 
@@ -107,32 +71,36 @@ def save_raw_data(procurement_id: int, document_type: str, full_analysis: Dict[s
         cursor = conn.cursor()
 
         column_name = map_document_type_to_column(document_type)
+        if not column_name:
+            raise ValueError(f"Неизвестный тип документа: {document_type}")
 
-        # Подготавливаем данные
-        data_to_save = full_analysis
-        json_data = json.dumps(data_to_save, ensure_ascii=False)
+        # Преобразуем данные в JSON
+        json_data = json.dumps(full_analysis, ensure_ascii=False, indent=2)
 
-        # Проверяем существование записи
-        check_query = "SELECT 1 FROM raw_document_data WHERE procurement_id = %s"
+        # Проверяем, существует ли уже запись с таким procurement_id
+        check_query = "SELECT id FROM raw_document_data WHERE procurement_id = %s"
         cursor.execute(check_query, (procurement_id,))
         exists = cursor.fetchone()
 
         if exists:
+            # Обновляем конкретное поле
             query = sql.SQL("""
-                UPDATE raw_document_data
-                SET {column} = %s, updated_at = NOW()
+                UPDATE raw_document_data 
+                SET {column} = %s, updated_at = NOW() 
                 WHERE procurement_id = %s
             """).format(column=sql.Identifier(column_name))
             cursor.execute(query, (json_data, procurement_id))
         else:
+            # Вставляем новую запись, только с одним заполненным полем
             query = sql.SQL("""
-                INSERT INTO raw_document_data (procurement_id, {column})
+                INSERT INTO raw_document_data (procurement_id, {column}) 
                 VALUES (%s, %s)
             """).format(column=sql.Identifier(column_name))
             cursor.execute(query, (procurement_id, json_data))
 
         conn.commit()
-        logger.info(f"Полный анализ сохранён в raw_document_data: {document_type} для procurement_id {procurement_id}")
+        logger.info(f"Сохранено в raw_document_data: {document_type} для procurement_id={procurement_id}")
+
     except Exception as e:
         logger.error(f"Ошибка при сохранении raw_data: {str(e)}", exc_info=True)
         if conn:
@@ -164,28 +132,31 @@ def save_clean_conclusion(procurement_id: int, document_type: str, conclusion: s
         cursor = conn.cursor()
 
         column_name = map_document_type_to_column(document_type)
+        if not column_name:
+            raise ValueError(f"Неизвестный тип документа: {document_type}")
 
-        # Проверяем, существует ли запись
-        check_query = "SELECT 1 FROM clean_document_conclusions WHERE procurement_id = %s"
+        # Проверяем существование записи
+        check_query = "SELECT id FROM clean_document_conclusions WHERE procurement_id = %s"
         cursor.execute(check_query, (procurement_id,))
         exists = cursor.fetchone()
 
         if exists:
             query = sql.SQL("""
-                UPDATE clean_document_conclusions
-                SET {column} = %s, updated_at = NOW()
+                UPDATE clean_document_conclusions 
+                SET {column} = %s, updated_at = NOW() 
                 WHERE procurement_id = %s
             """).format(column=sql.Identifier(column_name))
             cursor.execute(query, (conclusion, procurement_id))
         else:
             query = sql.SQL("""
-                INSERT INTO clean_document_conclusions (procurement_id, {column})
+                INSERT INTO clean_document_conclusions (procurement_id, {column}) 
                 VALUES (%s, %s)
             """).format(column=sql.Identifier(column_name))
             cursor.execute(query, (procurement_id, conclusion))
 
         conn.commit()
-        logger.info(f"Итоговое заключение сохранено: {document_type} для procurement_id {procurement_id}")
+        logger.info(f"Заключение сохранено: {document_type} для procurement_id={procurement_id}")
+
     except Exception as e:
         logger.error(f"Ошибка при сохранении clean_conclusion: {str(e)}", exc_info=True)
         if conn:
@@ -209,27 +180,80 @@ def get_procurement_report(procurement_id: int) -> Dict[str, Any]:
     try:
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        # Получаем данные из обеих таблиц
+
         raw_query = "SELECT * FROM raw_document_data WHERE procurement_id = %s"
         clean_query = "SELECT * FROM clean_document_conclusions WHERE procurement_id = %s"
-        
+
         cursor.execute(raw_query, (procurement_id,))
         raw_data = cursor.fetchone()
-        
+
         cursor.execute(clean_query, (procurement_id,))
         clean_data = cursor.fetchone()
-        
+
         result = {}
         if raw_data:
             result["raw_data"] = dict(raw_data)
         if clean_data:
             result["clean_data"] = dict(clean_data)
-            
-        return result
-        
+
+        return result if result else None
+
     except Exception as e:
-        logger.error(f"Ошибка при получении отчета: {str(e)}", exc_info=True)
+        logger.error(f"Ошибка при получении отчёта: {str(e)}", exc_info=True)
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_raw_data_by_procurement_id(procurement_id: str) -> Dict[str, Any]:
+    """
+    Получает сырые извлечённые данные по идентификатору закупки из базы данных.
+
+    Функция выполняет запрос к таблице `raw_document_data`, извлекает строку с указанным `procurement_id`
+    и преобразует содержимое столбцов с документами в словарь, где ключ — нормализованный тип документа,
+    а значение — соответствующие извлечённые данные в формате JSON. Служебные поля (id, даты и т.п.) игнорируются.
+
+    Args:
+        procurement_id (str): Уникальный идентификатор закупки, для которой запрашиваются данные.
+
+    Returns:
+        Dict[str, Any]: Словарь с данными, где:
+            - ключ: строковое название типа документа (например, "Техническое задание", "Извещение"),
+            - значение: структурированные данные документа (вложенные словари/списки), извлечённые ранее.
+            Если запись не найдена или произошла ошибка — возвращается пустой словарь.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+        query = "SELECT * FROM raw_document_data WHERE procurement_id = %s;"
+        cursor.execute(query, (procurement_id,))
+        row = cursor.fetchone()
+
+        if not row:
+            return {}
+
+        data = {}
+        row_dict = dict(row)  # Убедимся, что работаем с dict
+        for col_name, value in row_dict.items():
+            # Пропускаем служебные колонки
+            if col_name in ['id', 'procurement_id', 'created_at', 'updated_at']:
+                continue
+            if value is None:
+                continue
+
+            # Находим соответствующий тип документа по маппингу
+            doc_type = next(
+                (k for k, v in DOCUMENT_TYPE_MAPPING.items() if v == col_name),
+                col_name
+            )
+            data[doc_type] = value
+        return data
+
+    except Exception as e:
+        logger.error(f"Ошибка чтения данных из БД: {str(e)}", exc_info=True)
         return {}
     finally:
         if conn:

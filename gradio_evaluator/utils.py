@@ -190,7 +190,7 @@ def show_documents_content(
                                     "expertise_details": expertise_details
                                 },
                                 headers={"X-API-Key": api_key},
-                                timeout=60
+                                timeout=600
                             )
                         if response.status_code == 200:
                             doc_data = response.json()
@@ -280,7 +280,7 @@ def show_documents_content(
                                 "expertise_details": expertise_details
                             },
                             headers={"X-API-Key": api_key},
-                            timeout=60
+                            timeout=600
                         )
                     if response.status_code == 200:
                         doc_data = response.json()

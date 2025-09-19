@@ -1,87 +1,74 @@
--- Таблица для хранения извлечённых "сырых" данных из документов (соответствует report_for_operator)
+-- Таблица для хранения извлечённых "сырых" данных из документов
 CREATE TABLE raw_document_data (
-    procurement_id SERIAL PRIMARY KEY,
-    expertise_object JSONB,
-    legal_regulation JSONB,
-    procurement_method JSONB,
-    expertise_request JSONB,
-    acceptance_act JSONB,
-    contract_date DATE,
-    works_acceptance_doc JSONB,
-    goods_acceptance_doc JSONB,
-    impossible_alternative_doc JSONB,
-    penalty_recovery_docs JSONB,
-    warranty_docs JSONB,
-    contract_conditions_docs JSONB,
-    ip_rights_transfer_docs JSONB,
-    goods_origin_docs JSONB,
-    additional_materials JSONB,
-    contract_amendments JSONB,
-    notice JSONB,
-    nir_contract JSONB,
-    service_contract JSONB,
-    goods_contract JSONB,
-    price_justification_docs JSONB,
-    price_justification JSONB,
-    procurement_description JSONB,
-    nir_report JSONB,
-    procurement_policy JSONB,
-    bid_evaluation_procedure JSONB,
-    contract_subject JSONB,
-    contract_draft JSONB,
-    contract_details JSONB,
-    compliance_certificates JSONB,
-    eis_link JSONB,
-    technical_documentation JSONB,
-    goods_invoice JSONB,
-    bid_requirements JSONB,
-    work_results_photos JSONB,
-    goods_photos JSONB,
-    contract_execution_expertise JSONB,
+    id SERIAL PRIMARY KEY,
+    procurement_id TEXT NOT NULL,  -- id закупки
+    acceptance_act JSONB, -- Акт о приемке товара
+    works_acceptance_doc JSONB, -- Документ о приемке и/или акт сдачи-приемки работ (услуг)
+    goods_acceptance_doc JSONB, -- Документ о приемке товара (УПД, Счет-фактура и др.)
+    impossible_alternative_doc JSONB, -- Документация, подтверждающая невозможность (нецелесообразность) использования иных способов определения поставщика
+    penalty_recovery_docs JSONB, -- Документы по взысканию пени и штрафов
+    warranty_docs JSONB, -- Документы, подтверждающие гарантийные обязательства
+    contract_conditions_docs JSONB, -- Документы, подтверждающие исполнение всех условий контракта
+    ip_rights_transfer_docs JSONB, -- Документы, подтверждающие передачу авторских прав на результаты интеллектуальной собственности
+    goods_origin_docs JSONB, -- Документы, подтверждающие страну происхождения товара
+    additional_materials JSONB, -- Дополнительные материалы
+    contract_amendments JSONB, -- Дополнительные соглашения к контракту
+    notice JSONB, -- Извещение
+    nir_contract JSONB, -- Контракт на выполнение НИР (или НИОКР)
+    service_contract JSONB, -- Контракт на выполнение работ (оказание услуг)
+    goods_contract JSONB, -- Контракт на поставку товара
+    price_justification_docs JSONB, -- Материалы, подтверждающие Обоснование н(м)цк
+    price_justification JSONB, -- Обоснование н(м)цк
+    nir_report JSONB, -- Отчет о выполнении НИР
+    procurement_policy JSONB, -- Положение о закупках организации
+    bid_evaluation_procedure JSONB, -- Порядок рассмотрения и оценки заявок на конкурс
+    contract_draft JSONB, -- Проект контракта
+    compliance_certificates JSONB, -- Сертификаты соответствия
+    eis_link JSONB, -- Ссылка на ЕИС
+    technical_documentation JSONB, -- Техническая документация, паспорт товара и пр.
+    goods_invoice JSONB, -- Товарная накладная
+    bid_requirements JSONB, -- Требования к содержанию заявки на конкурс
+    work_results_photos JSONB, -- Фото результатов выполнения работ (оказания услуг)
+    goods_photos JSONB, -- Фото товара
+    contract_execution_expertise JSONB, -- Экспертиза результатов исполнения контракта
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Таблица для хранения итогового "чистого" заключения модели (соответствует report_for_operator)
+-- Таблица для хранения итогового "чистого" заключения модели
 CREATE TABLE clean_document_conclusions (
-    procurement_id SERIAL PRIMARY KEY,
-    expertise_object TEXT,
-    legal_regulation TEXT,
-    procurement_method TEXT,
-    expertise_request TEXT,
-    acceptance_act TEXT,
-    contract_date DATE,
-    works_acceptance_doc TEXT,
-    goods_acceptance_doc TEXT,
-    impossible_alternative_doc TEXT,
-    penalty_recovery_docs TEXT,
-    warranty_docs TEXT,
-    contract_conditions_docs TEXT,
-    ip_rights_transfer_docs TEXT,
-    goods_origin_docs TEXT,
-    additional_materials TEXT,
-    contract_amendments TEXT,
-    notice TEXT,
-    nir_contract TEXT,
-    service_contract TEXT,
-    goods_contract TEXT,
-    price_justification_docs TEXT,
-    price_justification TEXT,
-    procurement_description TEXT,
-    nir_report TEXT,
-    procurement_policy TEXT,
-    bid_evaluation_procedure TEXT,
-    contract_subject TEXT,
-    contract_draft TEXT,
-    contract_details TEXT,
-    compliance_certificates TEXT,
-    eis_link TEXT,
-    technical_documentation TEXT,
-    goods_invoice TEXT,
-    bid_requirements TEXT,
-    work_results_photos TEXT,
-    goods_photos TEXT,
-    contract_execution_expertise TEXT,
+    id SERIAL PRIMARY KEY,
+    procurement_id TEXT NOT NULL,  -- id закупки
+    acceptance_act TEXT, -- Акт о приемке товара
+    works_acceptance_doc TEXT, -- Документ о приемке и/или акт сдачи-приемки работ (услуг)
+    goods_acceptance_doc TEXT, -- Документ о приемке товара (УПД, Счет-фактура и др.)
+    impossible_alternative_doc TEXT, -- Документация, подтверждающая невозможность (нецелесообразность) использования иных способов определения поставщика
+    penalty_recovery_docs TEXT, -- Документы по взысканию пени и штрафов
+    warranty_docs TEXT, -- Документы, подтверждающие гарантийные обязательства
+    contract_conditions_docs TEXT, -- Документы, подтверждающие исполнение всех условий контракта
+    ip_rights_transfer_docs TEXT, -- Документы, подтверждающие передачу авторских прав на результаты интеллектуальной собственности
+    goods_origin_docs TEXT, -- Документы, подтверждающие страну происхождения товара
+    additional_materials TEXT,  -- Дополнительные материалы
+    contract_amendments TEXT,  -- Дополнительные соглашения к контракту
+    notice TEXT,  -- Извещение
+    nir_contract TEXT,  -- Контракт на выполнение НИР (или НИОКР)
+    service_contract TEXT, -- Контракт на выполнение работ (оказание услуг)
+    goods_contract TEXT, -- Контракт на поставку товара
+    price_justification_docs TEXT, -- Материалы, подтверждающие Обоснование н(м)цк
+    price_justification TEXT, -- Обоснование н(м)цк
+    nir_report TEXT,  -- Отчет о выполнении НИР
+    procurement_policy TEXT, -- Положение о закупках организации
+    bid_evaluation_procedure TEXT, -- Порядок рассмотрения и оценки заявок на конкурс
+    contract_draft TEXT, -- Проект контракта
+    compliance_certificates TEXT, -- Сертификаты соответствия
+    eis_link TEXT, -- Ссылка на ЕИС
+    technical_documentation TEXT, -- Техническая документация, паспорт товара и пр.
+    goods_invoice TEXT, -- Товарная накладная
+    bid_requirements TEXT, -- Требования к содержанию заявки на конкурс
+    work_results_photos TEXT, -- Фото результатов выполнения работ (оказания услуг)
+    goods_photos TEXT, -- Фото товара
+    contract_execution_expertise TEXT, -- Экспертиза результатов исполнения контракта
+    consistency_check TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
