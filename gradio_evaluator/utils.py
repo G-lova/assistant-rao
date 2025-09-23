@@ -7,7 +7,7 @@ import requests
 import gradio as gr
 from typing import List, Dict
 
-from procurement_requirements import PROCUREMENT_REQUIREMENTS
+from configs.procurement_requirements import PROCUREMENT_REQUIREMENTS
 
 
 logging.basicConfig(level=logging.INFO)

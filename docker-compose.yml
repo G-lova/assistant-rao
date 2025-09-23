@@ -34,7 +34,6 @@ services:
     command: uvicorn main:app --host 0.0.0.0 --port 20142 --reload
     restart: unless-stopped
     networks:
-      - qwen_embedding_network
       - qwen-vl-api_procurement_network
 
   gradio:
@@ -54,53 +53,9 @@ services:
     environment:
       API_URL: ${API_ACCESS}
 
-  qdrant:
-    image: qdrant/qdrant:v1.7.4
-    container_name: vector-qdrant
-    restart: unless-stopped
-    ports:
-      - "2305:6333"
-      - "6334:6334"
-    volumes:
-      - qdrant_data:/qdrant/storage
-    environment:
-      - QDRANT__SERVICE__GRPC_PORT=6334
-      - QDRANT__CLUSTER__ENABLED=false
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    networks:
-      - qwen_embedding_network
-      - qwen-vl-api_procurement_network
-
-  vector-api:
-    build: .
-    container_name: vector-api
-    restart: unless-stopped
-    ports:
-      - "2306:8002"
-    depends_on:
-      - qdrant
-    env_file:
-      - .env
-    volumes:
-      - ./.env:/app/.env
-      - ./search_engine:/app/search_engine
-    environment:
-      - QDRANT_HOST=qdrant
-      - QDRANT_PORT=6333
-    networks:
-      - qwen_embedding_network
-      - qwen-vl-api_procurement_network
-
 networks:
   qwen-vl-api_procurement_network:
-    external: true
-  qwen_embedding_network:
     external: true
 
 volumes:
   postgres_data:
-  qdrant_data:

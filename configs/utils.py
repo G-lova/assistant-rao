@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from configs.config import Config
-from configs.procurement_requirements import PROCUREMENT_REQUIREMENTS, DOCUMENT_TYPE_MAPPING
+from configs.procurement_requirements import DOCUMENT_TYPE_MAPPING
 from src.ocr import ocr_image_with_qwen_vl
 
 
@@ -80,29 +80,6 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         
         except Exception as e:
             return JSONResponse(status_code=500, content={"detail": f"Internal server error: {str(e)}"})
-
-
-def get_required_documents(legislation: str, procurement_method: str, expertise_details: str) -> List[str]:
-    """
-    Возвращает список обязательных документов для закупки на основе законодательства,
-    способа проведения закупки и дополнительных требований экспертизы.
-
-    Функция выполняет поиск по вложенному словарю `PROCUREMENT_REQUIREMENTS`,
-    где структура организована по уровням: законодательство → способ закупки → детали экспертизы.
-    Если какой-либо уровень отсутствует, возвращается пустой список.
-
-    Args:
-        legislation (str): Нормативный акт, по которому проводится закупка (например, "44-ФЗ", "223-ФЗ").
-        procurement_method (str): Способ определения поставщика (например, "Электронный аукцион", "Запрос котировок").
-        expertise_details (str): Дополнительные критерии, влияющие на состав документов (например, "С ОС", "Без ОС", "Для НИОКР").
-
-    Returns:
-        List[str]: Список названий обязательных документов (например, ["Техническое задание", "Проект договора"]).
-                   Возвращает пустой список, если подходящие требования не найдены.
-    """
-    return (PROCUREMENT_REQUIREMENTS.get(legislation, {})
-                                  .get(procurement_method, {})
-                                  .get(expertise_details, []))
 
 
 def extract_filename(path):
@@ -511,73 +488,84 @@ def read_file(file_path: str, original_filename: str = None) -> str:
         raise ValueError(f"Ошибка чтения файла: {str(e)}")
 
 
-def check_procurement_completeness(law_type: str, procurement_type: str, check_type: str, files: Dict[str, str]) -> Dict:
+def check_procurement_completeness(
+    files: Dict[str, str],
+    document_analysis_results: Dict[str, dict]
+) -> Dict:
     """
-    Проверяет полноту комплекта документов для закупки по заданным требованиям.
+    Проверяет полноту комплекта загруженных документов на соответствие заявленному списку приложений.
 
-    Функция сравнивает список загруженных документов с ожидаемыми по законодательству,
-    способу закупки и типу проверки. Оценивает наличие всех обязательных файлов и их содержимое.
+    Анализирует результаты разбора документов (например, извещения или проекта контракта),
+    извлекает перечень обязательных прилагаемых документов и сверяет его с фактически загруженными файлами.
+    Определяет, все ли требуемые документы были предоставлены. Если ни один документ не содержит
+    явного списка приложений, проверка считается пройденной по умолчанию.
 
     Args:
-        law_type (str): Тип законодательства (например, "44-ФЗ", "223-ФЗ").
-        procurement_type (str): Способ проведения закупки (например, "Конкурс", "Аукцион").
-        check_type (str): Тип экспертизы или проверки (например, "Полный комплект документов").
-        files (Dict[str, str]): Словарь, где ключ — имя файла, значение — его текстовое содержимое.
+        files (Dict[str, str]): Словарь загруженных файлов, где ключ — оригинальное имя файла, значение — путь к нему.
+        document_analysis_results (Dict[str, dict]): Результаты анализа каждого документа, содержащие поле `attached_documents_list`.
 
     Returns:
-        Dict: Результат проверки с полями:
-            - is_complete (bool): True, если все обязательные документы присутствуют и не пустые.
-            - missing_files (List[str]): Список отсутствующих обязательных документов.
-            - invalid_files (Dict[str, str]): Словарь с именами файлов и причинами некорректности (например, "Файл пустой").
-            - feedback (str): Человекочитаемый отчёт о результатах проверки.
+        Dict: Словарь с результатами проверки, включающий:
+            - status (str): 'allow' — если все документы на месте, 'deny' — если есть отсутствующие.
+            - declared_attachments (List[str]): Список документов, заявленных как обязательные для приложения.
+            - missing_in_upload (List[str]): Документы из заявленного списка, которые не были загружены.
+            - provided_documents (List[str]): Нормализованные типы фактически загруженных документов.
+            - source_docs_for_attached (List[str]): Имена документов, из которых был извлечён список приложений.
+            - feedback (str): Человекочитаемое пояснение результата проверки.
     """
-    requirements = (PROCUREMENT_REQUIREMENTS.get(law_type, {})
-                                     .get(procurement_type, {})
-                                     .get(check_type, []))
-    if not requirements:
+    # 1. Собираем все declared attached_documents_list из результатов анализа
+    declared_attached = set()
+    source_docs_for_attached = []  # откуда взялся список
+
+    for file_name, result in document_analysis_results.items():
+        attached_list = result.get("attached_documents_list", [])
+        if attached_list:
+            declared_attached.update(attached_list)
+            source_docs_for_attached.append(file_name)
+
+    # Если ни один документ не содержит списка приложений — считаем, что нет явного требования
+    if not declared_attached:
         return {
-            "is_complete": False,
-            "missing_files": [],
-            "invalid_files": {},
-            "feedback": "Неизвестный тип проверки или закупки"
+            "status": "allow",
+            "declared_attachments": [],
+            "missing_in_upload": [],
+            "provided_documents": list({normalize_document_type(name) for name in files.keys()}),
+            "feedback": "Не найдено ни одного документа с разделом «Документы к закупке». Полагаем, что комплектность не регламентирована.",
+            "source_docs_for_attached": []
         }
 
-    uploaded_files = {f.lower().strip(): f for f in files.keys()}
-    required_files_lower = [r.lower().strip() for r in requirements]
+    # 2. Нормализуем загруженные документы
+    normalized_provided = {
+        normalize_document_type(name): name
+        for name in files.keys()
+    }
 
-    missing_files = []
-    found_files = []
-    for req_file, req_lower in zip(requirements, required_files_lower):
-        found = False
-        for uploaded_lower, original_name in uploaded_files.items():
-            if req_lower in uploaded_lower or uploaded_lower in req_lower:
-                found = True
-                found_files.append(original_name)
-                break
-        if not found:
-            missing_files.append(req_file)
+    # 3. Проверяем, какие заявленные документы отсутствуют в загрузке
+    missing_in_upload = [
+        doc for doc in declared_attached
+        if doc not in normalized_provided
+    ]
 
-    invalid_files = {}
-    for file_name, content in files.items():
-        if file_name in found_files and not content.strip():
-            invalid_files[file_name] = "Файл пустой"
-
+    # 4. Формируем фидбек
     feedback_parts = []
-    if not missing_files:
-        feedback_parts.append("Все обязательные документы представлены.")
+
+    if source_docs_for_attached:
+        feedback_parts.append(f"Список приложенных документов взят из: {', '.join(source_docs_for_attached)}")
+
+    if not missing_in_upload:
+        feedback_parts.append("Все документы, указанные в списке приложений, присутствуют.")
     else:
-        feedback_parts.append(f"Отсутствуют документы: {', '.join(missing_files)}")
+        feedback_parts.append(f"Отсутствуют документы из заявленного списка: {', '.join(missing_in_upload)}")
 
-    if invalid_files:
-        feedback_parts.append(f"Проблемы в документах: {', '.join(invalid_files.keys())}")
-
-    if not missing_files and not invalid_files:
-        feedback_parts.append("Документы соответствуют требованиям комплектности.")
+    # 5. Статус
+    status = "deny" if missing_in_upload else "allow"
 
     return {
-        "is_complete": len(missing_files) == 0 and len(invalid_files) == 0,
-        "missing_files": missing_files,
-        "invalid_files": invalid_files,
+        "status": status,
+        "declared_attachments": list(declared_attached),
+        "missing_in_upload": missing_in_upload,
+        "provided_documents": list(normalized_provided.keys()),
+        "source_docs_for_attached": source_docs_for_attached,
         "feedback": "\n".join(feedback_parts)
     }
 

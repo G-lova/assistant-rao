@@ -12,6 +12,7 @@ CREATE TABLE raw_document_data (
     ip_rights_transfer_docs JSONB, -- Документы, подтверждающие передачу авторских прав на результаты интеллектуальной собственности
     goods_origin_docs JSONB, -- Документы, подтверждающие страну происхождения товара
     additional_materials JSONB, -- Дополнительные материалы
+    technical_specification JSONB, -- Техническое задание
     contract_amendments JSONB, -- Дополнительные соглашения к контракту
     notice JSONB, -- Извещение
     nir_contract JSONB, -- Контракт на выполнение НИР (или НИОКР)
@@ -49,6 +50,7 @@ CREATE TABLE clean_document_conclusions (
     ip_rights_transfer_docs TEXT, -- Документы, подтверждающие передачу авторских прав на результаты интеллектуальной собственности
     goods_origin_docs TEXT, -- Документы, подтверждающие страну происхождения товара
     additional_materials TEXT,  -- Дополнительные материалы
+    technical_specification TEXT, -- Техническое задание
     contract_amendments TEXT,  -- Дополнительные соглашения к контракту
     notice TEXT,  -- Извещение
     nir_contract TEXT,  -- Контракт на выполнение НИР (или НИОКР)

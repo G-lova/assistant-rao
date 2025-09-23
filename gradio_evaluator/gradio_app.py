@@ -1,220 +1,125 @@
-import logging
+import os
+import json
 
 import gradio as gr
+import requests
 from dotenv import load_dotenv
+from typing import Dict, Any
 
-from utils import (show_documents_content, 
-                   update_document_list, 
-                   add_document, 
-                   clear_documents_list, 
-                   toggle_explanation_visibility)
 
 load_dotenv()
 
+# Загрузка переменных окружения
+API_ACCESS = os.getenv("API_ACCESS")
+API_KEY = os.getenv("API_KEY")
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
+def call_evaluation_api(procurement_id: str, files, legislation: str, procurement_method: str, expertise_details: str) -> Dict[Any, Any]:
+    """
+    Вызывает внешнее API для анализа загруженных документов по закупке.
 
-with gr.Blocks(title="Проверка документов закупок") as demo:
-    gr.Markdown("## Проверка документов закупок")
+    Отправляет набор файлов и метаданных (ID закупки, законодательство, способ закупки и др.)
+    на сервер обработки через HTTP-запрос. Получает структурированный ответ с результатами
+    анализа каждого документа, включая определение типа, соответствие и извлечённые данные.
+    Обеспечивает корректное закрытие файловых дескрипторов после отправки.
+
+    Args:
+        procurement_id (str): Уникальный идентификатор закупки, используется для привязки документов.
+        files (list): Список объектов файлов (например, временных файлов), подготовленных для отправки.
+        legislation (str): Нормативный акт, регулирующий закупку (например, "44-ФЗ", "223-ФЗ").
+        procurement_method (str): Способ проведения закупки (например, "Конкурс", "Аукцион").
+        expertise_details (str): Дополнительная информация о цели экспертизы (может использоваться в будущем).
+
+    Returns:
+        Dict[Any, Any]: JSON-ответ от API в виде словаря. Возможные ключи:
+            - results (List[dict]): Результаты анализа по каждому документу.
+            - errors (List[str]): Ошибки, возникшие при обработке.
+            - error (str): Сообщение об общей ошибке, если запрос не удался.
+            При успешном выполнении возвращает данные от сервера; при ошибке — соответствующее описание.
+    """
+    if not procurement_id.strip():
+        return {"error": "ID закупки обязателен"}
     
+    if not files:
+        return {"error": "Не загружено ни одного файла"}
+
+    try:
+        # Подготавливаем файлы для отправки
+        file_list = [("files", (f.name, open(f.name, "rb"), f"application/octet-stream")) for f in files]
+        
+        data = {
+            "procurement_id": procurement_id,
+            "legislation": legislation,
+            "procurement_method": procurement_method,
+            "expertise_details": expertise_details
+        }
+
+        headers = {"X-API-Key": API_KEY}
+        
+        response = requests.post(
+            f"{API_ACCESS}/evaluate-documents",
+            files=file_list,
+            data=data,
+            headers=headers,
+            timeout=600
+        )
+
+        # Закрываем файлы после отправки
+        for _, (_, f_obj, _) in enumerate(file_list):
+            f_obj.close()
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            try:
+                error_detail = response.json().get("detail", response.text)
+            except:
+                error_detail = response.text
+            return {"error": f"Ошибка API: {response.status_code} – {error_detail}"}
+
+    except Exception as e:
+        return {"error": f"Ошибка соединения: {str(e)}"}
+
+
+with gr.Blocks(title="Эксперт по закупкам") as demo:
+    gr.Markdown("# 📄 Анализ комплекта документов закупки")
+
     with gr.Row():
-        with gr.Column():
-            procurement_id = gr.Textbox(
-                label="ID закупки*",
-                placeholder="Введите идентификатор закупки",
-                interactive=True
-            )
-            
-            expertise_object = gr.Dropdown(
-                label="Объект экспертизы*",
-                choices=[
-                    "Документация о проведении закупки",
-                    "Отчетные материалы (результаты исполнения Контракта или Договора)"
-                ],
-                value="Документация о проведении закупки"
-            )
-            
+        with gr.Column(scale=2):
+            procurement_id = gr.Textbox(label="ID закупки", placeholder="Введите уникальный ID закупки")
             legislation = gr.Dropdown(
-                label="Законодательное регулирование*",
+                label="Законодательство",
                 choices=["44-ФЗ", "223-ФЗ"],
                 value="44-ФЗ"
             )
-            
             procurement_method = gr.Dropdown(
-                label="Способ закупки*",
-                choices=[
-                    "Конкурс", "Аукцион", "Запрос котировок", 
-                    "Закупка у единственного поставщика", "Выполнение НИР",
-                    "Поставка товара", "Оказание услуг или выполнение работ"
-                ],
+                label="Способ закупки",
+                choices=["Конкурс", "Аукцион", "Запрос котировок", "Закупка у единственного поставщика"],
                 value="Конкурс"
             )
-            
             expertise_details = gr.Dropdown(
-                label="Детали экспертизы*",
+                label="Тип экспертизы",
                 choices=[
                     "Полный комплект документов о закупке",
                     "Описание объекта закупки",
-                    "Обоснование начальной (максимальной) цены контракта",
-                    "Порядок оценки заявок участников закупки",
-                    "Приемка по Контракту еще не проводилась",
-                    "Приемка по Контракту завершена"
+                    "Обоснование начальной (максимальной) цены контракта"
                 ],
                 value="Полный комплект документов о закупке"
             )
-            
-            eis_link = gr.Textbox(label="Ссылка на ЕИС (опционально)")
-            
-            # Блок для работы с документами
-            with gr.Group():
-                gr.Markdown("### Документы*")
-                with gr.Row():
-                    doc_name = gr.Dropdown(
-                        label="Тип документа*",
-                        choices=[],
-                        interactive=True,
-                        allow_custom_value=False
-                    )
-                    doc_explanation = gr.Textbox(
-                        label="Комментарий (если документ отсутствует)*",
-                        placeholder="Укажите причину отсутствия документа...",
-                        interactive=True,
-                        visible=False
-                    )
-                with gr.Row():
-                    doc_file = gr.File(
-                        label="Загрузить документ",
-                        file_count="single",
-                        file_types=[".pdf", ".docx", ".doc", ".xlsx", ".xls", ".txt", ".csv", ".zip", ".rar"],
-                        interactive=True
-                    )
-                with gr.Row():
-                    add_doc_btn = gr.Button("Добавить документ", variant="primary")
-                    clear_docs_btn = gr.Button("Очистить список")
-                docs_json = gr.Textbox(visible=False)
-                docs_display = gr.JSON(
-                    label="Текущие документы",
-                    interactive=False
-                )
-            
-            # Массовая загрузка файлов
-            mass_files = gr.File(
-                label="Массовая загрузка документов (автоматическое определение типа)",
-                file_count="multiple",
-                file_types=[".pdf", ".docx", ".doc", ".xlsx", ".xls", ".txt", ".csv", ".zip", ".rar"]
-            )
-            
-            submit_btn = gr.Button("Проверить документы", variant="primary")
-        
-        with gr.Column():
-            # Результаты
-            results_output = gr.JSON(label="Результаты проверки")
-            
-            # Детализированный вывод
-            with gr.Tabs():
-                with gr.Tab("Статус проверки"):
-                    status_output = gr.JSON(label="Статус проверки")
-                
-                with gr.Tab("Требуемые документы"):
-                    required_docs = gr.JSON(label="Список обязательных документов")
-                
-                with gr.Tab("Предоставленные документы"):
-                    provided_docs = gr.JSON(label="Список загруженных документов")
-                
-                with gr.Tab("Отсутствующие документы"):
-                    missing_docs = gr.JSON(label="Список отсутствующих документов")
-                
-                with gr.Tab("Содержимое документов"):
-                    docs_content = gr.JSON(label="Первые 200 символов каждого документа")
-                
-                with gr.Tab("Ошибки"):
-                    errors_output = gr.JSON(label="Ошибки обработки")
+            upload_btn = gr.UploadButton("📤 Загрузить документы", file_count="multiple", file_types=["pdf", "docx", "jpg", "jpeg", "png", "xls", "xlsx"])
 
-    # Инициализация списка документов при загрузке
-    demo.load(
-        fn=lambda: update_document_list("44-ФЗ", "Конкурс", "Полный комплект документов о закупке"),
-        outputs=doc_name
-    )
-    
-    # Обновление списка документов при изменении параметров
-    for component in [legislation, procurement_method, expertise_details]:
-        component.change(
-            update_document_list,
-            [legislation, procurement_method, expertise_details],
-            doc_name
-        )
-    
-    # Переключение видимости поля объяснения
-    doc_name.change(
-        toggle_explanation_visibility,
-        inputs=doc_name,
-        outputs=doc_explanation
-    )
-    
-    # Добавление документа
-    add_doc_btn.click(
-        add_document,
-        [docs_json, doc_name, doc_explanation, doc_file],
-        [docs_json, docs_display]
-    ).then(
-        lambda: (None, "", None),  # Очищаем поля после добавления
-        [],
-        [doc_name, doc_explanation, doc_file]
-    )
-    
-    # Очистка списка документов
-    clear_docs_btn.click(
-        clear_documents_list,
-        [],
-        [docs_json, docs_display]
-    )
-    
-    # Основная проверка документов
-    submit_btn.click(
-        show_documents_content,
-        [
-            procurement_id,
-            expertise_object,
-            legislation,
-            procurement_method,
-            expertise_details,
-            eis_link,
-            mass_files,
-            docs_json
-        ],
-        results_output
-    ).then(
-        lambda x: {
-            "status": x.get("status", "deny"),
-            "message": "Проверка завершена успешно" if x.get("status") == "allow" else "Обнаружены проблемы",
-            "error": x.get("error")
-        },
-        results_output,
-        status_output
-    ).then(
-        lambda x: x.get("required_documents", []),
-        results_output,
-        required_docs
-    ).then(
-        lambda x: x.get("provided_documents", []),
-        results_output,
-        provided_docs
-    ).then(
-        lambda x: x.get("missing_documents", []),
-        results_output,
-        missing_docs
-    ).then(
-        lambda x: {k: v[:200] for k, v in x.get("documents_content", {}).items()},
-        results_output,
-        docs_content
-    ).then(
-        lambda x: x.get("errors", []),
-        results_output,
-        errors_output
+        with gr.Column(scale=3):
+            output = gr.JSON(label="Результат анализа")
+
+    upload_btn.upload(
+        fn=call_evaluation_api,
+        inputs=[procurement_id, upload_btn, legislation, procurement_method, expertise_details],
+        outputs=output
     )
 
+    # Дополнительно: кнопка очистки
+    clear_btn = gr.Button("Очистить")
+    clear_btn.click(fn=lambda: (None, None), inputs=None, outputs=[upload_btn, output])
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", server_port=20141)

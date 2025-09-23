@@ -7,9 +7,8 @@ from typing import List, Dict, Any, Tuple
 from openai import OpenAI
 from dotenv import load_dotenv
 
-from configs.utils import read_file, get_required_documents
+from configs.utils import read_file
 from configs.procurement_requirements import DOCUMENT_TYPE_MAPPING
-from search_engine.service import search_similar_documents
 from src.prompts import RESPONSE_JSON_SCHEMA, SYSTEM_PROMPT
 from configs.working_with_db import save_raw_data, save_clean_conclusion, get_raw_data_by_procurement_id
 

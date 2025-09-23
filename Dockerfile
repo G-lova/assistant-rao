@@ -21,9 +21,7 @@ RUN apt-get update && \
         libgl1 \
         libglib2.0-0 \
         libxml2-dev \
-        libxslt-dev \
-        tesseract-ocr \
-        tesseract-ocr-rus && \
+        libxslt-dev && \
     rm -rf /var/lib/apt/lists/*
 
 RUN wget https://www.rarlab.com/rar/unrar_5.2.5-0.1_amd64.deb && \

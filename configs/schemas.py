@@ -31,6 +31,25 @@ class DocumentContentResponse(BaseModel):
     error: Optional[str] = None  # Сообщение об ошибке
 
 
+class BatchDocumentResponse(BaseModel):
+    """
+    Модель ответа для массовой обработки документов.
+
+    Используется как схема ответа при загрузке нескольких файлов одновременно.
+    Содержит общее состояние операции, список результатов по каждому документу
+    и возможные ошибки, возникшие в процессе обработки.
+
+    Attributes:
+        status (str): Общий статус выполнения операции (например, 'success', 'partial_success', 'error').
+        results (List[DocumentContentResponse]): Список детальных результатов анализа каждого документа.
+        errors (List[str]): Список сообщений об ошибках, произошедших при обработке отдельных файлов. 
+            По умолчанию — пустой список.
+    """
+    status: str
+    results: List[DocumentContentResponse]
+    errors: List[str] = []
+
+
 class APIError(BaseModel):
     """
     Модель стандартного ответа об ошибке API.
@@ -242,3 +261,35 @@ class DocumentConclusion(BaseModel):
     readability: Dict[str, Any]
     raw_data: RawData
     conclusion: str
+
+
+class DocumentAnalysisResult(BaseModel):
+    """
+    Модель результата анализа одного документа в рамках закупки.
+
+    Содержит метаданные о документе, результаты автоматической проверки,
+    извлечённые данные и финальное заключение. Используется для передачи детальной
+    информации о каждом обработанном файле в составе группового ответа.
+    """
+    procurement_id: str
+    filename: str
+    document_type: str
+    size: int
+    content_preview: str  # первые 300 символов
+    is_valid: bool
+    analysis: Dict[str, Any]  # как в raw_data
+    conclusion: str
+    error: Optional[str] = None
+
+
+class EvaluateDocumentsResponse(BaseModel):
+    """
+    Модель ответа на запрос массовой оценки документов.
+
+    Представляет собой комплексный отчёт по анализу нескольких документов одной закупки,
+    включая результаты проверки каждого файла, результаты междокументной согласованности
+    и сводную информацию. Используется как response_model в эндпоинтах пакетной обработки.
+    """
+    documents: List[DocumentAnalysisResult]
+    consistency_check: Dict[str, Any]  # результат check_consistency
+    summary: Dict[str, Any]  # краткая сводка

@@ -258,3 +258,74 @@ def get_raw_data_by_procurement_id(procurement_id: str) -> Dict[str, Any]:
     finally:
         if conn:
             conn.close()
+
+
+def get_contract_info_from_db(procurement_id: str) -> Dict[str, str]:
+    """
+    Извлекает основные реквизиты контракта из базы данных по идентификатору закупки.
+
+    Функция обращается к таблице `raw_document_data`, получает данные из поля `contract_draft`
+    и извлекает оттуда номер контракта, сумму (НМЦК или сумма контракта) и дату контракта.
+    Если данные отсутствуют или произошла ошибка — возвращает значения по умолчанию ("0").
+
+    Args:
+        procurement_id (str): Уникальный идентификатор закупки.
+
+    Returns:
+        Dict[str, str]: Словарь с ключами:
+            - "contract_number" (str): Номер контракта или "0", если не найден.
+            - "amount" (str): Сумма контракта в виде строки или "0", если не найдена.
+            - "date" (str): Дата контракта в текстовом формате или "0", если не найдена.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+        query = """
+            SELECT contract_draft 
+            FROM raw_document_data 
+            WHERE procurement_id = %s
+        """
+        cursor.execute(query, (procurement_id,))
+        result = cursor.fetchone()
+
+        if not result or not result["contract_draft"]:
+            logger.warning(f"Данные contract_draft не найдены для procurement_id={procurement_id}")
+            return {"contract_number": "0", "amount": "0", "date": "0"}
+
+        data = result["contract_draft"]
+
+        # Извлечение данных
+        contract_number = data.get("raw_data", {}).get("contract_number", "0")
+
+        amounts = data.get("raw_data", {}).get("amounts", [])
+        amount = "0"
+        for amt in amounts:
+            if isinstance(amt, dict):
+                field = amt.get("field", "")
+                if "нмцк" in field.lower() or "сумма контракта" in field.lower():
+                    amount = amt.get("value", "0")
+                    break
+
+        dates = data.get("raw_data", {}).get("dates", [])
+        date = "0"
+        for dt in dates:
+            if isinstance(dt, dict):
+                field = dt.get("field", "")
+                if "дата контракта" in field.lower():
+                    date = dt.get("value", "0")
+                    break
+
+        return {
+            "contract_number": str(contract_number) if contract_number != "0" else "0",
+            "amount": str(amount) if amount != "0" else "0",
+            "date": str(date) if date != "0" else "0"
+        }
+
+    except Exception as e:
+        logger.error(f"Ошибка при получении данных о контракте: {str(e)}", exc_info=True)
+        return {"contract_number": "0", "amount": "0", "date": "0"}
+    finally:
+        if conn:
+            conn.close()
