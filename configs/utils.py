@@ -12,7 +12,7 @@ import PyPDF2
 import rarfile
 import textract
 import zipfile
-from typing import Dict, List
+from typing import Dict, List, Any
 from docx import Document
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from pptx import Presentation
@@ -80,27 +80,6 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         
         except Exception as e:
             return JSONResponse(status_code=500, content={"detail": f"Internal server error: {str(e)}"})
-
-
-def extract_filename(path):
-    """
-    Извлекает имя файла без пути и расширения из заданного пути.
-
-    Функция пытается извлечь название CSV-файла, используя регулярное выражение,
-    чтобы найти имя файла перед расширением `.csv` и после последнего разделителя путей (`/` или `\`).
-    Если совпадение не найдено, возвращается имя файла (без расширения) с помощью стандартных средств `os.path`.
-
-    Поддерживает как Unix- (`/`), так и Windows-стиль (`\\`) разделителей путей.
-
-    Args:
-        path (str): Полный или относительный путь к файлу (например, 'data/procurements.csv' или 'C:\\files\\report.csv').
-
-    Returns:
-        str: Имя файла без пути и расширения. Например, из 'data/procurements.csv' вернёт 'procurements'.
-             Если имя не удаётся определить — возвращает базовое имя файла без расширения.
-    """
-    match = re.search(r'[/\\]([^/\\]+)\.csv$', path)
-    return match.group(1) if match else os.path.splitext(os.path.basename(path))[0]
 
 
 def read_txt_file(file_path: str) -> str:
@@ -617,3 +596,52 @@ def normalize_document_type(doc_type: str) -> str:
             return full_type
 
     return "Дополнительные материалы"
+
+
+def process_large_document(file_path: str, chunk_size: int = 40000) -> List[Dict[str, Any]]:
+    """
+    Разбивает большой документ на фрагменты для последующей поэтапной обработки.
+
+    Функция считывает содержимое файла и делит его на блоки заданного размера (в символах),
+    чтобы избежать превышения лимитов контекста при работе с языковыми моделями.
+    Каждый фрагмент включает служебную информацию: номер фрагмента, общее количество
+    и путь к исходному файлу. Используется для подготовки больших текстовых документов,
+    таких как контракты или технические спецификации.
+
+    Args:
+        file_path (str): Путь к файлу, который необходимо обработать.
+        chunk_size (int, optional): Максимальный размер одного фрагмента в символах.
+            По умолчанию — 40000 (подходит для большинства LLM-моделей с контекстом 32k–128k).
+
+    Returns:
+        List[Dict[str, Any]]: Список словарей, каждый из которых представляет один фрагмент и содержит:
+            - content (str): Текст фрагмента.
+            - chunk_number (int): Порядковый номер фрагмента (начиная с 1).
+            - total_chunks (int): Общее количество фрагментов (заполняется после разбиения).
+            - file_path (str): Путь к исходному файлу.
+            При ошибке чтения файла возвращается пустой список.
+    """
+    try:
+        text = read_file(file_path)
+        chunks = []
+        
+        # Разделяем текст на блоки
+        for i in range(0, len(text), chunk_size):
+            chunk = text[i:i + chunk_size]
+            chunks.append({
+                "content": chunk,
+                "chunk_number": len(chunks) + 1,
+                "total_chunks": -1,  # Определится после обработки
+                "file_path": file_path
+            })
+        
+        # Обновляем общее количество блоков
+        total_chunks = len(chunks)
+        for chunk in chunks:
+            chunk["total_chunks"] = total_chunks
+        
+        return chunks
+        
+    except Exception as e:
+        logger.error(f"Ошибка обработки большого документа {file_path}: {str(e)}")
+        return []
