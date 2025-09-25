@@ -9,9 +9,19 @@ from typing import Dict, Any, List
 
 load_dotenv()
 
+
 # Загрузка переменных окружения
 API_ACCESS = os.getenv("API_ACCESS")
 API_KEY = os.getenv("API_KEY")
+
+# Данные для аутентификации
+AUTH_USERNAME = os.getenv("GRADIO_USERNAME")  # Логин по умолчанию
+AUTH_PASSWORD = os.getenv("GRADIO_PASSWORD")  # Пароль по умолчанию
+
+
+def authenticate(username: str, password: str) -> bool:
+    """Проверяет правильность логина и пароля"""
+    return username == AUTH_USERNAME and password == AUTH_PASSWORD
 
 
 def call_evaluation_api(procurement_id: str, files, legislation: str, procurement_method: str, expertise_details: str) -> Dict[Any, Any]:
@@ -71,7 +81,7 @@ def call_evaluation_api(procurement_id: str, files, legislation: str, procuremen
             files=file_list,
             data=data,
             headers=headers,
-            timeout=120
+            timeout=360
         )
 
         # Закрываем файлы после отправки
@@ -248,69 +258,140 @@ def clear_all():
     )
 
 
+def login(username: str, password: str):
+    """Обработчик входа в систему"""
+    if authenticate(username, password):
+        return gr.update(visible=True), gr.update(visible=False), ""
+    else:
+        return gr.update(visible=False), gr.update(visible=True), "❌ Неверный логин или пароль"
+
+
+def logout():
+    """Обработчик выхода из системы"""
+    return gr.update(visible=False), gr.update(visible=True), ""
+
+
 # Создаем интерфейс Gradio
 with gr.Blocks(title="Эксперт по закупкам", theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# 📄 Анализ комплекта документов закупки")
-    gr.Markdown("Загрузите документы закупки для автоматического анализа комплектности и согласованности.")
+    # Скрываем интерфейс по умолчанию
+    main_interface = gr.Column(visible=False)
+    login_interface = gr.Column(visible=True)
     
-    with gr.Row():
-        with gr.Column(scale=1):
-            gr.Markdown("### ⚙️ Параметры закупки")
-            
-            procurement_id = gr.Textbox(
-                label="ID закупки *",
-                placeholder="Введите уникальный ID закупки...",
-                value="PR_12345"  # Пример значения для тестирования
-            )
-            
-            legislation = gr.Dropdown(
-                label="Законодательство *",
-                choices=["44-ФЗ", "223-ФЗ"],
-                value="44-ФЗ"
-            )
-            
-            procurement_method = gr.Dropdown(
-                label="Способ закупки *",
-                choices=["Конкурс", "Аукцион", "Запрос котировок", "Закупка у единственного поставщика"],
-                value="Конкурс"
-            )
-            
-            expertise_details = gr.Dropdown(
-                label="Тип экспертизы *",
-                choices=[
-                    "Полный комплект документов о закупке",
-                    "Описание объекта закупки",
-                    "Обоснование начальной (максимальной) цены контракта"
-                ],
-                value="Полный комплект документов о закупке"
-            )
-            
-            upload_btn = gr.UploadButton(
-                "📤 Загрузить документы",
-                file_count="multiple",
-                file_types=[".pdf", ".docx", ".doc", ".xls", ".xlsx", ".jpg", ".jpeg", ".png"]
-            )
-            
-            with gr.Row():
-                submit_btn = gr.Button("🚀 Начать анализ", variant="primary")
-                clear_btn = gr.Button("🧹 Очистить", variant="secondary")
+    with login_interface:
+        gr.Markdown("# 🔐 Вход в систему")
+        gr.Markdown("Для доступа к системе анализа закупок требуется авторизация")
         
-        with gr.Column(scale=2):
-            gr.Markdown("### 📊 Результаты анализа")
-            
-            with gr.Tab("📋 Форматированный отчет"):
-                output_text = gr.Markdown(
-                    label="Результаты анализа",
-                    value="## 📋 Результаты анализа\n\nЗагрузите документы для анализа..."
+        with gr.Row():
+            with gr.Column(scale=1):
+                login_username = gr.Textbox(
+                    label="Логин",
+                    placeholder="Введите ваш логин..."
                 )
-            
-            with gr.Tab("🔧 Сырые данные (JSON)"):
-                json_output = gr.JSON(
-                    label="JSON ответ",
-                    value={"message": "Результаты появятся здесь после анализа..."}
+                login_password = gr.Textbox(
+                    label="Пароль",
+                    type="password",
+                    placeholder="Введите ваш пароль..."
                 )
+                login_btn = gr.Button("Войти", variant="primary")
+                login_message = gr.Markdown()
     
-    # Обработчики событий
+    with main_interface:
+        gr.Markdown("# 📄 Анализ комплекта документов закупки")
+        gr.Markdown("Загрузите документы закупки для автоматического анализа комплектности и согласованности.")
+        
+        # Кнопка выхода
+        with gr.Row():
+            gr.Markdown("### Панель управления")
+            logout_btn = gr.Button("🚪 Выйти", variant="secondary", size="sm")
+        
+        with gr.Row():
+            with gr.Column(scale=1):
+                gr.Markdown("### ⚙️ Параметры закупки")
+                
+                procurement_id = gr.Textbox(
+                    label="ID закупки *",
+                    placeholder="Введите уникальный ID закупки...",
+                    value="PR_12345"  # Пример значения для тестирования
+                )
+                
+                legislation = gr.Dropdown(
+                    label="Законодательство *",
+                    choices=["44-ФЗ", "223-ФЗ"],
+                    value="44-ФЗ"
+                )
+                
+                procurement_method = gr.Dropdown(
+                    label="Способ закупки *",
+                    choices=["Конкурс", "Аукцион", "Запрос котировок", "Закупка у единственного поставщика"],
+                    value="Конкурс"
+                )
+                
+                expertise_details = gr.Dropdown(
+                    label="Тип экспертизы *",
+                    choices=[
+                        "Полный комплект документов о закупке",
+                        "Описание объекта закупки",
+                        "Обоснование начальной (максимальной) цены контракта"
+                    ],
+                    value="Полный комплект документов о закупке"
+                )
+                
+                upload_btn = gr.UploadButton(
+                    "📤 Загрузить документы",
+                    file_count="multiple",
+                    file_types=[".pdf", ".docx", ".doc", ".xls", ".xlsx", ".jpg", ".jpeg", ".png"]
+                )
+                
+                with gr.Row():
+                    submit_btn = gr.Button("🚀 Начать анализ", variant="primary")
+                    clear_btn = gr.Button("🧹 Очистить", variant="secondary")
+            
+            with gr.Column(scale=2):
+                gr.Markdown("### 📊 Результаты анализа")
+                
+                with gr.Tab("📋 Форматированный отчет"):
+                    output_text = gr.Markdown(
+                        label="Результаты анализа",
+                        value="## 📋 Результаты анализа\n\nЗагрузите документы для анализа..."
+                    )
+                
+                with gr.Tab("🔧 Сырые данные (JSON)"):
+                    json_output = gr.JSON(
+                        label="JSON ответ",
+                        value={"message": "Результаты появятся здесь после анализа..."}
+                    )
+        
+        # Информационный блок
+        gr.Markdown("---")
+        with gr.Accordion("ℹ️ Информация о системе", open=False):
+            gr.Markdown("""
+            **Возможности системы:**
+            
+            - ✅ Автоматическое определение типов документов
+            - ✅ Проверка комплектности документов
+            - ✅ Анализ согласованности данных между документами
+            - ✅ Формирование детального заключения по каждому документу
+            - ✅ Общая оценка комплекта документов
+            
+            **Поддерживаемые форматы:** PDF, DOCX, DOC, XLS, XLSX, JPG, JPEG, PNG
+            
+            **Пример ID закупки:** PR_12345
+            """)
+    
+    # Обработчики событий аутентификации
+    login_btn.click(
+        fn=login,
+        inputs=[login_username, login_password],
+        outputs=[main_interface, login_interface, login_message]
+    )
+    
+    logout_btn.click(
+        fn=logout,
+        inputs=[],
+        outputs=[main_interface, login_interface, login_message]
+    )
+    
+    # Обработчики событий основного интерфейса
     submit_btn.click(
         fn=process_evaluation,
         inputs=[procurement_id, upload_btn, legislation, procurement_method, expertise_details],
@@ -322,33 +403,20 @@ with gr.Blocks(title="Эксперт по закупкам", theme=gr.themes.Sof
         inputs=[],
         outputs=[procurement_id, legislation, procurement_method, expertise_details, output_text, json_output]
     )
-    
-    # Информационный блок
-    gr.Markdown("---")
-    with gr.Accordion("ℹ️ Информация о системе", open=False):
-        gr.Markdown("""
-        **Возможности системы:**
-        
-        - ✅ Автоматическое определение типов документов
-        - ✅ Проверка комплектности документов
-        - ✅ Анализ согласованности данных между документами
-        - ✅ Формирование детального заключения по каждому документу
-        - ✅ Общая оценка комплекта документов
-        
-        **Поддерживаемые форматы:** PDF, DOCX, DOC, XLS, XLSX, JPG, JPEG, PNG
-        
-        **Пример ID закупки:** PR_12345
-        """)
 
 
 if __name__ == "__main__":
     print("🚀 Запуск Gradio интерфейса на порту 20141...")
     print(f"🔍 API endpoint: {API_ACCESS}")
     print(f"🔍 API key: {'установлен' if API_KEY else 'отсутствует'}")
+    print(f"🔐 Логин для доступа: {AUTH_USERNAME}")
+    print(f"🔐 Пароль для доступа: {'установлен' if AUTH_PASSWORD else 'не установлен'}")
     
+    # Добавляем аутентификацию при запуске
     demo.launch(
         server_name="0.0.0.0",
         server_port=20141,
         share=False,
-        show_error=True
+        show_error=True,
+        auth=None  # Отключаем встроенную аутентификацию Gradio, так как реализовали свою
     )

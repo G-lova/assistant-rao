@@ -29,7 +29,7 @@ client = OpenAI(
 model_name = os.getenv("M_MODEL_NAME")
 
 
-def split_large_text(text: str, max_chunk_size: int = 40000) -> List[str]:
+def split_large_text(text: str, max_chunk_size: int = 30000) -> List[str]:
     """
     Разбивает большой текст на фрагменты заданного максимального размера с сохранением смысловой целостности.
 
@@ -41,7 +41,6 @@ def split_large_text(text: str, max_chunk_size: int = 40000) -> List[str]:
     Args:
         text (str): Исходный текст, который необходимо разбить на части.
         max_chunk_size (int, optional): Максимально допустимый размер одного фрагмента в символах.
-            По умолчанию — 40000 (подходит для моделей с большим контекстом).
 
     Returns:
         List[str]: Список строк-фрагментов, каждый из которых имеет длину не более `max_chunk_size`.
@@ -230,7 +229,6 @@ def merge_analysis_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     # Обновляем заключение
     if len(results) > 1:
         base_result["analysis"]["conclusion"] = (
-            f"Документ проанализирован по частям ({len(results)} блоков). " +
             base_result["analysis"]["conclusion"]
         )
     

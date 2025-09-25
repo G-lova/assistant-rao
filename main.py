@@ -98,7 +98,7 @@ async def evaluate_documents_batch(
                     raise ValueError("Не удалось извлечь текст из файла")
 
                 # Разделяем большой текст на блоки
-                chunks = split_large_text(extracted_text, max_chunk_size=40000)
+                chunks = split_large_text(extracted_text, max_chunk_size=30000)
                 logger.info(f"Документ разделён на {len(chunks)} блоков")
 
                 # Анализируем документ по частям
@@ -229,7 +229,7 @@ async def evaluate_documents_batch(
     )
 
     # Формируем общее заключение по комплекту документов
-    overall_conclusion = generate_overall_conclusion(
+    overall_conclusion_text, overall_status = generate_overall_conclusion(
         documents_results, 
         completeness_check, 
         consistency_result
@@ -240,14 +240,14 @@ async def evaluate_documents_batch(
         "documents": documents_results,
         "completeness_check": completeness_check,
         "consistency_check": consistency_result,
-        "overall_conclusion": overall_conclusion
+        "overall_conclusion": overall_status
     }
 
     # Возвращаем новый формат ответа
     return {
         "procurement_id": procurement_id,
         "documents": documents_results,
-        "overall_conclusion": overall_conclusion,
+        "overall_conclusion": overall_status,
         "completeness_summary": {
             "status": completeness_check.get("status", "unknown"),
             "conclusion": overall_completeness_conclusion,
@@ -320,16 +320,27 @@ def generate_overall_conclusion(
     # Формируем итоговую оценку
     total_issues = len(invalid_docs) + len(completeness_check.get("missing_in_upload", [])) + len(consistency_result.get("issues", []))
     
-    if total_issues == 0:
+    # ОПРЕДЕЛЯЕМ ОБЩИЙ СТАТУС
+    has_errors = (
+        len(invalid_docs) > 0 or 
+        completeness_check.get("status") != "allow" or 
+        consistency_result.get("status") != "ok"
+    )
+    
+    if not has_errors:
         final_assessment = "Комплект документов соответствует требованиям."
+        overall_status = "allow"
     elif total_issues <= 2:
         final_assessment = "Комплект документов в основном соответствует требованиям, но требуются исправления."
+        overall_status = "deny"
     else:
         final_assessment = "Комплект документов требует значительной доработки."
+        overall_status = "deny"
     
     conclusions.append(f"\nИТОГ: {final_assessment}")
     
-    return "\n".join(conclusions)
+    # Сохраняем общий статус для использования в ответе
+    return "\n".join(conclusions), overall_status
 
 
 @app.post("/get-procurement-completeness")

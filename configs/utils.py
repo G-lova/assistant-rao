@@ -12,7 +12,7 @@ import PyPDF2
 import rarfile
 import textract
 import zipfile
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Set
 from docx import Document
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from pptx import Presentation
@@ -472,80 +472,127 @@ def check_procurement_completeness(
     document_analysis_results: Dict[str, dict]
 ) -> Dict:
     """
-    Проверяет полноту комплекта загруженных документов на соответствие заявленному списку приложений.
+    Проверяет полноту и качество комплекта загруженных документов.
 
-    Анализирует результаты разбора документов (например, извещения или проекта контракта),
-    извлекает перечень обязательных прилагаемых документов и сверяет его с фактически загруженными файлами.
-    Определяет, все ли требуемые документы были предоставлены. Если ни один документ не содержит
-    явного списка приложений, проверка считается пройденной по умолчанию.
+    Анализирует:
+    1. Наличие обязательных приложенных документов (из attached_documents_list)
+    2. Читаемость каждого документа
+    3. Корректность типов документов
+    4. Наличие ключевых реквизитов (даты, суммы, стороны)
+    5. Формирует общий статус и детализированный фидбек
 
     Args:
-        files (Dict[str, str]): Словарь загруженных файлов, где ключ — оригинальное имя файла, значение — путь к нему.
-        document_analysis_results (Dict[str, dict]): Результаты анализа каждого документа, содержащие поле `attached_documents_list`.
+        files (Dict[str, str]): Словарь: имя_файла -> путь.
+        document_analysis_results (Dict[str, dict]): Результаты анализа документов.
 
     Returns:
-        Dict: Словарь с результатами проверки, включающий:
-            - status (str): 'allow' — если все документы на месте, 'deny' — если есть отсутствующие.
-            - declared_attachments (List[str]): Список документов, заявленных как обязательные для приложения.
-            - missing_in_upload (List[str]): Документы из заявленного списка, которые не были загружены.
-            - provided_documents (List[str]): Нормализованные типы фактически загруженных документов.
-            - source_docs_for_attached (List[str]): Имена документов, из которых был извлечён список приложений.
-            - feedback (str): Человекочитаемое пояснение результата проверки.
+        Dict: Словарь с результатами проверки:
+            - status: 'allow' или 'deny'
+            - declared_attachments: список требуемых документов
+            - missing_in_upload: какие из них отсутствуют
+            - provided_documents: нормализованные типы загруженных
+            - source_docs_for_attached: источники списка приложений
+            - feedback: текстовое пояснение
+            - detailed_issues: список выявленных проблем
+            - final_feedback: итоговое заключение
     """
-    # 1. Собираем все declared attached_documents_list из результатов анализа
-    declared_attached = set()
-    source_docs_for_attached = []  # откуда взялся список
+    declared_attached: Set[str] = set()
+    source_docs_for_attached: List[str] = []
+    provided_documents: List[str] = []
+    missing_in_upload: List[str] = []
+    issues: List[str] = []
+    feedback_parts: List[str] = []
 
+    # 1. Извлечение списка обязательных документов
     for file_name, result in document_analysis_results.items():
         attached_list = result.get("attached_documents_list", [])
         if attached_list:
             declared_attached.update(attached_list)
             source_docs_for_attached.append(file_name)
 
-    # Если ни один документ не содержит списка приложений — считаем, что нет явного требования
     if not declared_attached:
-        return {
-            "status": "allow",
-            "declared_attachments": [],
-            "missing_in_upload": [],
-            "provided_documents": list({normalize_document_type(name) for name in files.keys()}),
-            "feedback": "Не найдено ни одного документа с разделом «Документы к закупке». Полагаем, что комплектность не регламентирована.",
-            "source_docs_for_attached": []
-        }
+        feedback_parts.append("В документах не найден явный список «Документы к закупке». Полагаем, что комплектность не регламентирована.")
+    else:
+        feedback_parts.append(f"Обязательные документы определены на основе: {', '.join(source_docs_for_attached)}")
+        feedback_parts.append(f"Требуется предоставить: {', '.join(sorted(declared_attached))}")
 
-    # 2. Нормализуем загруженные документы
+    # 2. Нормализация загруженных файлов
     normalized_provided = {
         normalize_document_type(name): name
         for name in files.keys()
     }
+    provided_documents = sorted(normalized_provided.keys())
 
-    # 3. Проверяем, какие заявленные документы отсутствуют в загрузке
-    missing_in_upload = [
-        doc for doc in declared_attached
-        if doc not in normalized_provided
+    # Проверка отсутствующих документов
+    if declared_attached:
+        missing_in_upload = [doc for doc in declared_attached if doc not in normalized_provided]
+        if missing_in_upload:
+            issues.append(f"Отсутствуют обязательные документы: {', '.join(missing_in_upload)}")
+
+    # 3. Проверка читаемости
+    for file_name, result in document_analysis_results.items():
+        readability = result.get("readability", {})
+        status_read = readability.get("status")
+
+        if status_read == "неудовлетворительно":
+            issues.append(f"{file_name}: документ нечитаем")
+            feedback_parts.append(f"{file_name} — статус читаемости: 'неудовлетворительно'")
+        elif status_read == "частично читаем":
+            details = ", ".join(readability.get("issues", []))
+            issues.append(f"{file_name}: частичная читаемость")
+            feedback_parts.append(f"{file_name} — частично читаем: {details}")
+
+    # 4. Проверка соответствия типа
+    for file_name, result in document_analysis_results.items():
+        type_comp = result.get("type_compliance", {})
+        if type_comp.get("status") == "не соответствует":
+            expected = type_comp.get("expected_type", "неизвестно")
+            actual = type_comp.get("actual_type", "не определён")
+            issues.append(f"{file_name}: тип '{actual}' не соответствует ожидаемому '{expected}'")
+            feedback_parts.append(f"{file_name} — ожидался тип '{expected}', обнаружен '{actual}'")
+
+    # 5. Проверка наличия ключевых данных
+    for file_name, result in document_analysis_results.items():
+        raw_data = result.get("raw_data", {})
+
+        if not raw_data.get("dates"):
+            issues.append(f"{file_name}: отсутствуют даты")
+            feedback_parts.append(f"{file_name} — не обнаружены даты (например, дата контракта или извещения)")
+
+        if not raw_data.get("amounts"):
+            issues.append(f"{file_name}: отсутствуют суммы")
+            feedback_parts.append(f"{file_name} — не указаны финансовые суммы (НМЦК, цена и т.п.)")
+
+        if not raw_data.get("legal_entities"):
+            issues.append(f"{file_name}: не указаны стороны")
+            feedback_parts.append(f"{file_name} — отсутствуют данные о заказчике или поставщике")
+
+    # 6. Определение статуса
+    critical_issues = [
+        issue for issue in issues
+        if any(keyword in issue.lower() for keyword in ("нечитаем", "отсутствуют обязательные", "не соответствует"))
     ]
+    status = "deny" if critical_issues else "allow"
 
-    # 4. Формируем фидбек
-    feedback_parts = []
-
-    if source_docs_for_attached:
-        feedback_parts.append(f"Список приложенных документов взят из: {', '.join(source_docs_for_attached)}")
-
-    if not missing_in_upload:
-        feedback_parts.append("Все документы, указанные в списке приложений, присутствуют.")
+    # 7. Финальное пояснение
+    if status == "allow":
+        if not declared_attached:
+            final_feedback = "Комплектность документов не регламентирована — проверка пройдена."
+        else:
+            final_feedback = "Все обязательные документы предоставлены, типы корректны, данные полны."
     else:
-        feedback_parts.append(f"Отсутствуют документы из заявленного списка: {', '.join(missing_in_upload)}")
-
-    # 5. Статус
-    status = "deny" if missing_in_upload else "allow"
+        final_feedback = "Выявлены критические проблемы:\n" + \
+                         "\n".join(f"- {issue}" for issue in critical_issues)
 
     return {
         "status": status,
-        "declared_attachments": list(declared_attached),
-        "missing_in_upload": missing_in_upload,
-        "provided_documents": list(normalized_provided.keys()),
-        "source_docs_for_attached": source_docs_for_attached,
-        "feedback": "\n".join(feedback_parts)
+        "declared_attachments": sorted(list(declared_attached)),
+        "missing_in_upload": sorted(missing_in_upload),
+        "provided_documents": provided_documents,
+        "source_docs_for_attached": sorted(source_docs_for_attached),
+        "feedback": "\n".join(feedback_parts),
+        "detailed_issues": issues,
+        "final_feedback": final_feedback
     }
 
 
@@ -596,52 +643,3 @@ def normalize_document_type(doc_type: str) -> str:
             return full_type
 
     return "Дополнительные материалы"
-
-
-def process_large_document(file_path: str, chunk_size: int = 40000) -> List[Dict[str, Any]]:
-    """
-    Разбивает большой документ на фрагменты для последующей поэтапной обработки.
-
-    Функция считывает содержимое файла и делит его на блоки заданного размера (в символах),
-    чтобы избежать превышения лимитов контекста при работе с языковыми моделями.
-    Каждый фрагмент включает служебную информацию: номер фрагмента, общее количество
-    и путь к исходному файлу. Используется для подготовки больших текстовых документов,
-    таких как контракты или технические спецификации.
-
-    Args:
-        file_path (str): Путь к файлу, который необходимо обработать.
-        chunk_size (int, optional): Максимальный размер одного фрагмента в символах.
-            По умолчанию — 40000 (подходит для большинства LLM-моделей с контекстом 32k–128k).
-
-    Returns:
-        List[Dict[str, Any]]: Список словарей, каждый из которых представляет один фрагмент и содержит:
-            - content (str): Текст фрагмента.
-            - chunk_number (int): Порядковый номер фрагмента (начиная с 1).
-            - total_chunks (int): Общее количество фрагментов (заполняется после разбиения).
-            - file_path (str): Путь к исходному файлу.
-            При ошибке чтения файла возвращается пустой список.
-    """
-    try:
-        text = read_file(file_path)
-        chunks = []
-        
-        # Разделяем текст на блоки
-        for i in range(0, len(text), chunk_size):
-            chunk = text[i:i + chunk_size]
-            chunks.append({
-                "content": chunk,
-                "chunk_number": len(chunks) + 1,
-                "total_chunks": -1,  # Определится после обработки
-                "file_path": file_path
-            })
-        
-        # Обновляем общее количество блоков
-        total_chunks = len(chunks)
-        for chunk in chunks:
-            chunk["total_chunks"] = total_chunks
-        
-        return chunks
-        
-    except Exception as e:
-        logger.error(f"Ошибка обработки большого документа {file_path}: {str(e)}")
-        return []
