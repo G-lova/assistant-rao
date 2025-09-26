@@ -131,7 +131,14 @@ def save_clean_conclusion(procurement_id: int, document_type: str, conclusion: s
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        column_name = map_document_type_to_column(document_type)
+        # Для итогового заключения используем специальное поле
+        if document_type == "consistency_check":
+            column_name = "consistency_check"
+        elif document_type == "completeness_check":
+            column_name = "consistency_check"
+        else:
+            column_name = map_document_type_to_column(document_type)
+        
         if not column_name:
             raise ValueError(f"Неизвестный тип документа: {document_type}")
 

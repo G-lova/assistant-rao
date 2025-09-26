@@ -224,7 +224,7 @@ async def evaluate_documents_batch(
     
     save_clean_conclusion(
         procurement_id=procurement_id,
-        document_type="consistency_check",
+        document_type="completeness_check",
         conclusion=overall_consistency_conclusion
     )
 

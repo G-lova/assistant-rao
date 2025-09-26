@@ -202,25 +202,6 @@ def read_pdf_file(file_path: str) -> str:
 def read_excel_file(file_path: str) -> str:
     """
     Читает файл Excel (.xls или .xlsx) и извлекает текстовое содержимое всех листов.
-
-    Для устаревшего формата .xls сначала выполняется конвертация в .xlsx с помощью LibreOffice.
-    Затем данные считываются с помощью pandas и преобразуются в строковое представление.
-
-    Args:
-        file_path (str): Путь к файлу Excel.
-
-    Raises:
-        ValueError: Если файл не существует.
-        ValueError: Если формат файла не поддерживается (не .xls и не .xlsx).
-        RuntimeError: Если ошибка возникла при конвертации .xls в .xlsx.
-        RuntimeError: Если сконвертированный файл не найден.
-        RuntimeError: Если произошла ошибка при чтении или обработке файла.
-
-    Returns:
-        str: Текстовое содержимое всех листов в формате:
-             === Лист: <название> ===
-             [таблица в виде строки]
-             Объединено через переносы строк. Возвращает пустую строку при ошибке.
     """
     if not os.path.exists(file_path):
         raise ValueError(f"Файл не найден: {file_path}")
@@ -233,40 +214,70 @@ def read_excel_file(file_path: str) -> str:
     temp_xlsx_path = None
     try:
         if ext == '.xls':
-            temp_dir = tempfile.mkdtemp()
-            temp_xlsx_path = os.path.join(temp_dir, os.path.basename(base) + ".xlsx")
-            cmd = [
-                'libreoffice',
-                '--headless',
-                '--convert-to',
-                'xlsx',
-                '--outdir',
-                temp_dir,
-                file_path
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                raise RuntimeError(f"Ошибка конвертации: {result.stderr}")
-            converted_files = [f for f in os.listdir(temp_dir) if f.endswith('.xlsx')]
-            if not converted_files:
-                raise RuntimeError("Не удалось найти сконвертированный файл")
-            temp_xlsx_path = os.path.join(temp_dir, converted_files[0])
-            file_to_read = temp_xlsx_path
+            # Пытаемся использовать pandas с движком xlrd для .xls файлов
+            try:
+                excel_data = pd.read_excel(file_path, sheet_name=None, engine='xlrd')
+            except Exception as xlrd_error:
+                logger.warning(f"xlrd не смог прочитать .xls файл: {xlrd_error}. Пробуем LibreOffice...")
+                
+                # Создаем временную директорию для конвертации
+                temp_dir = tempfile.mkdtemp()
+                temp_xlsx_path = os.path.join(temp_dir, os.path.basename(base) + ".xlsx")
+                
+                # Проверяем доступность LibreOffice
+                try:
+                    result = subprocess.run(['libreoffice', '--version'], capture_output=True, text=True)
+                    if result.returncode != 0:
+                        raise RuntimeError("LibreOffice не установлен или недоступен")
+                    
+                    cmd = [
+                        'libreoffice',
+                        '--headless',
+                        '--convert-to',
+                        'xlsx',
+                        '--outdir',
+                        temp_dir,
+                        file_path
+                    ]
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                    if result.returncode != 0:
+                        raise RuntimeError(f"Ошибка конвертации: {result.stderr}")
+                    
+                    converted_files = [f for f in os.listdir(temp_dir) if f.endswith('.xlsx')]
+                    if not converted_files:
+                        raise RuntimeError("Не удалось найти сконвертированный файл")
+                    
+                    temp_xlsx_path = os.path.join(temp_dir, converted_files[0])
+                    excel_data = pd.read_excel(temp_xlsx_path, sheet_name=None, engine='openpyxl')
+                    
+                except Exception as libreoffice_error:
+                    # Если LibreOffice тоже не сработал, пробуем открыть как .xlsx с игнорированием ошибок
+                    logger.warning(f"LibreOffice также не сработал: {libreoffice_error}. Пробуем принудительное чтение...")
+                    try:
+                        excel_data = pd.read_excel(file_path, sheet_name=None, engine='openpyxl')
+                    except Exception as final_error:
+                        raise RuntimeError(f"Не удалось прочитать .xls файл: {final_error}")
         else:
-            file_to_read = file_path
+            # Для .xlsx файлов используем openpyxl
+            excel_data = pd.read_excel(file_path, sheet_name=None, engine='openpyxl')
 
-        excel_data = pd.read_excel(file_to_read, sheet_name=None, engine='openpyxl')
         result = []
         for sheet_name, df in excel_data.items():
             result.append(f"=== Лист: {sheet_name} ===")
+            # Заменяем NaN на пустые строки для лучшей читаемости
+            df = df.fillna('')
             result.append(df.to_string())
         return "\n".join(result)
 
     except Exception as e:
         raise RuntimeError(f"Ошибка при обработке Excel файла: {str(e)}")
     finally:
+        # Очищаем временные файлы
         if temp_dir and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception as cleanup_error:
+                logger.warning(f"Ошибка при очистке временных файлов: {cleanup_error}")
 
 
 def extract_text_and_images_from_docx(file_path: str, ocr_func=None) -> str:
