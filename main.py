@@ -105,7 +105,7 @@ async def evaluate_documents_batch(
                 analysis_result = await analyze_document_chunks(
                     chunks=chunks,
                     document_name=file.filename,
-                    document_type="",  # модель сама определит тип
+                    document_type="",
                     law_type=legislation,
                     procurement_method=procurement_method
                 )

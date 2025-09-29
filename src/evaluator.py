@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 from configs.utils import read_file
 from configs.procurement_requirements import DOCUMENT_TYPE_MAPPING
-from src.prompts import RESPONSE_JSON_SCHEMA, SYSTEM_PROMPT
+from src.prompts import RESPONSE_JSON_SCHEMA, SYSTEM_PROMPT, TYPE_DETECTION_PROMPT
 from configs.working_with_db import save_raw_data, save_clean_conclusion, get_raw_data_by_procurement_id
 from configs.utils import check_procurement_completeness
 
@@ -27,6 +27,9 @@ client = OpenAI(
     api_key=os.getenv("M_MODEL_API_KEY")
 )
 model_name = os.getenv("M_MODEL_NAME")
+
+
+ALLOWED_DOC_TYPES = list(DOCUMENT_TYPE_MAPPING.keys())
 
 
 def split_large_text(text: str, max_chunk_size: int = 30000) -> List[str]:
@@ -94,29 +97,7 @@ async def analyze_document_chunks(
     procurement_method: str
 ) -> Dict[str, Any]:
     """
-    Асинхронно анализирует документ, разбитый на фрагменты, с объединением результатов.
-
-    Функция предназначена для обработки больших документов, которые нельзя передать целиком в LLM.
-    Анализ начинается с первого фрагмента — по нему определяется тип документа и проводится первичная оценка.
-    Последующие фрагменты анализируются отдельно для извлечения дополнительных данных, после чего все результаты
-    объединяются в единый вывод с помощью функции `merge_analysis_results`.
-
-    Args:
-        chunks (List[str]): Список текстовых фрагментов, на которые был разделён документ.
-        document_name (str): Имя исходного документа (для логирования и отчётов).
-        document_type (str): Ожидаемый тип документа (например, 'contract', 'act'), используется в промпте.
-        law_type (str): Тип законодательства (например, '44-ФЗ'), влияет на контекст анализа.
-        procurement_method (str): Способ закупки (например, 'конкурс'), учитывается моделью при оценке.
-
-    Returns:
-        Dict[str, Any]: Единый словарь с результатами анализа, содержащий:
-            - status (str): 'success' или 'error'.
-            - analysis (dict): Объединённые данные анализа:
-                - type_compliance: Соответствие типа документа.
-                - readability: Оценка читаемости.
-                - raw_data: Извлечённые структурированные данные из всех блоков.
-                - conclusion: Итоговое заключение.
-            В случае пустого документа или ошибки возвращается соответствующий шаблон с диагностикой.
+    Анализирует документ с двухэтапным подходом.
     """
     if not chunks:
         return {
@@ -129,40 +110,59 @@ async def analyze_document_chunks(
             }
         }
     
-    # Анализируем первый блок для определения типа документа
-    first_chunk_result = await analyze_single_document(
-        content=chunks[0],
-        document_name=document_name,
-        document_type=document_type,
-        law_type=law_type,
-        procurement_method=procurement_method
-    )
+    # ЭТАП 1: Определение типа документа по первым 500 символам
+    first_500_chars = chunks[0][:500]
+    detected_type = await detect_document_type(first_500_chars, document_name)
     
-    if first_chunk_result["status"] != "success":
-        return first_chunk_result
+    # Если тип не определен, используем исходный или "Дополнительные материалы"
+    final_document_type = detected_type if detected_type != "Дополнительные материалы" else document_type
+    if not final_document_type:
+        final_document_type = "Дополнительные материалы"
     
-    # Если документ большой, анализируем остальные блоки для извлечения данных
-    if len(chunks) > 1:
-        additional_results = []
-        for i, chunk in enumerate(chunks[1:], 2):
-            try:
-                result = await analyze_single_document(
-                    content=chunk,
-                    document_name=f"{document_name} (блок {i})",
-                    document_type=document_type,
-                    law_type=law_type,
-                    procurement_method=procurement_method
-                )
-                if result["status"] == "success":
-                    additional_results.append(result)
-            except Exception as e:
-                logger.warning(f"Ошибка анализа блока {i}: {e}")
-        
-        # Объединяем результаты
-        if additional_results:
-            first_chunk_result = merge_analysis_results([first_chunk_result] + additional_results)
+    logger.info(f"Финальный тип для анализа: '{final_document_type}'")
     
-    return first_chunk_result
+    # ЭТАП 2: Параллельный анализ всех чанков
+    tasks = []
+    for i, chunk in enumerate(chunks):
+        task_name = f"{document_name} (блок {i+1})" if len(chunks) > 1 else document_name
+        task = analyze_single_document(
+            content=chunk,
+            document_name=task_name,
+            document_type=final_document_type,  # Используем ОПРЕДЕЛЕННЫЙ тип
+            law_type=law_type,
+            procurement_method=procurement_method
+        )
+        tasks.append(task)
+    
+    # Запускаем все задачи параллельно
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Обрабатываем результаты
+    successful_results = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            logger.error(f"Ошибка при анализе блока {i+1}: {result}")
+            continue
+        if result["status"] == "success":
+            # Принудительно устанавливаем определенный тип
+            result["analysis"]["type_compliance"]["actual_type"] = final_document_type
+            result["analysis"]["type_compliance"]["expected_type"] = final_document_type
+            successful_results.append(result)
+    
+    if not successful_results:
+        return {
+            "status": "error",
+            "analysis": {
+                "type_compliance": {"status": "не соответствует", "issues": ["Все блоки не удалось проанализировать"]},
+                "readability": {"status": "неудовлетворительно", "issues": ["Ошибка анализа всех блоков"]},
+                "raw_data": {},
+                "conclusion": "Не удалось проанализировать ни один блок документа"
+            }
+        }
+    
+    # Объединяем результаты
+    final_result = merge_analysis_results(successful_results)
+    return final_result
 
 
 def merge_analysis_results(results: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -243,38 +243,12 @@ async def analyze_single_document(
     procurement_method: str
 ) -> Dict[str, Any]:
     """
-    Асинхронно анализирует содержимое одного документа с помощью языковой модели.
-
-    Функция отправляет текст документа в LLM с системным промптом, ожидая структурированный JSON-ответ.
-    Выполняет парсинг результата, нормализует определённый моделью тип документа через внутреннее маппинг-правило,
-    проверяет соответствие и формирует единый результат с заключением. При ошибках возвращает детализированный отчёт.
-
-    Args:
-        content (str): Полный текст документа для анализа (например, извлечённый из PDF).
-        document_name (str): Имя файла документа — используется для логирования.
-        document_type (str): Ожидаемый тип документа (например, 'Техническое задание'), передаётся в промпт.
-        law_type (str): Тип законодательства (например, '44-ФЗ'), влияет на контекст анализа.
-        procurement_method (str): Способ закупки (например, 'Конкурс', 'Аукцион') — может использоваться в будущем.
-
-    Raises:
-        ValueError: Если не удаётся извлечь или распарсить JSON из ответа модели.
-        ValueError: Если JSON не найден в ответе после очистки от комментариев.
-
-    Returns:
-        Dict[str, Any]: Словарь с результатом анализа, содержащий:
-            - status (str): 'success' или 'error'.
-            - document_name (str): Имя обработанного документа.
-            - document_type (str): Переданный тип документа.
-            - analysis (dict): Данные анализа:
-                - type_compliance: Проверка соответствия типа с нормализованными значениями.
-                - readability: Оценка читаемости документа.
-                - raw_data: Извлечённые структурированные данные.
-                - conclusion: Итоговое заключение с учётом результата нормализации.
+    Анализирует один чанк документа с УЖЕ ИЗВЕСТНЫМ типом.
     """
     try:
-        logger.info(f"Анализ документа: {document_name} | Тип: {document_type}")
+        logger.info(f"Анализ чанка '{document_name}' с типом '{document_type}'")
 
-        # Формируем промпт с подстановкой
+        # Формируем промпт с подстановкой УЖЕ ИЗВЕСТНОГО типа
         prompt = SYSTEM_PROMPT.format(document_type=document_type)
 
         # Вызов модели с guided_json
@@ -282,7 +256,7 @@ async def analyze_single_document(
             model=model_name,
             messages=[
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": f"Проанализируй следующий документ:\n\n{content}"}
+                {"role": "user", "content": f"Проанализируй следующий документ типа '{document_type}':\n\n{content}"}
             ],
             extra_body={"guided_json": RESPONSE_JSON_SCHEMA}
         )
@@ -308,30 +282,39 @@ async def analyze_single_document(
             else:
                 raise ValueError("Не найден JSON в ответе модели")
 
-        # Нормализация типа документа
+        # Устанавливаем известный тип
         type_compliance = result.get("type_compliance", {})
-        actual_raw = type_compliance.get("actual_type", "").strip()
-        expected_raw = type_compliance.get("expected_type", document_type).strip()
-
-        actual_normalized = normalize_document_type(actual_raw)
-        expected_normalized = normalize_document_type(expected_raw)
-
-        type_compliance["actual_type"] = actual_normalized
-        type_compliance["expected_type"] = expected_normalized
-
-        if actual_normalized == "Дополнительные материалы":
-            type_compliance["status"] = "не соответствует"
-            issues = type_compliance.get("issues", [])
-            issues.append("Не удалось определить тип документа.")
-            type_compliance["issues"] = issues
-            conclusion_suffix = "Тип документа не распознан."
+        type_compliance["actual_type"] = document_type
+        type_compliance["expected_type"] = document_type
+        
+        # Проверяем соответствие содержания типу
+        if document_type != "Дополнительные материалы":
+            # Проверяем, есть ли признаки несоответствия в контенте
+            content_lower = content.lower()
+            expected_keywords = {
+                "Проект контракта": ["договор", "контракт", "стороны", "заказчик", "поставщик"],
+                "Извещение": ["извещение", "закупка", "размещение заказа"],
+                "Обоснование н(м)цк": ["обоснование", "нмцк", "расчет", "цена"],
+                "Техническое задание": ["техническое задание", "требования", "характеристики"],
+                "Описание объекта закупки": ["описание объекта", "предмет закупки"],
+                "Требования к содержанию заявки на конкурс": ["требования к заявке", "состав заявки"]
+            }
+            
+            keywords = expected_keywords.get(document_type, [])
+            has_keywords = any(keyword in content_lower for keyword in keywords)
+            
+            if has_keywords:
+                type_compliance["status"] = "соответствует"
+                type_compliance["issues"] = []
+                type_compliance["confidence"] = 0.9
+            else:
+                type_compliance["status"] = "частично соответствует"
+                type_compliance["issues"] = ["В содержании недостаточно признаков ожидаемого типа"]
+                type_compliance["confidence"] = 0.6
         else:
-            type_compliance["status"] = "соответствует"
-            type_compliance["issues"] = []
-            conclusion_suffix = f"Тип документа подтверждён: {actual_normalized}."
-
-        old_conclusion = result.get("conclusion", "")
-        result["conclusion"] = f"{conclusion_suffix} {old_conclusion}".strip()
+            type_compliance["status"] = "не соответствует"
+            type_compliance["issues"] = ["Тип документа не определен"]
+            type_compliance["confidence"] = 0.3
 
         return {
             "status": "success",
@@ -344,12 +327,12 @@ async def analyze_single_document(
                     "issues": ["Не оценено"]
                 }),
                 "raw_data": result.get("raw_data", {}),
-                "conclusion": result["conclusion"]
+                "conclusion": result.get("conclusion", f"Документ типа '{document_type}' проанализирован.")
             }
         }
 
     except Exception as e:
-        logger.error(f"Критическая ошибка при анализе {document_name}: {str(e)}", exc_info=True)
+        logger.error(f"Ошибка при анализе {document_name}: {str(e)}", exc_info=True)
         return {
             "status": "error",
             "document_name": document_name,
@@ -359,7 +342,8 @@ async def analyze_single_document(
                     "status": "не соответствует",
                     "issues": [f"Ошибка анализа: {str(e)}"],
                     "expected_type": document_type,
-                    "actual_type": "неизвестно"
+                    "actual_type": document_type,
+                    "confidence": 0.0
                 },
                 "readability": {
                     "status": "неудовлетворительно",
@@ -527,3 +511,48 @@ def normalize_document_type(doc_type: str) -> str:
                 return "Проект контракта"
 
     return "Дополнительные материалы"
+
+
+async def detect_document_type(first_500_chars: str, document_name: str) -> str:
+    """
+    Определяет тип документа по первым 500 символам.
+    """
+    try:
+        logger.info(f"Определение типа документа: {document_name}")
+        
+        # Формируем промпт с доступными типами
+        allowed_types_str = "\n".join([f"- {t}" for t in ALLOWED_DOC_TYPES])
+        prompt = TYPE_DETECTION_PROMPT.format(allowed_types=allowed_types_str)
+        
+        # Вызываем модель для определения типа с таймаутом
+        response = await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": f"Определи тип документа:\n\n{first_500_chars}"}
+                    ],
+                    max_tokens=100,
+                    temperature=0.1
+                )
+            ),
+            timeout=30.0  # 30 секунд таймаут
+        )
+        
+        detected_type = response.choices[0].message.content.strip()
+        logger.info(f"Модель определила тип: '{detected_type}' для документа '{document_name}'")
+        
+        # Нормализуем результат
+        normalized_type = normalize_document_type(detected_type)
+        logger.info(f"Нормализованный тип: '{normalized_type}'")
+        
+        return normalized_type
+        
+    except asyncio.TimeoutError:
+        logger.error(f"Таймаут при определении типа документа {document_name}")
+        return "Дополнительные материалы"
+    except Exception as e:
+        logger.error(f"Ошибка при определении типа документа {document_name}: {str(e)}")
+        return "Дополнительные материалы"
