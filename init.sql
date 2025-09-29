@@ -14,6 +14,7 @@ CREATE TABLE raw_document_data (
     additional_materials JSONB, -- Дополнительные материалы
     technical_specification JSONB, -- Техническое задание
     contract_amendments JSONB, -- Дополнительные соглашения к контракту
+    description_purchase_object JSONB, --Описание объекта закупки
     notice JSONB, -- Извещение
     nir_contract JSONB, -- Контракт на выполнение НИР (или НИОКР)
     service_contract JSONB, -- Контракт на выполнение работ (оказание услуг)
@@ -52,6 +53,7 @@ CREATE TABLE clean_document_conclusions (
     additional_materials TEXT,  -- Дополнительные материалы
     technical_specification TEXT, -- Техническое задание
     contract_amendments TEXT,  -- Дополнительные соглашения к контракту
+    description_purchase_object TEXT, -- Описание объекта закупки
     notice TEXT,  -- Извещение
     nir_contract TEXT,  -- Контракт на выполнение НИР (или НИОКР)
     service_contract TEXT, -- Контракт на выполнение работ (оказание услуг)

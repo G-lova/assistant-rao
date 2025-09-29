@@ -201,78 +201,166 @@ def read_pdf_file(file_path: str) -> str:
 
 def read_excel_file(file_path: str) -> str:
     """
-    Читает файл Excel (.xls или .xlsx) и извлекает текстовое содержимое всех листов.
+    Читает содержимое Excel-файла (.xls или .xlsx) и преобразует его в текстовый формат.
+
+    Функция поддерживает оба формата Excel, используя `openpyxl` для .xlsx и попытки чтения .xls
+    сначала через `openpyxl`, затем — через `xlrd`. При неудаче запускается резервный метод
+    с использованием LibreOffice. Каждый лист представляется как таблица в текстовом виде
+    с заголовками столбцов и данными. Результат объединяется в единую строку.
+
+    Args:
+        file_path (str): Путь к Excel-файлу на диске.
+
+    Raises:
+        ValueError: Если файл не существует или имеет неподдерживаемое расширение.
+        RuntimeError: Если все попытки чтения файла завершились ошибкой.
+        ValueError: Если указан неверный путь к файлу.
+        RuntimeError: Если возникла ошибка при обработке данных Excel.
+
+    Returns:
+        str: Текстовое представление всех листов Excel-файла, включая:
+            - название каждого листа,
+            - табличные данные в читаемом формате (ограничено 20 строками на лист),
+            - очищенные от NaN значения.
+            Отсутствующие ячейки заменяются пустыми строками, технические названия колонок (например, 'Unnamed') переименовываются.
+            В случае ошибки чтения — вызывается исключение.
     """
     if not os.path.exists(file_path):
         raise ValueError(f"Файл не найден: {file_path}")
+    
     base, ext = os.path.splitext(file_path)
     ext = ext.lower()
-    if ext not in ('.xls', '.xlsx'):
-        raise ValueError("Поддерживаются только файлы .xls и .xlsx")
-
-    temp_dir = None
-    temp_xlsx_path = None
+    
     try:
+        # Для .xls файлов используем openpyxl вместо xlrd
         if ext == '.xls':
-            # Пытаемся использовать pandas с движком xlrd для .xls файлов
             try:
-                excel_data = pd.read_excel(file_path, sheet_name=None, engine='xlrd')
-            except Exception as xlrd_error:
-                logger.warning(f"xlrd не смог прочитать .xls файл: {xlrd_error}. Пробуем LibreOffice...")
-                
-                # Создаем временную директорию для конвертации
-                temp_dir = tempfile.mkdtemp()
-                temp_xlsx_path = os.path.join(temp_dir, os.path.basename(base) + ".xlsx")
-                
-                # Проверяем доступность LibreOffice
+                # Пробуем прочитать с openpyxl
+                excel_data = pd.read_excel(file_path, sheet_name=None, engine='openpyxl')
+            except Exception as openpyxl_error:
+                logger.warning(f"openpyxl не смог прочитать .xls файл: {openpyxl_error}. Пробуем xlrd...")
                 try:
-                    result = subprocess.run(['libreoffice', '--version'], capture_output=True, text=True)
-                    if result.returncode != 0:
-                        raise RuntimeError("LibreOffice не установлен или недоступен")
-                    
-                    cmd = [
-                        'libreoffice',
-                        '--headless',
-                        '--convert-to',
-                        'xlsx',
-                        '--outdir',
-                        temp_dir,
-                        file_path
-                    ]
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-                    if result.returncode != 0:
-                        raise RuntimeError(f"Ошибка конвертации: {result.stderr}")
-                    
-                    converted_files = [f for f in os.listdir(temp_dir) if f.endswith('.xlsx')]
-                    if not converted_files:
-                        raise RuntimeError("Не удалось найти сконвертированный файл")
-                    
-                    temp_xlsx_path = os.path.join(temp_dir, converted_files[0])
-                    excel_data = pd.read_excel(temp_xlsx_path, sheet_name=None, engine='openpyxl')
-                    
-                except Exception as libreoffice_error:
-                    # Если LibreOffice тоже не сработал, пробуем открыть как .xlsx с игнорированием ошибок
-                    logger.warning(f"LibreOffice также не сработал: {libreoffice_error}. Пробуем принудительное чтение...")
-                    try:
-                        excel_data = pd.read_excel(file_path, sheet_name=None, engine='openpyxl')
-                    except Exception as final_error:
-                        raise RuntimeError(f"Не удалось прочитать .xls файл: {final_error}")
-        else:
-            # Для .xlsx файлов используем openpyxl
+                    # Пробуем старую версию xlrd
+                    excel_data = pd.read_excel(file_path, sheet_name=None, engine='xlrd')
+                except Exception as xlrd_error:
+                    logger.warning(f"xlrd также не сработал: {xlrd_error}. Пробуем LibreOffice...")
+                    return read_excel_with_libreoffice(file_path)
+        elif ext == '.xlsx':
             excel_data = pd.read_excel(file_path, sheet_name=None, engine='openpyxl')
+        else:
+            raise ValueError("Поддерживаются только файлы .xls и .xlsx")
 
         result = []
+        
         for sheet_name, df in excel_data.items():
-            result.append(f"=== Лист: {sheet_name} ===")
-            # Заменяем NaN на пустые строки для лучшей читаемости
-            df = df.fillna('')
-            result.append(df.to_string())
-        return "\n".join(result)
+            result.append(f"Лист: {sheet_name}")
+            # Заменяем NaN на пустые строки и преобразуем все в строки
+            df = df.fillna('').astype(str)
+            
+            # Форматируем таблицу для лучшей читаемости
+            for col in df.columns:
+                # Очищаем названия колонок от технической информации
+                if 'unnamed' in str(col).lower():
+                    df = df.rename(columns={col: f'Колонка_{df.columns.get_loc(col)}'})
+            
+            # Используем компактное представление таблицы
+            table_text = df.to_string(index=False, max_rows=20)  # Ограничиваем количество строк
+            result.append(table_text)
+            result.append("")  # Одна пустая строка между листами
+        
+        # Убираем лишние пустые строки в конце и множественные пробелы
+        full_text = "\n".join(result).strip()
+        # Заменяем множественные пробелы на один пробел
+        full_text = re.sub(r'\s+', ' ', full_text)
+        logger.info(f"Успешно извлечен текст из Excel: {len(full_text)} символов")
+        return full_text
 
     except Exception as e:
-        raise RuntimeError(f"Ошибка при обработке Excel файла: {str(e)}")
+        logger.error(f"Критическая ошибка при обработке Excel файла: {str(e)}")
+        raise RuntimeError(f"Не удалось прочитать Excel файл: {str(e)}")
+
+
+def read_excel_with_libreoffice(file_path: str) -> str:
+    """
+    Читает Excel-файл (.xls и др.) с помощью LibreOffice, конвертируя его в .xlsx и извлекая текстовое содержимое.
+
+    Является резервным методом для обработки старых или повреждённых Excel-файлов, которые не удаётся прочитать
+    стандартными библиотеками (например, `xlrd` или `openpyxl`). Запускает LibreOffice в headless-режиме,
+    конвертирует файл во временный формат .xlsx, затем читает его с помощью pandas и преобразует в строку.
+
+    Args:
+        file_path (str): Путь к исходному Excel-файлу (обычно .xls), который необходимо обработать.
+
+    Raises:
+        RuntimeError: Если LibreOffice не установлен или недоступен в системе.
+        RuntimeError: Если команда конвертации завершилась с ошибкой.
+        RuntimeError: Если после конвертации не найден выходной .xlsx-файл.
+        RuntimeError: Если произошла ошибка при чтении сконвертированного файла.
+        RuntimeError: Если возникла любая другая ошибка на этапе обработки (общее исключение).
+
+    Returns:
+        str: Текстовое представление всех листов файла, включая:
+            - название каждого листа,
+            - табличные данные в виде строки (ограничено 20 строками на лист),
+            - очищенные от NaN значений ячейки.
+            Все множественные пробелы заменяются на одиночные. В случае успеха — возвращает полный текст;
+            при ошибке — выбрасывает исключение с детализацией проблемы.
+    """
+    temp_dir = None
+    try:
+        temp_dir = tempfile.mkdtemp()
+        temp_xlsx_path = os.path.join(temp_dir, "converted.xlsx")
+        
+        # Проверяем доступность LibreOffice
+        try:
+            result = subprocess.run(['libreoffice', '--version'], capture_output=True, text=True, timeout=10)
+            if result.returncode != 0:
+                raise RuntimeError("LibreOffice не установлен или недоступен")
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            raise RuntimeError("LibreOffice не доступен")
+        
+        # Конвертируем в xlsx
+        cmd = [
+            'libreoffice',
+            '--headless',
+            '--convert-to',
+            'xlsx:Calc MS Excel 2007 XML',
+            '--outdir',
+            temp_dir,
+            file_path
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            raise RuntimeError(f"Ошибка конвертации: {result.stderr}")
+        
+        # Ищем сконвертированный файл
+        converted_files = [f for f in os.listdir(temp_dir) if f.endswith('.xlsx')]
+        if not converted_files:
+            raise RuntimeError("Не удалось найти сконвертированный файл")
+        
+        temp_xlsx_path = os.path.join(temp_dir, converted_files[0])
+        excel_data = pd.read_excel(temp_xlsx_path, sheet_name=None, engine='openpyxl')
+        
+        result = []
+        for sheet_name, df in excel_data.items():
+            result.append(f"Лист: {sheet_name}")
+            df = df.fillna('').astype(str)
+            
+            # Компактное представление
+            table_text = df.to_string(index=False, max_rows=20)
+            result.append(table_text)
+            result.append("")  # Одна пустая строка между листами
+        
+        full_text = "\n".join(result).strip()
+        # Заменяем множественные пробелы на один пробел
+        full_text = re.sub(r'\s+', ' ', full_text)
+        return full_text
+        
+    except Exception as e:
+        logger.error(f"Ошибка конвертации через LibreOffice: {str(e)}")
+        raise RuntimeError(f"Не удалось обработать Excel файл даже через LibreOffice: {str(e)}")
     finally:
-        # Очищаем временные файлы
         if temp_dir and os.path.exists(temp_dir):
             try:
                 shutil.rmtree(temp_dir)
@@ -529,7 +617,7 @@ def check_procurement_completeness(
 
     # 2. Нормализация загруженных файлов
     normalized_provided = {
-        normalize_document_type(name): name
+        name: name
         for name in files.keys()
     }
     provided_documents = sorted(normalized_provided.keys())
@@ -605,52 +693,3 @@ def check_procurement_completeness(
         "detailed_issues": issues,
         "final_feedback": final_feedback
     }
-
-
-def normalize_document_type(doc_type: str) -> str:
-    """
-    Нормализует тип документа, приводя его к единому стандартному наименованию.
-
-    Функция принимает строку с названием типа документа (возможно, в неформатном виде),
-    очищает и преобразует её, затем сопоставляет с эталонными типами из маппинга.
-    Проверка выполняется в порядке: точное совпадение → частичные вхождения по приоритетным ключам.
-    Если соответствие не найдено, возвращается тип по умолчанию.
-
-    Args:
-        doc_type (str): Исходное название типа документа (например, из метаданных или OCR).
-
-    Returns:
-        str: Нормализованное название типа документа, соответствующее одному из стандартных значений,
-             или "Дополнительные материалы", если тип не распознан.
-    """
-    if not doc_type or not isinstance(doc_type, str):
-        return "Дополнительные материалы"
-
-    clean = doc_type.strip().lower()
-
-    # 1. Точное совпадение
-    for key in DOCUMENT_TYPE_MAPPING:
-        if clean == key.lower():
-            return key
-
-    # 2. Частичные совпадения с приоритетом
-    priority_matches = [
-        ("требования к содержанию заявки на конкурс", "Требования к содержанию заявки на конкурс"),
-        ("техническое задание", "Техническое задание"),
-        ("извещение", "Извещение"),
-        ("проект контракта", "Проект контракта"),
-        ("обоснование нмцк", "Обоснование н(м)цк"),
-        ("акт о приемке", "Акт о приемке товара"),
-        ("счет-фактура", "Документ о приемке товара (УПД, Счет-фактура и др.)"),
-        ("дополнительное соглашение", "Дополнительные соглашения к контракту"),
-        ("расчёт нмцк", "Обоснование н(м)цк"),
-        ("обоснование начальной", "Обоснование н(м)цк"),
-        ("нмцк", "Обоснование н(м)цк"),
-        ("тз", "Техническое задание"),
-    ]
-
-    for substr, full_type in priority_matches:
-        if substr in clean:
-            return full_type
-
-    return "Дополнительные материалы"

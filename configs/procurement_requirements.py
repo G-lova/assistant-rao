@@ -274,11 +274,11 @@ DOCUMENT_TYPE_MAPPING = {
         "Обоснование н(м)цк": "price_justification",
         "Материалы, подтверждающие Обоснование н(м)цк": "price_justification_docs",
         "Техническое задание": "technical_specification",
-        "Заявка на проведение экспертизы": "expertise_request",
         "Положение о закупках организации": "procurement_policy",
         "Порядок рассмотрения и оценки заявок на конкурс": "bid_evaluation_procedure",
         "Требования к содержанию заявки на конкурс": "bid_requirements",
         "Документация, подтверждающая невозможность использования иных способов определения поставщика": "impossible_alternative_doc",
+        "Описание объекта закупки": "description_purchase_object",
 
         # Типы контрактов
         "Контракт на поставку товара": "goods_contract",

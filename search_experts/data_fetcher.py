@@ -3,6 +3,7 @@ import json
 import pandas as pd
 import requests
 
+
 class DataFetcher:
     """
     Утилита для получения данных из внешнего API с использованием SQL-запросов.

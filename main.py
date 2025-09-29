@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict
 
 from configs.schemas import DocumentContentResponse, BatchDocumentResponse
-from configs.utils import APIKeyMiddleware, normalize_document_type, read_file, check_procurement_completeness
+from configs.utils import APIKeyMiddleware, read_file, check_procurement_completeness
 from src.evaluator import check_documents_consistency, analyze_document_chunks, split_large_text
 from configs.working_with_db import save_raw_data, save_clean_conclusion, get_contract_info_from_db
 from src.scoring import scoring
@@ -100,7 +100,7 @@ async def evaluate_documents_batch(
                     raise ValueError("Не удалось извлечь текст из файла")
 
                 # Разделяем большой текст на блоки
-                chunks = split_large_text(extracted_text, max_chunk_size=30000)
+                chunks = split_large_text(extracted_text, max_chunk_size=20000)
                 logger.info(f"Документ разделён на {len(chunks)} блоков")
 
                 # Анализируем документ по частям
@@ -121,7 +121,7 @@ async def evaluate_documents_batch(
                     actual_type_from_model = analysis["type_compliance"].get("actual_type", "").strip()
 
                     # Нормализуем тип
-                    final_doc_type = normalize_document_type(actual_type_from_model)
+                    final_doc_type = actual_type_from_model if actual_type_from_model else "Дополнительные материалы"
 
                     confidence = analysis["type_compliance"].get("confidence", 0)
                     is_valid = (
