@@ -1,9 +1,41 @@
 import os
 
 from dotenv import load_dotenv
+from dataclasses import dataclass
 
 
 load_dotenv()
+
+
+@dataclass
+class DatabaseConfig:
+    """Конфигурация базы данных"""
+    url: str
+    api_key: str
+    
+    @property
+    def headers(self):
+        return {
+            "X-API-Key": self.api_key,
+            "Content-Type": "application/json"
+        }
+
+
+@dataclass
+class EmbeddingConfig:
+    """Конфигурация сервиса эмбеддингов"""
+    api_url: str
+    api_key: str
+    batch_size: int = 16
+
+
+@dataclass
+class PathConfig:
+    """Конфигурация путей"""
+    sql_queries: str
+    outputs: str
+    logs: str = "logs/"
+
 
 
 class Config:
@@ -28,18 +60,73 @@ class Config:
     # Model qwen-vl
     M_MODEL_API_URL = os.getenv("M_MODEL_API_URL")
     M_MODEL_NAME = os.getenv("M_MODEL_NAME")
+    
+    # MySQL
+    MYSQL_URL = os.getenv("MYSQL_URL")
+    MYSQL_API_KEY = os.getenv("MYSQL_API_KEY")
+    
+    # Qwen/Qwen3-Embedding-0.6B
+    EMBEDDING_URL = os.getenv("EMBEDDING_URL")
+    EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY")
+    BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))
+    
+    # Paths
+    SQL_QUERIES_PATH = os.getenv("SQL_QUERIES_PATH", "data/queries/")
+    OUTPUT_PATH = os.getenv("OUTPUT_PATH", "data/outputs/")
+    LOG_PATH = os.getenv("LOG_PATH", "logs/")
+    
+    # Application
+    APP_ENV = os.getenv("APP_ENV", "development")
+    DEBUG = os.getenv("DEBUG", "False").lower() == "true"
+    LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+    LOG_FILE = os.getenv("LOG_FILE", "logs/app.log")
 
     @classmethod
     def get_model_config(cls):
-        """
-        Возвращает конфигурацию параметров генерации для языковой модели.
-
-        Returns:
-            dict: Словарь с ключами:
-                - temperature: параметр креативности модели;
-                - max_new_tokens: максимальное количество генерируемых токенов.
-        """
         return {
             "temperature": cls.TEMPERATURE,
             "max_new_tokens": cls.MAX_NEW_TOKENS
+        }
+    
+    @classmethod
+    def get_database_config(cls) -> DatabaseConfig:
+        """
+        Возвращает конфигурацию базы данных для scoring pipeline.
+        """
+        return DatabaseConfig(
+            url=cls.MYSQL_URL,
+            api_key=cls.MYSQL_API_KEY
+        )
+    
+    @classmethod
+    def get_embedding_config(cls) -> EmbeddingConfig:
+        """
+        Возвращает конфигурацию сервиса эмбеддингов.
+        """
+        return EmbeddingConfig(
+            api_url=cls.EMBEDDING_URL,
+            api_key=cls.EMBEDDING_API_KEY,
+            batch_size=cls.BATCH_SIZE
+        )
+    
+    @classmethod
+    def get_paths_config(cls) -> PathConfig:
+        """
+        Возвращает конфигурацию путей.
+        """
+        return PathConfig(
+            sql_queries=cls.SQL_QUERIES_PATH,
+            outputs=cls.OUTPUT_PATH,
+            logs=cls.LOG_PATH
+        )
+    
+    @classmethod
+    def get_scoring_config(cls):
+        """
+        Возвращает полную конфигурацию для scoring pipeline.
+        """
+        return {
+            "environment": cls.APP_ENV,
+            "debug": cls.DEBUG,
+            "log_level": cls.LOG_LEVEL
         }

@@ -1,0 +1,631 @@
+WITH expertise_info AS ( 
+	SELECT
+		e.id AS expertise_id,
+		e.subjectContract,
+		u.id AS user_expertise_id,
+		u.name AS expertise_name,
+		u.organization AS expertise_organization,
+		e.priceContract, 
+		e.exucutorContract, 
+		CASE e.examination
+			WHEN 2 THEN 0
+			ELSE e.examination
+		END AS expertise_examination,
+		CASE e.`object`
+			WHEN 1 THEN 'Результаты исполнения заключенных контрактов/договоров Минобрнауки России и подведомственных Минобрнауки России организаций на выполнение работ/оказание услуг/поставку товара'
+			WHEN 2 THEN 'Результаты исполнения заключенных Минобрнауки России и подведомственных Минобрнауки России организаций соглашений на предоставление субсидий в виде грантов (основная экспертиза и дополнительные проверки при необходимости)'
+			WHEN 3 THEN 'Проекты государственных заданий Минобрнауки России для подведомственных организаций (предварительная экспертиза)'
+			WHEN 4 THEN 'Результаты исполнения государственных заданий Минобрнауки России для подведомственных организаций'
+			WHEN 5 THEN 'Сведения и документы о закупочной деятельности подведомственных Минобрнауки России организаций'
+		END AS expertise_direction,
+		CASE e.checkType 
+			WHEN 2 THEN 'Сведения и документы о закупочной деятельности организации (мониторинг закупок)'
+		END AS expertise_monitoring,	
+		CASE e.`object`
+			WHEN 1 THEN 'Результаты исполнения заключенных государственных контрактов/договоров'
+			WHEN 2 THEN 'Результаты исполнения соглашений на предоставление субсидий в виде грантов (основная экспертиза и дополнительные проверки при необходимости)'
+			WHEN 3 THEN 'Проекты государственных заданий (предварительная экспертиза)'
+			WHEN 4 THEN 'Результаты исполнения государственных заданий'
+			WHEN 5 THEN 'Закупочная деятельность'
+		END AS experienceExpertise_direction,
+		e.regionExpertise AS expertise_regionExpertise, 
+		REGEXP_REPLACE(
+			CONCAT_WS(' ', LOWER(e.subjectContract), 
+				LOWER(e.directionContract), 
+				LOWER(u.okved_name), 
+				LOWER(u.organization)
+			), '["\'«»]', '') AS expertise_text_feature, 
+		CASE 
+			WHEN u.region_id IS NULL 
+			THEN 
+				CASE CAST(SUBSTRING(u.inn, 1, 2) AS UNSIGNED)
+					WHEN 86 THEN 81
+					WHEN 87 THEN 82
+					WHEN 89 THEN 83
+					WHEN 90 THEN 84
+					WHEN 91 THEN 85
+					WHEN 92 THEN 86
+					WHEN 93 THEN 87
+					WHEN 94 THEN 88
+					WHEN 95 THEN 89
+					WHEN 97 THEN 77
+					ELSE CAST(SUBSTRING(u.inn, 1, 2) AS UNSIGNED)
+				END
+			ELSE u.region_id
+		END AS expertise_region_id 
+	FROM expertises e
+	JOIN users u
+	ON e.user_id = u.id
+	WHERE e.id = :expertise_id
+), expertise_with_coords AS (
+	SELECT
+		*,
+		CASE expertise_region_id
+			WHEN 1 THEN 44.6089
+			WHEN 2 THEN 54.7355
+			WHEN 3 THEN 51.8335
+			WHEN 4 THEN 51.9581
+			WHEN 5 THEN 42.9831
+			WHEN 6 THEN 43.1667
+			WHEN 7 THEN 43.4853
+			WHEN 8 THEN 46.3080
+			WHEN 9 THEN 44.2269
+			WHEN 10 THEN 61.7850
+			WHEN 11 THEN 61.6688
+			WHEN 12 THEN 56.6344
+			WHEN 13 THEN 54.1870
+			WHEN 14 THEN 62.0278
+			WHEN 15 THEN 43.0241
+			WHEN 16 THEN 55.7963
+			WHEN 17 THEN 51.7191
+			WHEN 18 THEN 56.8527
+			WHEN 19 THEN 53.7224
+			WHEN 20 THEN 43.3180
+			WHEN 21 THEN 56.1439
+			WHEN 22 THEN 53.3561
+			WHEN 23 THEN 45.0355
+			WHEN 24 THEN 56.0153
+			WHEN 25 THEN 43.1332
+			WHEN 26 THEN 45.0445
+			WHEN 27 THEN 48.4827
+			WHEN 28 THEN 50.2907
+			WHEN 29 THEN 64.5473
+			WHEN 30 THEN 46.3476
+			WHEN 31 THEN 50.5974
+			WHEN 32 THEN 53.2434
+			WHEN 33 THEN 56.1290
+			WHEN 34 THEN 48.7071
+			WHEN 35 THEN 59.2205
+			WHEN 36 THEN 51.6615
+			WHEN 37 THEN 57.0004
+			WHEN 38 THEN 52.2864
+			WHEN 39 THEN 54.7104
+			WHEN 40 THEN 54.5140
+			WHEN 41 THEN 53.0376
+			WHEN 42 THEN 55.3547
+			WHEN 43 THEN 58.6036
+			WHEN 44 THEN 57.7677
+			WHEN 45 THEN 55.4410
+			WHEN 46 THEN 51.7304
+			WHEN 47 THEN 59.9391
+			WHEN 48 THEN 52.6088
+			WHEN 49 THEN 59.5682
+			WHEN 50 THEN 55.7558
+			WHEN 51 THEN 68.9707
+			WHEN 52 THEN 56.3269
+			WHEN 53 THEN 58.5228
+			WHEN 54 THEN 55.0084
+			WHEN 55 THEN 54.9893
+			WHEN 56 THEN 51.7682
+			WHEN 57 THEN 52.9703
+			WHEN 58 THEN 53.1951
+			WHEN 59 THEN 58.0105
+			WHEN 60 THEN 57.8194
+			WHEN 61 THEN 47.2225
+			WHEN 62 THEN 54.6293
+			WHEN 63 THEN 53.1959
+			WHEN 64 THEN 51.5336
+			WHEN 65 THEN 46.9591
+			WHEN 66 THEN 56.8380
+			WHEN 67 THEN 54.7826
+			WHEN 68 THEN 52.7213
+			WHEN 69 THEN 56.8587
+			WHEN 70 THEN 56.4846
+			WHEN 71 THEN 54.1931
+			WHEN 72 THEN 57.1530
+			WHEN 73 THEN 54.3142
+			WHEN 74 THEN 55.1600
+			WHEN 75 THEN 52.0339
+			WHEN 76 THEN 57.6261
+			WHEN 77 THEN 55.7558
+			WHEN 78 THEN 59.9391
+			WHEN 79 THEN 48.7947
+			WHEN 80 THEN 67.6381
+			WHEN 81 THEN 61.0032
+			WHEN 82 THEN 64.7364
+			WHEN 83 THEN 66.5299
+			WHEN 84 THEN 47.8388
+			WHEN 85 THEN 44.9521
+			WHEN 86 THEN 44.6167
+			WHEN 87 THEN 48.0159
+			WHEN 88 THEN 48.5740
+			WHEN 89 THEN 46.6354
+		END AS expertise_lon,
+		CASE expertise_region_id
+			WHEN 1 THEN 40.1005
+			WHEN 2 THEN 55.9917
+			WHEN 3 THEN 107.5841
+			WHEN 4 THEN 85.9603
+			WHEN 5 THEN 47.5047
+			WHEN 6 THEN 44.8167
+			WHEN 7 THEN 43.6071
+			WHEN 8 THEN 44.2558
+			WHEN 9 THEN 42.0465
+			WHEN 10 THEN 34.3469
+			WHEN 11 THEN 50.8365
+			WHEN 12 THEN 47.8998
+			WHEN 13 THEN 45.1839
+			WHEN 14 THEN 129.7315
+			WHEN 15 THEN 44.6905
+			WHEN 16 THEN 49.1089
+			WHEN 17 THEN 94.4378
+			WHEN 18 THEN 53.2115
+			WHEN 19 THEN 91.4437
+			WHEN 20 THEN 45.6982
+			WHEN 21 THEN 47.2489
+			WHEN 22 THEN 83.7636
+			WHEN 23 THEN 38.9753
+			WHEN 24 THEN 92.8932
+			WHEN 25 THEN 131.9113
+			WHEN 26 THEN 41.9691
+			WHEN 27 THEN 135.0839
+			WHEN 28 THEN 127.5272
+			WHEN 29 THEN 40.5668
+			WHEN 30 THEN 48.0302
+			WHEN 31 THEN 36.5889
+			WHEN 32 THEN 34.3642
+			WHEN 33 THEN 40.4066
+			WHEN 34 THEN 44.5169
+			WHEN 35 THEN 39.8915
+			WHEN 36 THEN 39.2003
+			WHEN 37 THEN 40.9739
+			WHEN 38 THEN 104.2807
+			WHEN 39 THEN 20.4522
+			WHEN 40 THEN 36.2614
+			WHEN 41 THEN 158.6510
+			WHEN 42 THEN 86.0873
+			WHEN 43 THEN 49.6680
+			WHEN 44 THEN 40.9264
+			WHEN 45 THEN 65.3411
+			WHEN 46 THEN 36.1926
+			WHEN 47 THEN 30.3159
+			WHEN 48 THEN 39.5992
+			WHEN 49 THEN 150.8085
+			WHEN 50 THEN 37.6173
+			WHEN 51 THEN 33.0750
+			WHEN 52 THEN 44.0059
+			WHEN 53 THEN 31.2699
+			WHEN 54 THEN 82.9357
+			WHEN 55 THEN 73.3682
+			WHEN 56 THEN 55.0974
+			WHEN 57 THEN 36.0635
+			WHEN 58 THEN 45.0183
+			WHEN 59 THEN 56.2342
+			WHEN 60 THEN 28.3318
+			WHEN 61 THEN 39.7187
+			WHEN 62 THEN 39.7396
+			WHEN 63 THEN 50.1002
+			WHEN 64 THEN 46.0343
+			WHEN 65 THEN 142.7380
+			WHEN 66 THEN 60.5975
+			WHEN 67 THEN 32.0453
+			WHEN 68 THEN 41.4527
+			WHEN 69 THEN 35.9176
+			WHEN 70 THEN 84.9476
+			WHEN 71 THEN 37.6173
+			WHEN 72 THEN 65.5343
+			WHEN 73 THEN 48.4031
+			WHEN 74 THEN 61.4006
+			WHEN 75 THEN 113.4996
+			WHEN 76 THEN 39.8845
+			WHEN 77 THEN 37.6173
+			WHEN 78 THEN 30.3159
+			WHEN 79 THEN 132.9218
+			WHEN 80 THEN 53.0069
+			WHEN 81 THEN 69.0189
+			WHEN 82 THEN 177.4835
+			WHEN 83 THEN 66.6145
+			WHEN 84 THEN 35.1396
+			WHEN 85 THEN 34.1024
+			WHEN 86 THEN 33.5254
+			WHEN 87 THEN 37.8029
+			WHEN 88 THEN 39.3078
+			WHEN 89 THEN 32.6169
+		END AS expertise_lat	
+	FROM expertise_info
+), experts AS (
+	SELECT 
+		u.id AS expert_id,
+		u.name AS expert_name,
+		u.organization AS expert_organization,
+		u.diplom AS expert_diplom, 
+		CASE 
+		    WHEN u.birthday IS NOT NULL AND TIMESTAMPDIFF(YEAR, u.birthday, CURDATE()) > 21 THEN TIMESTAMPDIFF(YEAR, u.birthday, CURDATE())
+		    WHEN u.dateDiplom IS NOT NULL AND TIMESTAMPDIFF(YEAR, u.dateDiplom, CURDATE()) > 0 THEN TIMESTAMPDIFF(YEAR, u.dateDiplom, CURDATE()) + 22
+		    ELSE NULL
+		END AS age,
+		(CASE WHEN u.email IS NOT NULL THEN 1 ELSE 0 END 
+			+ CASE WHEN u.contactEmail IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.organization IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.snils IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.passport IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.datePassport IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.code IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.birthday IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.phone IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.`number` IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.bank IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.bik IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.correspondentNumber IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.innOplata IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.kpp IS NOT NULL THEN 1 ELSE 0 END) / 15 AS personal_block, 
+		u.directions,
+		u.regionExpertises AS expert_regionExpertises,
+		REGEXP_REPLACE(
+			CONCAT_WS(' ', LOWER(et.name), 
+				LOWER(t.name), 
+				LOWER(u.qualification), 
+				LOWER(u.speciality), 
+				LOWER(u.branchScienceDegree), 
+				LOWER(u.branchScienceAcademicTitle),
+				LOWER(u.diplom), 
+				LOWER(u.`position`), 
+				LOWER(u.organization)
+			), '["\'«»]', '') AS expert_text_feature,
+		u.examination AS expert_examination,		
+		CASE 
+			WHEN u.region_id IS NULL 
+			THEN 
+				CASE CAST(SUBSTRING(inn, 1, 2) AS UNSIGNED)
+					WHEN 86 THEN 81
+					WHEN 87 THEN 82
+					WHEN 89 THEN 83
+					WHEN 90 THEN 84
+					WHEN 91 THEN 85
+					WHEN 92 THEN 86
+					WHEN 93 THEN 87
+					WHEN 94 THEN 88
+					WHEN 95 THEN 89
+					WHEN 97 THEN 77
+					ELSE CAST(SUBSTRING(inn, 1, 2) AS UNSIGNED)
+				END
+			ELSE u.region_id
+		END AS expert_region_id, 
+		u.education,
+		u.experience,
+		COALESCE((YEAR(CURDATE()) - u.yearDegree), 0) AS degreeExperience, 
+		COALESCE((YEAR(CURDATE()) - u.yearAcademicTitle), 0) AS academicTitleExperience, 
+		CASE 
+			WHEN u.publication = 1 
+				OR (JSON_LENGTH(u.linkPublication) > 0 
+				AND CAST(u.linkPublication AS JSON) != CAST('[null]' AS JSON))
+			THEN 1
+			ELSE 0
+		END AS publication,
+		CASE 
+			WHEN CAST(u.linkPublication AS JSON) = CAST('[null]' AS JSON) 
+			THEN 0
+			ELSE JSON_LENGTH(u.linkPublication)
+		END AS countPublications,
+		CASE 
+			WHEN u.monographs = 1 
+				OR (JSON_LENGTH(u.linkMonographs) > 0 
+				AND CAST(u.linkMonographs AS JSON) != CAST('[null]' AS JSON))
+			THEN 1
+			ELSE 0
+		END AS monographs,
+		CASE 
+			WHEN CAST(u.linkMonographs AS JSON) = CAST('[null]' AS JSON) 
+			THEN 0
+			ELSE JSON_LENGTH(u.linkMonographs)
+		END AS countMonographs,
+		u.experienceExpertise,
+		u.countExpertise,
+		COALESCE(u.workExpertise, 0) AS desiredWeekWorkload,
+		COUNT(CASE WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE status = 5) THEN 1 END) AS countExpertisesBD,
+		AVG(COALESCE(ee.`range`, 0)) AS avg_range,
+        CASE 
+            WHEN MAX(CASE WHEN e.status IN (3,4) AND e.dateStatus3 IS NOT NULL THEN 1 ELSE 0 END) = 1 
+            THEN 7 / AVG(CASE WHEN e.status IN (3,4) AND e.dateStatus3 IS NOT NULL 
+                             THEN DATEDIFF(CURDATE(), e.dateStatus3) ELSE NULL END)
+            ELSE
+                CASE 
+                    WHEN MAX(CASE WHEN e.status IN (3,4) AND e.dateStatus4 IS NOT NULL THEN 1 ELSE 0 END) = 1 
+                    THEN 7 / AVG(CASE WHEN e.status IN (3,4) AND e.dateStatus4 IS NOT NULL 
+                                     THEN DATEDIFF(CURDATE(), e.dateStatus4) ELSE NULL END)
+                    ELSE 0
+                END    
+        END  AS currentWeekWorkload,
+		CASE 
+		    WHEN MAX(CASE WHEN e.dateStatus5 IS NOT NULL THEN 1 ELSE 0 END) = 1
+		    THEN 
+		        CASE 
+		            WHEN MAX(CASE WHEN e.status IN (5) AND e.dateStatus3 IS NOT NULL THEN 1 ELSE 0 END) = 1 
+		            THEN 7 / AVG(CASE WHEN e.dateStatus3 IS NOT NULL THEN DATEDIFF(e.dateStatus5, e.dateStatus3) ELSE NULL END)
+		            ELSE
+		                CASE 
+		                    WHEN MAX(CASE WHEN e.dateStatus4 IS NOT NULL THEN 1 ELSE 0 END) = 1 
+		                    THEN 7 / AVG(CASE WHEN e.dateStatus4 IS NOT NULL THEN DATEDIFF(e.dateStatus5, e.dateStatus4) ELSE NULL END)
+		                    ELSE 0
+		                END    
+		        END    
+		    ELSE 
+		        CASE 
+		            WHEN MAX(CASE WHEN e.status IN (5) AND  e.dateStatus3 IS NOT NULL THEN 1 ELSE 0 END) = 1 
+		            THEN 7 / AVG(CASE WHEN e.dateStatus3 IS NOT NULL 
+		                                    THEN DATEDIFF(CURDATE(), e.dateStatus3) ELSE NULL END)
+		            ELSE
+		                CASE 
+		                    WHEN MAX(CASE WHEN e.dateStatus4 IS NOT NULL THEN 1 ELSE 0 END) = 1 
+		                    THEN 7 / AVG(CASE WHEN e.dateStatus4 IS NOT NULL 
+		                                            THEN DATEDIFF(CURDATE(), e.dateStatus4) ELSE NULL END)
+		                    ELSE 0
+		                END    
+		        END    
+		END AS weekWorkload 
+	FROM users u 
+	LEFT JOIN expertise_experts ee 
+	ON u.id = ee.expert_id 
+	LEFT JOIN expertises e 
+	ON e.id = ee.expertise_id 
+	LEFT JOIN training t
+	ON u.training_id = t.id
+	LEFT JOIN enlarged_training et 
+	ON u.enlargedTraining_id = et.id
+	WHERE u.`role` = 'expert' 
+	AND u.active = 1 
+	AND u.status = 3 
+	AND u.deleted_at IS NULL 
+	AND u.inn != '' AND CAST(SUBSTRING(u.inn, 1, 2) AS UNSIGNED) != 0 AND LOWER(u.name) NOT LIKE '%тест%' AND LOWER(u.name) NOT LIKE '%test%' 
+	GROUP BY u.id
+), 
+experts_with_coords AS (
+	SELECT
+		*,
+		COALESCE(age, AVG(age) OVER (PARTITION BY expert_id)) AS avg_age,
+		CASE expert_region_id
+			WHEN 1 THEN 44.6089
+			WHEN 2 THEN 54.7355
+			WHEN 3 THEN 51.8335
+			WHEN 4 THEN 51.9581
+			WHEN 5 THEN 42.9831
+			WHEN 6 THEN 43.1667
+			WHEN 7 THEN 43.4853
+			WHEN 8 THEN 46.3080
+			WHEN 9 THEN 44.2269
+			WHEN 10 THEN 61.7850
+			WHEN 11 THEN 61.6688
+			WHEN 12 THEN 56.6344
+			WHEN 13 THEN 54.1870
+			WHEN 14 THEN 62.0278
+			WHEN 15 THEN 43.0241
+			WHEN 16 THEN 55.7963
+			WHEN 17 THEN 51.7191
+			WHEN 18 THEN 56.8527
+			WHEN 19 THEN 53.7224
+			WHEN 20 THEN 43.3180
+			WHEN 21 THEN 56.1439
+			WHEN 22 THEN 53.3561
+			WHEN 23 THEN 45.0355
+			WHEN 24 THEN 56.0153
+			WHEN 25 THEN 43.1332
+			WHEN 26 THEN 45.0445
+			WHEN 27 THEN 48.4827
+			WHEN 28 THEN 50.2907
+			WHEN 29 THEN 64.5473
+			WHEN 30 THEN 46.3476
+			WHEN 31 THEN 50.5974
+			WHEN 32 THEN 53.2434
+			WHEN 33 THEN 56.1290
+			WHEN 34 THEN 48.7071
+			WHEN 35 THEN 59.2205
+			WHEN 36 THEN 51.6615
+			WHEN 37 THEN 57.0004
+			WHEN 38 THEN 52.2864
+			WHEN 39 THEN 54.7104
+			WHEN 40 THEN 54.5140
+			WHEN 41 THEN 53.0376
+			WHEN 42 THEN 55.3547
+			WHEN 43 THEN 58.6036
+			WHEN 44 THEN 57.7677
+			WHEN 45 THEN 55.4410
+			WHEN 46 THEN 51.7304
+			WHEN 47 THEN 59.9391
+			WHEN 48 THEN 52.6088
+			WHEN 49 THEN 59.5682
+			WHEN 50 THEN 55.7558
+			WHEN 51 THEN 68.9707
+			WHEN 52 THEN 56.3269
+			WHEN 53 THEN 58.5228
+			WHEN 54 THEN 55.0084
+			WHEN 55 THEN 54.9893
+			WHEN 56 THEN 51.7682
+			WHEN 57 THEN 52.9703
+			WHEN 58 THEN 53.1951
+			WHEN 59 THEN 58.0105
+			WHEN 60 THEN 57.8194
+			WHEN 61 THEN 47.2225
+			WHEN 62 THEN 54.6293
+			WHEN 63 THEN 53.1959
+			WHEN 64 THEN 51.5336
+			WHEN 65 THEN 46.9591
+			WHEN 66 THEN 56.8380
+			WHEN 67 THEN 54.7826
+			WHEN 68 THEN 52.7213
+			WHEN 69 THEN 56.8587
+			WHEN 70 THEN 56.4846
+			WHEN 71 THEN 54.1931
+			WHEN 72 THEN 57.1530
+			WHEN 73 THEN 54.3142
+			WHEN 74 THEN 55.1600
+			WHEN 75 THEN 52.0339
+			WHEN 76 THEN 57.6261
+			WHEN 77 THEN 55.7558
+			WHEN 78 THEN 59.9391
+			WHEN 79 THEN 48.7947
+			WHEN 80 THEN 67.6381
+			WHEN 81 THEN 61.0032
+			WHEN 82 THEN 64.7364
+			WHEN 83 THEN 66.5299
+			WHEN 84 THEN 47.8388
+			WHEN 85 THEN 44.9521
+			WHEN 86 THEN 44.6167
+			WHEN 87 THEN 48.0159
+			WHEN 88 THEN 48.5740
+			WHEN 89 THEN 46.6354
+		END AS expert_lon,
+		CASE expert_region_id
+			WHEN 1 THEN 40.1005
+			WHEN 2 THEN 55.9917
+			WHEN 3 THEN 107.5841
+			WHEN 4 THEN 85.9603
+			WHEN 5 THEN 47.5047
+			WHEN 6 THEN 44.8167
+			WHEN 7 THEN 43.6071
+			WHEN 8 THEN 44.2558
+			WHEN 9 THEN 42.0465
+			WHEN 10 THEN 34.3469
+			WHEN 11 THEN 50.8365
+			WHEN 12 THEN 47.8998
+			WHEN 13 THEN 45.1839
+			WHEN 14 THEN 129.7315
+			WHEN 15 THEN 44.6905
+			WHEN 16 THEN 49.1089
+			WHEN 17 THEN 94.4378
+			WHEN 18 THEN 53.2115
+			WHEN 19 THEN 91.4437
+			WHEN 20 THEN 45.6982
+			WHEN 21 THEN 47.2489
+			WHEN 22 THEN 83.7636
+			WHEN 23 THEN 38.9753
+			WHEN 24 THEN 92.8932
+			WHEN 25 THEN 131.9113
+			WHEN 26 THEN 41.9691
+			WHEN 27 THEN 135.0839
+			WHEN 28 THEN 127.5272
+			WHEN 29 THEN 40.5668
+			WHEN 30 THEN 48.0302
+			WHEN 31 THEN 36.5889
+			WHEN 32 THEN 34.3642
+			WHEN 33 THEN 40.4066
+			WHEN 34 THEN 44.5169
+			WHEN 35 THEN 39.8915
+			WHEN 36 THEN 39.2003
+			WHEN 37 THEN 40.9739
+			WHEN 38 THEN 104.2807
+			WHEN 39 THEN 20.4522
+			WHEN 40 THEN 36.2614
+			WHEN 41 THEN 158.6510
+			WHEN 42 THEN 86.0873
+			WHEN 43 THEN 49.6680
+			WHEN 44 THEN 40.9264
+			WHEN 45 THEN 65.3411
+			WHEN 46 THEN 36.1926
+			WHEN 47 THEN 30.3159
+			WHEN 48 THEN 39.5992
+			WHEN 49 THEN 150.8085
+			WHEN 50 THEN 37.6173
+			WHEN 51 THEN 33.0750
+			WHEN 52 THEN 44.0059
+			WHEN 53 THEN 31.2699
+			WHEN 54 THEN 82.9357
+			WHEN 55 THEN 73.3682
+			WHEN 56 THEN 55.0974
+			WHEN 57 THEN 36.0635
+			WHEN 58 THEN 45.0183
+			WHEN 59 THEN 56.2342
+			WHEN 60 THEN 28.3318
+			WHEN 61 THEN 39.7187
+			WHEN 62 THEN 39.7396
+			WHEN 63 THEN 50.1002
+			WHEN 64 THEN 46.0343
+			WHEN 65 THEN 142.7380
+			WHEN 66 THEN 60.5975
+			WHEN 67 THEN 32.0453
+			WHEN 68 THEN 41.4527
+			WHEN 69 THEN 35.9176
+			WHEN 70 THEN 84.9476
+			WHEN 71 THEN 37.6173
+			WHEN 72 THEN 65.5343
+			WHEN 73 THEN 48.4031
+			WHEN 74 THEN 61.4006
+			WHEN 75 THEN 113.4996
+			WHEN 76 THEN 39.8845
+			WHEN 77 THEN 37.6173
+			WHEN 78 THEN 30.3159
+			WHEN 79 THEN 132.9218
+			WHEN 80 THEN 53.0069
+			WHEN 81 THEN 69.0189
+			WHEN 82 THEN 177.4835
+			WHEN 83 THEN 66.6145
+			WHEN 84 THEN 35.1396
+			WHEN 85 THEN 34.1024
+			WHEN 86 THEN 33.5254
+			WHEN 87 THEN 37.8029
+			WHEN 88 THEN 39.3078
+			WHEN 89 THEN 32.6169
+		END AS expert_lat		
+	FROM experts
+), ee_joined AS ( 
+	SELECT 
+		ewc.*,
+		u.*,
+		CASE 
+			WHEN ewc.expertise_examination = 1 THEN 6371 * 2 * ATAN2(SQRT(SIN(RADIANS(u.expert_lat - ewc.expertise_lat)/2) * SIN(RADIANS(u.expert_lat - ewc.expertise_lat)/2) + 
+				COS(RADIANS(ewc.expertise_lat)) * COS(RADIANS(u.expert_lat)) * SIN(RADIANS(u.expert_lon - ewc.expertise_lon)/2) * 
+				SIN(RADIANS(u.expert_lon - ewc.expertise_lon)/2)), SQRT(1-SIN(RADIANS(u.expert_lat - ewc.expertise_lat)/2) * SIN(RADIANS(u.expert_lat - ewc.expertise_lat)/2) + 
+		        COS(RADIANS(ewc.expertise_lat)) * COS(RADIANS(u.expert_lat)) * 
+		        SIN(RADIANS(u.expert_lon - ewc.expertise_lon)/2) * SIN(RADIANS(u.expert_lon - ewc.expertise_lon)/2)))
+			ELSE 1
+		END AS region_distance_km,
+		CASE 
+			WHEN JSON_CONTAINS(u.experienceExpertise, JSON_QUOTE(ewc.experienceExpertise_direction)) THEN 1
+			ELSE 0
+		END AS 	experienceExpertise_rate,
+		CASE 
+			WHEN u.desiredWeekWorkload > 0 THEN u.desiredWeekWorkload - u.currentWeekWorkload
+			ELSE 
+				CASE 
+					WHEN u.weekWorkload > 0 THEN u.weekWorkload - u.currentWeekWorkload
+					ELSE 2
+				END
+		END	AS possibleWeekWorkload,
+		(u.countExpertise + u.countExpertisesBD) / MAX(u.countExpertise + u.countExpertisesBD) OVER(PARTITION BY ewc.expertise_id) AS countExpertise_rate,
+		u.experience / MAX(u.experience) OVER(PARTITION BY ewc.expertise_id) AS experience_rate,
+		u.academicTitleExperience / MAX(u.academicTitleExperience) OVER(PARTITION BY ewc.expertise_id) AS academicTitleExperience_rate,
+		u.degreeExperience / MAX(u.degreeExperience) OVER(PARTITION BY ewc.expertise_id) AS degreeExperience_rate,
+		u.education / MAX(u.education) OVER(PARTITION BY ewc.expertise_id) AS education_rate,
+		(u.publication + u.monographs) / MAX(u.publication + u.monographs) OVER(PARTITION BY ewc.expertise_id) AS pubMon_rate,
+		(u.countPublications + u.countMonographs) / MAX(u.countPublications + u.countMonographs) OVER(PARTITION BY ewc.expertise_id) AS countPubMon_rate
+	FROM expertise_with_coords ewc
+	LEFT JOIN experts_with_coords u
+	ON (JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_direction)) OR JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_monitoring))) 
+	AND (ewc.expertise_regionExpertise IS NULL 
+		OR (u.expert_regionExpertises IS NULL OR JSON_LENGTH(u.expert_regionExpertises) = 0)
+		OR ewc.expertise_regionExpertise IN ('Общая') 
+		OR JSON_CONTAINS(u.expert_regionExpertises, JSON_QUOTE(ewc.expertise_regionExpertise))) 
+	AND ((ewc.expertise_examination = 1 AND ewc.expertise_examination = u.expert_examination) 
+		OR ewc.expertise_examination IS NULL 
+		OR ewc.expertise_examination != 1) 
+)
+SELECT 
+	*,
+	1 - region_distance_km / MAX(region_distance_km) OVER(PARTITION BY expertise_id) AS distance_rate,
+	CAST(possibleWeekWorkload / MAX(possibleWeekWorkload) OVER(PARTITION BY expertise_id) AS FLOAT) AS workload_rate,
+	(avg_age / MAX(avg_age) OVER(PARTITION BY expertise_id)
+	+ personal_block + education_rate + experience_rate + degreeExperience_rate
+	+ academicTitleExperience_rate + pubMon_rate + countPubMon_rate 
+	+ experienceExpertise_rate + countExpertise_rate + avg_range * 2
+	) / 12 AS avg_rating
+FROM ee_joined
+WHERE possibleWeekWorkload > 0;

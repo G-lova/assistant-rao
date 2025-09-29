@@ -3,6 +3,7 @@ import tempfile
 import logging
 import json
 
+import pandas as pd
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict
@@ -11,6 +12,7 @@ from configs.schemas import DocumentContentResponse, BatchDocumentResponse
 from configs.utils import APIKeyMiddleware, normalize_document_type, read_file, check_procurement_completeness
 from src.evaluator import check_documents_consistency, analyze_document_chunks, split_large_text
 from configs.working_with_db import save_raw_data, save_clean_conclusion, get_contract_info_from_db
+from src.scoring import scoring
 
 
 app = FastAPI()
@@ -470,6 +472,73 @@ async def api_get_contract_info(request_body: Dict[str, str] = Body(...)):
     except Exception as e:
         logger.error(f"Неожиданная ошибка при обработке /get-contract-info: {e}", exc_info=True)
         return {"contract_number": "0", "amount": "0", "date": "0"}
+
+
+@app.post("/get-experts-for-expertise")
+async def get_experts_for_expertise(request_body: Dict[str, int] = Body(...)):
+    """
+    Обработчик API-запроса для подбора подходящих экспертов по идентификатору экспертизы.
+
+    Принимает ID экспертизы, запускает пайплайн оценки (scoring), который анализирует соответствие
+    профилей экспертов тематике экспертизы, учитывает географическую близость, рабочую нагрузку,
+    средний рейтинг и наличие конфликтов интересов. Возвращает топ-10 экспертов с их метриками.
+
+    Args:
+        request_body (Dict[str, int], optional): Тело запроса в формате JSON, содержащее ключ "expertise_id".
+            Пример: {"expertise_id": 12345}.
+
+    Raises:
+        HTTPException: Если поле `expertise_id` отсутствует — возвращает ошибку 400.
+        HTTPException: При возникновении внутренней ошибки в процессе обработки — возвращает ошибку 500.
+
+    Returns:
+        dict: Структурированный ответ с результатами подбора:
+            - expertise_id (int): Идентификатор запрошенной экспертизы.
+            - total_experts_found (int): Количество найденных и ранжированных экспертов.
+            - experts (List[dict]): Список экспертов с детальными метриками:
+                - expert_id: Уникальный идентификатор эксперта.
+                - similarity_embeddings: Уровень семантического соответствия (0–1).
+                - distance_rate: Оценка удалённости (чем ниже, тем лучше).
+                - possibleWeekWorkload: Загруженность на неделю.
+                - avg_rating: Средний рейтинг эксперта.
+                - conflict_fuzzy: Показатель риска конфликта интересов (0–100).
+                - rating: Итоговый рассчитанный рейтинг (0–1).
+                - priceContract: Стоимость контракта (если доступна).
+    """
+    try:
+        expertise_id = request_body.get("expertise_id")
+        
+        if not expertise_id:
+            raise HTTPException(status_code=400, detail="Поле 'expertise_id' обязательно")
+        
+        # Запускаем скоринг пайплайн
+        results = scoring(expertise_id, rows=10)
+        
+        # Преобразуем результаты в JSON-сериализуемый формат
+        experts_list = []
+        for _, row in results.iterrows():
+            expert_data = {
+                "expert_id": int(row["expert_id"]),
+                "expertise_id": int(row["expertise_id"]),
+                "similarity_embeddings": float(row["similarity_embeddings"]),
+                "distance_rate": float(row["distance_rate"]),
+                "possibleWeekWorkload": float(row["possibleWeekWorkload"]),
+                "avg_rating": float(row["avg_rating"]),
+                "conflict_fuzzy": int(row["conflict_fuzzy"]),
+                "rating": float(row["rating"]),
+                "priceContract": float(row["priceContract"]) if pd.notna(row["priceContract"]) else 0.0
+            }
+            experts_list.append(expert_data)
+        
+        return {
+            "expertise_id": expertise_id,
+            "total_experts_found": len(experts_list),
+            "experts": experts_list
+        }
+        
+    except Exception as e:
+        logger.error(f"Ошибка при подборе экспертов: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при подборе экспертов: {str(e)}")
 
 
 @app.get("/health")
