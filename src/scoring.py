@@ -13,27 +13,21 @@ project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
 
 
-def scoring(expertise_id, rows):
+def scoring(expertise_id):
     """
-    Запускает полный пайплайн оценки и ранжирования экспертов для указанной экспертизы.
+    Запускает пайплайн оценки экспертов для заданной экспертизы.
 
-    Инициализирует систему логирования, создаёт экземпляр ScoringPipeline, выполняет загрузку данных,
-    предобработку, вычисление схожести, фильтрацию конфликтов интересов и расчёт итогового рейтинга.
-    Выводит топ-N результатов в консоль и сохраняет их в CSV-файл.
+    Функция инициализирует пайплайн ScoringPipeline, выполняет SQL-запрос для получения данных
+    об экспертах, рассчитывает рейтинг на основе критериев и возвращает отсортированный список
+    экспертов по убыванию релевантности. Результаты сохраняются в CSV-файл.
 
     Args:
-        expertise_id (Any): Уникальный идентификатор экспертизы, на основе которой происходит подбор экспертов.
-        rows (int): Количество лучших экспертов, которые необходимо вернуть и сохранить.
+        expertise_id: Идентификатор экспертизы, для которой проводится оценка и подбор экспертов.
 
     Returns:
-        pd.DataFrame: Таблица с топ-N экспертами, содержащая их рейтинги и ключевые метрики:
-            - similarity_embeddings: Семантическое сходство профиля с задачей экспертизы.
-            - conflict_fuzzy: Уровень риска конфликта интересов (0–100).
-            - rating: Итоговый нормализованный рейтинг (0–1), рассчитанный по весовой формуле.
-            - distance_rate, workload_rate, avg_rating: Дополнительные факторы ранжирования.
-
-    Raises:
-        Exception: Если возникла ошибка на любом этапе обработки — она записывается в лог и пробрасывается дальше.
+        pd.Series или pd.DataFrame: Отсортированный набор результатов (топ экспертов),
+                                   готовый к использованию или выводу.
+                                   В случае ошибки — исключение не подавляется.
     """
     # Настройка логирования
     setup_logging()
@@ -54,15 +48,12 @@ def scoring(expertise_id, rows):
         df = pipeline.run_pipeline(sql_file_name, expertise_id)
         
         # Получение результатов
-        top_results = pipeline.get_top_results(df, rows)
+        top_results = pipeline.get_top_results(df)
         
         logger.info("Scoring pipeline completed successfully")
         
         # Вывод результатов
-        print("=" * 80)
-        print(f"Топ-{rows} экспертов по рейтингу:")
-        print("=" * 80)
-        print(top_results.to_string(index=False))
+        print(f'Эксперты в порядке убывания рейтинга:\n{top_results.tolist()}')
         
         # Сохранение результатов
         output_dir = os.path.join(project_root, "data", "outputs")
@@ -79,7 +70,7 @@ def scoring(expertise_id, rows):
         logger.error(f"Error in scoring pipeline: {e}", exc_info=True)
         raise
 
-
 if __name__ == "__main__":
+
     expertise_id = int(input('ID экспертизы для подбора эксперта:'))
-    scoring(expertise_id, rows=10)
+    scoring(expertise_id)

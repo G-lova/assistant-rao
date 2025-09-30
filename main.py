@@ -498,12 +498,22 @@ async def get_experts_for_expertise(request_body: Dict[str, int] = Body(...)):
             raise HTTPException(status_code=400, detail="Поле 'expertise_id' обязательно")
         
         # Запускаем скоринг пайплайн
-        results = scoring(expertise_id, rows=10)
+        results = scoring(expertise_id)
         
-        # Извлекаем только expert_id и преобразуем в список
-        expert_ids = [int(row["expert_id"]) for _, row in results.iterrows()]
+        # Преобразуем результат в список целых чисел
+        if hasattr(results, 'tolist'):
+            expert_ids = results.tolist()  # Для Series или массива
+        elif isinstance(results, list):
+            expert_ids = results
+        else:
+            # Предполагаем, что это DataFrame — извлекаем первую колонку или 'expert_id'
+            col = 'expert_id' if 'expert_id' in results.columns else results.columns[0]
+            expert_ids = results[col].tolist()
         
-        return expert_ids
+        # Убедимся, что все элементы — int
+        expert_ids = [int(x) for x in expert_ids]
+        
+        return expert_ids  # FastAPI автоматически сериализует в JSON
         
     except Exception as e:
         logger.error(f"Ошибка при подборе экспертов: {str(e)}", exc_info=True)
