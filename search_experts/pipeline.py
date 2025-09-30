@@ -10,15 +10,24 @@ from search_experts.conflict_detector import ConflictDetector
 
 class ScoringPipeline:
     """
-    Конвейер оценки экспертов на основе текстового сходства, нагрузки и конфликтов интересов.
+    Конвейер для оценки и ранжирования экспертов на основе схожести текстов и дополнительных метрик.
 
-    Основной класс системы ранжирования, который объединяет загрузку данных, предобработку,
-    вычисление эмбеддингов, обнаружение конфликтов и расчёт итогового рейтинга.
-    Предназначен для автоматического подбора наиболее подходящих экспертов под задачу экспертизы.
+    Выполняет полный цикл обработки: загрузку данных из БД по заданному SQL-запросу,
+    предобработку текстов, вычисление эмбеддингов и косинусного сходства, фильтрацию по конфликтам интересов
+    и расчёт итогового рейтинга экспертов. Используется для подбора наиболее подходящих экспертов
+    к конкретной экспертизе.
     """
+
     def __init__(self):
         """
-        Инициализирует пайплайн, загружая конфигурацию и создавая экземпляры компонентов.
+        Инициализирует компоненты конвейера с использованием глобальной конфигурации.
+
+        Загружает настройки из конфигурационного файла и создаёт экземпляры зависимостей:
+        - DataFetcher — для получения данных из базы,
+        - TextProcessor — для очистки текста,
+        - EmbeddingClient — для генерации эмбеддингов,
+        - ConflictDetector — для выявления конфликтов интересов.
+        Также сохраняет путь к директории с SQL-запросами.
         """
         # Загрузка конфигурации
         self.config = Config()
@@ -27,7 +36,6 @@ class ScoringPipeline:
         db_config = self.config.get_database_config()
         embedding_config = self.config.get_embedding_config()
         paths_config = self.config.get_paths_config()
-        scoring_config = self.config.get_scoring_config()
         
         self.data_fetcher = DataFetcher(db_config.url, db_config.headers)
         self.text_processor = TextProcessor()
@@ -38,57 +46,60 @@ class ScoringPipeline:
         )
         self.conflict_detector = ConflictDetector()
         
-        # self.similarity_threshold = scoring_config['similarity_threshold']
         self.sql_queries_path = paths_config.sql_queries
     
 
     def load_sql_query(self, file_name: str) -> str:
         """
-        Загружает SQL-запрос из файла и нормализует его (удаляет лишние пробелы).
+        Загружает и нормализует SQL-запрос из файла.
+
+        Читает содержимое SQL-файла из предопределённой директории и удаляет лишние пробелы и переносы,
+        возвращая запрос в виде одной строки для корректной передачи в HTTP-запрос.
 
         Args:
-            file_name (str): Имя файла с SQL-запросом (должен находиться в директории sql_queries).
+            file_name (str): Имя файла с SQL-запросом (например, "get_experts.sql").
 
         Returns:
-            str: Содержимое файла в виде одной строки без лишних переносов и пробелов.
+            str: SQL-запрос в виде одной строки без лишних пробельных символов.
         """
         file_path = f"{self.sql_queries_path}{file_name}"
         with open(file_path, encoding="utf-8") as f:
             sql_query = f.read()
         return " ".join(sql_query.split())
-
+    
 
     def preprocess_data(self, df):
         """
-        Очищает текстовые поля в DataFrame от мусора и приводит к единому формату.
+        Очищает текстовые поля в датафрейме от лишних символов и нормализует их.
 
-        Применяет очистку текста (удаление спецсимволов, нормализацию пробелов) к ключевым полям,
-        используемым для сравнения: описанию экспертизы и профилю эксперта.
+        Применяет функцию `clean_text` к столбцам с текстом экспертизы и описанием эксперта,
+        оставляя только буквы и пробелы, что улучшает качество последующего сравнения.
 
         Args:
-            df (pd.DataFrame): Входной DataFrame с сырыми текстовыми данными.
+            df (pandas.DataFrame): Датафрейм с колонками 'expertise_text_feature' и 'expert_text_feature'.
 
         Returns:
-            pd.DataFrame: DataFrame с очищенными текстовыми полями.
+            pandas.DataFrame: Датафрейм с очищенными текстовыми полями.
         """
         df["expertise_text_feature"] = df["expertise_text_feature"].apply(self.text_processor.clean_text)
         df["expert_text_feature"] = df["expert_text_feature"].apply(self.text_processor.clean_text)
         return df
-
+    
 
     def calculate_similarities(self, df):
         """
-        Вычисляет семантическую близость между описанием экспертизы и профилями экспертов.
+        Вычисляет косинусное сходство между эмбеддингами текста экспертизы и описаний экспертов.
 
-        Использует модель эмбеддингов для преобразования текстов в векторы и рассчитывает
-        косинусное сходство между запросом экспертизы и каждым экспертом.
+        Генерирует векторные представления текстов с помощью внешнего embedding API,
+        рассчитывает попарное сходство и добавляет результат в новый столбец датафрейма.
+        Возвращает датафрейм, отсортированный по убыванию сходства.
 
         Args:
-            df (pd.DataFrame): DataFrame, содержащий столбцы 'expertise_text_feature' и 'expert_text_feature'.
+            df (pandas.DataFrame): Датафрейм с очищенными текстами.
 
         Returns:
-            pd.DataFrame: Исходный DataFrame с добавленным столбцом 'similarity_embeddings'
-                          и отсортированный по убыванию схожести.
+            pandas.DataFrame: Датафрейм с добавленным столбцом 'similarity_embeddings',
+            отсортированный по этому столбцу в порядке убывания.
         """
         exp_text = df["expertise_text_feature"].iloc[0]
         expert_texts = df["expert_text_feature"].tolist()
@@ -98,53 +109,59 @@ class ScoringPipeline:
         
         df["similarity_embeddings"] = cosine_similarity(exp_emb, expert_embs).flatten()
         return df.sort_values(by="similarity_embeddings", ascending=False)
-
+    
 
     def detect_conflicts(self, df):
         """
-        Фильтрует экспертов, потенциально имеющих конфликт интересов.
+        Фильтрует экспертов, имеющих конфликт интересов с текущей экспертизой.
 
-        Выполняет нечёткое сравнение имён и организаций экспертов с участниками контракта.
-        Удаляет строки, где уровень совпадения 81% и выше (высокий риск конфликта).
+        Применяет нечёткое сравнение (fuzzy matching) между текстом экспертизы и описанием эксперта.
+        Исключает записи, где степень совпадения превышает порог (81%), что указывает на возможный конфликт.
 
         Args:
-            df (pd.DataFrame): DataFrame с экспертами.
+            df (pandas.DataFrame): Датафрейм с текстами и сходством.
 
         Returns:
-            pd.DataFrame: DataFrame без экспертов, вызывающих подозрение в конфликте интересов.
+            pandas.DataFrame: Отфильтрованный датафрейм, содержащий только экспертов без конфликта интересов.
         """
         df['conflict_fuzzy'] = df.apply(self.conflict_detector.fuzzy_match, axis=1).astype(int)
         return df[df['conflict_fuzzy'] < 81]
-
+    
 
     def calculate_ratings(self, df):
         """
-        Рассчитывает итоговый рейтинг каждого эксперта на основе нескольких факторов.
+        Рассчитывает итоговый рейтинг эксперта на основе нескольких факторов.
 
-        Комбинирует схожесть текстов, удалённость, рабочую нагрузку и средний рейтинг в один показатель.
-        Формула: (similar * 4 + distance * 3 + workload * 2 + avg_rating) / 10
+        Комбинирует три метрики с весами:
+        - сходство текстов (40%),
+        - дистанционная оценка (40%),
+        - средний рейтинг эксперта (20%).
+        Результат сохраняется в столбце 'rating'.
 
         Args:
-            df (pd.DataFrame): DataFrame с вычисленными метриками.
+            df (pandas.DataFrame): Датафрейм с колонками 'similarity_embeddings', 'distance_rate', 'avg_rating'.
 
         Returns:
-            pd.DataFrame: DataFrame с новым столбцом 'rating'.
+            pandas.DataFrame: Датафрейм с добавленным столбцом 'rating'.
         """
-        df['rating'] = (df['similarity_embeddings'] * 4 + df['distance_rate'] * 3 + 
-                        df['workload_rate'] * 2 + df['avg_rating']) / 10
+        df['rating'] = df['similarity_embeddings'] * 0.4 + df['distance_rate'] * 0.4 + df['avg_rating'] * 0.2
         return df
-
+    
 
     def run_pipeline(self, sql_file_path, expertise_id):
         """
-        Запускает полный конвейер обработки: от загрузки данных до расчёта рейтингов.
+        Запускает полный конвейер оценки экспертов для заданной экспертизы.
+
+        Последовательно выполняет все этапы: загрузку данных, предобработку, расчёт сходства,
+        фильтрацию по конфликтам и вычисление рейтинга.
 
         Args:
-            sql_file_path (str): Путь к файлу с SQL-запросом для получения данных.
-            expertise_id (Any): Идентификатор конкретной экспертизы.
+            sql_file_path (str): Имя файла с SQL-запросом для получения данных об экспертах.
+            expertise_id (str или int): Уникальный идентификатор экспертизы.
 
         Returns:
-            pd.DataFrame: Отсортированный DataFrame с экспертами и их рейтингами.
+            pandas.DataFrame: Датафрейм с отфильтрованными и ранжированными экспертами,
+            содержащий колонки 'expert_id' и 'rating'.
         """
         # Загрузка SQL запроса
         sql_query = self.load_sql_query(sql_file_path)
@@ -165,21 +182,19 @@ class ScoringPipeline:
         df = self.calculate_ratings(df)
         
         return df
+    
 
-
-    def get_top_results(self, df, rows=10):
+    def get_top_results(self, df):
         """
-        Возвращает топ-N экспертов с наивысшим рейтингом и ключевой информацией.
+        Извлекает идентификаторы экспертов, отсортированных по убыванию рейтинга.
+
+        Возвращает список ID топовых экспертов для дальнейшего использования (например, в рекомендациях).
 
         Args:
-            df (pd.DataFrame): DataFrame с результатами выполнения пайплайна.
-            rows (int, optional): Количество возвращаемых строк. По умолчанию — 10.
+            df (pandas.DataFrame): Датафрейм с колонками 'expert_id' и 'rating'.
 
         Returns:
-            pd.DataFrame: Таблица с топ-экспертами и основными метриками.
+            pandas.Series: Серия с идентификаторами экспертов, отсортированная по рейтингу по убыванию.
         """
-        result_cols = [
-            'expertise_id', 'priceContract', 'expertise_text_feature', 'expert_id', 'expert_text_feature', 
-            'distance_rate', 'similarity_embeddings', 'possibleWeekWorkload', 'avg_rating', 'conflict_fuzzy', 'rating'
-        ]
-        return df[result_cols].sort_values(by='rating', ascending=False).head(rows)
+        experts = df[['expert_id', 'rating']].sort_values(by='rating', ascending=False)
+        return experts['expert_id']

@@ -580,14 +580,11 @@ experts_with_coords AS (
 	SELECT 
 		ewc.*,
 		u.*,
-		CASE 
-			WHEN ewc.expertise_examination = 1 THEN 6371 * 2 * ATAN2(SQRT(SIN(RADIANS(u.expert_lat - ewc.expertise_lat)/2) * SIN(RADIANS(u.expert_lat - ewc.expertise_lat)/2) + 
-				COS(RADIANS(ewc.expertise_lat)) * COS(RADIANS(u.expert_lat)) * SIN(RADIANS(u.expert_lon - ewc.expertise_lon)/2) * 
-				SIN(RADIANS(u.expert_lon - ewc.expertise_lon)/2)), SQRT(1-SIN(RADIANS(u.expert_lat - ewc.expertise_lat)/2) * SIN(RADIANS(u.expert_lat - ewc.expertise_lat)/2) + 
-		        COS(RADIANS(ewc.expertise_lat)) * COS(RADIANS(u.expert_lat)) * 
-		        SIN(RADIANS(u.expert_lon - ewc.expertise_lon)/2) * SIN(RADIANS(u.expert_lon - ewc.expertise_lon)/2)))
-			ELSE 1
-		END AS region_distance_km,
+		6371 * 2 * ATAN2(SQRT(SIN(RADIANS(u.expert_lat - ewc.expertise_lat)/2) * SIN(RADIANS(u.expert_lat - ewc.expertise_lat)/2) + 
+			COS(RADIANS(ewc.expertise_lat)) * COS(RADIANS(u.expert_lat)) * SIN(RADIANS(u.expert_lon - ewc.expertise_lon)/2) * 
+			SIN(RADIANS(u.expert_lon - ewc.expertise_lon)/2)), SQRT(1-SIN(RADIANS(u.expert_lat - ewc.expertise_lat)/2) * SIN(RADIANS(u.expert_lat - ewc.expertise_lat)/2) + 
+			COS(RADIANS(ewc.expertise_lat)) * COS(RADIANS(u.expert_lat)) * 
+			SIN(RADIANS(u.expert_lon - ewc.expertise_lon)/2) * SIN(RADIANS(u.expert_lon - ewc.expertise_lon)/2))) AS region_distance_km,
 		CASE 
 			WHEN JSON_CONTAINS(u.experienceExpertise, JSON_QUOTE(ewc.experienceExpertise_direction)) THEN 1
 			ELSE 0
@@ -609,10 +606,9 @@ experts_with_coords AS (
 		(u.countPublications + u.countMonographs) / MAX(u.countPublications + u.countMonographs) OVER(PARTITION BY ewc.expertise_id) AS countPubMon_rate
 	FROM expertise_with_coords ewc
 	LEFT JOIN experts_with_coords u
-	ON (JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_direction)) OR JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_monitoring))) 
+	ON (JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_direction)) OR JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_monitoring)))  
 	AND (ewc.expertise_regionExpertise IS NULL 
-		OR (u.expert_regionExpertises IS NULL OR JSON_LENGTH(u.expert_regionExpertises) = 0)
-		OR ewc.expertise_regionExpertise IN ('Общая') 
+		OR ((u.expert_regionExpertises IS NULL OR JSON_LENGTH(u.expert_regionExpertises) = 0) AND ewc.expertise_regionExpertise IN ('Общая', 'Закупочная'))
 		OR JSON_CONTAINS(u.expert_regionExpertises, JSON_QUOTE(ewc.expertise_regionExpertise))) 
 	AND ((ewc.expertise_examination = 1 AND ewc.expertise_examination = u.expert_examination) 
 		OR ewc.expertise_examination IS NULL 
@@ -620,7 +616,10 @@ experts_with_coords AS (
 )
 SELECT 
 	*,
-	1 - region_distance_km / MAX(region_distance_km) OVER(PARTITION BY expertise_id) AS distance_rate,
+	CASE 
+		WHEN expertise_examination = 1 THEN 1 - region_distance_km / MAX(region_distance_km) OVER(PARTITION BY expertise_id)
+		ELSE 1
+	END AS distance_rate,
 	CAST(possibleWeekWorkload / MAX(possibleWeekWorkload) OVER(PARTITION BY expertise_id) AS FLOAT) AS workload_rate,
 	(avg_age / MAX(avg_age) OVER(PARTITION BY expertise_id)
 	+ personal_block + education_rate + experience_rate + degreeExperience_rate
@@ -628,4 +627,4 @@ SELECT
 	+ experienceExpertise_rate + countExpertise_rate + avg_range * 2
 	) / 12 AS avg_rating
 FROM ee_joined
-WHERE possibleWeekWorkload > 0;
+WHERE possibleWeekWorkload > 0.13;
