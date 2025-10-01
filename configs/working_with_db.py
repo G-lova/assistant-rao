@@ -271,7 +271,7 @@ def get_contract_info_from_db(procurement_id: str) -> Dict[str, str]:
     """
     Извлекает основные реквизиты контракта из базы данных по идентификатору закупки.
 
-    Функция обращается к таблице `raw_document_data`, получает данные из поля `contract_draft`
+    Функция обращается к таблице `raw_document_data`, получает данные из поля `summary_report`
     и извлекает оттуда номер контракта, сумму (НМЦК или сумма контракта) и дату контракта.
     Если данные отсутствуют или произошла ошибка — возвращает значения по умолчанию ("0").
 
@@ -290,49 +290,117 @@ def get_contract_info_from_db(procurement_id: str) -> Dict[str, str]:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
 
         query = """
-            SELECT contract_draft 
+            SELECT summary_report 
             FROM raw_document_data 
             WHERE procurement_id = %s
         """
         cursor.execute(query, (procurement_id,))
         result = cursor.fetchone()
 
-        if not result or not result["contract_draft"]:
-            logger.warning(f"Данные contract_draft не найдены для procurement_id={procurement_id}")
+        if not result or not result["summary_report"]:
+            logger.warning(f"Данные summary_report не найдены для procurement_id={procurement_id}")
             return {"contract_number": "0", "amount": "0", "date": "0"}
 
-        data = result["contract_draft"]
+        data = result["summary_report"]
 
-        # Извлечение данных
-        contract_number = data.get("raw_data", {}).get("contract_number", "0")
+        # Извлечение данных из сводного отчета
+        contract_numbers = []
+        amounts = []
+        dates = []
 
-        amounts = data.get("raw_data", {}).get("amounts", [])
-        amount = "0"
-        for amt in amounts:
-            if isinstance(amt, dict):
-                field = amt.get("field", "")
-                if "нмцк" in field.lower() or "сумма контракта" in field.lower():
-                    amount = amt.get("value", "0")
-                    break
+        # Собираем все возможные значения из всех документов
+        for doc_name, doc_data in data.get("documents_summary", {}).items():
+            raw_data = doc_data.get("raw_data", {})
+            
+            # Номера контрактов
+            if raw_data.get("contract_number") and raw_data["contract_number"] != "0":
+                contract_numbers.append(raw_data["contract_number"])
+            
+            # Суммы
+            for amt in raw_data.get("amounts", []):
+                if isinstance(amt, dict) and amt.get("value") and amt.get("value") != "0":
+                    field = amt.get("field", "").lower()
+                    if any(keyword in field for keyword in ["нмцк", "сумма контракта", "цена", "стоимость"]):
+                        amounts.append(amt["value"])
+            
+            # Даты
+            for dt in raw_data.get("dates", []):
+                if isinstance(dt, dict) and dt.get("value") and dt.get("value") != "0":
+                    field = dt.get("field", "").lower()
+                    if any(keyword in field for keyword in ["дата контракта", "дата заключения", "дата подписания"]):
+                        dates.append(dt["value"])
 
-        dates = data.get("raw_data", {}).get("dates", [])
-        date = "0"
-        for dt in dates:
-            if isinstance(dt, dict):
-                field = dt.get("field", "")
-                if "дата контракта" in field.lower():
-                    date = dt.get("value", "0")
-                    break
+        # Выбираем наиболее вероятные значения
+        contract_number = contract_numbers[0] if contract_numbers else "0"
+        amount = amounts[0] if amounts else "0"
+        date = dates[0] if dates else "0"
 
         return {
-            "contract_number": str(contract_number) if contract_number != "0" else "0",
-            "amount": str(amount) if amount != "0" else "0",
-            "date": str(date) if date != "0" else "0"
+            "contract_number": str(contract_number),
+            "amount": str(amount),
+            "date": str(date)
         }
 
     except Exception as e:
         logger.error(f"Ошибка при получении данных о контракте: {str(e)}", exc_info=True)
         return {"contract_number": "0", "amount": "0", "date": "0"}
+    finally:
+        if conn:
+            conn.close()
+
+
+def save_summary_report(procurement_id: int, summary_data: Dict[str, Any]):
+    """
+    Сохраняет сводный отчёт по закупке в базу данных.
+
+    Функция сериализует переданный словарь с результатами анализа в JSON
+    и сохраняет его в таблицу `raw_document_data` по уникальному идентификатору закупки.
+    Если запись с таким `procurement_id` уже существует — обновляется поле `summary_report`,
+    иначе создаётся новая запись. Время обновления автоматически устанавливается в NOW().
+
+    Args:
+        procurement_id (int): Уникальный идентификатор закупки.
+        summary_data (Dict[str, Any]): Словарь с данными сводного отчёта (например, статусы документов, ошибки, рекомендации).
+
+    Returns:
+        None: Функция ничего не возвращает, но логирует успешное сохранение или ошибку.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Преобразуем данные в JSON
+        json_data = json.dumps(summary_data, ensure_ascii=False, indent=2)
+
+        # Проверяем, существует ли уже запись с таким procurement_id
+        check_query = "SELECT id FROM raw_document_data WHERE procurement_id = %s"
+        cursor.execute(check_query, (procurement_id,))
+        exists = cursor.fetchone()
+
+        if exists:
+            # Обновляем поле summary_report
+            query = sql.SQL("""
+                UPDATE raw_document_data 
+                SET summary_report = %s, updated_at = NOW() 
+                WHERE procurement_id = %s
+            """)
+            cursor.execute(query, (json_data, procurement_id))
+        else:
+            # Вставляем новую запись
+            query = sql.SQL("""
+                INSERT INTO raw_document_data (procurement_id, summary_report) 
+                VALUES (%s, %s)
+            """)
+            cursor.execute(query, (procurement_id, json_data))
+
+        conn.commit()
+        logger.info(f"Сводный отчет сохранен для procurement_id={procurement_id}")
+
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении summary_report: {str(e)}", exc_info=True)
+        if conn:
+            conn.rollback()
     finally:
         if conn:
             conn.close()

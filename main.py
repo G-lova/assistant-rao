@@ -8,10 +8,20 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict
 
-from configs.schemas import DocumentContentResponse, BatchDocumentResponse
-from configs.utils import APIKeyMiddleware, read_file, check_procurement_completeness
-from src.evaluator import check_documents_consistency, analyze_document_chunks, split_large_text
-from configs.working_with_db import save_raw_data, save_clean_conclusion, get_contract_info_from_db
+from configs.utils import (APIKeyMiddleware,
+                           read_file,
+                           create_summary_report,
+                           generate_overall_conclusion,
+                           extract_provided_docs_from_results,
+                           extract_required_docs_from_analysis)
+from configs.working_with_db import (save_raw_data,
+                                     save_clean_conclusion,
+                                     get_contract_info_from_db,
+                                     save_summary_report)
+from src.evaluator import (check_documents_consistency,
+                           analyze_document_chunks,
+                           split_large_text,
+                           check_completeness_with_ai)
 from src.scoring import scoring
 
 
@@ -198,20 +208,17 @@ async def evaluate_documents_batch(
     overall_completeness_conclusion = ""
     
     if document_analysis_results:
-        completeness_check = check_procurement_completeness(files_dict, document_analysis_results)
-        
-        # Формируем общее заключение по комплектности
-        if completeness_check["status"] == "allow":
-            overall_completeness_conclusion = "Комплект документов полный. Все необходимые документы присутствуют."
-        else:
-            missing_docs = ", ".join(completeness_check["missing_in_upload"])
-            overall_completeness_conclusion = f"Комплект документов неполный. Отсутствуют: {missing_docs}"
+        completeness_check = await check_completeness_with_ai(
+            procurement_id=procurement_id,
+            required_documents=extract_required_docs_from_analysis(document_analysis_results),
+            provided_documents=extract_provided_docs_from_results(documents_results)
+        )
         
         # Сохраняем результат проверки комплектности
         save_clean_conclusion(
             procurement_id=procurement_id,
             document_type="completeness_check",
-            conclusion=overall_completeness_conclusion
+            conclusion=completeness_check.get("reasoning", "") + f"\nСтатус: {completeness_check.get('completeness_status', 'неизвестно')}\nОтсутствуют: {', '.join(completeness_check.get('missing_documents', []))}"
         )
 
     # Проверяем согласованность данных между документами
@@ -245,6 +252,22 @@ async def evaluate_documents_batch(
         "overall_conclusion": overall_status
     }
 
+    try:
+        summary_report = create_summary_report(
+            procurement_id=procurement_id,
+            documents_results=documents_results,
+            document_analysis_results=document_analysis_results,
+            completeness_check=completeness_check,
+            consistency_result=consistency_result
+        )
+
+        # Сохраняем сводный отчет в raw слой
+        save_summary_report(procurement_id, summary_report)
+
+        logger.info(f"Сводный отчет создан и сохранен для procurement_id={procurement_id}")
+    except Exception as e:
+        logger.error(f"Ошибка при создании сводного отчета: {str(e)}")
+
     # Возвращаем новый формат ответа
     return {
         "procurement_id": procurement_id,
@@ -261,88 +284,6 @@ async def evaluate_documents_batch(
             "issues": consistency_result.get("issues", [])
         }
     }
-
-
-def generate_overall_conclusion(
-    documents_results: List[Dict], 
-    completeness_check: Dict, 
-    consistency_result: Dict
-) -> str:
-    """
-    Генерирует итоговое заключение по результатам комплексной проверки комплекта документов.
-
-    Формирует текстовый вывод на основе анализа трёх аспектов: валидности отдельных документов,
-    полноты комплекта и согласованности данных между документами. Подсчитывает количество проблем
-    и формирует итоговую оценку с рекомендациями.
-
-    Args:
-        documents_results (List[Dict]): Список результатов проверки каждого документа, 
-            где каждый словарь содержит ключ `is_valid` (bool).
-        completeness_check (Dict): Результат проверки полноты комплекта, должен содержать:
-            - status (str): 'allow' — комплект полный, иначе — неполный.
-            - missing_in_upload (List[str]): Список отсутствующих документов (если есть).
-        consistency_result (Dict): Результат проверки согласованности данных между документами, должен содержать:
-            - status (str): 'ok' — всё согласовано, иначе — есть расхождения.
-            - issues (List[dict]): Список выявленных несоответствий.
-
-    Returns:
-        str: Текстовое заключение, содержащее:
-            - Количество обработанных и проблемных документов.
-            - Статус полноты комплекта.
-            - Статус согласованности данных.
-            - Итоговую оценку: "соответствует", "требует исправлений" или "требует доработки".
-            Все пункты объединены в читаемый отчёт, разделённый переносами строк.
-    """
-    conclusions = []
-    
-    # Анализируем результаты по документам
-    valid_docs = [doc for doc in documents_results if doc.get("is_valid")]
-    invalid_docs = [doc for doc in documents_results if not doc.get("is_valid")]
-    
-    if valid_docs:
-        conclusions.append(f"Обработано документов: {len(valid_docs)}")
-    
-    if invalid_docs:
-        conclusions.append(f"Проблемных документов: {len(invalid_docs)}")
-    
-    # Добавляем информацию о комплектности
-    if completeness_check.get("status") == "allow":
-        conclusions.append("Комплект документов полный")
-    else:
-        missing_count = len(completeness_check.get("missing_in_upload", []))
-        conclusions.append(f"Отсутствует документов: {missing_count}")
-    
-    # Добавляем информацию о согласованности
-    if consistency_result.get("status") == "ok":
-        conclusions.append("Данные согласованы")
-    else:
-        issues_count = len(consistency_result.get("issues", []))
-        conclusions.append(f"Обнаружено расхождений: {issues_count}")
-    
-    # Формируем итоговую оценку
-    total_issues = len(invalid_docs) + len(completeness_check.get("missing_in_upload", [])) + len(consistency_result.get("issues", []))
-    
-    # ОПРЕДЕЛЯЕМ ОБЩИЙ СТАТУС
-    has_errors = (
-        len(invalid_docs) > 0 or 
-        completeness_check.get("status") != "allow" or 
-        consistency_result.get("status") != "ok"
-    )
-    
-    if not has_errors:
-        final_assessment = "Комплект документов соответствует требованиям."
-        overall_status = "allow"
-    elif total_issues <= 2:
-        final_assessment = "Комплект документов в основном соответствует требованиям, но требуются исправления."
-        overall_status = "deny"
-    else:
-        final_assessment = "Комплект документов требует значительной доработки."
-        overall_status = "deny"
-    
-    conclusions.append(f"\nИТОГ: {final_assessment}")
-    
-    # Сохраняем общий статус для использования в ответе
-    return "\n".join(conclusions), overall_status
 
 
 @app.post("/get-procurement-completeness")

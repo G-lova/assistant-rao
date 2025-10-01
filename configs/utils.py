@@ -693,3 +693,255 @@ def check_procurement_completeness(
         "detailed_issues": issues,
         "final_feedback": final_feedback
     }
+
+
+def create_summary_report(
+    procurement_id: str,
+    documents_results: List[Dict],
+    document_analysis_results: Dict[str, Dict],
+    completeness_check: Dict,
+    consistency_result: Dict
+) -> Dict[str, Any]:
+    """
+    Формирует сводный отчёт по результатам анализа комплекта документов закупки.
+
+    Объединяет данные из нескольких источников: результаты обработки файлов,
+    детальный анализ каждого документа, проверку комплектности и согласованности.
+    Собирает агрегированные сведения (даты, суммы, юрлица, ссылки на законодательство)
+    и рассчитывает статистику по документам.
+
+    Args:
+        procurement_id (str): Уникальный идентификатор закупки.
+        documents_results (List[Dict]): Список результатов обработки загруженных файлов
+                                       (метаданные, статус валидации и т.д.).
+        document_analysis_results (Dict[str, Dict]): Результаты детального анализа
+                                                    по каждому документу (ключ — имя файла).
+        completeness_check (Dict): Результаты проверки полноты комплекта документов.
+        consistency_result (Dict): Результаты проверки внутренней согласованности данных.
+
+    Returns:
+        Dict[str, Any]: Структурированный сводный отчёт, содержащий:
+            - procurement_id и timestamp;
+            - documents_summary: краткая информация по каждому документу;
+            - completeness_check и consistency_check: статусы и выявленные проблемы;
+            - aggregated_data: объединённые данные из всех документов (даты, суммы и др.);
+            - statistics: статистика по количеству и типам документов.
+    """
+    summary = {
+        "procurement_id": procurement_id,
+        "processing_timestamp": pd.Timestamp.now().isoformat(),
+        "documents_summary": {},
+        "completeness_check": {
+            "status": completeness_check.get("status"),
+            "declared_attachments": completeness_check.get("declared_attachments", []),
+            "missing_documents": completeness_check.get("missing_in_upload", []),
+            "provided_documents": completeness_check.get("provided_documents", [])
+        },
+        "consistency_check": {
+            "status": consistency_result.get("status"),
+            "issues": consistency_result.get("issues", [])
+        }
+    }
+    
+    # Собираем данные из всех документов (исключая conclusion, readability, type_compliance)
+    for doc_name, analysis in document_analysis_results.items():
+        doc_summary = {}
+        
+        # Извлекаем только raw_data и другую полезную информацию
+        if "raw_data" in analysis:
+            raw_data = analysis["raw_data"].copy()
+            
+            # Очищаем данные от ненужных полей если они есть
+            raw_data.pop("conclusion", None)
+            raw_data.pop("readability", None)
+            raw_data.pop("type_compliance", None)
+            
+            doc_summary["raw_data"] = raw_data
+        
+        # Добавляем информацию о документе
+        doc_info = next((doc for doc in documents_results if doc["filename"] == doc_name), {})
+        doc_summary["document_type"] = doc_info.get("document_type", "Дополнительные материалы")
+        doc_summary["is_valid"] = doc_info.get("is_valid", False)
+        
+        summary["documents_summary"][doc_name] = doc_summary
+    
+    # Агрегируем ключевые данные из всех документов
+    all_dates = []
+    all_amounts = []
+    all_legal_entities = []
+    all_law_references = []
+    
+    for doc_name, analysis in document_analysis_results.items():
+        raw_data = analysis.get("raw_data", {})
+        
+        # Собираем даты
+        if "dates" in raw_data:
+            for date_info in raw_data["dates"]:
+                date_info["source_document"] = doc_name
+                all_dates.append(date_info)
+        
+        # Собираем суммы
+        if "amounts" in raw_data:
+            for amount_info in raw_data["amounts"]:
+                amount_info["source_document"] = doc_name
+                all_amounts.append(amount_info)
+        
+        # Собираем юридические лица
+        if "legal_entities" in raw_data:
+            for entity_info in raw_data["legal_entities"]:
+                entity_info["source_document"] = doc_name
+                all_legal_entities.append(entity_info)
+        
+        # Собираем ссылки на законодательство
+        if "law_references" in raw_data:
+            for law_ref in raw_data["law_references"]:
+                all_law_references.append({
+                    "reference": law_ref,
+                    "source_document": doc_name
+                })
+    
+    # Добавляем агрегированные данные в сводный отчет
+    summary["aggregated_data"] = {
+        "dates": all_dates,
+        "amounts": all_amounts,
+        "legal_entities": all_legal_entities,
+        "law_references": all_law_references
+    }
+    
+    # Добавляем статистику
+    summary["statistics"] = {
+        "total_documents": len(documents_results),
+        "valid_documents": len([doc for doc in documents_results if doc.get("is_valid")]),
+        "invalid_documents": len([doc for doc in documents_results if not doc.get("is_valid")]),
+        "unique_document_types": list(set(doc.get("document_type", "Дополнительные материалы") for doc in documents_results)),
+        "total_amounts_found": len(all_amounts),
+        "total_dates_found": len(all_dates),
+        "total_legal_entities_found": len(all_legal_entities)
+    }
+    
+    return summary
+
+
+def generate_overall_conclusion(
+    documents_results: List[Dict], 
+    completeness_check: Dict, 
+    consistency_result: Dict
+) -> str:
+    """
+    Генерирует итоговое заключение по результатам комплексной проверки комплекта документов.
+
+    Формирует текстовый вывод на основе анализа трёх аспектов: валидности отдельных документов,
+    полноты комплекта и согласованности данных между документами. Подсчитывает количество проблем
+    и формирует итоговую оценку с рекомендациями.
+
+    Args:
+        documents_results (List[Dict]): Список результатов проверки каждого документа, 
+            где каждый словарь содержит ключ `is_valid` (bool).
+        completeness_check (Dict): Результат проверки полноты комплекта, должен содержать:
+            - status (str): 'allow' — комплект полный, иначе — неполный.
+            - missing_in_upload (List[str]): Список отсутствующих документов (если есть).
+        consistency_result (Dict): Результат проверки согласованности данных между документами, должен содержать:
+            - status (str): 'ok' — всё согласовано, иначе — есть расхождения.
+            - issues (List[dict]): Список выявленных несоответствий.
+
+    Returns:
+        str: Текстовое заключение, содержащее:
+            - Количество обработанных и проблемных документов.
+            - Статус полноты комплекта.
+            - Статус согласованности данных.
+            - Итоговую оценку: "соответствует", "требует исправлений" или "требует доработки".
+            Все пункты объединены в читаемый отчёт, разделённый переносами строк.
+    """
+    conclusions = []
+    
+    # Анализируем результаты по документам
+    valid_docs = [doc for doc in documents_results if doc.get("is_valid")]
+    invalid_docs = [doc for doc in documents_results if not doc.get("is_valid")]
+    
+    if valid_docs:
+        conclusions.append(f"Обработано документов: {len(valid_docs)}")
+    
+    if invalid_docs:
+        conclusions.append(f"Проблемных документов: {len(invalid_docs)}")
+    
+    # Добавляем информацию о комплектности
+    if completeness_check.get("status") == "allow":
+        conclusions.append("Комплект документов полный")
+    else:
+        missing_count = len(completeness_check.get("missing_in_upload", []))
+        conclusions.append(f"Отсутствует документов: {missing_count}")
+    
+    # Добавляем информацию о согласованности
+    if consistency_result.get("status") == "ok":
+        conclusions.append("Данные согласованы")
+    else:
+        issues_count = len(consistency_result.get("issues", []))
+        conclusions.append(f"Обнаружено расхождений: {issues_count}")
+    
+    # Формируем итоговую оценку
+    total_issues = len(invalid_docs) + len(completeness_check.get("missing_in_upload", [])) + len(consistency_result.get("issues", []))
+    
+    # ОПРЕДЕЛЯЕМ ОБЩИЙ СТАТУС
+    has_errors = (
+        len(invalid_docs) > 0 or 
+        completeness_check.get("status") != "allow" or 
+        consistency_result.get("status") != "ok"
+    )
+    
+    if not has_errors:
+        final_assessment = "Комплект документов соответствует требованиям."
+        overall_status = "allow"
+    elif total_issues <= 2:
+        final_assessment = "Комплект документов в основном соответствует требованиям, но требуются исправления."
+        overall_status = "deny"
+    else:
+        final_assessment = "Комплект документов требует значительной доработки."
+        overall_status = "deny"
+    
+    conclusions.append(f"\nИТОГ: {final_assessment}")
+    
+    # Сохраняем общий статус для использования в ответе
+    return "\n".join(conclusions), overall_status
+
+
+def extract_required_docs_from_analysis(document_analysis_results: Dict[str, Dict]) -> List[str]:
+    """
+    Извлекает список требуемых документов из результатов анализа исходного документа.
+
+    Функция проходит по результатам анализа каждого документа и собирает названия
+    документов, указанных в поле 'attached_documents_list' внутри 'raw_data'.
+    Используется для определения полного комплекта, который должен быть предоставлен.
+
+    Args:
+        document_analysis_results (Dict[str, Dict]): Словарь, где ключ — имя документа,
+                                                    значение — результат его анализа,
+                                                    содержащий, в частности, raw_data.
+
+    Returns:
+        List[str]: Уникальный список требуемых документов, извлечённых из всех анализов.
+    """
+    required_docs = set()
+    
+    for doc_name, analysis in document_analysis_results.items():
+        if "raw_data" in analysis and "attached_documents_list" in analysis["raw_data"]:
+            attached_docs = analysis["raw_data"]["attached_documents_list"]
+            if attached_docs:
+                required_docs.update(attached_docs)
+    
+    return list(required_docs)
+
+
+def extract_provided_docs_from_results(documents_results: List[Dict]) -> List[str]:
+    """
+    Извлекает список предоставленных документов из результатов обработки загрузки.
+
+    Функция собирает типы документов, которые были успешно загружены и обработаны,
+    на основе поля 'document_type' в каждом элементе списка.
+
+    Args:
+        documents_results (List[Dict]): Список словарей с результатами обработки каждого загруженного документа.
+
+    Returns:
+        List[str]: Список типов предоставленных документов (без дубликатов не требуется, сохраняется порядок).
+    """
+    return [doc["document_type"] for doc in documents_results if doc.get("document_type")]

@@ -33,6 +33,7 @@ CREATE TABLE raw_document_data (
     work_results_photos JSONB, -- Фото результатов выполнения работ (оказания услуг)
     goods_photos JSONB, -- Фото товара
     contract_execution_expertise JSONB, -- Экспертиза результатов исполнения контракта
+    summary_report JSONB,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );

@@ -9,7 +9,11 @@ from openai import OpenAI
 from dotenv import load_dotenv
 
 from configs.procurement_requirements import DOCUMENT_TYPE_MAPPING
-from src.prompts import RESPONSE_JSON_SCHEMA, SYSTEM_PROMPT, TYPE_DETECTION_PROMPT
+from src.prompts import (RESPONSE_JSON_SCHEMA,
+                         SYSTEM_PROMPT,
+                         TYPE_DETECTION_PROMPT,
+                         COMPLETENESS_CHECK_PROMPT,
+                         COMPLETENESS_CHECK_SCHEMA)
 from configs.working_with_db import save_raw_data, save_clean_conclusion, get_raw_data_by_procurement_id
 from configs.utils import check_procurement_completeness
 
@@ -133,7 +137,6 @@ async def analyze_document_chunks(
     
     # ЭТАП 1: Определение типа документа по первым 1500 символам
     first_n_chars = chunks[0][:1500]
-    print('------first_n_chars------' + first_n_chars)
     detected_type = await detect_document_type(first_n_chars, document_name)
     
     # Если тип не определен, используем исходный или "Дополнительные материалы"
@@ -684,11 +687,11 @@ async def detect_document_type(first_n_chars: str, document_name: str) -> str:
                     messages=[
                         {
                             "role": "system", 
-                            "content": "Ты — эксперт по документам закупочной деятельности. Определи тип документа по его началу и верни ТОЛЬКО JSON с полем document_type."
+                            "content": TYPE_DETECTION_PROMPT
                         },
                         {
                             "role": "user", 
-                            "content": f"Определи тип этого документа по первым символам:\n\n{text_for_analysis}"
+                            "content": f"Определи тип этого документа:\n\n{text_for_analysis}"
                         }
                     ],
                     max_tokens=100,
@@ -724,3 +727,159 @@ async def detect_document_type(first_n_chars: str, document_name: str) -> str:
     except Exception as e:
         logger.error(f"Ошибка при определении типа документа {document_name}: {str(e)}")
         return "Дополнительные материалы"
+
+
+async def check_completeness_with_ai(
+    procurement_id: str,
+    required_documents: List[str],
+    provided_documents: List[str]
+) -> Dict[str, Any]:
+    """
+    Проверяет комплектность документов с помощью ИИ, учитывая смысловое соответствие.
+
+    Args:
+        procurement_id (str): ID закупки
+        required_documents (List[str]): Список обязательных документов
+        provided_documents (List[str]): Список загруженных документов
+
+    Returns:
+        Dict[str, Any]: Результат проверки комплектности
+    """
+    try:
+        logger.info(f"Проверка комплектности с ИИ для закупки {procurement_id}")
+        logger.info(f"Обязательные документы: {required_documents}")
+        logger.info(f"Загруженные документы: {provided_documents}")
+
+        if not required_documents:
+            return {
+                "completeness_status": "полный",
+                "missing_documents": [],
+                "document_mapping": {},
+                "reasoning": "Список обязательных документов не указан"
+            }
+
+        # Формируем промпт
+        prompt = COMPLETENESS_CHECK_PROMPT.format(
+            required_docs=json.dumps(required_documents, ensure_ascii=False, indent=2),
+            provided_docs=json.dumps(provided_documents, ensure_ascii=False, indent=2)
+        )
+
+        # Вызываем модель
+        response = await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": "Ты — эксперт по проверке комплектности документов закупки."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=2000,
+                    temperature=0.1,
+                    extra_body={"guided_json": COMPLETENESS_CHECK_SCHEMA}
+                )
+            ),
+            timeout=45.0
+        )
+
+        raw_response = response.choices[0].message.content.strip()
+        logger.info(f"Ответ модели для проверки комплектности: {raw_response}")
+
+        # Парсим JSON
+        try:
+            result = json.loads(raw_response)
+            
+            # Валидация результата
+            if not all(key in result for key in ["completeness_status", "missing_documents", "document_mapping", "reasoning"]):
+                raise ValueError("Неполный ответ от модели")
+                
+            logger.info(f"Проверка комплектности завершена: статус - {result['completeness_status']}")
+            return result
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Ошибка парсинга JSON при проверке комплектности: {e}")
+            logger.error(f"Сырой ответ: {raw_response}")
+            return create_fallback_completeness_result(required_documents, provided_documents)
+
+    except asyncio.TimeoutError:
+        logger.error(f"Таймаут при проверке комплектности для {procurement_id}")
+        return create_fallback_completeness_result(required_documents, provided_documents)
+    except Exception as e:
+        logger.error(f"Ошибка при проверке комплектности: {str(e)}", exc_info=True)
+        return create_fallback_completeness_result(required_documents, provided_documents)
+
+
+def create_fallback_completeness_result(required_docs: List[str], provided_docs: List[str]) -> Dict[str, Any]:
+    """
+    Создает резервный результат проверки комплектности при ошибке ИИ.
+    
+    Args:
+        required_docs (List[str]): Обязательные документы
+        provided_docs (List[str]): Загруженные документы
+        
+    Returns:
+        Dict[str, Any]: Резервный результат
+    """
+    # Простое сравнение без семантического анализа
+    missing_docs = []
+    document_mapping = {}
+    
+    # Базовое сопоставление по ключевым словам
+    for req_doc in required_docs:
+        found_match = False
+        for prov_doc in provided_docs:
+            if is_document_match(req_doc, prov_doc):
+                document_mapping[req_doc] = prov_doc
+                found_match = True
+                break
+                
+        if not found_match:
+            missing_docs.append(req_doc)
+    
+    status = "полный" if not missing_docs else "неполный"
+    
+    return {
+        "completeness_status": status,
+        "missing_documents": missing_docs,
+        "document_mapping": document_mapping,
+        "reasoning": "Проверка выполнена базовым методом (без семантического анализа)"
+    }
+
+
+def is_document_match(required_doc: str, provided_doc: str) -> bool:
+    """
+    Проверяет соответствие документов по ключевым словам.
+    
+    Args:
+        required_doc (str): Обязательный документ
+        provided_doc (str): Загруженный документ
+        
+    Returns:
+        bool: True если документы соответствуют
+    """
+    required_lower = required_doc.lower()
+    provided_lower = provided_doc.lower()
+    
+    # Группы эквивалентных документов
+    contract_group = ["проект контракта", "проект договора", "контракт", "договор"]
+    price_group = ["обоснование н(м)цк", "обоснование цены", "расчет нмцк", "смета"]
+    tech_group = ["техническое задание", "тз", "описание объекта закупки"]
+    notice_group = ["извещение", "уведомление о закупке"]
+    requirements_group = ["требования к содержанию заявки", "инструкция для участников"]
+    
+    # Проверка принадлежности к одной группе
+    groups = [contract_group, price_group, tech_group, notice_group, requirements_group]
+    
+    for group in groups:
+        if required_lower in group and any(doc in provided_lower for doc in group):
+            return True
+            
+    # Точноет совпадение
+    if required_lower == provided_lower:
+        return True
+        
+    # Частичное совпадение
+    if required_lower in provided_lower or provided_lower in required_lower:
+        return True
+        
+    return False
