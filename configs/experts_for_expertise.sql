@@ -332,8 +332,8 @@ WITH expertise_info AS (
 		u.experienceExpertise,
 		u.countExpertise,
 		COALESCE(u.workExpertise, 0) AS desiredWeekWorkload,
-		COUNT(CASE WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE status = 5) THEN 1 END) AS countExpertisesBD,
 		COUNT(CASE WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) AND ee.expertise_id IN (SELECT id FROM expertises WHERE status = 5) THEN 1 END) AS countExpertises_lastYear,
+		COUNT(CASE WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE status = 5) THEN 1 END) AS countExpertisesBD,
 		AVG(CASE WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) THEN ee.`range` ELSE NULL END) AS avg_range,
         CASE 
             WHEN MAX(CASE WHEN e.status IN (3,4) AND e.dateStatus3 IS NOT NULL THEN 1 ELSE 0 END) = 1 
@@ -633,7 +633,7 @@ experts_with_coords AS (
 		(u.countPublications + u.countMonographs) / MAX(u.countPublications + u.countMonographs) OVER(PARTITION BY ewc.expertise_id) AS countPubMon_rate
 	FROM expertise_with_coords ewc
 	LEFT JOIN experts_with_coords u
-	ON (JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_direction)) OR JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_monitoring)))  
+	ON (JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_direction)) OR JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_monitoring))) 
 	AND (ewc.expertise_regionExpertise IS NULL 
 		OR ((u.expert_regionExpertises IS NULL OR JSON_LENGTH(u.expert_regionExpertises) = 0) AND ewc.expertise_regionExpertise IN ('Общая', 'Закупочная'))
 		OR JSON_CONTAINS(u.expert_regionExpertises, JSON_QUOTE(ewc.expertise_regionExpertise))) 
@@ -651,7 +651,7 @@ SELECT
 	(age / MAX(age) OVER(PARTITION BY expertise_id) + declines_rate
 	+ personal_block + education_rate + experience_rate + degreeExperience_rate
 	+ academicTitleExperience_rate + pubMon_rate + countPubMon_rate 
-	+ experienceExpertise_rate + countExpertise_rate + avg_range * 2
+	+ experienceExpertise_rate + countExpertise_rate + COALESCE(avg_range, 0)
 	) / 12 AS avg_rating
 FROM ee_joined
 WHERE possibleWeekWorkload > 0.13;
