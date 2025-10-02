@@ -203,25 +203,38 @@ async def evaluate_documents_batch(
             }
             documents_results.append(document_result)
 
-    # Проверяем комплектность документов
+    # Проверяем комплектность документов С ПОМОЩЬЮ МОДЕЛИ ИИ
     completeness_check = {}
     overall_completeness_conclusion = ""
     
     if document_analysis_results:
-        completeness_check = await check_completeness_with_ai(
+        # ИСПОЛЬЗУЕМ МОДЕЛЬ ДЛЯ ПРОВЕРКИ КОМПЛЕКТНОСТИ
+        ai_completeness_result = await check_completeness_with_ai(
             procurement_id=procurement_id,
             required_documents=extract_required_docs_from_analysis(document_analysis_results),
             provided_documents=extract_provided_docs_from_results(documents_results)
         )
         
+        # Преобразуем результат ИИ в совместимый формат
+        completeness_check = {
+            "status": "allow" if ai_completeness_result.get("completeness_status") == "полный" else "deny",
+            "declared_attachments": extract_required_docs_from_analysis(document_analysis_results),
+            "missing_in_upload": ai_completeness_result.get("missing_documents", []),
+            "provided_documents": extract_provided_docs_from_results(documents_results),
+            "source_docs_for_attached": list(document_analysis_results.keys()),
+            "feedback": ai_completeness_result.get("reasoning", ""),
+            "detailed_issues": [],
+            "final_feedback": f"Статус комплектности: {ai_completeness_result.get('completeness_status', 'неизвестно')}. {ai_completeness_result.get('reasoning', '')}"
+        }
+        
         # Сохраняем результат проверки комплектности
         save_clean_conclusion(
             procurement_id=procurement_id,
             document_type="completeness_check",
-            conclusion=completeness_check.get("reasoning", "") + f"\nСтатус: {completeness_check.get('completeness_status', 'неизвестно')}\nОтсутствуют: {', '.join(completeness_check.get('missing_documents', []))}"
+            conclusion=completeness_check["final_feedback"]
         )
 
-    # Проверяем согласованность данных между документами
+    # Проверяем согласованность данных между документами ТАКЖЕ С ПОМОЩЬЮ МОДЕЛИ
     consistency_result = await check_documents_consistency(procurement_id)
     
     # Формируем общее заключение по согласованности
@@ -231,9 +244,10 @@ async def evaluate_documents_batch(
     else:
         overall_consistency_conclusion = f"Обнаружены расхождения в документах: {consistency_result['conclusion']}"
     
+    # ИСПРАВЛЕНО: сохраняем consistency_check в правильное поле
     save_clean_conclusion(
         procurement_id=procurement_id,
-        document_type="completeness_check",
+        document_type="consistency_check",
         conclusion=overall_consistency_conclusion
     )
 
@@ -275,7 +289,7 @@ async def evaluate_documents_batch(
         "overall_conclusion": overall_status,
         "completeness_summary": {
             "status": completeness_check.get("status", "unknown"),
-            "conclusion": overall_completeness_conclusion,
+            "conclusion": completeness_check.get("final_feedback", ""),
             "missing_documents": completeness_check.get("missing_in_upload", [])
         },
         "consistency_summary": {
@@ -368,7 +382,7 @@ async def api_get_documents_report(request_body: Dict[str, str] = Body(...)):
         "overall_conclusion": cache_data["overall_conclusion"],
         "completeness_summary": {
             "status": cache_data["completeness_check"].get("status", "unknown"),
-            "conclusion": cache_data["completeness_check"].get("feedback", ""),
+            "conclusion": cache_data["completeness_check"].get("final_feedback", ""),
             "missing_documents": cache_data["completeness_check"].get("missing_in_upload", [])
         },
         "consistency_summary": {
