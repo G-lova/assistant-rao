@@ -503,11 +503,7 @@ def process_archive(file_path: str) -> str:
 
 def read_file(file_path: str, original_filename: str = None) -> str:
     """
-    Читает файл и извлекает текстовое содержимое в зависимости от его формата.
-
-    Функция определяет тип файла по расширению и вызывает соответствующий обработчик:
-    TXT, PDF, Excel, PowerPoint, DOC/DOCX, архивы и другие форматы. Поддерживает
-    передачу оригинального имени файла для корректной обработки (например, при работе с временными путями).
+    Читает файл и извлекает текстовое содержимое с улучшенной обработкой бинарных файлов
 
     Args:
         file_path (str): Путь к файлу на диске.
@@ -527,6 +523,25 @@ def read_file(file_path: str, original_filename: str = None) -> str:
     logger.info(f"Чтение файла: {filename_to_check} (расширение: {ext})")
 
     try:
+        # Если расширение .bin, пробуем определить реальный тип
+        if ext == ".bin":
+            real_extension = detect_binary_file_type(file_path)
+            logger.info(f"Определен реальный тип бинарного файла: {real_extension}")
+            
+            # Создаем копию файла с правильным расширением для обработки
+            if real_extension != ".bin":
+                new_path = file_path + real_extension
+                shutil.copy2(file_path, new_path)
+                try:
+                    result = read_file(new_path, original_filename + real_extension)
+                    os.unlink(new_path)
+                    return result
+                except Exception as e:
+                    logger.warning(f"Не удалось обработать файл с определенным расширением {real_extension}: {str(e)}")
+                    os.unlink(new_path)
+                    # Продолжаем с оригинальным .bin файлом
+
+        # Основная логика обработки по расширениям
         if ext == ".txt":
             with open(file_path, "r", encoding="utf-8") as f:
                 text = f.read()
@@ -557,10 +572,26 @@ def read_file(file_path: str, original_filename: str = None) -> str:
             text = process_archive(file_path)
             logger.info(f"Извлечён текст из архива: {filename_to_check}, длина: {len(text)}")
             return text
+        elif ext in [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff"]:
+            # Обработка изображений через OCR
+            try:
+                text = ocr_image_with_qwen_vl(file_path)
+                logger.info(f"Извлечён текст из изображения через OCR: {filename_to_check}, длина: {len(text)}")
+                return text
+            except Exception as e:
+                logger.warning(f"Не удалось извлечь текст из изображения {filename_to_check}: {str(e)}")
+                return f"Изображение {os.path.basename(file_path)} (текст не распознан)"
         else:
-            msg = f"Бинарный файл {os.path.basename(file_path)} (формат {ext})"
+            # Для неизвестных форматов пробуем определить тип и обработать
+            if ext == ".bin":
+                # Уже пробовали определить тип выше, если дошли сюда - не удалось
+                msg = f"Бинарный файл {os.path.basename(file_path)} (не удалось определить формат)"
+            else:
+                msg = f"Бинарный файл {os.path.basename(file_path)} (формат {ext})"
+            
             logger.warning(f"Неподдерживаемый формат файла: {filename_to_check}")
             return msg
+            
     except Exception as e:
         logger.error(f"Ошибка чтения файла {filename_to_check}: {str(e)}", exc_info=True)
         raise ValueError(f"Ошибка чтения файла: {str(e)}")
@@ -907,18 +938,13 @@ def generate_overall_conclusion(
 def extract_required_docs_from_analysis(document_analysis_results: Dict[str, Dict]) -> List[str]:
     """
     Извлекает список требуемых документов из результатов анализа исходного документа.
-
-    Функция проходит по результатам анализа каждого документа и собирает названия
-    документов, указанных в поле 'attached_documents_list' внутри 'raw_data'.
-    Используется для определения полного комплекта, который должен быть предоставлен.
+    ИСКЛЮЧАЕТ 'проект контракта' из проверки комплектности.
 
     Args:
-        document_analysis_results (Dict[str, Dict]): Словарь, где ключ — имя документа,
-                                                    значение — результат его анализа,
-                                                    содержащий, в частности, raw_data.
+        document_analysis_results (Dict[str, Dict]): Словарь с результатами анализа документов.
 
     Returns:
-        List[str]: Уникальный список требуемых документов, извлечённых из всех анализов.
+        List[str]: Уникальный список требуемых документов, исключая 'проект контракта'.
     """
     required_docs = set()
     
@@ -926,7 +952,12 @@ def extract_required_docs_from_analysis(document_analysis_results: Dict[str, Dic
         if "raw_data" in analysis and "attached_documents_list" in analysis["raw_data"]:
             attached_docs = analysis["raw_data"]["attached_documents_list"]
             if attached_docs:
-                required_docs.update(attached_docs)
+                # ФИЛЬТРУЕМ - исключаем 'проект контракта'
+                filtered_docs = [
+                    doc for doc in attached_docs 
+                    if doc.lower().strip() != "проект контракта"
+                ]
+                required_docs.update(filtered_docs)
     
     return list(required_docs)
 
@@ -945,3 +976,87 @@ def extract_provided_docs_from_results(documents_results: List[Dict]) -> List[st
         List[str]: Список типов предоставленных документов (без дубликатов не требуется, сохраняется порядок).
     """
     return [doc["document_type"] for doc in documents_results if doc.get("document_type")]
+
+
+def detect_binary_file_type(file_path: str) -> str:
+    """
+    Определяет тип бинарного файла по его содержимому (сигнатурам)
+    
+    Args:
+        file_path (str): Путь к файлу
+        
+    Returns:
+        str: Расширение файла (.pdf, .docx, .jpg и т.д.) или .bin если не удалось определить
+    """
+    try:
+        with open(file_path, 'rb') as f:
+            header = f.read(12)  # Читаем первые 12 байт для лучшего определения
+        # PDF - %PDF
+        if header.startswith(b'%PDF'):
+            return '.pdf'
+        # ZIP-based formats (DOCX, XLSX, PPTX, ODT и т.д.)
+        if header.startswith(b'PK\x03\x04'):
+            # Можно попробовать определить точный тип по структуре ZIP
+            try:
+                with zipfile.ZipFile(file_path, 'r') as zip_file:
+                    namelist = zip_file.namelist()
+                    # Проверяем структуру для разных форматов
+                    if any(name.startswith('word/') for name in namelist):
+                        return '.docx'
+                    elif any(name.startswith('xl/') for name in namelist):
+                        return '.xlsx'
+                    elif any(name.startswith('ppt/') for name in namelist):
+                        return '.pptx'
+                    else:
+                        return '.zip'  # обычный ZIP архив
+            except:
+                return '.docx'  # по умолчанию считаем DOCX
+        # Microsoft Office old formats (DOC, XLS, PPT)
+        if header.startswith(b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1'):
+            return '.doc'  # по умолчанию DOC
+        # JPEG
+        if header.startswith(b'\xFF\xD8\xFF'):
+            return '.jpg'
+        # PNG
+        if header.startswith(b'\x89PNG\r\n\x1a\n'):
+            return '.png'
+        # GIF
+        if header.startswith(b'GIF8'):
+            return '.gif'
+        # BMP
+        if header.startswith(b'BM'):
+            return '.bmp'
+        # TIFF
+        if header.startswith(b'II\x2A\x00') or header.startswith(b'MM\x00\x2A'):
+            return '.tiff'
+        # RAR
+        if header.startswith(b'Rar!\x1A\x07\x00') or header.startswith(b'Rar!\x1A\x07\x01'):
+            return '.rar'
+        # 7Z
+        if header.startswith(b'7z\xBC\xAF\x27\x1C'):
+            return '.7z'
+        # Microsoft Cabinet (CAB)
+        if header.startswith(b'MSCF'):
+            return '.cab'
+        # Windows Executable
+        if header.startswith(b'MZ'):
+            return '.exe'
+        # UTF-8/16 text files with BOM
+        if header.startswith(b'\xEF\xBB\xBF'):  # UTF-8 BOM
+            return '.txt'
+        if header.startswith(b'\xFF\xFE') or header.startswith(b'\xFE\xFF'):  # UTF-16 BOM
+            return '.txt'
+
+        # Пробуем определить как текстовый файл
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                f.read(1024)  # Пробуем прочитать как текст
+            return '.txt'
+        except:
+            pass
+            
+        return '.bin'
+        
+    except Exception as e:
+        logger.error(f"Ошибка определения типа бинарного файла {file_path}: {str(e)}")
+        return '.bin'

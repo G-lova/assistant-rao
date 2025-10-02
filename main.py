@@ -23,6 +23,7 @@ from src.evaluator import (check_documents_consistency,
                            split_large_text,
                            check_completeness_with_ai)
 from src.scoring import scoring
+from configs.parsing import parse_cloud_storage_link, is_cloud_storage_link, process_input_links
 
 
 app = FastAPI()
@@ -48,7 +49,8 @@ document_analysis_cache = {}
 @app.post("/evaluate-documents")
 async def evaluate_documents_batch(
     procurement_id: str = Form(...),
-    files: List[UploadFile] = File(..., description="Список загружаемых документов"),
+    files: List[UploadFile] = File(None),
+    links: List[str] = Form(None),
     legislation: Optional[str] = Form("44-ФЗ"),
     procurement_method: Optional[str] = Form("Конкурс"),
     expertise_details: Optional[str] = Form("Полный комплект документов о закупке")
@@ -56,31 +58,19 @@ async def evaluate_documents_batch(
     """
     Обработчик POST-запроса для массовой проверки документов закупки.
 
-    Принимает несколько файлов и метаданные (ID закупки, законодательство и т.д.), 
-    последовательно анализирует каждый документ с автоматическим определением его типа,
-    проверяет полноту комплекта и согласованность данных между документами.
-    Поддерживает обработку больших файлов через разбиение на фрагменты.
+    Принимает файлы и/или ссылки на облачные хранилища, анализирует каждый документ 
+    с автоматическим определением его типа, проверяет полноту комплекта и согласованность данных.
 
     Args:
         procurement_id (str): Уникальный идентификатор закупки для группировки документов.
-        files (List[UploadFile]): Список загруженных файлов (PDF, DOCX, XLSX и др.).
-        legislation (Optional[str], optional): Нормативная база (например, "44-ФЗ"). По умолчанию — "44-ФЗ".
+        files (List[UploadFile], optional): Список загруженных файлов (PDF, DOCX, XLSX и др.).
+        links (List[str], optional): Список ссылок на облачные хранилища.
+        legislation (Optional[str], optional): Нормативная база. По умолчанию — "44-ФЗ".
         procurement_method (Optional[str], optional): Способ проведения закупки. По умолчанию — "Конкурс".
-        expertise_details (Optional[str], optional): Дополнительные сведения об экспертизе. 
-            По умолчанию — "Полный комплект документов о закупке".
-
-    Raises:
-        ValueError: Если файл пустой или не удаётся извлечь текст.
-        Exception: При критических ошибках чтения или обработки файла.
+        expertise_details (Optional[str], optional): Дополнительные сведения об экспертизе.
 
     Returns:
-        dict: Структурированный ответ, содержащий:
-            - procurement_id: ID закупки.
-            - documents: Список результатов по каждому документу (тип, валидность, вывод).
-            - overall_conclusion: Итоговое заключение по всем документам.
-            - completeness_summary: Информация о полноте комплекта.
-            - consistency_summary: Результаты проверки согласованности данных.
-            Все промежуточные результаты сохраняются в БД и кэшируются.
+        dict: Структурированный ответ с результатами анализа.
     """
     global document_analysis_cache
     
@@ -88,127 +78,233 @@ async def evaluate_documents_batch(
     document_analysis_results = {}
     files_dict = {}
 
-    for file in files:
-        try:
-            # Создаём временный файл
-            suffix = os.path.splitext(file.filename)[1] or ".bin"
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                content = await file.read()
-                if not content:
-                    raise ValueError("Файл пустой")
-                tmp.write(content)
-                tmp_path = tmp.name
-                files_dict[file.filename] = tmp_path
+    # Проверяем, что есть хотя бы файлы или ссылки
+    if not files and not links:
+        raise HTTPException(
+            status_code=400, 
+            detail="Необходимо предоставить либо файлы, либо ссылки на документы"
+        )
 
+    # ОБРАБОТКА ФАЙЛОВ
+    if files:
+        for file in files:
             try:
-                logger.info(f"Обработка файла: {file.filename} для закупки {procurement_id}")
+                # Создаём временный файл
+                suffix = os.path.splitext(file.filename)[1] or ".bin"
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                    content = await file.read()
+                    if not content:
+                        raise ValueError("Файл пустой")
+                    tmp.write(content)
+                    tmp_path = tmp.name
+                    files_dict[file.filename] = tmp_path
 
-                # Извлечение текста
-                extracted_text = read_file(tmp_path, original_filename=file.filename)
+                try:
+                    logger.info(f"Обработка файла: {file.filename} для закупки {procurement_id}")
 
-                if not extracted_text or "[Нет читаемого текста]" in extracted_text:
-                    raise ValueError("Не удалось извлечь текст из файла")
+                    # Извлечение текста
+                    extracted_text = read_file(tmp_path, original_filename=file.filename)
 
-                # Разделяем большой текст на блоки
-                chunks = split_large_text(extracted_text, max_chunk_size=20000)
-                logger.info(f"Документ разделён на {len(chunks)} блоков")
+                    if not extracted_text or "[Нет читаемого текста]" in extracted_text:
+                        raise ValueError("Не удалось извлечь текст из файла")
 
-                # Анализируем документ по частям
-                analysis_result = await analyze_document_chunks(
-                    chunks=chunks,
-                    document_name=file.filename,
-                    document_type="",
-                    law_type=legislation,
-                    procurement_method=procurement_method
-                )
+                    # Разделяем большой текст на блоки
+                    chunks = split_large_text(extracted_text, max_chunk_size=20000)
+                    logger.info(f"Документ разделён на {len(chunks)} блоков")
 
-                if analysis_result["status"] == "error":
-                    final_doc_type = "Дополнительные материалы"
-                    is_valid = False
-                    conclusion = f"Ошибка анализа: {analysis_result['analysis']['conclusion']}"
-                else:
-                    analysis = analysis_result["analysis"]
-                    actual_type_from_model = analysis["type_compliance"].get("actual_type", "").strip()
-
-                    # Нормализуем тип
-                    final_doc_type = actual_type_from_model if actual_type_from_model else "Дополнительные материалы"
-
-                    confidence = analysis["type_compliance"].get("confidence", 0)
-                    is_valid = (
-                        final_doc_type != "Дополнительные материалы"
-                        and confidence >= 0.7
+                    # Анализируем документ по частям
+                    analysis_result = await analyze_document_chunks(
+                        chunks=chunks,
+                        document_name=file.filename,
+                        document_type="",
+                        law_type=legislation,
+                        procurement_method=procurement_method
                     )
-                    
-                    conclusion = analysis["conclusion"]
-                    
-                    # Сохраняем результаты анализа для проверки комплектности
-                    document_analysis_results[file.filename] = analysis
 
-                    # Сохраняем в БД
-                    try:
-                        save_raw_data(
-                            procurement_id=procurement_id, 
-                            document_type=final_doc_type, 
-                            full_analysis=analysis
+                    if analysis_result["status"] == "error":
+                        final_doc_type = "Дополнительные материалы"
+                        is_valid = False
+                        conclusion = f"Ошибка анализа: {analysis_result['analysis']['conclusion']}"
+                    else:
+                        analysis = analysis_result["analysis"]
+                        actual_type_from_model = analysis["type_compliance"].get("actual_type", "").strip()
+
+                        # Нормализуем тип
+                        final_doc_type = actual_type_from_model if actual_type_from_model else "Дополнительные материалы"
+
+                        confidence = analysis["type_compliance"].get("confidence", 0)
+                        is_valid = (
+                            final_doc_type != "Дополнительные материалы"
+                            and confidence >= 0.7
                         )
-                        save_clean_conclusion(
-                            procurement_id=procurement_id, 
-                            document_type=final_doc_type, 
-                            conclusion=conclusion
-                        )
+                        
+                        conclusion = analysis["conclusion"]
+                        
+                        # Сохраняем результаты анализа для проверки комплектности
+                        document_analysis_results[file.filename] = analysis
 
-                        logger.info(f"Сохранено: {procurement_id}, {final_doc_type}")
-                    except Exception as db_error:
-                        logger.error(f"Ошибка сохранения в БД: {str(db_error)}")
-                        conclusion += " [Ошибка сохранения в БД]"
+                        # Сохраняем в БД
+                        try:
+                            save_raw_data(
+                                procurement_id=procurement_id, 
+                                document_type=final_doc_type, 
+                                full_analysis=analysis
+                            )
+                            save_clean_conclusion(
+                                procurement_id=procurement_id, 
+                                document_type=final_doc_type, 
+                                conclusion=conclusion
+                            )
 
-                # Формируем результат для документа
-                document_result = {
-                    "procurement_id": procurement_id,
-                    "document_type": final_doc_type,
-                    "filename": file.filename,
-                    "is_valid": is_valid,
-                    "error": None,
-                    "conclusion": conclusion
-                }
-                
-                documents_results.append(document_result)
+                            logger.info(f"Сохранено: {procurement_id}, {final_doc_type}")
+                        except Exception as db_error:
+                            logger.error(f"Ошибка сохранения в БД: {str(db_error)}")
+                            conclusion += " [Ошибка сохранения в БД]"
+
+                    # Формируем результат для документа
+                    document_result = {
+                        "procurement_id": procurement_id,
+                        "document_type": final_doc_type,
+                        "filename": file.filename,
+                        "is_valid": is_valid,
+                        "error": None,
+                        "conclusion": conclusion,
+                        "source": "uploaded_file"
+                    }
+                    
+                    documents_results.append(document_result)
+
+                except Exception as e:
+                    logger.error(f"Ошибка при обработке {file.filename}: {str(e)}", exc_info=True)
+                    # Формируем результат с ошибкой
+                    document_result = {
+                        "procurement_id": procurement_id,
+                        "document_type": "Дополнительные материалы",
+                        "filename": file.filename,
+                        "is_valid": False,
+                        "error": str(e),
+                        "conclusion": f"Критическая ошибка обработки: {str(e)}",
+                        "source": "uploaded_file"
+                    }
+                    documents_results.append(document_result)
+
+                finally:
+                    if os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
 
             except Exception as e:
-                logger.error(f"Ошибка при обработке {file.filename}: {str(e)}", exc_info=True)
-                # Формируем результат с ошибкой
+                logger.error(f"Критическая ошибка при обработке {file.filename}: {str(e)}", exc_info=True)
                 document_result = {
                     "procurement_id": procurement_id,
                     "document_type": "Дополнительные материалы",
                     "filename": file.filename,
                     "is_valid": False,
                     "error": str(e),
-                    "conclusion": f"Критическая ошибка обработки: {str(e)}"
+                    "conclusion": f"Критическая ошибка: {str(e)}",
+                    "source": "uploaded_file"
                 }
                 documents_results.append(document_result)
 
-            finally:
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
+    # ОБРАБОТКА ССЫЛОК НА ОБЛАЧНЫЕ ХРАНИЛИЩА
+    if links:
+        logger.info(f"Обработка {len(links)} ссылок для закупки {procurement_id}")
+        
+        for link in links:
+            try:
+                logger.info(f"Обработка ссылки: {link}")
+                
+                # Парсим ссылку на облачное хранилище - используем await для асинхронной функции
+                parse_result = await parse_cloud_storage_link(link, procurement_id)
+                
+                if parse_result["status"] == "success":
+                    analysis = parse_result.get("analysis", {})
+                    filename = parse_result.get("filename", f"cloud_doc_{hash(link)}")
+                    
+                    # Добавляем анализ в общие результаты
+                    document_analysis_results[filename] = analysis
+                    
+                    # Определяем тип документа и валидность
+                    if analysis.get("status") == "success":
+                        doc_analysis = analysis.get("analysis", {})
+                        actual_type = doc_analysis.get("type_compliance", {}).get("actual_type", "")
+                        final_doc_type = actual_type if actual_type else "Дополнительные материалы"
+                        confidence = doc_analysis.get("type_compliance", {}).get("confidence", 0)
+                        is_valid = (
+                            final_doc_type != "Дополнительные материалы" 
+                            and confidence >= 0.7
+                        )
+                        conclusion = doc_analysis.get("conclusion", "Документ обработан из облачного хранилища")
+                    else:
+                        final_doc_type = "Дополнительные материалы"
+                        is_valid = False
+                        conclusion = f"Ошибка анализа облачного документа: {analysis.get('error', 'Неизвестная ошибка')}"
+                    
+                    # Формируем результат для облачного документа
+                    document_result = {
+                        "procurement_id": procurement_id,
+                        "document_type": final_doc_type,
+                        "filename": filename,
+                        "is_valid": is_valid,
+                        "error": None,
+                        "conclusion": conclusion,
+                        "source": "cloud_storage",
+                        "original_link": link
+                    }
+                    
+                    documents_results.append(document_result)
+                    
+                    # Сохраняем в БД
+                    try:
+                        if analysis.get("status") == "success":
+                            save_raw_data(
+                                procurement_id=procurement_id, 
+                                document_type=final_doc_type, 
+                                full_analysis=doc_analysis
+                            )
+                            save_clean_conclusion(
+                                procurement_id=procurement_id, 
+                                document_type=final_doc_type, 
+                                conclusion=conclusion
+                            )
+                            logger.info(f"Сохранен облачный документ: {filename}")
+                    except Exception as db_error:
+                        logger.error(f"Ошибка сохранения облачного документа в БД: {str(db_error)}")
+                
+                else:
+                    # Обработка ошибок парсинга ссылки
+                    logger.error(f"Ошибка парсинга ссылки {link}: {parse_result.get('error')}")
+                    document_result = {
+                        "procurement_id": procurement_id,
+                        "document_type": "Дополнительные материалы",
+                        "filename": f"failed_link_{hash(link)}",
+                        "is_valid": False,
+                        "error": parse_result.get("error", "Неизвестная ошибка парсинга"),
+                        "conclusion": f"Ошибка обработки ссылки: {parse_result.get('error', 'Неизвестная ошибка')}",
+                        "source": "cloud_storage",
+                        "original_link": link
+                    }
+                    documents_results.append(document_result)
+                    
+            except Exception as e:
+                logger.error(f"Критическая ошибка при обработке ссылки {link}: {str(e)}", exc_info=True)
+                document_result = {
+                    "procurement_id": procurement_id,
+                    "document_type": "Дополнительные материалы",
+                    "filename": f"error_link_{hash(link)}",
+                    "is_valid": False,
+                    "error": str(e),
+                    "conclusion": f"Критическая ошибка обработки ссылки: {str(e)}",
+                    "source": "cloud_storage", 
+                    "original_link": link
+                }
+                documents_results.append(document_result)
 
-        except Exception as e:
-            logger.error(f"Критическая ошибка при обработке {file.filename}: {str(e)}", exc_info=True)
-            document_result = {
-                "procurement_id": procurement_id,
-                "document_type": "Дополнительные материалы",
-                "filename": file.filename,
-                "is_valid": False,
-                "error": str(e),
-                "conclusion": f"Критическая ошибка: {str(e)}"
-            }
-            documents_results.append(document_result)
-
-    # Проверяем комплектность документов С ПОМОЩЬЮ МОДЕЛИ ИИ
+    # ПРОВЕРКА КОМПЛЕКТНОСТИ ДОКУМЕНТОВ
     completeness_check = {}
     overall_completeness_conclusion = ""
     
     if document_analysis_results:
-        # ИСПОЛЬЗУЕМ МОДЕЛЬ ДЛЯ ПРОВЕРКИ КОМПЛЕКТНОСТИ
+        # Используем ИИ для проверки комплектности
         ai_completeness_result = await check_completeness_with_ai(
             procurement_id=procurement_id,
             required_documents=extract_required_docs_from_analysis(document_analysis_results),
@@ -234,7 +330,7 @@ async def evaluate_documents_batch(
             conclusion=completeness_check["final_feedback"]
         )
 
-    # Проверяем согласованность данных между документами ТАКЖЕ С ПОМОЩЬЮ МОДЕЛИ
+    # ПРОВЕРКА СОГЛАСОВАННОСТИ ДАННЫХ
     consistency_result = await check_documents_consistency(procurement_id)
     
     # Формируем общее заключение по согласованности
@@ -244,21 +340,21 @@ async def evaluate_documents_batch(
     else:
         overall_consistency_conclusion = f"Обнаружены расхождения в документах: {consistency_result['conclusion']}"
     
-    # ИСПРАВЛЕНО: сохраняем consistency_check в правильное поле
+    # Сохраняем результат проверки согласованности
     save_clean_conclusion(
         procurement_id=procurement_id,
         document_type="consistency_check",
         conclusion=overall_consistency_conclusion
     )
 
-    # Формируем общее заключение по комплекту документов
+    # ФОРМИРУЕМ ОБЩЕЕ ЗАКЛЮЧЕНИЕ
     overall_conclusion_text, overall_status = generate_overall_conclusion(
         documents_results, 
         completeness_check, 
         consistency_result
     )
 
-    # Кэшируем результаты для возможного последующего использования
+    # КЭШИРУЕМ РЕЗУЛЬТАТЫ
     document_analysis_cache[procurement_id] = {
         "documents": documents_results,
         "completeness_check": completeness_check,
@@ -266,6 +362,7 @@ async def evaluate_documents_batch(
         "overall_conclusion": overall_status
     }
 
+    # СОЗДАЕМ СВОДНЫЙ ОТЧЕТ
     try:
         summary_report = create_summary_report(
             procurement_id=procurement_id,
@@ -275,16 +372,19 @@ async def evaluate_documents_batch(
             consistency_result=consistency_result
         )
 
-        # Сохраняем сводный отчет в raw слой
+        # Сохраняем сводный отчет
         save_summary_report(procurement_id, summary_report)
 
         logger.info(f"Сводный отчет создан и сохранен для procurement_id={procurement_id}")
     except Exception as e:
         logger.error(f"Ошибка при создании сводного отчета: {str(e)}")
 
-    # Возвращаем новый формат ответа
+    # ВОЗВРАЩАЕМ РЕЗУЛЬТАТ
     return {
         "procurement_id": procurement_id,
+        "documents_processed": len(documents_results),
+        "files_processed": len([d for d in documents_results if d.get("source") == "uploaded_file"]),
+        "links_processed": len([d for d in documents_results if d.get("source") == "cloud_storage"]),
         "documents": documents_results,
         "overall_conclusion": overall_status,
         "completeness_summary": {
@@ -298,6 +398,32 @@ async def evaluate_documents_batch(
             "issues": consistency_result.get("issues", [])
         }
     }
+
+
+@app.post("/process-links")
+async def process_links(
+    procurement_id: str = Form(...),
+    links: List[str] = Form(...),
+    legislation: Optional[str] = Form("44-ФЗ"),
+    procurement_method: Optional[str] = Form("Конкурс")
+):
+    """
+    Обработчик для парсинга данных из облачных хранилищ и прямых ссылок
+    """
+    try:
+        results = await process_input_links(links, procurement_id)
+        
+        return {
+            "procurement_id": procurement_id,
+            "processed_links": len(results),
+            "successful": len([r for r in results if r["result"]["status"] == "success"]),
+            "failed": len([r for r in results if r["result"]["status"] == "error"]),
+            "results": results
+        }
+        
+    except Exception as e:
+        logger.error(f"Ошибка обработки ссылок: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Ошибка обработки ссылок: {str(e)}")
 
 
 @app.post("/get-procurement-completeness")

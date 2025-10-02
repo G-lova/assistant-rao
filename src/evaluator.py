@@ -270,43 +270,40 @@ async def analyze_single_document(
     procurement_method: str
 ) -> Dict[str, Any]:
     """
-    Асинхронно анализирует фрагмент документа с использованием языковой модели и возвращает структурированный результат.
+    Анализирует отдельный документ с использованием языковой модели и возвращает структурированный результат.
 
-    Функция отправляет текстовый контент в LLM с системным промптом, соответствующим ожидаемому типу документа,
-    ограничивает размер входных данных и устанавливает таймаут на выполнение. После получения ответа
-    выполняет надёжный парсинг JSON, включая извлечение через регулярные выражения при необходимости.
-    Поскольку тип документа уже известен (передан как аргумент), функция устанавливает его как «фактический»
-    и помечает соответствие как успешное (кроме случая «Дополнительные материалы»).
+    Функция обрабатывает текст документа, ограничивает его длину при необходимости,
+    формирует системный промпт с учетом типа документа и отправляет запрос к LLM.
+    Ответ модели парсится как JSON, при ошибках применяются механизмы восстановления.
+    Возвращается унифицированная структура анализа, включающая соответствие типу,
+    читаемость, извлеченные данные и общее заключение.
 
     Args:
-        content (str): Текстовое содержимое документа или его фрагмента.
-        document_name (str): Имя файла или идентификатор фрагмента для логирования.
-        document_type (str): Ожидаемый и фактический тип документа (например, «Техническое задание»).
-        law_type (str): Тип законодательства (например, «44-ФЗ»), используется в промпте для контекста.
-        procurement_method (str): Способ закупки (например, «Конкурс»), также передаётся в промпт.
-
-    Raises:
-        ValueError: Если произошёл таймаут при вызове модели.
+        content (str): Текстовое содержимое документа для анализа.
+        document_name (str): Имя или идентификатор документа (для логирования и отчетности).
+        document_type (str): Ожидаемый тип документа (например, "Извещение", "Документация").
+        law_type (str): Тип законодательства, применимого к документу (например, "44-ФЗ", "223-ФЗ").
+        procurement_method (str): Способ закупки (например, "Электронный аукцион", "Запрос котировок").
 
     Returns:
         Dict[str, Any]: Словарь с результатом анализа, содержащий:
-            - status (str): «success» или «error».
-            - document_name (str): Имя документа.
-            - document_type (str): Тип документа.
-            - analysis (dict): Структурированный результат, включающий:
-                * type_compliance — соответствие типа (всегда «соответствует», если тип не «Дополнительные материалы»),
-                * readability — оценка читаемости,
-                * raw_data — извлечённые сущности (даты, суммы, юрлица и др.),
-                * conclusion — текстовое заключение.
-            При ошибке возвращается объект с диагностикой.
+            - "status": статус выполнения ("success" или ошибка),
+            - "document_name": имя документа,
+            - "document_type": тип документа,
+            - "analysis": детализированный анализ, включающий:
+                - "type_compliance": соответствие заявленному типу,
+                - "readability": оценка читаемости,
+                - "raw_data": извлеченные сущности (даты, суммы, организации и т.д.),
+                - "conclusion": итоговое заключение модели.
+            В случае таймаута или ошибки возвращается заглушка с минимальной информацией.
     """
     try:
         logger.info(f"Анализ чанка '{document_name}' с типом '{document_type}'")
         logger.info(f"Длина контента: {len(content)} символов")
 
         # Ограничиваем размер контента для предотвращения ошибок
-        if len(content) > 20000:
-            content = content[:20000] + "... [контент обрезан]"
+        if len(content) > 15000:
+            content = content[:15000] + "... [контент обрезан]"
             logger.info(f"Контент обрезан до {len(content)} символов")
 
         # Формируем промпт с подстановкой УЖЕ ИЗВЕСТНОГО типа
@@ -324,14 +321,16 @@ async def analyze_single_document(
                             {"role": "user", "content": f"Проанализируй следующий документ типа '{document_type}':\n\n{content}"}
                         ],
                         extra_body={"guided_json": RESPONSE_JSON_SCHEMA},
-                        max_tokens=4000  # Ограничиваем выходные токены
+                        max_tokens=3000,
+                        temperature=0.1
                     )
                 ),
-                timeout=60.0  # 60 секунд таймаут
+                timeout=45.0
             )
         except asyncio.TimeoutError:
             logger.error(f"Таймаут при анализе {document_name}")
-            raise ValueError("Таймаут при анализе документа")
+            # Возвращаем базовый результат вместо исключения
+            return create_timeout_analysis(document_name, document_type)
 
         raw_response = response.choices[0].message.content.strip()
         logger.info(f"Получен ответ длиной {len(raw_response)} символов")
@@ -401,6 +400,55 @@ async def analyze_single_document(
     except Exception as e:
         logger.error(f"Ошибка при анализе {document_name}: {str(e)}")
         return create_error_analysis(document_name, document_type, str(e))
+
+
+def create_timeout_analysis(document_name: str, document_type: str) -> Dict[str, Any]:
+    """
+    Создает заглушку результата анализа для случая таймаута при обработке документа.
+
+    Эта функция возвращает структурированный ответ, имитирующий успешный анализ,
+    но с пометкой об ошибке и информацией о прерывании из-за превышения времени ожидания.
+    Используется как fallback при возникновении asyncio.TimeoutError в основном анализаторе.
+
+    Args:
+        document_name (str): Имя или идентификатор документа.
+        document_type (str): Тип документа, указанный при вызове анализа.
+
+    Returns:
+        Dict[str, Any]: Словарь с результатом анализа, содержащий:
+            - "status": "error" (указывает на незавершённую обработку),
+            - "document_name": имя документа,
+            - "document_type": тип документа,
+            - "analysis": частично заполненная структура анализа с пометкой о таймауте,
+              включая минимальные значения по умолчанию для всех полей.
+    """
+    return {
+        "status": "error",
+        "document_name": document_name,
+        "document_type": document_type,
+        "analysis": {
+            "type_compliance": {
+                "status": "соответствует",
+                "issues": ["Таймаут при анализе"],
+                "expected_type": document_type,
+                "actual_type": document_type,
+                "confidence": 0.5
+            },
+            "readability": {
+                "status": "удовлетворительно",
+                "issues": []
+            },
+            "raw_data": {
+                "dates": [],
+                "amounts": [],
+                "legal_entities": [],
+                "contract_number": "",
+                "law_references": [],
+                "attached_documents_list": []
+            },
+            "conclusion": f"Анализ документа '{document_name}' не завершен из-за таймаута. Рекомендуется проверить документ вручную."
+        }
+    }
 
 
 def create_fallback_analysis(document_type: str, content: str) -> Dict[str, Any]:
@@ -497,13 +545,22 @@ def create_error_analysis(document_name: str, document_type: str, error: str) ->
 
 async def check_documents_consistency(procurement_id: str) -> Dict[str, Any]:
     """
-    Проверяет согласованность ключевых полей между различными документами одной закупки С ПОМОЩЬЮ LLM.
+    Проверяет согласованность данных между документами в рамках одной закупки.
+
+    Функция извлекает исходные данные по идентификатору закупки, исключает из анализа
+    документ типа "Проект контракта", подготавливает оставшиеся документы и передаёт их
+    в модуль искусственного интеллекта для выявления несоответствий (например, расхождения
+    в суммах, сроках, наименованиях участников и т.д.). Возвращает структурированный отчёт
+    о найденных проблемах или подтверждение согласованности.
 
     Args:
         procurement_id (str): Уникальный идентификатор закупки.
 
     Returns:
-        Dict[str, Any]: Результаты проверки согласованности.
+        Dict[str, Any]: Словарь с результатом проверки, содержащий:
+            - "status": общий статус ("ok", "warning", "error"),
+            - "issues": список выявленных несоответствий (может быть пустым),
+            - "conclusion": текстовое заключение по результатам анализа.
     """
     try:
         raw_data = get_raw_data_by_procurement_id(procurement_id)
@@ -514,14 +571,14 @@ async def check_documents_consistency(procurement_id: str) -> Dict[str, Any]:
                 "conclusion": "Нет данных для проверки согласованности."
             }
 
-        # Подготавливаем данные для LLM
+        # Подготавливаем данные для LLM (исключая Проект контракта)
         documents_data = prepare_documents_data_for_consistency_check(raw_data)
         
         if not documents_data:
             return {
                 "status": "ok", 
                 "issues": [],
-                "conclusion": "Недостаточно данных для проверки согласованности."
+                "conclusion": "Недостаточно данных для проверки согласованности (после исключения Проекта контракта)."
             }
 
         # ВЫЗЫВАЕМ LLM ДЛЯ ПРОВЕРКИ СОГЛАСОВАННОСТИ
@@ -541,7 +598,23 @@ async def check_documents_consistency(procurement_id: str) -> Dict[str, Any]:
 
 def convert_consistency_result(ai_result: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Преобразует результат проверки согласованности от ИИ в совместимый формат.
+    Преобразует результат анализа согласованности от ИИ в унифицированный формат ответа.
+
+    Функция маппит статусы согласованности, фильтрует ложные срабатывания (например,
+    "одинаковые данные", "отсутствие данных", "разный формат"), объединяет все выявленные
+    несоответствия в единый список с указанием уровня серьёзности и формирует итоговое
+    заключение. Также сохраняет исходный результат ИИ в поле detailed_result для отладки.
+
+    Args:
+        ai_result (Dict[str, Any]): Сырой результат от модуля ИИ, содержащий поля
+            consistency_status, critical_issues, medium_issues, minor_issues и overall_assessment.
+
+    Returns:
+        Dict[str, Any]: Преобразованный результат в стандартном формате, включающий:
+            - "status": общий статус ("ok", "warning", "error"),
+            - "issues": список реальных несоответствий с полями field, problem, details, severity,
+            - "conclusion": человекочитаемое заключение,
+            - "detailed_result": исходный ответ ИИ (для аудита и отладки).
     """
     # Преобразуем статус
     status_map = {
@@ -553,97 +626,200 @@ def convert_consistency_result(ai_result: Dict[str, Any]) -> Dict[str, Any]:
     consistency_status = ai_result.get("consistency_status", "согласовано")
     status = status_map.get(consistency_status, "ok")
     
-    # Объединяем все issues
+    # Объединяем все issues в единый список для обратной совместимости
     all_issues = []
-    all_issues.extend(ai_result.get("critical_issues", []))
-    all_issues.extend(ai_result.get("medium_issues", []))
-    all_issues.extend(ai_result.get("minor_issues", []))
     
-    # Формируем заключение
-    summary = ai_result.get("summary", {})
-    conclusion = summary.get("overall_assessment", "Проверка согласованности завершена.")
+    # Преобразуем critical_issues (только реальные расхождения)
+    for issue in ai_result.get("critical_issues", []):
+        # ФИЛЬТРУЕМ: не добавляем мнимые расхождения
+        description = issue.get("description", "").lower()
+        if any(keyword in description for keyword in ["одинаковые данные", "отсутствие данных", "разный формат"]):
+            continue  # Пропускаем мнимые расхождения
+            
+        all_issues.append({
+            "field": "комплексный анализ",
+            "problem": issue.get("description", ""),
+            "details": f"Документы: {', '.join(issue.get('affected_documents', []))}. {issue.get('evidence', '')}",
+            "severity": "high"
+        })
     
-    if all_issues:
-        conclusion += f" Обнаружено расхождений: {len(all_issues)}."
+    # Преобразуем medium_issues
+    for issue in ai_result.get("medium_issues", []):
+        description = issue.get("description", "").lower()
+        if any(keyword in description for keyword in ["одинаковые данные", "отсутствие данных", "разный формат"]):
+            continue
+            
+        all_issues.append({
+            "field": "комплексный анализ", 
+            "problem": issue.get("description", ""),
+            "details": f"Документы: {', '.join(issue.get('affected_documents', []))}. {issue.get('evidence', '')}",
+            "severity": "medium"
+        })
+    
+    # Преобразуем minor_issues (обычно это нормально)
+    for issue in ai_result.get("minor_issues", []):
+        all_issues.append({
+            "field": "комплексный анализ",
+            "problem": issue.get("description", ""),
+            "details": f"Документы: {', '.join(issue.get('affected_documents', []))}",
+            "severity": "low"
+        })
+    
+    # Формируем заключение на основе РЕАЛЬНЫХ расхождений
+    overall_assessment = ai_result.get("overall_assessment", {})
+    conclusion = overall_assessment.get("summary", "Проверка согласованности завершена.")
+    
+    real_issues_count = len(all_issues)
+    if real_issues_count == 0:
+        conclusion = "Документы согласованы. Критических расхождений не обнаружено."
+        status = "ok"
+    else:
+        critical_count = len([issue for issue in all_issues if issue.get("severity") == "high"])
+        conclusion = f"Обнаружено расхождений: {real_issues_count} (критических: {critical_count})."
     
     return {
         "status": status,
         "issues": all_issues,
         "conclusion": conclusion,
-        "detailed_result": ai_result  # Сохраняем полный результат для детального анализа
+        "detailed_result": ai_result
     }
 
 
 async def check_consistency_with_ai(procurement_id: str, documents_data: str) -> Dict[str, Any]:
     """
-    Проверяет согласованность документов с помощью LLM.
+    Выполняет целостную проверку согласованности документов закупки с помощью ИИ.
+
+    Функция отправляет агрегированные данные документов в языковую модель, предварительно
+    ограничив их объём для предотвращения таймаутов. Модель анализирует данные комплексно
+    (а не по отдельным полям) и возвращает структурированный отчёт о согласованности,
+    включая статус, критические/средние/незначительные несоответствия и общее заключение.
+    В случае таймаута, ошибки парсинга или исключения возвращается резервный результат.
+
+    Args:
+        procurement_id (str): Уникальный идентификатор закупки (используется для логирования).
+        documents_data (str): Строка с объединёнными и подготовленными данными из документов
+            (без "Проекта контракта"), предназначенная для анализа моделью.
+
+    Returns:
+        Dict[str, Any]: Результат анализа согласованности в формате, соответствующем
+            схеме CONSISTENCY_CHECK_SCHEMA, или резервный результат в случае ошибки.
+            Содержит поля: consistency_status, critical_issues, medium_issues, minor_issues,
+            overall_assessment и другие метаданные.
     """
     try:
-        logger.info(f"Проверка согласованности с ИИ для закупки {procurement_id}")
+        logger.info(f"Целостная проверка согласованности с ИИ для закупки {procurement_id}")
+        
+        # ОГРАНИЧИВАЕМ объем данных для предотвращения таймаутов
+        if len(documents_data) > 10000:
+            documents_data = documents_data[:10000] + "\n...[данные обрезаны для предотвращения таймаута]"
+            logger.info(f"Данные для проверки согласованности обрезаны до {len(documents_data)} символов")
+        else:
+            logger.info(f"Объем данных для анализа: {len(documents_data)} символов")
 
-        # Формируем промпт
+        # Формируем промпт для целостного анализа
         prompt = CONSISTENCY_CHECK_PROMPT.format(documents_data=documents_data)
 
-        # Вызываем модель
-        response = await asyncio.wait_for(
-            asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: client.chat.completions.create(
-                    model=model_name,
-                    messages=[
-                        {"role": "system", "content": "Ты — эксперт по проверке согласованности документов закупки."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=4000,
-                    temperature=0.1,
-                    extra_body={"guided_json": CONSISTENCY_CHECK_SCHEMA}
-                )
-            ),
-            timeout=60.0
-        )
+        # Вызываем модель с оптимизированными параметрами
+        try:
+            response = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: client.chat.completions.create(
+                        model=model_name,
+                        messages=[
+                            {
+                                "role": "system", 
+                                "content": "Ты — эксперт по проверке согласованности документов. Анализируй ВСЕ данные целостно, а не по отдельным полям. Будь краток в ответе."
+                            },
+                            {
+                                "role": "user", 
+                                "content": prompt
+                            }
+                        ],
+                        max_tokens=2000,
+                        temperature=0.1,
+                        extra_body={"guided_json": CONSISTENCY_CHECK_SCHEMA}
+                    )
+                ),
+                timeout=60.0  # ОСТАВИЛИ 60 секунд
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Таймаут при целостной проверке согласованности для {procurement_id}")
+            return create_fallback_consistency_result()
 
         raw_response = response.choices[0].message.content.strip()
-#        logger.info(f"Ответ модели для проверки согласованности: {raw_response}")
+        logger.info(f"Ответ модели для целостной проверки согласованности получен")
 
         # Парсим JSON
         try:
             result = json.loads(raw_response)
-            logger.info(f"Проверка согласованности завершена: статус - {result.get('consistency_status')}")
+            logger.info(f"Целостная проверка согласованности завершена: статус - {result.get('consistency_status')}")
             return result
             
         except json.JSONDecodeError as e:
-            logger.error(f"Ошибка парсинга JSON при проверке согласованности: {e}")
-            logger.error(f"Сырой ответ: {raw_response}")
+            logger.error(f"Ошибка парсинга JSON при целостной проверке согласованности: {e}")
+            # Пробуем извлечь JSON из текста
+            json_match = re.search(r'\{.*\}', raw_response, re.DOTALL)
+            if json_match:
+                try:
+                    result = json.loads(json_match.group())
+                    logger.info("JSON извлечен с помощью regex")
+                    return result
+                except:
+                    pass
+            logger.error(f"Сырой ответ: {raw_response[:500]}...")
             return create_fallback_consistency_result()
 
-    except asyncio.TimeoutError:
-        logger.error(f"Таймаут при проверке согласованности для {procurement_id}")
-        return create_fallback_consistency_result()
     except Exception as e:
-        logger.error(f"Ошибка при проверке согласованности: {str(e)}", exc_info=True)
+        logger.error(f"Ошибка при целостной проверке согласованности: {str(e)}", exc_info=True)
         return create_fallback_consistency_result()
 
 
 def create_fallback_consistency_result() -> Dict[str, Any]:
     """
-    Создает резервный результат проверки согласованности при ошибке ИИ.
+    Создаёт резервный (заглушечный) результат проверки согласованности при возникновении ошибки.
+
+    Возвращается в случаях, когда основной анализ с помощью ИИ недоступен — например,
+    из-за таймаута, ошибки парсинга или сбоя в работе модели. Результат помечен как
+    "согласовано", но содержит поясняющее сообщение о невозможности выполнить проверку.
+
+    Returns:
+        Dict[str, Any]: Стандартизированный словарь с нейтральным статусом согласованности
+            и информацией о том, что проверка не была выполнена. Содержит пустые списки
+            для всех категорий несоответствий и пояснение в overall_assessment.
     """
     return {
         "consistency_status": "согласовано",
         "critical_issues": [],
-        "medium_issues": [], 
+        "medium_issues": [],
         "minor_issues": [],
-        "summary": {
-            "total_issues": "0",
-            "critical_count": "0",
-            "overall_assessment": "Проверка согласованности не выполнена из-за технической ошибки"
+        "overall_assessment": {
+            "summary": "Целостная проверка согласованности не выполнена из-за технической ошибки",
+            "total_issues_found": "0",
+            "critical_issues_count": "0", 
+            "consistency_score": "не определена",
+            "recommendations": "Рекомендуется повторить проверку"
         }
     }
 
 
 def prepare_documents_data_for_consistency_check(raw_data: Dict[str, Any]) -> str:
     """
-    Подготавливает данные документов для проверки согласованности LLM.
+    Подготавливает и фильтрует данные документов для последующей проверки согласованности.
+
+    Исключает документ типа "Проект контракта", извлекает только ключевые поля
+    (номер контракта, даты, суммы, юридические лица, ссылки на законодательство)
+    и форматирует их в компактную текстовую строку, пригодную для передачи в ИИ-модель.
+    Пустые или несущественные данные отбрасываются, а объём каждого поля ограничен
+    для оптимизации контекста модели.
+
+    Args:
+        raw_data (Dict[str, Any]): Словарь с необработанными данными документов,
+            где ключи — типы документов, а значения — их содержимое и метаданные.
+
+    Returns:
+        str: Отформатированная строка с ключевыми данными из всех документов,
+            за исключением "Проекта контракта", готовая к использованию в промпте ИИ.
     """
     documents_data = []
     
@@ -651,42 +827,50 @@ def prepare_documents_data_for_consistency_check(raw_data: Dict[str, Any]) -> st
         if not isinstance(doc_data, dict):
             continue
             
+        # ИСКЛЮЧАЕМ "Проект контракта" из проверки согласованности
+        if doc_type.lower().strip() == "проект контракта":
+            logger.info(f"Исключен из проверки согласованности: {doc_type}")
+            continue
+            
         doc_info = {
-            "document_type": doc_type,
+            "document_name": doc_type,
             "key_data": {}
         }
         
-        # Извлекаем ключевые данные из raw_data
+        # Извлекаем только КЛЮЧЕВЫЕ данные для анализа
         raw_data_content = doc_data.get("raw_data", {})
         
-        # Реквизиты контракта
-        if raw_data_content.get("contract_number"):
-            doc_info["key_data"]["contract_number"] = raw_data_content["contract_number"]
-            
-        # Даты
-        if raw_data_content.get("dates"):
-            doc_info["key_data"]["dates"] = raw_data_content["dates"]
-            
-        # Суммы
-        if raw_data_content.get("amounts"):
-            doc_info["key_data"]["amounts"] = raw_data_content["amounts"]
-            
-        # Юридические лица
-        if raw_data_content.get("legal_entities"):
-            doc_info["key_data"]["legal_entities"] = raw_data_content["legal_entities"]
-            
-        # Предмет закупки
-        if raw_data_content.get("procurement_subject"):
-            doc_info["key_data"]["procurement_subject"] = raw_data_content["procurement_subject"]
-            
-        # Сроки
-        if raw_data_content.get("planned_timeline"):
-            doc_info["key_data"]["planned_timeline"] = raw_data_content["planned_timeline"]
+        # Только самые важные поля для проверки согласованности
+        key_fields = {
+            "contract_number": raw_data_content.get("contract_number"),
+            "dates": raw_data_content.get("dates", [])[:3],
+            "amounts": raw_data_content.get("amounts", [])[:3],
+            "legal_entities": raw_data_content.get("legal_entities", [])[:2],
+            "law_references": raw_data_content.get("law_references", [])[:5]
+        }
         
-        if doc_info["key_data"]:  # Добавляем только если есть данные
+        # Добавляем только непустые поля
+        for field, value in key_fields.items():
+            if value and (isinstance(value, list) and value or isinstance(value, str) and value.strip()):
+                doc_info["key_data"][field] = value
+        
+        if doc_info["key_data"]:  # Добавляем только если есть ключевые данные
             documents_data.append(doc_info)
     
-    return json.dumps(documents_data, ensure_ascii=False, indent=2)
+    # Форматируем компактно для LLM
+    formatted_data = "КЛЮЧЕВЫЕ ДАННЫЕ ИЗ ДОКУМЕНТОВ (Проект контракта исключен):\n\n"
+    for doc in documents_data:
+        formatted_data += f"=== {doc['document_name']} ===\n"
+        
+        key_data = doc['key_data']
+        for key, value in key_data.items():
+            formatted_data += f"{key}: {str(value)[:200]}\n"
+        
+        formatted_data += "\n"
+    
+    logger.info(f"Подготовлено данных для проверки согласованности (без Проекта контракта): {len(formatted_data)} символов")
+    logger.info(f"Документы для проверки: {[doc['document_name'] for doc in documents_data]}")
+    return formatted_data
 
 
 def normalize_document_type(doc_type: str) -> str:
@@ -893,21 +1077,35 @@ async def check_completeness_with_ai(
 
 def create_fallback_completeness_result(required_docs: List[str], provided_docs: List[str]) -> Dict[str, Any]:
     """
-    Создает резервный результат проверки комплектности при ошибке ИИ.
-    
+    Создаёт резервный результат проверки комплектности документов при сбое основного анализа.
+
+    Выполняет упрощённую проверку: исключает "Проект контракта" из списка обязательных
+    документов, сопоставляет предоставленные документы с требуемыми по ключевым словам
+    и определяет отсутствующие. Используется как заглушка, когда основной ИИ-анализ
+    недоступен или завершился ошибкой.
+
     Args:
-        required_docs (List[str]): Обязательные документы
-        provided_docs (List[str]): Загруженные документы
-        
+        required_docs (List[str]): Список наименований обязательных документов.
+        provided_docs (List[str]): Список наименований фактически предоставленных документов.
+
     Returns:
-        Dict[str, Any]: Резервный результат
+        Dict[str, Any]: Словарь с результатом проверки комплектности, содержащий:
+            - "completeness_status": "полный" или "неполный",
+            - "missing_documents": список недостающих документов (без "Проекта контракта"),
+            - "document_mapping": соответствие между требуемыми и найденными документами,
+            - "reasoning": пояснение, что проверка выполнена базовым методом.
     """
-    # Простое сравнение без семантического анализа
+    # ФИЛЬТРУЕМ - исключаем "Проект контракта" из обязательных документов
+    filtered_required_docs = [
+        doc for doc in required_docs 
+        if doc.lower().strip() != "проект контракта"
+    ]
+    
     missing_docs = []
     document_mapping = {}
     
-    # Базовое сопоставление по ключевым словам
-    for req_doc in required_docs:
+    # Базовое сопоставление по ключевым словам (исключая "Проект контракта")
+    for req_doc in filtered_required_docs:
         found_match = False
         for prov_doc in provided_docs:
             if is_document_match(req_doc, prov_doc):
@@ -924,33 +1122,40 @@ def create_fallback_completeness_result(required_docs: List[str], provided_docs:
         "completeness_status": status,
         "missing_documents": missing_docs,
         "document_mapping": document_mapping,
-        "reasoning": "Проверка выполнена базовым методом (без семантического анализа)"
+        "reasoning": "Проверка выполнена базовым методом. Проект контракта исключен из проверки комплектности."
     }
 
 
 def is_document_match(required_doc: str, provided_doc: str) -> bool:
     """
-    Проверяет соответствие документов по ключевым словам.
-    
+    Проверяет, соответствует ли предоставленный документ требуемому с учётом синонимов и групп эквивалентности.
+
+    Функция игнорирует регистр и пробелы, исключает "Проект контракта" из сопоставления,
+    а также использует предопределённые группы эквивалентных наименований документов
+    (например, "ТЗ" и "Техническое задание"). Поддерживает точное, частичное и групповое совпадение.
+
     Args:
-        required_doc (str): Обязательный документ
-        provided_doc (str): Загруженный документ
-        
+        required_doc (str): Наименование обязательного документа.
+        provided_doc (str): Наименование предоставленного документа.
+
     Returns:
-        bool: True если документы соответствуют
+        bool: True, если документы считаются соответствующими, иначе False.
     """
+    # ЕСЛИ ТРЕБУЕМЫЙ ДОКУМЕНТ - "ПРОЕКТ КОНТРАКТА", СРАЗУ ВОЗВРАЩАЕМ False
+    if required_doc.lower().strip() == "проект контракта":
+        return False
+        
     required_lower = required_doc.lower()
     provided_lower = provided_doc.lower()
     
-    # Группы эквивалентных документов
-    contract_group = ["проект контракта", "проект договора", "контракт", "договор"]
+    # Группы эквивалентных документов (БЕЗ ГРУППЫ ПРОЕКТА КОНТРАКТА)
     price_group = ["обоснование н(м)цк", "обоснование цены", "расчет нмцк", "смета"]
     tech_group = ["техническое задание", "тз", "описание объекта закупки"]
     notice_group = ["извещение", "уведомление о закупке"]
     requirements_group = ["требования к содержанию заявки", "инструкция для участников"]
     
     # Проверка принадлежности к одной группе
-    groups = [contract_group, price_group, tech_group, notice_group, requirements_group]
+    groups = [price_group, tech_group, notice_group, requirements_group]
     
     for group in groups:
         if required_lower in group and any(doc in provided_lower for doc in group):
