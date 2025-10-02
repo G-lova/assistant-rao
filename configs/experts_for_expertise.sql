@@ -252,7 +252,7 @@ WITH expertise_info AS (
 		CASE 
 		    WHEN u.birthday IS NOT NULL AND TIMESTAMPDIFF(YEAR, u.birthday, CURDATE()) > 21 THEN TIMESTAMPDIFF(YEAR, u.birthday, CURDATE())
 		    WHEN u.dateDiplom IS NOT NULL AND TIMESTAMPDIFF(YEAR, u.dateDiplom, CURDATE()) > 0 THEN TIMESTAMPDIFF(YEAR, u.dateDiplom, CURDATE()) + 22
-		    ELSE NULL
+		    ELSE 22
 		END AS age,
 		(CASE WHEN u.email IS NOT NULL THEN 1 ELSE 0 END 
 			+ CASE WHEN u.contactEmail IS NOT NULL THEN 1 ELSE 0 END
@@ -332,8 +332,9 @@ WITH expertise_info AS (
 		u.experienceExpertise,
 		u.countExpertise,
 		COALESCE(u.workExpertise, 0) AS desiredWeekWorkload,
+		COUNT(CASE WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) AND ee.expertise_id IN (SELECT id FROM expertises WHERE status = 5) THEN 1 END) AS countExpertises_lastYear,
 		COUNT(CASE WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE status = 5) THEN 1 END) AS countExpertisesBD,
-		AVG(COALESCE(ee.`range`, 0)) AS avg_range,
+		AVG(CASE WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) THEN ee.`range` ELSE NULL END) AS avg_range,
         CASE 
             WHEN MAX(CASE WHEN e.status IN (3,4) AND e.dateStatus3 IS NOT NULL THEN 1 ELSE 0 END) = 1 
             THEN 7 / AVG(CASE WHEN e.status IN (3,4) AND e.dateStatus3 IS NOT NULL 
@@ -388,12 +389,30 @@ WITH expertise_info AS (
 	AND u.deleted_at IS NULL 
 	AND u.inn != '' AND CAST(SUBSTRING(u.inn, 1, 2) AS UNSIGNED) != 0 AND LOWER(u.name) NOT LIKE '%тест%' AND LOWER(u.name) NOT LIKE '%test%' 
 	GROUP BY u.id
-), 
+), expert_declines AS (
+	SELECT 
+	    expert_id,
+	    COUNT(*) AS expert_declines
+	FROM (
+	    SELECT 
+	        d.id,
+	        d.dateStatus2,
+	        de.expert_id
+	    FROM expertises d
+	    JOIN JSON_TABLE(
+	        d.declineExperts,
+	        "$[*]" COLUMNS (
+	            expert_id INT PATH "$"
+	        )
+	    ) de
+	    WHERE d.dateStatus2 >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
+	) declines
+	GROUP BY expert_id
+),
 experts_with_coords AS (
 	SELECT
-		*,
-		COALESCE(age, AVG(age) OVER (PARTITION BY expert_id)) AS avg_age,
-		CASE expert_region_id
+		e.*,
+		CASE e.expert_region_id
 			WHEN 1 THEN 44.6089
 			WHEN 2 THEN 54.7355
 			WHEN 3 THEN 51.8335
@@ -484,7 +503,7 @@ experts_with_coords AS (
 			WHEN 88 THEN 48.5740
 			WHEN 89 THEN 46.6354
 		END AS expert_lon,
-		CASE expert_region_id
+		CASE e.expert_region_id
 			WHEN 1 THEN 40.1005
 			WHEN 2 THEN 55.9917
 			WHEN 3 THEN 107.5841
@@ -574,8 +593,11 @@ experts_with_coords AS (
 			WHEN 87 THEN 37.8029
 			WHEN 88 THEN 39.3078
 			WHEN 89 THEN 32.6169
-		END AS expert_lat		
-	FROM experts
+		END AS expert_lat,
+		ed.expert_declines
+	FROM experts e
+	LEFT JOIN expert_declines ed
+	ON ed.expert_id = e.expert_id
 ), ee_joined AS ( 
 	SELECT 
 		ewc.*,
@@ -598,6 +620,11 @@ experts_with_coords AS (
 				END
 		END	AS possibleWeekWorkload,
 		(u.countExpertise + u.countExpertisesBD) / MAX(u.countExpertise + u.countExpertisesBD) OVER(PARTITION BY ewc.expertise_id) AS countExpertise_rate,
+		CASE 
+			WHEN (u.countExpertises_lastYear + COALESCE(u.expert_declines, 0)) > 0
+			THEN (u.countExpertises_lastYear) / (u.countExpertises_lastYear + COALESCE(u.expert_declines, 0))
+			ELSE 1
+		END AS declines_rate,
 		u.experience / MAX(u.experience) OVER(PARTITION BY ewc.expertise_id) AS experience_rate,
 		u.academicTitleExperience / MAX(u.academicTitleExperience) OVER(PARTITION BY ewc.expertise_id) AS academicTitleExperience_rate,
 		u.degreeExperience / MAX(u.degreeExperience) OVER(PARTITION BY ewc.expertise_id) AS degreeExperience_rate,
@@ -606,7 +633,7 @@ experts_with_coords AS (
 		(u.countPublications + u.countMonographs) / MAX(u.countPublications + u.countMonographs) OVER(PARTITION BY ewc.expertise_id) AS countPubMon_rate
 	FROM expertise_with_coords ewc
 	LEFT JOIN experts_with_coords u
-	ON (JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_direction)) OR JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_monitoring)))  
+	ON (JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_direction)) OR JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_monitoring))) 
 	AND (ewc.expertise_regionExpertise IS NULL 
 		OR ((u.expert_regionExpertises IS NULL OR JSON_LENGTH(u.expert_regionExpertises) = 0) AND ewc.expertise_regionExpertise IN ('Общая', 'Закупочная'))
 		OR JSON_CONTAINS(u.expert_regionExpertises, JSON_QUOTE(ewc.expertise_regionExpertise))) 
@@ -621,10 +648,10 @@ SELECT
 		ELSE 1
 	END AS distance_rate,
 	CAST(possibleWeekWorkload / MAX(possibleWeekWorkload) OVER(PARTITION BY expertise_id) AS FLOAT) AS workload_rate,
-	(avg_age / MAX(avg_age) OVER(PARTITION BY expertise_id)
+	(age / MAX(age) OVER(PARTITION BY expertise_id) + declines_rate
 	+ personal_block + education_rate + experience_rate + degreeExperience_rate
 	+ academicTitleExperience_rate + pubMon_rate + countPubMon_rate 
-	+ experienceExpertise_rate + countExpertise_rate + avg_range * 2
+	+ experienceExpertise_rate + countExpertise_rate + COALESCE(avg_range, 0)
 	) / 12 AS avg_rating
 FROM ee_joined
 WHERE possibleWeekWorkload > 0.13;
