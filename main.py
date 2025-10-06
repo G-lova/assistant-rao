@@ -1,7 +1,7 @@
 import os
 import tempfile
 import logging
-import json
+import asyncio
 
 import pandas as pd
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body
@@ -13,7 +13,8 @@ from configs.utils import (APIKeyMiddleware,
                            create_summary_report,
                            generate_overall_conclusion,
                            extract_provided_docs_from_results,
-                           extract_required_docs_from_analysis)
+                           extract_required_docs_from_analysis,
+                           evaluate_documents_batch_internal)
 from configs.working_with_db import (save_raw_data,
                                      save_clean_conclusion,
                                      get_contract_info_from_db,
@@ -24,9 +25,11 @@ from src.evaluator import (check_documents_consistency,
                            check_completeness_with_ai)
 from src.scoring import scoring
 from configs.parsing import parse_cloud_storage_link, is_cloud_storage_link, process_input_links
+from configs.retry_utils import async_retry, API_RETRY_CONFIG, EXPERTS_RETRY_CONFIG
+from celery_app import celery_app
 
 
-app = FastAPI()
+app = FastAPI(debug=False)
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,6 +48,50 @@ logger = logging.getLogger(__name__)
 # Глобальный словарь для хранения результатов анализа документов
 document_analysis_cache = {}
 
+
+@app.post("/internal/parse-cloud-link")
+async def internal_parse_cloud_link(
+    url: str = Form(...),
+    procurement_id: str = Form(None)
+):
+    """
+    Внутренний эндпоинт для парсинга документа по ссылке из облачного хранилища.
+
+    Принимает URL на документ (например, из Яндекс.Диска или Google Drive) и опциональный
+    идентификатор закупки, извлекает содержимое документа, анализирует его и возвращает
+    структурированный результат. Используется для интеграции с внешними системами
+    или фоновой обработки ссылок.
+
+    Args:
+        url (str, optional): URL на документ в облачном хранилище. Обязательный параметр,
+            передаётся в теле запроса как form-data.
+        procurement_id (str, optional): Уникальный идентификатор закупки для логирования
+            и сохранения результатов. Может отсутствовать.
+
+    Returns:
+        _type_: JSON-ответ с полем "status" ("success" или "error"), исходным URL
+            и либо результатом парсинга ("result"), либо сообщением об ошибке ("error").
+    """
+    try:
+        logger.info(f"Внутренний парсинг ссылки: {url} для закупки {procurement_id}")
+        
+        # Парсим ссылку напрямую
+        parse_result = await parse_cloud_storage_link(url, procurement_id)
+        
+        return {
+            "status": "success",
+            "url": url,
+            "result": parse_result
+        }
+        
+    except Exception as e:
+        logger.error(f"Ошибка внутреннего парсинга ссылки: {str(e)}")
+        return {
+            "status": "error",
+            "url": url,
+            "error": str(e)
+        }
+    
 
 @app.post("/evaluate-documents")
 async def evaluate_documents_batch(
@@ -205,18 +252,18 @@ async def evaluate_documents_batch(
                 }
                 documents_results.append(document_result)
 
-    # ОБРАБОТКА ССЫЛОК НА ОБЛАЧНЫЕ ХРАНИЛИЩА
+    # ОБРАБОТКА ССЫЛОК ЧЕРЕЗ ВНУТРЕННИЙ ЭНДПОЙНТ
     if links:
         logger.info(f"Обработка {len(links)} ссылок для закупки {procurement_id}")
         
         for link in links:
             try:
-                logger.info(f"Обработка ссылки: {link}")
+                logger.info(f"Обработка ссылки через внутренний эндпоинт: {link}")
                 
-                # Парсим ссылку на облачное хранилище - используем await для асинхронной функции
+                # ВМЕСТО ВЫЗОВА HTTP - вызываем функцию напрямую
                 parse_result = await parse_cloud_storage_link(link, procurement_id)
                 
-                if parse_result["status"] == "success":
+                if parse_result.get("status") == "success":
                     analysis = parse_result.get("analysis", {})
                     filename = parse_result.get("filename", f"cloud_doc_{hash(link)}")
                     
@@ -271,15 +318,16 @@ async def evaluate_documents_batch(
                         logger.error(f"Ошибка сохранения облачного документа в БД: {str(db_error)}")
                 
                 else:
-                    # Обработка ошибок парсинга ссылки
-                    logger.error(f"Ошибка парсинга ссылки {link}: {parse_result.get('error')}")
+                    # Ошибка парсинга
+                    error_msg = parse_result.get("error", "Неизвестная ошибка парсинга")
+                    logger.error(f"Ошибка парсинга ссылки {link}: {error_msg}")
                     document_result = {
                         "procurement_id": procurement_id,
                         "document_type": "Дополнительные материалы",
                         "filename": f"failed_link_{hash(link)}",
                         "is_valid": False,
-                        "error": parse_result.get("error", "Неизвестная ошибка парсинга"),
-                        "conclusion": f"Ошибка обработки ссылки: {parse_result.get('error', 'Неизвестная ошибка')}",
+                        "error": error_msg,
+                        "conclusion": f"Ошибка обработки ссылки: {error_msg}",
                         "source": "cloud_storage",
                         "original_link": link
                     }
@@ -556,22 +604,9 @@ async def api_get_contract_info(request_body: Dict[str, str] = Body(...)):
 
 
 @app.post("/get-experts-for-expertise")
+@async_retry(EXPERTS_RETRY_CONFIG)
 async def get_experts_for_expertise(request_body: Dict[str, int] = Body(...)):
-    """
-    Обработчик API-запроса для подбора подходящих экспертов по идентификатору экспертизы.
-    Возвращает список ID экспертов.
-
-    Args:
-        request_body (Dict[str, int], optional): Тело запроса в формате JSON, содержащее ключ "expertise_id".
-            Пример: {"expertise_id": 12345}.
-
-    Raises:
-        HTTPException: Если поле `expertise_id` отсутствует — возвращает ошибку 400.
-        HTTPException: При возникновении внутренней ошибки в процессе обработки — возвращает ошибку 500.
-
-    Returns:
-        List[int]: Список идентификаторов экспертов, отсортированных по рейтингу.
-    """
+    """Получение экспертов с повторными попытками"""
     try:
         expertise_id = request_body.get("expertise_id")
         
@@ -583,22 +618,54 @@ async def get_experts_for_expertise(request_body: Dict[str, int] = Body(...)):
         
         # Преобразуем результат в список целых чисел
         if hasattr(results, 'tolist'):
-            expert_ids = results.tolist()  # Для Series или массива
+            expert_ids = results.tolist()
         elif isinstance(results, list):
             expert_ids = results
         else:
-            # Предполагаем, что это DataFrame — извлекаем первую колонку или 'expert_id'
             col = 'expert_id' if 'expert_id' in results.columns else results.columns[0]
             expert_ids = results[col].tolist()
         
-        # Убедимся, что все элементы — int
         expert_ids = [int(x) for x in expert_ids]
         
-        return expert_ids  # FastAPI автоматически сериализует в JSON
+        return expert_ids
         
     except Exception as e:
         logger.error(f"Ошибка при подборе экспертов: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Ошибка при подборе экспертов: {str(e)}")
+
+
+# Добавляем Celery задачи с повторными попытками
+@celery_app.task(bind=True, max_retries=3)
+def parse_cloud_link_task(self, url: str, procurement_id: str = None):
+    """Фоновая задача для парсинга облачных ссылок"""
+    try:
+        # Используем синхронную версию или запускаем асинхронную в event loop
+        result = asyncio.run(parse_cloud_storage_link(url, procurement_id))
+        return result
+    except Exception as exc:
+        # Автоматический retry от Celery
+        raise self.retry(countdown=10, exc=exc)
+
+
+@celery_app.task(bind=True, max_retries=2)
+def evaluate_documents_task(self, task_data: dict):
+    """Фоновая задача для оценки документов"""
+    try:
+        result = asyncio.run(evaluate_documents_batch_internal(task_data))
+        return result
+    except Exception as exc:
+        raise self.retry(countdown=5, exc=exc)
+
+
+@celery_app.task(bind=True, max_retries=3)
+def get_experts_task(self, expertise_id: int):
+    """Фоновая задача для получения экспертов"""
+    try:
+        # Здесь логика получения экспертов
+        results = scoring(expertise_id)
+        return results
+    except Exception as exc:
+        raise self.retry(countdown=5, exc=exc)
 
 
 @app.get("/health")

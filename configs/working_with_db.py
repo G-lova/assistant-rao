@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional
 from psycopg2 import sql
 
 from configs.procurement_requirements import DOCUMENT_TYPE_MAPPING
+from configs.retry_utils import sync_retry, DATABASE_RETRY_CONFIG
 
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ def map_document_type_to_column(document_type: str) -> str:
     return mapping.get(document_type, "additional_materials")  # fallback
 
 
+@sync_retry(DATABASE_RETRY_CONFIG)
 def save_raw_data(procurement_id: int, document_type: str, full_analysis: Dict[str, Any]):
     """
     Сохраняет полный анализ документа в таблицу сырых данных.
@@ -110,6 +112,7 @@ def save_raw_data(procurement_id: int, document_type: str, full_analysis: Dict[s
             conn.close()
 
 
+@sync_retry(DATABASE_RETRY_CONFIG)
 def save_clean_conclusion(procurement_id: int, document_type: str, conclusion: str):
     """
     Сохраняет очищенное текстовое заключение по документу в таблицу выводов.
@@ -213,6 +216,7 @@ def get_procurement_report(procurement_id: int) -> Dict[str, Any]:
             conn.close()
 
 
+@sync_retry(DATABASE_RETRY_CONFIG)
 def get_raw_data_by_procurement_id(procurement_id: str) -> Dict[str, Any]:
     """
     Получает сырые извлечённые данные по идентификатору закупки из базы данных.

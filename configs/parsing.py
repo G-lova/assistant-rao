@@ -10,6 +10,7 @@ from urllib.parse import urlparse, parse_qs
 
 from configs.utils import read_file
 from src.evaluator import analyze_document_chunks, split_large_text
+from configs.retry_utils import async_retry, CLOUD_PARSING_RETRY_CONFIG
 
 
 logger = logging.getLogger(__name__)
@@ -49,17 +50,9 @@ class CloudStorageParser:
         return parsed.netloc in self.supported_domains
 
 
+    @async_retry(CLOUD_PARSING_RETRY_CONFIG)
     async def parse_cloud_link(self, url: str, procurement_id: str = None) -> Dict:
-        """
-        Асинхронно обрабатывает ссылку на облачное хранилище и возвращает результат анализа файла.
-
-        Args:
-            url (str): Ссылка на файл в облаке.
-            procurement_id (str, optional): Идентификатор закупки для логирования и метаданных. Defaults to None.
-
-        Returns:
-            Dict: Результат обработки с ключами 'status', 'error' (при ошибке) или 'analysis' (при успехе).
-        """
+        """Парсинг ссылки с повторными попытками"""
         if not self.is_cloud_link(url):
             return {
                 "status": "error",
@@ -78,6 +71,7 @@ class CloudStorageParser:
             }
 
 
+    @async_retry(CLOUD_PARSING_RETRY_CONFIG)
     async def _parse_google_drive(self, url: str, procurement_id: str = None) -> Dict:
         """
         Обрабатывает ссылку на файл Google Drive: извлекает ID, формирует URL для скачивания и запускает обработку.
@@ -383,6 +377,7 @@ class CloudStorageParser:
             }
 
 
+    @async_retry(CLOUD_PARSING_RETRY_CONFIG) 
     async def _download_and_process_file(self, url: str, source: str, resource_id: str, 
                                        procurement_id: str = None, file_extension: str = None) -> Dict:
         """

@@ -37,6 +37,13 @@ class PathConfig:
     logs: str = "logs/"
 
 
+@dataclass
+class RetryConfig:
+    """Конфигурация повторных попыток"""
+    max_retries: int = 3
+    default_delay: float = 1.0
+    backoff_factor: float = 2.0
+
 
 class Config:
     """
@@ -80,6 +87,22 @@ class Config:
     DEBUG = os.getenv("DEBUG", "False").lower() == "true"
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     LOG_FILE = os.getenv("LOG_FILE", "logs/app.log")
+
+    # Retry settings
+    RETRY_MAX_ATTEMPTS = int(os.getenv("RETRY_MAX_ATTEMPTS", "3"))
+    RETRY_DELAY = float(os.getenv("RETRY_DELAY", "1.0"))
+    RETRY_BACKOFF = float(os.getenv("RETRY_BACKOFF", "2.0"))
+
+    @classmethod
+    def get_retry_config(cls) -> RetryConfig:
+        """
+        Возвращает конфигурацию повторных попыток.
+        """
+        return RetryConfig(
+            max_retries=cls.RETRY_MAX_ATTEMPTS,
+            default_delay=cls.RETRY_DELAY,
+            backoff_factor=cls.RETRY_BACKOFF
+        )
 
     @classmethod
     def get_model_config(cls):
