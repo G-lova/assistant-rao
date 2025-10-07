@@ -335,44 +335,19 @@ WITH expertise_info AS (
 		COUNT(CASE WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) AND ee.expertise_id IN (SELECT id FROM expertises WHERE status = 5) THEN 1 END) AS countExpertises_lastYear,
 		COUNT(CASE WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE status = 5) THEN 1 END) AS countExpertisesBD,
 		AVG(CASE WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) THEN ee.`range` ELSE NULL END) AS avg_range,
-        CASE 
-            WHEN MAX(CASE WHEN e.status IN (3,4) AND e.dateStatus3 IS NOT NULL THEN 1 ELSE 0 END) = 1 
-            THEN 7 / AVG(CASE WHEN e.status IN (3,4) AND e.dateStatus3 IS NOT NULL 
-                             THEN DATEDIFF(CURDATE(), e.dateStatus3) ELSE NULL END)
-            ELSE
-                CASE 
-                    WHEN MAX(CASE WHEN e.status IN (3,4) AND e.dateStatus4 IS NOT NULL THEN 1 ELSE 0 END) = 1 
-                    THEN 7 / AVG(CASE WHEN e.status IN (3,4) AND e.dateStatus4 IS NOT NULL 
-                                     THEN DATEDIFF(CURDATE(), e.dateStatus4) ELSE NULL END)
-                    ELSE 0
-                END    
-        END  AS currentWeekWorkload,
+        SUM(CASE WHEN e.status IN (3) THEN 1 ELSE 0 END) AS currentWeekWorkload,
 		CASE 
-		    WHEN MAX(CASE WHEN e.dateStatus5 IS NOT NULL THEN 1 ELSE 0 END) = 1
-		    THEN 
-		        CASE 
-		            WHEN MAX(CASE WHEN e.status IN (5) AND e.dateStatus3 IS NOT NULL THEN 1 ELSE 0 END) = 1 
-		            THEN 7 / AVG(CASE WHEN e.dateStatus3 IS NOT NULL THEN DATEDIFF(e.dateStatus5, e.dateStatus3) ELSE NULL END)
-		            ELSE
-		                CASE 
-		                    WHEN MAX(CASE WHEN e.dateStatus4 IS NOT NULL THEN 1 ELSE 0 END) = 1 
-		                    THEN 7 / AVG(CASE WHEN e.dateStatus4 IS NOT NULL THEN DATEDIFF(e.dateStatus5, e.dateStatus4) ELSE NULL END)
-		                    ELSE 0
-		                END    
-		        END    
-		    ELSE 
-		        CASE 
-		            WHEN MAX(CASE WHEN e.status IN (5) AND  e.dateStatus3 IS NOT NULL THEN 1 ELSE 0 END) = 1 
-		            THEN 7 / AVG(CASE WHEN e.dateStatus3 IS NOT NULL 
-		                                    THEN DATEDIFF(CURDATE(), e.dateStatus3) ELSE NULL END)
-		            ELSE
-		                CASE 
-		                    WHEN MAX(CASE WHEN e.dateStatus4 IS NOT NULL THEN 1 ELSE 0 END) = 1 
-		                    THEN 7 / AVG(CASE WHEN e.dateStatus4 IS NOT NULL 
-		                                            THEN DATEDIFF(CURDATE(), e.dateStatus4) ELSE NULL END)
-		                    ELSE 0
-		                END    
-		        END    
+		    WHEN MAX(e.status IN (4,5) AND e.dateStatus3 <> e.dateStatus4) = 1
+			THEN 7 / AVG(
+				CASE 
+					WHEN CASE WHEN e.dateStatus3 IS NOT NULL AND e.dateStatus4 IS NOT NULL THEN 1 ELSE 0 END
+					THEN DATEDIFF(e.dateStatus4, e.dateStatus3) + 1 
+				        - 2 * (FLOOR((DATEDIFF(e.dateStatus4, e.dateStatus3) + DAYOFWEEK(e.dateStatus3) - 1) / 7))
+				        - (CASE WHEN DAYOFWEEK(e.dateStatus3) = 1 THEN 1 ELSE 0 END)
+				        - (CASE WHEN DAYOFWEEK(e.dateStatus4) = 7 THEN 1 ELSE 0 END)
+					ELSE NULL 
+				END)
+            ELSE 0  
 		END AS weekWorkload 
 	FROM users u 
 	LEFT JOIN expertise_experts ee 
@@ -654,4 +629,4 @@ SELECT
 	+ experienceExpertise_rate + countExpertise_rate + COALESCE(avg_range, 0)
 	) / 12 AS avg_rating
 FROM ee_joined
-WHERE possibleWeekWorkload > 0.13;
+WHERE possibleWeekWorkload >= 1;
