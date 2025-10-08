@@ -1471,3 +1471,29 @@ async def evaluate_documents_batch_internal(task_data: dict):
             "documents_processed": 0,
             "documents": []
         }
+    
+
+async def save_document_data(procurement_id: str, doc_type: str, analysis: dict, conclusion: str):
+    """
+    Сохраняет полные и очищенные данные анализа документа в базу данных.
+
+    Выполняет две операции: сохранение полного JSON-результата анализа и отдельно
+    человекочитаемого заключения. Обе операции выполняются в рамках одного логического
+    действия, и при ошибке в любой из них исключение пробрасывается выше.
+
+    Args:
+        procurement_id (str): Уникальный идентификатор закупки.
+        doc_type (str): Тип документа (например, "Извещение", "Техническое задание").
+        analysis (dict): Полный словарь с результатами ИИ-анализа документа.
+        conclusion (str): Текстовое заключение по результатам анализа.
+
+    Raises:
+        e: Любое исключение, возникшее при сохранении в БД (например, ошибка подключения,
+           нарушение ограничений целостности и т.д.).
+    """
+    try:
+        save_raw_data(procurement_id, doc_type, analysis)
+        save_clean_conclusion(procurement_id, doc_type, conclusion)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения документа {doc_type}: {str(e)}")
+        raise e

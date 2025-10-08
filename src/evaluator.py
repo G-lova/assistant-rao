@@ -17,7 +17,6 @@ from src.prompts import (RESPONSE_JSON_SCHEMA,
                          CONSISTENCY_CHECK_PROMPT,
                          CONSISTENCY_CHECK_SCHEMA)
 from configs.working_with_db import get_raw_data_by_procurement_id
-from configs.utils import check_procurement_completeness
 
 
 load_dotenv()

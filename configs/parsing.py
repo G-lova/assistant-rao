@@ -2,30 +2,79 @@ import os
 import re
 import logging
 import tempfile
+import asyncio
+import json
 
-import requests
-import pandas as pd
+import aiohttp
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
-
-from configs.utils import read_file
-from src.evaluator import analyze_document_chunks, split_large_text
-from configs.retry_utils import async_retry, CLOUD_PARSING_RETRY_CONFIG
 
 
 logger = logging.getLogger(__name__)
 
 
+async def execute_with_retry(async_func, *args, max_retries=3, base_delay=5, **kwargs):
+    """
+    Выполняет асинхронную функцию с автоматическими повторными попытками при возникновении ошибок.
+
+    Поддерживает экспоненциальную задержку между попытками и дополнительно проверяет,
+    не вернула ли функция словарь со статусом "error" — в этом случае также считается,
+    что операция завершилась неудачей. Используется для повышения надёжности вызовов
+    внешних сервисов или нестабильных операций.
+
+    Args:
+        async_func (_type_): Асинхронная функция для выполнения.
+        max_retries (int, optional): Максимальное количество повторных попыток.
+            По умолчанию 3.
+        base_delay (int, optional): Начальная задержка в секундах перед первой повторной попыткой.
+            По умолчанию 5.
+
+    Raises:
+        last_exception: Исключение, возникшее при последней (неудачной) попытке.
+
+    Returns:
+        _type_: Результат успешного выполнения async_func.
+    """
+    last_exception = None
+    
+    for attempt in range(max_retries + 1):
+        try:
+            result = await async_func(*args, **kwargs)
+            
+            # Проверяем, не вернула ли функция ошибку в результате
+            if isinstance(result, dict) and result.get("status") == "error":
+                raise Exception(result.get("error", "Unknown error in result"))
+                
+            return result
+            
+        except Exception as e:
+            last_exception = e
+            logger.warning(f"Попытка {attempt + 1}/{max_retries + 1} не удалась: {str(e)}")
+            
+            if attempt < max_retries:
+                # Экспоненциальная задержка
+                delay = base_delay * (2 ** attempt)
+                logger.info(f"Повтор через {delay} секунд...")
+                await asyncio.sleep(delay)
+            else:
+                logger.error(f"Все {max_retries + 1} попыток не удались")
+                raise last_exception
+    
+    raise last_exception
+
+
 class CloudStorageParser:
     """
-    Парсер для извлечения и обработки файлов из популярных облачных хранилищ.
-    Поддерживает Google Drive, Google Docs, Яндекс.Диск и Облако Mail.ru.
+    Парсер для извлечения документов из популярных облачных хранилищ.
+
+    Поддерживает Google Drive, Google Docs (включая таблицы и презентации),
+    Яндекс.Диск и облако Mail.ru. Предоставляет единый интерфейс для проверки
+    и асинхронной обработки ссылок, включая скачивание файлов и подготовку
+    их для дальнейшего анализа.
     """
     
     def __init__(self):
-        """
-        Инициализирует парсер с поддерживаемыми доменами и соответствующими методами обработки.
-        """
+        """Инициализирует парсер с маппингом поддерживаемых доменов и соответствующих методов обработки."""
         self.supported_domains = {
             'drive.google.com': self._parse_google_drive,
             'docs.google.com': self._parse_google_docs,
@@ -38,21 +87,33 @@ class CloudStorageParser:
 
     def is_cloud_link(self, url: str) -> bool:
         """
-        Проверяет, является ли URL ссылкой на поддерживаемое облачное хранилище.
+        Проверяет, относится ли URL к поддерживаемому облачному хранилищу.
 
         Args:
-            url (str): URL для проверки.
+            url (str): Проверяемый URL.
 
         Returns:
-            bool: True, если домен поддерживается, иначе False.
+            bool: True, если домен URL поддерживается, иначе False.
         """
         parsed = urlparse(url)
         return parsed.netloc in self.supported_domains
 
 
-    @async_retry(CLOUD_PARSING_RETRY_CONFIG)
     async def parse_cloud_link(self, url: str, procurement_id: str = None) -> Dict:
-        """Парсинг ссылки с повторными попытками"""
+        """
+        Асинхронно обрабатывает ссылку на документ в облаке и возвращает информацию для скачивания.
+
+        Выполняет маршрутизацию к соответствующему парсеру по домену и применяет
+        повторные попытки при ошибках.
+
+        Args:
+            url (str): Ссылка на документ в облачном хранилище.
+            procurement_id (str, optional): Идентификатор закупки для логирования.
+                По умолчанию None.
+
+        Returns:
+            Dict: Результат обработки: либо данные для скачивания файла, либо ошибка.
+        """
         if not self.is_cloud_link(url):
             return {
                 "status": "error",
@@ -63,7 +124,13 @@ class CloudStorageParser:
         parser_func = self.supported_domains.get(parsed.netloc)
         
         if parser_func:
-            return await parser_func(url, procurement_id)
+            return await execute_with_retry(
+                parser_func,
+                url,
+                procurement_id,
+                max_retries=3,
+                base_delay=5
+            )
         else:
             return {
                 "status": "error", 
@@ -71,17 +138,16 @@ class CloudStorageParser:
             }
 
 
-    @async_retry(CLOUD_PARSING_RETRY_CONFIG)
     async def _parse_google_drive(self, url: str, procurement_id: str = None) -> Dict:
         """
-        Обрабатывает ссылку на файл Google Drive: извлекает ID, формирует URL для скачивания и запускает обработку.
+        Обрабатывает ссылку на файл в Google Drive и формирует прямую ссылку для скачивания.
 
         Args:
             url (str): Ссылка на файл в Google Drive.
-            procurement_id (str, optional): Идентификатор закупки. Defaults to None.
+            procurement_id (str, optional): Идентификатор закупки. По умолчанию None.
 
         Returns:
-            Dict: Результат обработки файла.
+            Dict: Результат с прямой ссылкой на скачивание или ошибкой.
         """
         try:
             # Извлекаем ID файла из URL
@@ -96,7 +162,7 @@ class CloudStorageParser:
             download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
             
             # Скачиваем файл
-            return await self._download_and_process_file(
+            return await self._download_file_only(
                 download_url, 
                 "google_drive", 
                 file_id,
@@ -113,15 +179,14 @@ class CloudStorageParser:
 
     async def _parse_google_docs(self, url: str, procurement_id: str = None) -> Dict:
         """
-        Обрабатывает ссылку на Google Docs, Sheets или Slides: определяет тип документа,
-        формирует URL экспорта и запускает обработку.
+        Обрабатывает ссылку на Google Docs, Sheets или Slides и формирует ссылку для экспорта.
 
         Args:
-            url (str): Ссылка на документ Google.
-            procurement_id (str, optional): Идентификатор закупки. Defaults to None.
+            url (str): Ссылка на документ Google Docs.
+            procurement_id (str, optional): Идентификатор закупки. По умолчанию None.
 
         Returns:
-            Dict: Результат обработки документа.
+            Dict: Результат с ссылкой на экспорт в подходящем формате или ошибкой.
         """
         try:
             # Извлекаем ID документа и определяем тип
@@ -134,7 +199,6 @@ class CloudStorageParser:
             
             # Создаем ссылку для экспорта в зависимости от типа
             if doc_type == "spreadsheets":
-                # Для таблиц пробуем разные форматы
                 export_url = f"https://docs.google.com/spreadsheets/d/{doc_id}/export?format=xlsx"
                 file_extension = ".xlsx"
             elif doc_type == "presentation":
@@ -144,7 +208,7 @@ class CloudStorageParser:
                 export_url = f"https://docs.google.com/document/d/{doc_id}/export?format=pdf"
                 file_extension = ".pdf"
             
-            return await self._download_and_process_file(
+            return await self._download_file_only(
                 export_url,
                 "google_docs",
                 doc_id,
@@ -162,13 +226,14 @@ class CloudStorageParser:
 
     def _extract_google_docs_id_and_type(self, url: str) -> Tuple[Optional[str], str]:
         """
-        Извлекает ID документа и его тип (документ, таблица, презентация) из URL Google Docs.
+        Извлекает идентификатор и тип документа из URL Google Docs.
 
         Args:
-            url (str): URL документа Google.
+            url (str): URL на документ Google Docs.
 
         Returns:
-            Tuple[Optional[str], str]: Кортеж из ID документа и его типа.
+            Tuple[Optional[str], str]: Кортеж из ID документа (или None) и типа документа
+                ("document", "spreadsheets", "presentation").
         """
         patterns = [
             (r'/document/d/([a-zA-Z0-9_-]+)', 'document'),
@@ -186,40 +251,39 @@ class CloudStorageParser:
 
     async def _parse_yandex_disk(self, url: str, procurement_id: str = None) -> Dict:
         """
-        Обрабатывает публичную ссылку на файл Яндекс.Диска: извлекает ресурс, получает прямую ссылку
-        для скачивания и запускает обработку.
+        Обрабатывает ссылку на файл в Яндекс.Диске и получает прямую ссылку для скачивания.
 
         Args:
-            url (str): Публичная ссылка на файл Яндекс.Диска.
-            procurement_id (str, optional): Идентификатор закупки. Defaults to None.
+            url (str): Ссылка на файл или папку в Яндекс.Диске.
+            procurement_id (str, optional): Идентификатор закупки. По умолчанию None.
 
         Returns:
-            Dict: Результат обработки файла.
+            Dict: Результат с прямой ссылкой на скачивание или ошибкой.
         """
         try:
-            # Извлекаем ID ресурса
-            resource_id = self._extract_yandex_disk_resource(url)
+            # ОЧИЩАЕМ URL ОТ ЛИШНИХ ПРОБЕЛОВ
+            clean_url = url.strip()
+
+            # Извлекаем ID ресурса из ОЧИЩЕННОГО URL
+            resource_id = self._extract_yandex_disk_resource(clean_url)
 
             # Получаем информацию о файле и прямую ссылку для скачивания
-            download_info = await self._get_yandex_disk_download_info(url, resource_id)
-
+            download_info = await self._get_yandex_disk_download_info(clean_url, resource_id)
             if not download_info:
                 return {
                     "status": "error",
                     "error": "Не удалось получить информацию о файле с Яндекс.Диска"
                 }
-
             download_url = download_info['url']
             file_extension = download_info.get('extension', '.bin')
-
-            return await self._download_and_process_file(
+            return await self._download_file_only(
                 download_url,
                 "yandex_disk",
                 resource_id,
                 procurement_id,
-                file_extension
+                file_extension,
+                original_filename=download_info.get('original_filename')
             )
-
         except Exception as e:
             logger.error(f"Ошибка парсинга Yandex Disk: {str(e)}")
             return {
@@ -230,72 +294,63 @@ class CloudStorageParser:
 
     async def _get_yandex_disk_download_info(self, url: str, resource_id: str) -> Dict:
         """
-        Получает информацию о файле на Яндекс.Диске: прямую ссылку для скачивания и расширение файла.
+        Запрашивает метаданные файла с API Яндекс.Диска для получения прямой ссылки.
 
         Args:
-            url (str): Исходная публичная ссылка.
-            resource_id (str): Идентификатор ресурса на Яндекс.Диске.
+            url (str): Оригинальная публичная ссылка на ресурс.
+            resource_id (str): Идентификатор ресурса.
 
         Returns:
-            Dict: Словарь с ключами 'url', 'extension', 'content_type'.
+            Dict: Информация для скачивания: URL, расширение, тип контента и имя файла.
         """
         try:
-            # Преобразуем ссылку просмотра в ссылку скачивания
-            download_url = self._convert_yandex_disk_to_download(url)
+            async with aiohttp.ClientSession() as session:
+                # Передаём ПОЛНУЮ ОЧИЩЕННУЮ ссылку как public_key
+                params = {"public_key": url}
+                api_url = "https://cloud-api.yandex.net/v1/disk/public/resources/download"
+                async with session.get(api_url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                    if response.status != 200:
+                        logger.error(f"API Яндекс.Диска вернул статус {response.status} для {url}")
+                        return await self._try_yandex_disk_alternative_methods(url, resource_id)
 
-            # Делаем HEAD запрос для получения информации о файле
-            head_response = requests.head(download_url, allow_redirects=True, timeout=10)
+                    data = await response.json()
+                    download_url = data.get("href")
+                    if not download_url:
+                        logger.error("API не вернул поле 'href'")
+                        return await self._try_yandex_disk_alternative_methods(url, resource_id)
 
-            if head_response.status_code != 200:
-                # Пробуем альтернативный метод
-                return await self._try_yandex_disk_alternative_methods(url, resource_id)
+                    file_extension = self._get_extension_from_url(download_url)
+                    if not file_extension:
+                        file_extension = ".bin"
 
-            # Получаем информацию из заголовков
-            content_type = head_response.headers.get('content-type', '')
-            content_disposition = head_response.headers.get('content-disposition', '')
-
-            # Извлекаем расширение из content-disposition
-            file_extension = self._extract_extension_from_content_disposition(content_disposition)
-
-            # Если не нашли в content-disposition, определяем по content-type
-            if not file_extension:
-                file_extension = self._get_extension_from_content_type(content_type)
-
-            # Если все еще нет расширения, пробуем определить по URL
-            if not file_extension:
-                file_extension = self._get_extension_from_url(url)
-
-            return {
-                'url': download_url,
-                'extension': file_extension,
-                'content_type': content_type
-            }
-
+                    return {
+                        'url': download_url,
+                        'extension': file_extension,
+                        'content_type': 'application/octet-stream',
+                        'original_filename': self._extract_filename_from_url(download_url)
+                    }
         except Exception as e:
-            logger.error(f"Ошибка получения информации о файле Яндекс.Диска: {str(e)}")
+            logger.error(f"Ошибка при обращении к API Яндекс.Диска для {url}: {str(e)}")
             return await self._try_yandex_disk_alternative_methods(url, resource_id)
 
 
     def _extract_extension_from_content_disposition(self, content_disposition: str) -> str:
         """
-        Извлекает расширение файла из заголовка Content-Disposition HTTP-ответа.
+        Извлекает расширение файла из заголовка Content-Disposition.
 
         Args:
             content_disposition (str): Значение заголовка Content-Disposition.
 
         Returns:
-            str: Расширение файла (например, '.pdf'), либо пустая строка, если не удалось извлечь.
+            str: Расширение файла (например, ".pdf"), либо пустая строка, если не удалось извлечь.
         """
         if not content_disposition:
             return ""
 
-        # Ищем filename в content-disposition
         filename_match = re.search(r'filename[^;=\n]*=(([\'"]).*?\2|[^;\n]*)', content_disposition)
         if filename_match:
             filename = filename_match.group(1)
-            # Убираем кавычки
             filename = filename.strip('\"\'')
-            # Извлекаем расширение
             _, extension = os.path.splitext(filename)
             if extension:
                 return extension.lower()
@@ -305,39 +360,38 @@ class CloudStorageParser:
 
     async def _try_yandex_disk_alternative_methods(self, url: str, resource_id: str) -> Dict:
         """
-        Пробует альтернативные URL-адреса для скачивания файла с Яндекс.Диска, если основной метод не сработал.
+        Пробует альтернативные URL-форматы для скачивания с Яндекс.Диска при отказе официального API.
 
         Args:
-            url (str): Исходная ссылка.
+            url (str): Оригинальная ссылка.
             resource_id (str): Идентификатор ресурса.
 
         Returns:
-            Dict: Информация о файле с рабочим URL или резервным вариантом.
+            Dict: Информация для скачивания по альтернативному URL или заглушка.
         """
         alternative_urls = [
-            # Основной метод скачивания
             f"https://disk.yandex.ru/d/{resource_id}?format=download",
             f"https://yadi.sk/d/{resource_id}?format=download",
-            # Прямое скачивание
             f"https://disk.yandex.ru/dl/{resource_id}",
             f"https://yadi.sk/i/{resource_id}/download",
         ]
 
-        for alt_url in alternative_urls:
-            try:
-                head_response = requests.head(alt_url, allow_redirects=True, timeout=5)
-                if head_response.status_code == 200:
-                    content_type = head_response.headers.get('content-type', '')
-                    file_extension = self._get_extension_from_content_type(content_type)
+        async with aiohttp.ClientSession() as session:
+            for alt_url in alternative_urls:
+                try:
+                    async with session.head(alt_url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=5)) as response:
+                        if response.status == 200:
+                            content_type = response.headers.get('content-type', '')
+                            file_extension = self._get_extension_from_content_type(content_type)
 
-                    return {
-                        'url': alt_url,
-                        'extension': file_extension or '.bin',
-                        'content_type': content_type
-                    }
-            except Exception as e:
-                logger.warning(f"Альтернативный URL {alt_url} не сработал: {str(e)}")
-                continue
+                            return {
+                                'url': alt_url,
+                                'extension': file_extension or '.bin',
+                                'content_type': content_type
+                            }
+                except Exception as e:
+                    logger.warning(f"Альтернативный URL {alt_url} не сработал: {str(e)}")
+                    continue
             
         # Если ничего не сработало, возвращаем базовую ссылку
         return {
@@ -349,26 +403,94 @@ class CloudStorageParser:
 
     async def _parse_mail_cloud(self, url: str, procurement_id: str = None) -> Dict:
         """
-        Обрабатывает ссылку на файл в Облаке Mail.ru и запускает его обработку.
+        Парсит публичную ссылку на документ в облаке Mail.ru и возвращает прямую ссылку для скачивания.
+
+        Анализирует HTML-страницу публичной папки Mail.ru, извлекает данные из скрипта
+        window.cloudSettings, формирует прямой URL на файл и инициирует его скачивание.
+        Поддерживает обработку редиректов и экранированных символов в JSON.
 
         Args:
-            url (str): Ссылка на файл в Облаке Mail.ru.
-            procurement_id (str, optional): Идентификатор закупки. Defaults to None.
+            url (str): Публичная ссылка на файл в облаке Mail.ru (должна содержать '/public/').
+            procurement_id (str, optional): Идентификатор закупки для логирования и привязки результата.
+                По умолчанию None.
+
+        Raises:
+            Exception: При неверном формате ссылки, отсутствии необходимых данных в HTML,
+                ошибках загрузки страницы или парсинга JSON.
 
         Returns:
-            Dict: Результат обработки файла.
+            Dict: Словарь с результатом операции. При успехе — содержит данные скачанного файла;
+                при ошибке — статус "error" и сообщение об ошибке.
         """
         try:
-            # Для Облака Mail.ru используем прямую ссылку
-            download_url = url
-            
-            return await self._download_and_process_file(
-                download_url,
+            clean_url = url.strip()
+            if '/public/' not in clean_url:
+                raise Exception("Некорректный формат ссылки Mail.ru")
+
+            # === 1. Скачиваем HTML-страницу с User-Agent и БЕЗ редиректов ===
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.get(clean_url, headers=headers, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                    if response.status == 200:
+                        html_content = await response.text()
+                    elif 300 <= response.status < 400:
+                        # Mail.ru иногда редиректит на другую страницу с тем же контентом
+                        redirect_url = response.headers.get('Location')
+                        if redirect_url:
+                            async with session.get(redirect_url, headers=headers, allow_redirects=False, timeout=aiohttp.ClientTimeout(total=10)) as resp2:
+                                if resp2.status == 200:
+                                    html_content = await resp2.text()
+                                else:
+                                    raise Exception(f"Не удалось загрузить страницу после редиректа: {resp2.status}")
+                        else:
+                            raise Exception("Получен редирект без Location")
+                    else:
+                        raise Exception(f"Не удалось загрузить страницу Mail.ru: {response.status}")
+
+            # === 2. Извлекаем window.cloudSettings ===
+            match = re.search(r'<script>window\.cloudSettings\s*=\s*({.*?})\s*;</script>', html_content, re.DOTALL)
+            if not match:
+                raise Exception("Блок window.cloudSettings не найден в HTML")
+
+            json_str = match.group(1)
+
+            # Очищаем от x3c/x3e (экранированные символы)
+            json_str = re.sub(r'"[^"]*x3[cd][^"]*"', '""', json_str)
+
+            # Парсим JSON
+            try:
+                cloud_settings = json.loads(json_str)
+            except json.JSONDecodeError:
+                json_str = json_str.replace(r'\/', '/')
+                cloud_settings = json.loads(json_str)
+
+            # === 3. Собираем прямую ссылку ===
+            weblink_get_list = cloud_settings.get("dispatcher", {}).get("weblink_get", [])
+            if not weblink_get_list:
+                raise Exception("weblink_get отсутствует в cloudSettings")
+
+            base_url = weblink_get_list[0].get("url")
+            weblink = cloud_settings.get("request", {}).get("weblink")
+            if not base_url or not weblink:
+                raise Exception("Не удалось извлечь base_url или weblink")
+
+            direct_download_url = f"{base_url}/{weblink}"
+
+            # === 4. Извлекаем имя файла ===
+            filename = weblink.split('/')[-1] if '/' in weblink else weblink
+            if not filename:
+                filename = "mail_cloud_file"
+
+            # === 5. Скачиваем файл ПО ПРЯМОЙ ССЫЛКЕ (без редиректов!) ===
+            return await self._download_file_only(
+                direct_download_url,
                 "mail_cloud",
-                self._extract_mail_cloud_resource(url),
+                filename,
                 procurement_id
             )
-            
+
         except Exception as e:
             logger.error(f"Ошибка парсинга Mail.ru Cloud: {str(e)}")
             return {
@@ -377,60 +499,68 @@ class CloudStorageParser:
             }
 
 
-    @async_retry(CLOUD_PARSING_RETRY_CONFIG) 
-    async def _download_and_process_file(self, url: str, source: str, resource_id: str, 
-                                       procurement_id: str = None, file_extension: str = None) -> Dict:
+    async def _download_file_only(self, url: str, source: str, resource_id: str, 
+                                procurement_id: str = None, file_extension: str = None,
+                                original_filename: str = None) -> Dict:
         """
-        Скачивает файл по указанному URL во временный файл и запускает его анализ.
+        Скачивает файл по прямой ссылке и сохраняет его во временный файл.
 
         Args:
             url (str): Прямая ссылка для скачивания.
-            source (str): Источник файла (например, 'google_drive').
-            resource_id (str): Уникальный идентификатор ресурса.
-            procurement_id (str, optional): Идентификатор закупки. Defaults to None.
-            file_extension (str, optional): Расширение файла. Defaults to None.
-
-        Raises:
-            Exception: Возникает при ошибках скачивания или обработки.
+            source (str): Источник (например, "google_drive").
+            resource_id (str): Идентификатор ресурса.
+            procurement_id (str, optional): Идентификатор закупки. По умолчанию None.
+            file_extension (str, optional): Расширение файла. По умолчанию None.
+            original_filename (str, optional): Оригинальное имя файла. По умолчанию None.
 
         Returns:
-            Dict: Результат анализа файла.
+            Dict: Результат с путём к временному файлу и метаданными или ошибкой.
         """
         try:
-            # Скачиваем файл с таймаутом
-            response = requests.get(url, stream=True, timeout=30)
-            
-            # Проверяем статус ответа
-            if response.status_code != 200:
-                # Пробуем альтернативные форматы для Google таблиц
-                if "spreadsheets" in url and "export" in url:
-                    return await self._try_alternative_google_sheets_formats(resource_id, procurement_id)
-                else:
-                    raise Exception(f"HTTP {response.status_code}: {response.reason}")
-            
-            # Определяем расширение файла из заголовков или URL
-            if not file_extension:
-                content_type = response.headers.get('content-type', '')
-                file_extension = self._get_extension_from_content_type(content_type)
-                
-                if not file_extension:
-                    file_extension = self._get_extension_from_url(url)
-            
-            # Создаем временный файл
-            with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp_file:
-                for chunk in response.iter_content(chunk_size=8192):
-                    tmp_file.write(chunk)
-                tmp_path = tmp_file.name
-            
-            # Обрабатываем файл
-            filename = f"{source}_{resource_id}{file_extension}"
-            result = await self._process_downloaded_file(tmp_path, filename, procurement_id)
-            
-            # Очищаем временный файл
-            os.unlink(tmp_path)
-            
-            return result
-            
+            # Используем aiohttp для асинхронного скачивания
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as response:
+                    if response.status != 200:
+                        # Пробуем альтернативные форматы для Google таблиц
+                        if "spreadsheets" in url and "export" in url:
+                            return await self._try_alternative_google_sheets_formats(resource_id, procurement_id)
+                        else:
+                            raise Exception(f"HTTP {response.status}: {response.reason}")
+                    
+                    # Определяем расширение файла из заголовков или URL
+                    if not file_extension:
+                        content_type = response.headers.get('content-type', '')
+                        file_extension = self._get_extension_from_content_type(content_type)
+                        
+                        if not file_extension:
+                            file_extension = self._get_extension_from_url(url)
+                    
+                    # Создаем временный файл
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp_file:
+                        # Читаем данные чанками и пишем в файл
+                        async for chunk in response.content.iter_chunked(8192):
+                            tmp_file.write(chunk)
+                        tmp_path = tmp_file.name
+                    
+                    # Используем original_filename, если есть
+                    if original_filename:
+                        # Очищаем от недопустимых символов
+                        safe_name = re.sub(r'[<>:"/\\|?*]', '_', original_filename)
+                        filename = safe_name
+                    else:
+                        filename = f"{source}_{resource_id}{file_extension}"
+                    
+                    # Возвращаем информацию о скачанном файле, а не анализируем его
+                    return {
+                        "status": "success",
+                        "filename": filename,
+                        "file_path": tmp_path,  # Путь к скачанному файлу
+                        "source": "cloud_storage",
+                        "original_url": url,
+                        "procurement_id": procurement_id,
+                        "file_extension": file_extension
+                    }
+                    
         except Exception as e:
             logger.error(f"Ошибка скачивания файла {url}: {str(e)}")
             
@@ -444,16 +574,16 @@ class CloudStorageParser:
             }
 
 
-    def _try_alternative_google_sheets_formats(self, sheet_id: str, procurement_id: str = None) -> Dict:
+    async def _try_alternative_google_sheets_formats(self, sheet_id: str, procurement_id: str = None) -> Dict:
         """
-        Пробует альтернативные форматы экспорта Google Таблиц (xlsx, pdf, ods), если основной не сработал.
+        Пробует альтернативные форматы экспорта Google Таблиц при неудаче основного.
 
         Args:
-            sheet_id (str): ID Google Таблицы.
-            procurement_id (str, optional): Идентификатор закупки. Defaults to None.
+            sheet_id (str): Идентификатор Google Таблицы.
+            procurement_id (str, optional): Идентификатор закупки. По умолчанию None.
 
         Returns:
-            Dict: Результат обработки в первом успешном формате или ошибка.
+            Dict: Результат с первым успешным форматом или ошибкой.
         """
         formats_to_try = [
             ("https://docs.google.com/spreadsheets/d/{}/export?format=xlsx", ".xlsx"),
@@ -461,61 +591,72 @@ class CloudStorageParser:
             ("https://docs.google.com/spreadsheets/d/{}/export?format=ods", ".ods"),
         ]
 
-        for url_template, extension in formats_to_try:
-            try:
-                url = url_template.format(sheet_id)
-                response = requests.get(url, stream=True, timeout=20)
+        async with aiohttp.ClientSession() as session:
+            for url_template, extension in formats_to_try:
+                try:
+                    url = url_template.format(sheet_id)
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                        if response.status == 200:
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as tmp_file:
+                                async for chunk in response.content.iter_chunked(8192):
+                                    tmp_file.write(chunk)
+                                tmp_path = tmp_file.name
 
-                if response.status_code == 200:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as tmp_file:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            tmp_file.write(chunk)
-                        tmp_path = tmp_file.name
+                            filename = f"google_sheets_{sheet_id}{extension}"
+                            
+                            return {
+                                "status": "success",
+                                "filename": filename,
+                                "file_path": tmp_path,
+                                "source": "cloud_storage", 
+                                "original_url": url,
+                                "procurement_id": procurement_id,
+                                "file_extension": extension
+                            }
 
-                    filename = f"google_sheets_{sheet_id}{extension}"
-                    result = self._process_downloaded_file(tmp_path, filename, procurement_id)
-
-                    os.unlink(tmp_path)
-                    return result
-
-            except Exception as e:
-                logger.warning(f"Формат {extension} не сработал: {str(e)}")
-                continue
+                except Exception as e:
+                    logger.warning(f"Формат {extension} не сработал: {str(e)}")
+                    continue
             
         # Если все форматы не сработали, пробуем CSV
-        return self._try_google_sheets_csv(sheet_id, procurement_id)
+        return await self._try_google_sheets_csv(sheet_id, procurement_id)
 
 
-    def _try_google_sheets_csv(self, sheet_id: str, procurement_id: str = None) -> Dict:
+    async def _try_google_sheets_csv(self, sheet_id: str, procurement_id: str = None) -> Dict:
         """
         Экспортирует Google Таблицу в формате CSV как последний резервный вариант.
 
         Args:
-            sheet_id (str): ID Google Таблицы.
-            procurement_id (str, optional): Идентификатор закупки. Defaults to None.
-
-        Raises:
-            Exception: Если CSV-экспорт завершился с ошибкой.
+            sheet_id (str): Идентификатор Google Таблицы.
+            procurement_id (str, optional): Идентификатор закупки. По умолчанию None.
 
         Returns:
-            Dict: Результат обработки CSV-файла или ошибка.
+            Dict: Результат с CSV-файлом или ошибкой.
         """
         try:
             csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv"
-            response = requests.get(csv_url, timeout=20)
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(csv_url, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                    if response.status == 200:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp_file:
+                            content = await response.read()
+                            tmp_file.write(content)
+                            tmp_path = tmp_file.name
 
-            if response.status_code == 200:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp_file:
-                    tmp_file.write(response.content)
-                    tmp_path = tmp_file.name
-
-                filename = f"google_sheets_{sheet_id}.csv"
-                result = self._process_downloaded_file(tmp_path, filename, procurement_id)
-
-                os.unlink(tmp_path)
-                return result
-            else:
-                raise Exception(f"CSV export failed with status {response.status_code}")
+                        filename = f"google_sheets_{sheet_id}.csv"
+                        
+                        return {
+                            "status": "success",
+                            "filename": filename,
+                            "file_path": tmp_path,
+                            "source": "cloud_storage",
+                            "original_url": csv_url,
+                            "procurement_id": procurement_id,
+                            "file_extension": ".csv"
+                        }
+                    else:
+                        raise Exception(f"CSV export failed with status {response.status}")
 
         except Exception as e:
             logger.error(f"CSV export также не сработал: {str(e)}")
@@ -525,62 +666,12 @@ class CloudStorageParser:
             }
 
 
-    async def _process_downloaded_file(self, file_path: str, filename: str, procurement_id: str = None) -> Dict:
-        """
-        Извлекает текст из локального файла, разбивает его на чанки и запускает семантический анализ.
-
-        Args:
-            file_path (str): Путь к временному файлу.
-            filename (str): Имя файла (для метаданных).
-            procurement_id (str, optional): Идентификатор закупки. Defaults to None.
-
-        Returns:
-            Dict: Результат анализа документа.
-        """
-        try:
-            # Извлекаем текст из файла
-            extracted_text = read_file(file_path, original_filename=filename)
-            
-            if not extracted_text or "[Нет читаемого текста]" in extracted_text:
-                return {
-                    "status": "error",
-                    "error": "Не удалось извлечь текст из файла"
-                }
-            
-            # Разделяем на чанки
-            chunks = split_large_text(extracted_text, max_chunk_size=20000)
-            
-            # Анализируем документ
-            analysis_result = await analyze_document_chunks(
-                chunks=chunks,
-                document_name=filename,
-                document_type="",
-                law_type="44-ФЗ",  # можно сделать параметром
-                procurement_method="Конкурс"  # можно сделать параметром
-            )
-            
-            return {
-                "status": "success",
-                "filename": filename,
-                "source": "cloud_storage",
-                "analysis": analysis_result,
-                "procurement_id": procurement_id
-            }
-            
-        except Exception as e:
-            logger.error(f"Ошибка обработки файла: {str(e)}")
-            return {
-                "status": "error",
-                "error": f"Ошибка обработки файла: {str(e)}"
-            }
-
-
     def _extract_google_drive_file_id(self, url: str) -> Optional[str]:
         """
-        Извлекает ID файла из различных форматов ссылок Google Drive.
+        Извлекает идентификатор файла из различных форматов ссылок Google Drive.
 
         Args:
-            url (str): Ссылка на файл Google Drive.
+            url (str): Ссылка на файл в Google Drive.
 
         Returns:
             Optional[str]: ID файла или None, если не найден.
@@ -599,66 +690,32 @@ class CloudStorageParser:
         return None
 
 
-    def _extract_google_docs_id(self, url: str) -> Optional[str]:
-        """
-        Извлекает ID документа из ссылок Google Docs, Sheets или Slides.
-
-        Args:
-            url (str): Ссылка на Google-документ.
-
-        Returns:
-            Optional[str]: ID документа или None, если не найден.
-        """
-        patterns = [
-            r'/document/d/([a-zA-Z0-9_-]+)',
-            r'/presentation/d/([a-zA-Z0-9_-]+)',
-            r'/spreadsheets/d/([a-zA-Z0-9_-]+)'
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, url)
-            if match:
-                return match.group(1)
-        
-        return None
-
-
     def _extract_yandex_disk_resource(self, url: str) -> str:
         """
-        Извлекает идентификатор ресурса из публичной ссылки Яндекс.Диска.
+        Извлекает идентификатор ресурса из ссылки Яндекс.Диска.
 
         Args:
-            url (str): Публичная ссылка на файл или папку Яндекс.Диска.
+            url (str): Ссылка на файл или папку в Яндекс.Диске.
 
         Returns:
-            str: Идентификатор ресурса.
+            str: Идентификатор ресурса или "yandex_resource" по умолчанию.
         """
-        patterns = [
-            r'/i/([a-zA-Z0-9_-]+)',
-            r'/d/([a-zA-Z0-9_-]+)',
-            r'/client/disk/([a-zA-Z0-9_-]+)'
-        ]
-
-        for pattern in patterns:
-            match = re.search(pattern, url)
-            if match:
-                return match.group(1)
-
-        # Если не нашли по шаблонам, берем последнюю часть URL
+        match = re.search(r'/[id]/([a-zA-Z0-9_-]+)', url)
+        if match:
+            return match.group(1)
         parsed = urlparse(url)
-        path_parts = parsed.path.split('/')
-        return path_parts[-1] if path_parts else "yandex_resource"
+        return parsed.path.split('/')[-1] or "yandex_resource"
 
 
     def _extract_mail_cloud_resource(self, url: str) -> str:
         """
-        Извлекает имя файла или идентификатор из ссылки Облака Mail.ru.
+        Извлекает идентификатор ресурса из ссылки облака Mail.ru.
 
         Args:
-            url (str): Ссылка на файл в Облаке Mail.ru.
+            url (str): Ссылка на файл в Mail.ru Cloud.
 
         Returns:
-            str: Имя или идентификатор ресурса.
+            str: Идентификатор ресурса или "mail_cloud_resource" по умолчанию.
         """
         parsed = urlparse(url)
         path_parts = parsed.path.split('/')
@@ -667,26 +724,22 @@ class CloudStorageParser:
 
     def _convert_yandex_disk_to_download(self, url: str) -> str:
         """
-        Преобразует публичную ссылку Яндекс.Диска в прямую ссылку для скачивания.
+        Формирует URL для скачивания из публичной ссылки Яндекс.Диска.
 
         Args:
-            url (str): Исходная публичная ссылка.
+            url (str): Публичная ссылка на ресурс.
 
         Returns:
-            str: URL с параметром скачивания.
+            str: URL с параметром format=download.
         """
-        # Извлекаем ID ресурса
         resource_id = self._extract_yandex_disk_resource(url)
 
-        # Для публичных ссылок Яндекс.Диска
         if '/i/' in url or '/d/' in url:
             return f"https://disk.yandex.ru/d/{resource_id}?format=download"
 
-        # Если ссылка уже содержит параметры скачивания
         if 'download' in url or 'format=download' in url:
             return url
 
-        # Добавляем параметр скачивания к существующей ссылке
         if '?' in url:
             return f"{url}&format=download"
         else:
@@ -695,16 +748,15 @@ class CloudStorageParser:
 
     def _get_extension_from_content_type(self, content_type: str) -> str:
         """
-        Определяет расширение файла по MIME-типу из HTTP-заголовка Content-Type.
+        Определяет расширение файла по MIME-типу.
 
         Args:
-            content_type (str): MIME-тип файла.
+            content_type (str): MIME-тип контента.
 
         Returns:
-            str: Расширение файла (например, '.pdf'), по умолчанию '.bin'.
+            str: Расширение файла (например, ".pdf") или ".bin" по умолчанию.
         """
         extension_map = {
-            # Документы
             'application/pdf': '.pdf',
             'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
             'application/msword': '.doc',
@@ -712,54 +764,42 @@ class CloudStorageParser:
             'application/vnd.ms-excel': '.xls',
             'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
             'application/vnd.ms-powerpoint': '.ppt',
-
-            # Текстовые файлы
             'text/plain': '.txt',
             'text/csv': '.csv',
             'text/html': '.html',
             'application/json': '.json',
             'application/xml': '.xml',
-
-            # Изображения
             'image/jpeg': '.jpg',
             'image/jpg': '.jpg',
             'image/png': '.png',
             'image/gif': '.gif',
             'image/webp': '.webp',
             'image/svg+xml': '.svg',
-
-            # Архивы
             'application/zip': '.zip',
             'application/x-rar-compressed': '.rar',
             'application/x-7z-compressed': '.7z',
             'application/gzip': '.gz',
             'application/x-tar': '.tar',
-
-            # Яндекс-специфичные
-            'application/x-yadisk-document': '.doc',  # Яндекс.Документы
-            'application/x-yadisk-table': '.xls',     # Яндекс.Таблицы
-            'application/x-yadisk-presentation': '.ppt',  # Яндекс.Презентации
         }
 
-        # Берем основную часть content-type (игнорируем кодировку и т.д.)
         main_content_type = content_type.split(';')[0].strip().lower()
-
         return extension_map.get(main_content_type, '.bin')
 
 
     def _get_extension_from_url(self, url: str) -> str:
         """
-        Определяет расширение файла по его URL, анализируя путь.
+        Определяет расширение файла по URL.
 
         Args:
             url (str): URL файла.
 
         Returns:
-            str: Расширение файла или '.bin' по умолчанию.
+            str: Расширение файла или ".bin" по умолчанию.
         """
         parsed = urlparse(url)
         path = parsed.path.lower()
 
+        # Сначала пробуем по пути
         extension_map = {
             '.pdf': '.pdf',
             '.docx': '.docx', '.doc': '.doc',
@@ -770,18 +810,40 @@ class CloudStorageParser:
             '.jpg': '.jpg', '.jpeg': '.jpg', '.png': '.png', '.gif': '.gif',
             '.html': '.html', '.htm': '.html',
         }
-
-        # Проверяем полное совпадение
-        for ext, result_ext in extension_map.items():
+        for ext in extension_map:
             if path.endswith(ext):
-                return result_ext
+                return extension_map[ext]
 
-        # Проверяем частичное совпадение (например, в середине URL)
-        for ext in extension_map.keys():
-            if ext in path:
+        # Затем пробуем из параметра filename в query string
+        query_params = parse_qs(parsed.query)
+        filenames = query_params.get('filename', [])
+        if filenames:
+            filename = filenames[0]
+            _, ext = os.path.splitext(filename)
+            ext = ext.lower()
+            if ext in extension_map:
                 return extension_map[ext]
 
         return '.bin'
+
+
+    def _extract_filename_from_url(self, url: str) -> str:
+        """
+        Извлекает имя файла из параметров URL.
+
+        Args:
+            url (str): URL с параметром filename.
+
+        Returns:
+            str: Имя файла или пустая строка, если не найдено.
+        """
+        from urllib.parse import urlparse, parse_qs
+        parsed = urlparse(url)
+        query_params = parse_qs(parsed.query)
+        filenames = query_params.get('filename', [])
+        if filenames:
+            return filenames[0]
+        return ""
 
 
 # Глобальный экземпляр парсера
@@ -790,93 +852,36 @@ cloud_parser = CloudStorageParser()
 
 async def parse_cloud_storage_link(url: str, procurement_id: str = None) -> Dict:
     """
-    Удобная обёртка для асинхронного парсинга ссылки на облачное хранилище.
+    Асинхронно парсит документ по ссылке из облачного хранилища и возвращает его анализ.
+
+    Поддерживает популярные облачные сервисы (например, Яндекс.Диск, Google Drive).
+    Скачивает файл, извлекает текст, определяет тип документа и возвращает
+    структурированный результат анализа. Используется как основной интерфейс
+    для обработки внешних ссылок.
 
     Args:
-        url (str): Ссылка на файл в облаке.
-        procurement_id (str, optional): Идентификатор закупки. Defaults to None.
+        url (str): URL на документ в облачном хранилище.
+        procurement_id (str, optional): Идентификатор закупки для логирования
+            и привязки результата. По умолчанию None.
 
     Returns:
-        Dict: Результат обработки.
+        Dict: Словарь с результатом парсинга, содержащий статус, путь к временному файлу,
+            имя документа, результат ИИ-анализа и другую метаинформацию.
     """
     return await cloud_parser.parse_cloud_link(url, procurement_id)
 
 
 def is_cloud_storage_link(url: str) -> bool:
     """
-    Проверяет, ведёт ли ссылка на поддерживаемое облачное хранилище.
+    Проверяет, является ли URL ссылкой на документ в поддерживаемом облачном хранилище.
+
+    Использует внутреннюю логику парсера для распознавания ссылок на популярные
+    облачные сервисы, такие как Яндекс.Диск, Google Drive и другие.
 
     Args:
-        url (str): Проверяемая ссылка.
+        url (str): Проверяемый URL.
 
     Returns:
-        bool: True, если ссылка поддерживается.
+        bool: True, если ссылка ведёт на поддерживаемое облачное хранилище, иначе False.
     """
     return cloud_parser.is_cloud_link(url)
-
-
-async def process_input_links(links: List[str], procurement_id: str = None) -> List[Dict]:
-    """
-    Обрабатывает список ссылок: определяет тип (облако или прямая ссылка) и запускает анализ.
-
-    Args:
-        links (List[str]): Список URL-адресов.
-        procurement_id (str, optional): Идентификатор закупки. Defaults to None.
-
-    Returns:
-        List[Dict]: Список результатов обработки каждой ссылки.
-    """
-    results = []
-    
-    for link in links:
-        try:
-            if is_cloud_storage_link(link):
-                # Обрабатываем как облачное хранилище
-                result = await parse_cloud_storage_link(link, procurement_id)
-            else:
-                # Пробуем обработать как прямую ссылку на файл
-                result = await cloud_parser._download_and_process_file(
-                    link, 
-                    "direct_link",
-                    cloud_parser._extract_filename_from_url(link),
-                    procurement_id
-                )
-            
-            results.append({
-                "url": link,
-                "result": result
-            })
-            
-        except Exception as e:
-            logger.error(f"Ошибка обработки ссылки {link}: {str(e)}")
-            results.append({
-                "url": link,
-                "result": {
-                    "status": "error",
-                    "error": f"Ошибка обработки: {str(e)}"
-                }
-            })
-    
-    return results
-
-
-def _extract_filename_from_url(url: str) -> str:
-    """
-    Извлекает имя файла из URL, обрезая слишком длинные имена.
-
-    Args:
-        url (str): URL файла.
-
-    Returns:
-        str: Имя файла, пригодное для использования в файловой системе.
-    """
-    parsed = urlparse(url)
-    path_parts = parsed.path.split('/')
-    filename = path_parts[-1] if path_parts else "unknown_file"
-    
-    # Если имя файла слишком длинное, обрезаем
-    if len(filename) > 50:
-        name, ext = os.path.splitext(filename)
-        filename = name[:45] + ext
-    
-    return filename
