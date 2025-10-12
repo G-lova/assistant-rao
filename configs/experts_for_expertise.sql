@@ -394,7 +394,8 @@ WITH expertise_info AS (
 	AND u.deleted_at IS NULL 
 	AND u.inn != '' AND CAST(SUBSTRING(u.inn, 1, 2) AS UNSIGNED) != 0 AND LOWER(u.name) NOT LIKE '%тест%' AND LOWER(u.name) NOT LIKE '%test%' 
 	GROUP BY u.id
-), expert_declines AS (
+), 
+expert_declines AS (
 	SELECT 
 	    expert_id,
 	    COUNT(*) AS expert_declines
@@ -412,6 +413,26 @@ WITH expertise_info AS (
 	    ) de
 	    WHERE d.dateStatus2 >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
 	) declines
+	GROUP BY expert_id
+),
+expert_requests AS (
+	SELECT 
+	    expert_id,
+	    COUNT(*) AS expert_requests
+	FROM (
+	    SELECT 
+	        d.id,
+	        d.dateStatus2,
+	        de.expert_id
+	    FROM expertises d
+	    JOIN JSON_TABLE(
+	        d.requestExperts,
+	        "$[*]" COLUMNS (
+	            expert_id INT PATH "$"
+	        )
+	    ) de
+	    WHERE d.status IN (2)
+	) requests
 	GROUP BY expert_id
 ),
 experts_with_coords AS (
@@ -599,10 +620,13 @@ experts_with_coords AS (
 			WHEN 88 THEN 39.3078
 			WHEN 89 THEN 32.6169
 		END AS expert_lat,
-		COALESCE(ed.expert_declines, 0) AS expert_declines
+		COALESCE(ed.expert_declines, 0) AS expert_declines,
+		COALESCE(er.expert_requests, 0) + e.currentWeekWorkload AS currentWeekWorkloadRequests
 	FROM experts e
 	LEFT JOIN expert_declines ed
 	ON ed.expert_id = e.expert_id
+	LEFT JOIN expert_requests er
+	ON er.expert_id = e.expert_id
 ), ee_joined AS ( 
 	SELECT 
 		ewc.*,
@@ -617,8 +641,8 @@ experts_with_coords AS (
 			ELSE 0
 		END AS 	experienceExpertise_rate,
 		CASE 
-			WHEN u.desiredWeekWorkload > 0 THEN u.desiredWeekWorkload - u.currentWeekWorkload
-			ELSE 5 - u.currentWeekWorkload
+			WHEN u.desiredWeekWorkload > 0 THEN u.desiredWeekWorkload - u.currentWeekWorkloadRequests
+			ELSE 5 - u.currentWeekWorkloadRequests
 		END	AS possibleWeekWorkload,
 		(u.countExpertise + u.countExpertisesBD) / MAX(u.countExpertise + u.countExpertisesBD) OVER(PARTITION BY ewc.expertise_id) AS countExpertise_rate,
 		CASE 
