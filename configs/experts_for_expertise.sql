@@ -28,6 +28,7 @@ WITH expertise_info AS (
 			WHEN 4 THEN 'Результаты исполнения государственных заданий'
 			WHEN 5 THEN 'Закупочная деятельность'
 		END AS experienceExpertise_direction,
+		e.`type`,
 		e.regionExpertise AS expertise_regionExpertise, 
 		REGEXP_REPLACE(
 			CONCAT_WS(' ', LOWER(e.subjectContract), 
@@ -332,23 +333,52 @@ WITH expertise_info AS (
 		u.experienceExpertise,
 		u.countExpertise,
 		COALESCE(u.workExpertise, 0) AS desiredWeekWorkload,
-		COUNT(CASE WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) AND ee.expertise_id IN (SELECT id FROM expertises WHERE status = 5) THEN 1 END) AS countExpertises_lastYear,
-		COUNT(CASE WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE status = 5) THEN 1 END) AS countExpertisesBD,
-		AVG(CASE WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) THEN ee.`range` ELSE NULL END) AS avg_range,
-        SUM(CASE WHEN e.status IN (3) THEN 1 ELSE 0 END) AS currentWeekWorkload,
-		CASE 
-		    WHEN MAX(e.status IN (4,5) AND e.dateStatus3 <> e.dateStatus4) = 1
-			THEN 7 / AVG(
-				CASE 
-					WHEN CASE WHEN e.dateStatus3 IS NOT NULL AND e.dateStatus4 IS NOT NULL THEN 1 ELSE 0 END
-					THEN DATEDIFF(e.dateStatus4, e.dateStatus3) + 1 
-				        - 2 * (FLOOR((DATEDIFF(e.dateStatus4, e.dateStatus3) + DAYOFWEEK(e.dateStatus3) - 1) / 7))
-				        - (CASE WHEN DAYOFWEEK(e.dateStatus3) = 1 THEN 1 ELSE 0 END)
-				        - (CASE WHEN DAYOFWEEK(e.dateStatus4) = 7 THEN 1 ELSE 0 END)
-					ELSE NULL 
-				END)
-            ELSE 0  
-		END AS weekWorkload 
+		COUNT(CASE WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE status IN (4,5)) THEN 1 END) AS countExpertisesBD,
+		COUNT(CASE 
+				WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
+				THEN 1 
+			END) AS countExpertises_lastYear,
+		COALESCE(SUM(CASE 
+			WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
+			THEN COALESCE(ee.secondUpload, 0)
+		END), 0) AS secondUpload_lastYear,
+		SUM(CASE WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) THEN CASE 
+				WHEN ee.uploadExpertDate >= e.dateStatus3 
+				THEN CASE 
+						WHEN e.dateStatus3 IS NOT NULL AND e.dateStatus3 >= e.dateStatus2 THEN DATEDIFF(ee.uploadExpertDate, DATE_ADD(e.dateStatus3, INTERVAL 1 DAY)) + 1 
+					        - 2 * (FLOOR((DATEDIFF(ee.uploadExpertDate, DATE_ADD(e.dateStatus3, INTERVAL 1 DAY)) + DAYOFWEEK(DATE_ADD(e.dateStatus3, INTERVAL 1 DAY)) - 1) / 7))
+					        - (CASE WHEN DAYOFWEEK(DATE_ADD(e.dateStatus3, INTERVAL 1 DAY)) = 1 THEN 1 ELSE 0 END)
+					        - (CASE WHEN DAYOFWEEK(ee.uploadExpertDate) = 7 THEN 1 ELSE 0 END)
+						WHEN e.dateStatus2 IS NOT NULL AND DATEDIFF(ee.uploadExpertDate, e.dateStatus2) > 3 THEN DATEDIFF(ee.uploadExpertDate, DATE_ADD(e.dateStatus2, INTERVAL 4 DAY)) + 1 
+					        - 2 * (FLOOR((DATEDIFF(ee.uploadExpertDate, DATE_ADD(e.dateStatus2, INTERVAL 4 DAY)) + DAYOFWEEK(DATE_ADD(e.dateStatus2, INTERVAL 4 DAY)) - 1) / 7))
+					        - (CASE WHEN DAYOFWEEK(DATE_ADD(e.dateStatus2, INTERVAL 3 DAY)) = 1 THEN 1 ELSE 0 END)
+					        - (CASE WHEN DAYOFWEEK(ee.uploadExpertDate) = 7 THEN 1 ELSE 0 END)
+						ELSE 0
+					END
+				WHEN ee.uploadExpertDate >= e.dateStatus2
+				THEN CASE
+					WHEN e.dateStatus2 IS NOT NULL AND DATEDIFF(ee.uploadExpertDate, e.dateStatus2) > 3 THEN DATEDIFF(ee.uploadExpertDate, DATE_ADD(e.dateStatus2, INTERVAL 3 DAY)) + 1 
+					        - 2 * (FLOOR((DATEDIFF(ee.uploadExpertDate, DATE_ADD(e.dateStatus2, INTERVAL 4 DAY)) + DAYOFWEEK(DATE_ADD(e.dateStatus2, INTERVAL 4 DAY)) - 1) / 7))
+					        - (CASE WHEN DAYOFWEEK(DATE_ADD(e.dateStatus2, INTERVAL 4 DAY)) = 1 THEN 1 ELSE 0 END)
+					        - (CASE WHEN DAYOFWEEK(ee.uploadExpertDate) = 7 THEN 1 ELSE 0 END)
+					ELSE 0
+				END		
+				ELSE 0
+			END
+			ELSE 0 
+		END > 3) AS overdues,
+		AVG(CASE WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) THEN COALESCE(ee.`range`, 0) ELSE 0 END) AS criterion4,
+		COALESCE(AVG(CASE 
+			WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
+			THEN CASE
+				WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE `type` IN (3)) THEN 0.5
+				WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE `type` IN (1)) THEN 0.75
+				WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE `type` IN (2,4,5)) THEN 1
+				ELSE 0
+			END			
+			ELSE NULL
+		END), 0) AS criterion5,
+        SUM(CASE WHEN e.status IN (3) THEN 1 ELSE 0 END) AS currentWeekWorkload 
 	FROM users u 
 	LEFT JOIN expertise_experts ee 
 	ON u.id = ee.expert_id 
@@ -569,7 +599,7 @@ experts_with_coords AS (
 			WHEN 88 THEN 39.3078
 			WHEN 89 THEN 32.6169
 		END AS expert_lat,
-		ed.expert_declines
+		COALESCE(ed.expert_declines, 0) AS expert_declines
 	FROM experts e
 	LEFT JOIN expert_declines ed
 	ON ed.expert_id = e.expert_id
@@ -588,17 +618,30 @@ experts_with_coords AS (
 		END AS 	experienceExpertise_rate,
 		CASE 
 			WHEN u.desiredWeekWorkload > 0 THEN u.desiredWeekWorkload - u.currentWeekWorkload
-			ELSE 
-				CASE 
-					WHEN u.weekWorkload > 0 THEN u.weekWorkload - u.currentWeekWorkload
-					ELSE 2
-				END
+			ELSE 5 - u.currentWeekWorkload
 		END	AS possibleWeekWorkload,
 		(u.countExpertise + u.countExpertisesBD) / MAX(u.countExpertise + u.countExpertisesBD) OVER(PARTITION BY ewc.expertise_id) AS countExpertise_rate,
 		CASE 
-			WHEN (u.countExpertises_lastYear + COALESCE(u.expert_declines, 0)) > 0
-			THEN (u.countExpertises_lastYear) / (u.countExpertises_lastYear + COALESCE(u.expert_declines, 0))
-			ELSE 1
+			WHEN u.countExpertises_lastYear > 0 AND u.countExpertises_lastYear <= 5 THEN 0.25
+			WHEN u.countExpertises_lastYear > 5 AND u.countExpertises_lastYear <= 10 THEN 0.5
+			WHEN u.countExpertises_lastYear > 10 AND u.countExpertises_lastYear <= 15 THEN 0.75
+			WHEN u.countExpertises_lastYear > 15 THEN 1
+			ELSE 0
+		END AS criterion1,	
+		CASE 
+			WHEN u.countExpertises_lastYear > 0
+			THEN 1 - u.overdues / u.countExpertises_lastYear
+			ELSE 0
+		END AS criterion2,
+		CASE 
+			WHEN u.countExpertises_lastYear > 0
+			THEN 1 - u.secondUpload_lastYear / u.countExpertises_lastYear
+			ELSE 0
+		END AS criterion3,
+		CASE 
+			WHEN (u.countExpertises_lastYear + u.expert_declines) > 0
+			THEN (u.countExpertises_lastYear) / (u.countExpertises_lastYear + u.expert_declines)
+			ELSE 0
 		END AS declines_rate,
 		u.experience / MAX(u.experience) OVER(PARTITION BY ewc.expertise_id) AS experience_rate,
 		u.academicTitleExperience / MAX(u.academicTitleExperience) OVER(PARTITION BY ewc.expertise_id) AS academicTitleExperience_rate,
@@ -619,14 +662,16 @@ experts_with_coords AS (
 SELECT 
 	*,
 	CASE 
-		WHEN expertise_examination = 1 THEN 1 - region_distance_km / MAX(region_distance_km) OVER(PARTITION BY expertise_id)
+		WHEN expertise_examination = 1 AND (MAX(region_distance_km) OVER(PARTITION BY expertise_id)) > 0
+		THEN 1 - region_distance_km / MAX(region_distance_km) OVER(PARTITION BY expertise_id)
 		ELSE 1
 	END AS distance_rate,
-	CAST(possibleWeekWorkload / MAX(possibleWeekWorkload) OVER(PARTITION BY expertise_id) AS FLOAT) AS workload_rate,
+	(0.2 * criterion1 + 0.1 * criterion2 + 0.1 * criterion3 + 0.4 * criterion4 + 0.2 * criterion5) AS criterion_rating,
 	(age / MAX(age) OVER(PARTITION BY expertise_id) + declines_rate
 	+ personal_block + education_rate + experience_rate + degreeExperience_rate
 	+ academicTitleExperience_rate + pubMon_rate + countPubMon_rate 
-	+ experienceExpertise_rate + countExpertise_rate + COALESCE(avg_range, 0)
+	+ experienceExpertise_rate + countExpertise_rate 
+	+ (0.2 * criterion1 + 0.1 * criterion2 + 0.1 * criterion3 + 0.4 * criterion4 + 0.2 * criterion5)
 	) / 12 AS avg_rating
 FROM ee_joined
 WHERE possibleWeekWorkload >= 1;
