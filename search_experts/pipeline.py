@@ -81,9 +81,29 @@ class ScoringPipeline:
         Returns:
             pandas.DataFrame: Датафрейм с очищенными текстовыми полями.
         """
+        for col in ['expert_name', 'expertise_name', 'expertise_organization', 'expert_organization', 'expert_diplom', 'exucutorContract']:
+            df[col] = df[col].apply(self.text_processor.normalize_text)
+            
         df["expertise_text_feature"] = df["expertise_text_feature"].apply(self.text_processor.clean_text)
         df["expert_text_feature"] = df["expert_text_feature"].apply(self.text_processor.clean_text)
         return df
+    
+
+    def detect_conflicts(self, df):
+        """
+        Фильтрует экспертов, имеющих конфликт интересов с текущей экспертизой.
+
+        Применяет нечёткое сравнение (fuzzy matching) между текстом экспертизы и описанием эксперта.
+        Исключает записи, где степень совпадения превышает порог (85%), что указывает на возможный конфликт.
+
+        Args:
+            df (pandas.DataFrame): Датафрейм с текстами и сходством.
+
+        Returns:
+            pandas.DataFrame: Отфильтрованный датафрейм, содержащий только экспертов без конфликта интересов.
+        """
+        df['conflict_fuzzy'] = df.apply(self.conflict_detector.fuzzy_match, axis=1).astype(int)
+        return df[df['conflict_fuzzy'] < 85]
     
 
     def calculate_similarities(self, df):
@@ -109,23 +129,6 @@ class ScoringPipeline:
         
         df["similarity_embeddings"] = cosine_similarity(exp_emb, expert_embs).flatten()
         return df.sort_values(by="similarity_embeddings", ascending=False)
-    
-
-    def detect_conflicts(self, df):
-        """
-        Фильтрует экспертов, имеющих конфликт интересов с текущей экспертизой.
-
-        Применяет нечёткое сравнение (fuzzy matching) между текстом экспертизы и описанием эксперта.
-        Исключает записи, где степень совпадения превышает порог (81%), что указывает на возможный конфликт.
-
-        Args:
-            df (pandas.DataFrame): Датафрейм с текстами и сходством.
-
-        Returns:
-            pandas.DataFrame: Отфильтрованный датафрейм, содержащий только экспертов без конфликта интересов.
-        """
-        df['conflict_fuzzy'] = df.apply(self.conflict_detector.fuzzy_match, axis=1).astype(int)
-        return df[df['conflict_fuzzy'] < 81]
     
 
     def calculate_ratings(self, df):
@@ -172,11 +175,11 @@ class ScoringPipeline:
         # Предобработка
         df = self.preprocess_data(df)
         
-        # Расчет схожестей
-        df = self.calculate_similarities(df)
-        
         # Обнаружение конфликтов
         df = self.detect_conflicts(df)
+        
+        # Расчет схожестей
+        df = self.calculate_similarities(df)
         
         # Расчет рейтингов
         df = self.calculate_ratings(df)

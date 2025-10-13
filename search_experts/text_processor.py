@@ -28,6 +28,27 @@ class TextProcessor:
         self.stopwords_re = re.compile(r"\b(" + "|".join(self.domain_stopwords) + r")[\w]*\b")
 
 
+    def normalize_text(self, text):
+        """
+        Приводит текст к единому формату.
+
+        Приводит текст к нижнему регистру и удаляет лишние кавычки и пробелы.
+
+        Args:
+            text (str or Any): Входной текст для обработки. Если значение None или NaN — возвращается пустая строка.
+
+        Returns:
+            str: Нормализованный текст без стоп-слов и лишних кавычек и пробелов.
+        """
+        if pd.isna(text) or text is None:
+            return ""
+                
+        text = text.lower()
+        text = text.replace(r'["«»]', '', regex=True)
+        text = text.strip()
+        return text
+
+
     def clean_text(self, text):
         """
         Очищает текст от доменных терминов, приводит к единому формату.
@@ -45,7 +66,8 @@ class TextProcessor:
         if pd.isna(text) or text is None:
             return ""
         
-        text = text.lower()
+        text = text.normalize_text()
         text = self.stopwords_re.sub(" ", text)
-        text = re.sub(r"\s+", " ", text).strip()
+        text = re.sub(r"\s+", " ", text)
+        text = text.normalize_text()
         return text
