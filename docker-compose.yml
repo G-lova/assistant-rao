@@ -75,6 +75,7 @@ services:
     command: celery -A celery_app worker --loglevel=info --concurrency=4
     volumes:
       - .:/app
+      - /tmp:/tmp
     environment:
       - REDIS_URL=redis://redis:6379/0
     depends_on:
@@ -90,6 +91,7 @@ services:
     command: celery -A celery_app beat --loglevel=info
     volumes:
       - .:/app
+      - /tmp:/tmp
     environment:
       - REDIS_URL=redis://redis:6379/0
     depends_on:

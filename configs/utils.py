@@ -444,6 +444,9 @@ def extract_text_and_images_from_docx(file_path: str, ocr_func=None) -> str:
             image_files = [name for name in doc_zip.namelist() if name.startswith('word/media/')]
             for img_file in image_files:
                 try:
+                    if img_file.lower().endswith(('.wmf', '.emf')):
+                        logger.info(f"Пропускаем неподдерживаемый формат изображения: {img_file}")
+                        continue
                     img_data = doc_zip.read(img_file)
                     img_path = os.path.join(temp_dir, os.path.basename(img_file))
                     with open(img_path, 'wb') as f:

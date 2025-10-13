@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from functools import wraps
+from dataclasses import dataclass
 
 from typing import Type, Tuple, Callable, Any, Optional
 
@@ -160,9 +161,25 @@ def sync_retry(config: RetryConfig):
     return decorator
 
 
+@dataclass
+class RetryConfig:
+    max_retries: int = 2
+    delay: float = 1.0
+    backoff: float = 2.0
+    exceptions: Tuple[Type[Exception], ...] = (Exception,)
+    log_errors: bool = False
+
 # Конфигурации для разных типов операций
+API_RETRY_CONFIG = RetryConfig(
+    max_retries=2,
+    delay=1.0,
+    backoff=2.0,
+    exceptions=(Exception, ConnectionError, TimeoutError),
+    log_errors=True
+)
+
 CLOUD_PARSING_RETRY_CONFIG = RetryConfig(
-    max_retries=3,
+    max_retries=2,
     delay=2.0,
     backoff=2.0,
     exceptions=(Exception, ConnectionError, TimeoutError),
@@ -170,18 +187,10 @@ CLOUD_PARSING_RETRY_CONFIG = RetryConfig(
 )
 
 DATABASE_RETRY_CONFIG = RetryConfig(
-    max_retries=3,
+    max_retries=2,
     delay=1.0,
     backoff=1.5,
     exceptions=(Exception, ConnectionError),
-    log_errors=True
-)
-
-API_RETRY_CONFIG = RetryConfig(
-    max_retries=3,
-    delay=1.0,
-    backoff=2.0,
-    exceptions=(Exception, ConnectionError, TimeoutError),
     log_errors=True
 )
 
