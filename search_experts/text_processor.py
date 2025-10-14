@@ -44,7 +44,7 @@ class TextProcessor:
             return ""
                 
         text = text.lower()
-        text = text.replace(r'["«»]', '', regex=True)
+        text = re.sub(r'["«»]', '', text)
         text = text.strip()
         return text
 
@@ -66,8 +66,7 @@ class TextProcessor:
         if pd.isna(text) or text is None:
             return ""
         
-        text = text.normalize_text()
+        text = self.normalize_text(text)
         text = self.stopwords_re.sub(" ", text)
-        text = re.sub(r"\s+", " ", text)
-        text = text.normalize_text()
+        text = re.sub(r"\s+", " ", text).strip()
         return text
