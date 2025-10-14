@@ -26,6 +26,8 @@ services:
       DB_NAME: ${DB_NAME}
       API_URL: ${API_ACCESS}
       PYTHONPATH: /app
+      UVICORN_TIMEOUT: 1200
+      PYTHONUNBUFFERED: 1
     depends_on:
       - postgres
     ports:
@@ -34,7 +36,7 @@ services:
       - .:/app
       - /tmp:/tmp
       - .env:/app/.env
-    command: uvicorn main:app --host 0.0.0.0 --port 20142 --reload
+    command: uvicorn main:app --host 0.0.0.0 --port 20142 --timeout-keep-alive 1200 --timeout-graceful-shutdown 600 --reload
     restart: unless-stopped
     networks:
       - qwen-vl-api_procurement_network

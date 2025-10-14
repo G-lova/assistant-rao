@@ -67,10 +67,18 @@ class Config:
     # Model qwen-vl
     M_MODEL_API_URL = os.getenv("M_MODEL_API_URL")
     M_MODEL_NAME = os.getenv("M_MODEL_NAME")
+    M_MODEL_API_KEY = os.getenv("M_MODEL_API_KEY")
     
     # MySQL
     MYSQL_URL = os.getenv("MYSQL_URL")
     MYSQL_API_KEY = os.getenv("MYSQL_API_KEY")
+
+    # Postgres
+    DB_HOST = os.getenv("DB_HOST")
+    DB_PORT = os.getenv("DB_PORT")
+    DB_NAME = os.getenv("DB_NAME")
+    DB_USER = os.getenv("DB_USER")
+    DB_PASSWORD = os.getenv("DB_PASSWORD")
     
     # Qwen/Qwen3-Embedding-0.6B
     EMBEDDING_URL = os.getenv("EMBEDDING_URL")

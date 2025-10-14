@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 from typing import List
 
 import aiohttp
@@ -33,7 +34,7 @@ TEST_LINKS = [
 DOCS_PER_REQUEST = 4  # например: 1 файл + 1 ссылка, или 2 файла и т.д.
 
 # Сколько ЗАПРОСОВ отправить ПАРАЛЛЕЛЬНО (нагрузка)
-TOTAL_REQUESTS = 5
+TOTAL_REQUESTS = 10
 
 # Законодательство и способ закупки (можно оставить по умолчанию)
 LEGISLATION = "44-ФЗ"
@@ -53,7 +54,7 @@ def get_test_files() -> List[str]:
     return files
 
 # ==============================
-# Функция отправки одного запроса
+# Функция отправки одного запроса с замером времени
 # ==============================
 
 async def send_evaluate_request(session: aiohttp.ClientSession, request_id: int, files: List[str], links: List[str]):
@@ -65,7 +66,6 @@ async def send_evaluate_request(session: aiohttp.ClientSession, request_id: int,
     data.add_field("procurement_method", PROCUREMENT_METHOD)
     data.add_field("expertise_details", "Полный комплект документов о закупке")
     
-    # Добавляем файлы
     opened_files = []
     try:
         for file_path in files:
@@ -77,25 +77,30 @@ async def send_evaluate_request(session: aiohttp.ClientSession, request_id: int,
                 filename=os.path.basename(file_path),
                 content_type="application/octet-stream"
             )
-        
-        # Добавляем ссылки
         for link in links:
             data.add_field("links", link)
 
         headers = {"X-API-Key": API_KEY}
-        async with session.post(f"{BASE_URL}/evaluate-documents", data=data, headers=headers) as resp:
+        start_time = time.time()
+        timeout = aiohttp.ClientTimeout(total=600)
+        async with session.post(f"{BASE_URL}/evaluate-documents", data=data, headers=headers, timeout=timeout) as resp:
+            elapsed = time.time() - start_time
             status = resp.status
             try:
                 response_json = await resp.json()
                 docs_processed = response_json.get("documents_processed", 0)
                 overall = response_json.get("overall_conclusion", "unknown")
             except:
-                response_json = {}
                 docs_processed = 0
                 overall = "parse_error"
 
-            print(f"[{request_id}] Статус: {status} | Обработано: {docs_processed} | Итог: {overall}")
-            return status == 200
+            print(f"[{request_id:2d}] Статус: {status} | Обработано: {docs_processed} | Итог: {overall} | Время: {elapsed:.2f} сек")
+            return {
+                "success": status == 200,
+                "elapsed": elapsed,
+                "status": status,
+                "docs_processed": docs_processed
+            }
     finally:
         for f in opened_files:
             f.close()
@@ -114,29 +119,24 @@ async def main():
 
     print(f"Найдено файлов: {len(test_files)}")
     print(f"Найдено ссылок: {len(all_links)}")
-    print(f"Отправка {TOTAL_REQUESTS} запросов по {DOCS_PER_REQUEST} документов каждый...")
-    
+    print(f"Отправка {TOTAL_REQUESTS} запросов по {DOCS_PER_REQUEST} документов каждый...\n")
+
+    start_total = time.time()
     async with aiohttp.ClientSession() as session:
         tasks = []
         for i in range(TOTAL_REQUESTS):
-            # Чередуем файлы и ссылки
             files_to_send = []
             links_to_send = []
 
-            # Берём файлы циклически
             if test_files:
                 for j in range(DOCS_PER_REQUEST // 2 + DOCS_PER_REQUEST % 2):
                     files_to_send.append(test_files[(i + j) % len(test_files)])
-            
-            # Берём ссылки циклически
             if all_links:
                 for j in range(DOCS_PER_REQUEST // 2):
                     links_to_send.append(all_links[(i + j) % len(all_links)])
             
-            # Если нет файлов — отправляем только ссылки
             if not files_to_send and links_to_send:
                 links_to_send = all_links[:min(DOCS_PER_REQUEST, len(all_links))]
-            # Если нет ссылок — только файлы
             if not links_to_send and files_to_send:
                 files_to_send = test_files[:min(DOCS_PER_REQUEST, len(test_files))]
 
@@ -144,14 +144,32 @@ async def main():
             tasks.append(task)
         
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        success_count = sum(1 for r in results if r is True)
-        error_count = len(results) - success_count
-        
-        print("\n" + "="*50)
-        print(f"Успешно: {success_count}")
-        print(f"Ошибок: {error_count}")
-        print("="*50)
+
+    total_time = time.time() - start_total
+
+    # Фильтруем только успешные результаты (не исключения)
+    valid_results = [r for r in results if isinstance(r, dict)]
+    success_count = sum(1 for r in valid_results if r["success"])
+    error_count = len(valid_results) - success_count
+
+    # Собираем времена
+    times = [r["elapsed"] for r in valid_results if r.get("elapsed") is not None]
+    min_time = min(times) if times else 0
+    max_time = max(times) if times else 0
+    avg_time = sum(times) / len(times) if times else 0
+
+    # ==============================
+    # Вывод статистики
+    # ==============================
+    print("\n" + "="*60)
+    print(f"Успешно: {success_count}")
+    print(f"Ошибок:  {error_count}")
+    print(f" Время на запросы:")
+    print(f" Мин: {min_time:.2f} сек")
+    print(f" Макс: {max_time:.2f} сек")
+    print(f" Среднее: {avg_time:.2f} сек")
+    print(f"Общее время выполнения: {total_time:.2f} сек")
+    print("="*60)
 
 # ==============================
 # Запуск

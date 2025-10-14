@@ -7,31 +7,20 @@ import subprocess
 import tempfile
 
 import pandas as pd
-import numpy as np
-import PyPDF2
 import rarfile
 import textract
 import zipfile
-from typing import Dict, List, Any, Set
+from typing import Dict, List, Any
 from docx import Document
-from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from pptx import Presentation
 from pdf2image import convert_from_path
 from dotenv import load_dotenv
-from fastapi import HTTPException, Request
+from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from configs.config import Config
 from src.ocr import ocr_image_with_qwen_vl
-from configs.working_with_db import (save_raw_data,
-                                     save_clean_conclusion,
-                                     save_summary_report)
-from src.evaluator import (check_documents_consistency,
-                           analyze_document_chunks,
-                           split_large_text,
-                           check_completeness_with_ai)
-from configs.parsing import parse_cloud_storage_link
 
 
 config = Config.get_model_config()
@@ -45,6 +34,7 @@ logger = logging.getLogger(__name__)
 document_analysis_cache = {}
 
 API_KEY_PATTERN = re.compile(r'^[A-Za-z0-9._\-]+$')
+
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
     """
@@ -89,7 +79,7 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
                 )
             
             # 3. Проверка конфигурации
-            expected_api_key = os.getenv("API_KEY")
+            expected_api_key = Config.API_KEY
             if not expected_api_key:
                 # Логируем внутреннюю ошибку, но не раскрываем клиенту
                 print("CRITICAL: API_KEY not set in environment")
@@ -634,262 +624,6 @@ def read_file(file_path: str, original_filename: str = None) -> str:
         raise ValueError(f"Ошибка чтения файла: {str(e)}")
 
 
-def check_procurement_completeness(
-    files: Dict[str, str],
-    document_analysis_results: Dict[str, dict]
-) -> Dict:
-    """
-    Проверяет полноту и качество комплекта загруженных документов.
-
-    Анализирует:
-    1. Наличие обязательных приложенных документов (из attached_documents_list)
-    2. Читаемость каждого документа
-    3. Корректность типов документов
-    4. Наличие ключевых реквизитов (даты, суммы, стороны)
-    5. Формирует общий статус и детализированный фидбек
-
-    Args:
-        files (Dict[str, str]): Словарь: имя_файла -> путь.
-        document_analysis_results (Dict[str, dict]): Результаты анализа документов.
-
-    Returns:
-        Dict: Словарь с результатами проверки:
-            - status: 'allow' или 'deny'
-            - declared_attachments: список требуемых документов
-            - missing_in_upload: какие из них отсутствуют
-            - provided_documents: нормализованные типы загруженных
-            - source_docs_for_attached: источники списка приложений
-            - feedback: текстовое пояснение
-            - detailed_issues: список выявленных проблем
-            - final_feedback: итоговое заключение
-    """
-    declared_attached: Set[str] = set()
-    source_docs_for_attached: List[str] = []
-    provided_documents: List[str] = []
-    missing_in_upload: List[str] = []
-    issues: List[str] = []
-    feedback_parts: List[str] = []
-
-    # 1. Извлечение списка обязательных документов
-    for file_name, result in document_analysis_results.items():
-        attached_list = result.get("attached_documents_list", [])
-        if attached_list:
-            declared_attached.update(attached_list)
-            source_docs_for_attached.append(file_name)
-
-    if not declared_attached:
-        feedback_parts.append("В документах не найден явный список «Документы к закупке». Полагаем, что комплектность не регламентирована.")
-    else:
-        feedback_parts.append(f"Обязательные документы определены на основе: {', '.join(source_docs_for_attached)}")
-        feedback_parts.append(f"Требуется предоставить: {', '.join(sorted(declared_attached))}")
-
-    # 2. Нормализация загруженных файлов
-    normalized_provided = {
-        name: name
-        for name in files.keys()
-    }
-    provided_documents = sorted(normalized_provided.keys())
-
-    # Проверка отсутствующих документов
-    if declared_attached:
-        missing_in_upload = [doc for doc in declared_attached if doc not in normalized_provided]
-        if missing_in_upload:
-            issues.append(f"Отсутствуют обязательные документы: {', '.join(missing_in_upload)}")
-
-    # 3. Проверка читаемости
-    for file_name, result in document_analysis_results.items():
-        readability = result.get("readability", {})
-        status_read = readability.get("status")
-
-        if status_read == "неудовлетворительно":
-            issues.append(f"{file_name}: документ нечитаем")
-            feedback_parts.append(f"{file_name} — статус читаемости: 'неудовлетворительно'")
-        elif status_read == "частично читаем":
-            details = ", ".join(readability.get("issues", []))
-            issues.append(f"{file_name}: частичная читаемость")
-            feedback_parts.append(f"{file_name} — частично читаем: {details}")
-
-    # 4. Проверка соответствия типа
-    for file_name, result in document_analysis_results.items():
-        type_comp = result.get("type_compliance", {})
-        if type_comp.get("status") == "не соответствует":
-            expected = type_comp.get("expected_type", "неизвестно")
-            actual = type_comp.get("actual_type", "не определён")
-            issues.append(f"{file_name}: тип '{actual}' не соответствует ожидаемому '{expected}'")
-            feedback_parts.append(f"{file_name} — ожидался тип '{expected}', обнаружен '{actual}'")
-
-    # 5. Проверка наличия ключевых данных
-    for file_name, result in document_analysis_results.items():
-        raw_data = result.get("raw_data", {})
-
-        if not raw_data.get("dates"):
-            issues.append(f"{file_name}: отсутствуют даты")
-            feedback_parts.append(f"{file_name} — не обнаружены даты (например, дата контракта или извещения)")
-
-        if not raw_data.get("amounts"):
-            issues.append(f"{file_name}: отсутствуют суммы")
-            feedback_parts.append(f"{file_name} — не указаны финансовые суммы (НМЦК, цена и т.п.)")
-
-        if not raw_data.get("legal_entities"):
-            issues.append(f"{file_name}: не указаны стороны")
-            feedback_parts.append(f"{file_name} — отсутствуют данные о заказчике или поставщике")
-
-    # 6. Определение статуса
-    critical_issues = [
-        issue for issue in issues
-        if any(keyword in issue.lower() for keyword in ("нечитаем", "отсутствуют обязательные", "не соответствует"))
-    ]
-    status = "deny" if critical_issues else "allow"
-
-    # 7. Финальное пояснение
-    if status == "allow":
-        if not declared_attached:
-            final_feedback = "Комплектность документов не регламентирована — проверка пройдена."
-        else:
-            final_feedback = "Все обязательные документы предоставлены, типы корректны, данные полны."
-    else:
-        final_feedback = "Выявлены критические проблемы:\n" + \
-                         "\n".join(f"- {issue}" for issue in critical_issues)
-
-    return {
-        "status": status,
-        "declared_attachments": sorted(list(declared_attached)),
-        "missing_in_upload": sorted(missing_in_upload),
-        "provided_documents": provided_documents,
-        "source_docs_for_attached": sorted(source_docs_for_attached),
-        "feedback": "\n".join(feedback_parts),
-        "detailed_issues": issues,
-        "final_feedback": final_feedback
-    }
-
-
-def create_summary_report(
-    procurement_id: str,
-    documents_results: List[Dict],
-    document_analysis_results: Dict[str, Dict],
-    completeness_check: Dict,
-    consistency_result: Dict
-) -> Dict[str, Any]:
-    """
-    Формирует сводный отчёт по результатам анализа комплекта документов закупки.
-
-    Объединяет данные из нескольких источников: результаты обработки файлов,
-    детальный анализ каждого документа, проверку комплектности и согласованности.
-    Собирает агрегированные сведения (даты, суммы, юрлица, ссылки на законодательство)
-    и рассчитывает статистику по документам.
-
-    Args:
-        procurement_id (str): Уникальный идентификатор закупки.
-        documents_results (List[Dict]): Список результатов обработки загруженных файлов
-                                       (метаданные, статус валидации и т.д.).
-        document_analysis_results (Dict[str, Dict]): Результаты детального анализа
-                                                    по каждому документу (ключ — имя файла).
-        completeness_check (Dict): Результаты проверки полноты комплекта документов.
-        consistency_result (Dict): Результаты проверки внутренней согласованности данных.
-
-    Returns:
-        Dict[str, Any]: Структурированный сводный отчёт, содержащий:
-            - procurement_id и timestamp;
-            - documents_summary: краткая информация по каждому документу;
-            - completeness_check и consistency_check: статусы и выявленные проблемы;
-            - aggregated_data: объединённые данные из всех документов (даты, суммы и др.);
-            - statistics: статистика по количеству и типам документов.
-    """
-    summary = {
-        "procurement_id": procurement_id,
-        "processing_timestamp": pd.Timestamp.now().isoformat(),
-        "documents_summary": {},
-        "completeness_check": {
-            "status": completeness_check.get("status"),
-            "declared_attachments": completeness_check.get("declared_attachments", []),
-            "missing_documents": completeness_check.get("missing_in_upload", []),
-            "provided_documents": completeness_check.get("provided_documents", [])
-        },
-        "consistency_check": {
-            "status": consistency_result.get("status"),
-            "issues": consistency_result.get("issues", [])
-        }
-    }
-    
-    # Собираем данные из всех документов (исключая conclusion, readability, type_compliance)
-    for doc_name, analysis in document_analysis_results.items():
-        doc_summary = {}
-        
-        # Извлекаем только raw_data и другую полезную информацию
-        if "raw_data" in analysis:
-            raw_data = analysis["raw_data"].copy()
-            
-            # Очищаем данные от ненужных полей если они есть
-            raw_data.pop("conclusion", None)
-            raw_data.pop("readability", None)
-            raw_data.pop("type_compliance", None)
-            
-            doc_summary["raw_data"] = raw_data
-        
-        # Добавляем информацию о документе
-        doc_info = next((doc for doc in documents_results if doc["filename"] == doc_name), {})
-        doc_summary["document_type"] = doc_info.get("document_type", "Дополнительные материалы")
-        doc_summary["is_valid"] = doc_info.get("is_valid", False)
-        
-        summary["documents_summary"][doc_name] = doc_summary
-    
-    # Агрегируем ключевые данные из всех документов
-    all_dates = []
-    all_amounts = []
-    all_legal_entities = []
-    all_law_references = []
-    
-    for doc_name, analysis in document_analysis_results.items():
-        raw_data = analysis.get("raw_data", {})
-        
-        # Собираем даты
-        if "dates" in raw_data:
-            for date_info in raw_data["dates"]:
-                date_info["source_document"] = doc_name
-                all_dates.append(date_info)
-        
-        # Собираем суммы
-        if "amounts" in raw_data:
-            for amount_info in raw_data["amounts"]:
-                amount_info["source_document"] = doc_name
-                all_amounts.append(amount_info)
-        
-        # Собираем юридические лица
-        if "legal_entities" in raw_data:
-            for entity_info in raw_data["legal_entities"]:
-                entity_info["source_document"] = doc_name
-                all_legal_entities.append(entity_info)
-        
-        # Собираем ссылки на законодательство
-        if "law_references" in raw_data:
-            for law_ref in raw_data["law_references"]:
-                all_law_references.append({
-                    "reference": law_ref,
-                    "source_document": doc_name
-                })
-    
-    # Добавляем агрегированные данные в сводный отчет
-    summary["aggregated_data"] = {
-        "dates": all_dates,
-        "amounts": all_amounts,
-        "legal_entities": all_legal_entities,
-        "law_references": all_law_references
-    }
-    
-    # Добавляем статистику
-    summary["statistics"] = {
-        "total_documents": len(documents_results),
-        "valid_documents": len([doc for doc in documents_results if doc.get("is_valid")]),
-        "invalid_documents": len([doc for doc in documents_results if not doc.get("is_valid")]),
-        "unique_document_types": list(set(doc.get("document_type", "Дополнительные материалы") for doc in documents_results)),
-        "total_amounts_found": len(all_amounts),
-        "total_dates_found": len(all_dates),
-        "total_legal_entities_found": len(all_legal_entities)
-    }
-    
-    return summary
-
-
 def generate_overall_conclusion(
     documents_results: List[Dict], 
     completeness_check: Dict, 
@@ -1097,406 +831,130 @@ def detect_binary_file_type(file_path: str) -> str:
     except Exception as e:
         logger.error(f"Ошибка определения типа бинарного файла {file_path}: {str(e)}")
         return '.bin'
-
-
-async def evaluate_documents_batch_internal(task_data: dict):
-    """
-    Выполняет полный цикл внутренней обработки пакета документов закупки.
-
-    Функция обрабатывает как загруженные файлы, так и документы по ссылкам из облачных хранилищ:
-    извлекает текст, определяет тип документа с помощью ИИ, сохраняет результаты в БД,
-    проверяет комплектность и согласованность данных, формирует сводный отчёт и кэширует
-    итоговые результаты. Поддерживает обработку ошибок на каждом этапе и возвращает
-    структурированный результат со статусами по каждому документу и общей оценкой.
-
-    Args:
-        task_data (dict): Словарь с данными задачи, содержащий:
-            - procurement_id: уникальный идентификатор закупки,
-            - files_data: список загруженных файлов с бинарным содержимым,
-            - links: список ссылок на документы в облаке,
-            - legislation: тип законодательства (например, "44-ФЗ"),
-            - procurement_method: способ закупки,
-            - expertise_details: дополнительные сведения (не используется напрямую).
-
-    Raises:
-        ValueError: Возникает при отсутствии текста в обрабатываемом файле.
-
-    Returns:
-        _type_: Словарь с полным результатом обработки, включающий:
-            - статус выполнения,
-            - список обработанных документов с типами и заключениями,
-            - результаты проверок комплектности и согласованности,
-            - общее заключение и метаданные обработки.
-    """
-    try:
-        procurement_id = task_data['procurement_id']
-        files_data = task_data.get('files_data', [])
-        links = task_data.get('links', [])
-        legislation = task_data.get('legislation', '44-ФЗ')
-        procurement_method = task_data.get('procurement_method', 'Конкурс')
-        expertise_details = task_data.get('expertise_details', 'Полный комплект документов о закупке')
-
-        logger.info(f"Начата внутренняя обработка документов для закупки {procurement_id}")
-        logger.info(f"Файлы: {len(files_data)}, ссылки: {len(links)}")
-
-        documents_results = []
-        document_analysis_results = {}
-        files_dict = {}
-
-        # ОБРАБОТКА ФАЙЛОВ ИЗ files_data
-        if files_data:
-            for file_info in files_data:
-                try:
-                    filename = file_info.get('filename', 'unknown_file')
-                    file_content = file_info.get('content')  # Бинарное содержимое файла
-                    file_extension = file_info.get('extension', '.bin')
-
-                    if not file_content:
-                        logger.warning(f"Пустое содержимое файла: {filename}")
-                        continue
-
-                    # Создаём временный файл
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp:
-                        tmp.write(file_content)
-                        tmp_path = tmp.name
-                        files_dict[filename] = tmp_path
-
-                    try:
-                        logger.info(f"Обработка файла: {filename} для закупки {procurement_id}")
-
-                        # Извлечение текста
-                        extracted_text = read_file(tmp_path, original_filename=filename)
-
-                        if not extracted_text or "[Нет читаемого текста]" in extracted_text:
-                            raise ValueError("Не удалось извлечь текст из файла")
-
-                        # Разделяем большой текст на блоки
-                        chunks = split_large_text(extracted_text, max_chunk_size=20000)
-                        logger.info(f"Документ разделён на {len(chunks)} блоков")
-
-                        # Анализируем документ по частям
-                        analysis_result = await analyze_document_chunks(
-                            chunks=chunks,
-                            document_name=filename,
-                            document_type="",
-                            law_type=legislation,
-                            procurement_method=procurement_method
-                        )
-
-                        if analysis_result["status"] == "error":
-                            final_doc_type = "Дополнительные материалы"
-                            is_valid = False
-                            conclusion = f"Ошибка анализа: {analysis_result['analysis']['conclusion']}"
-                        else:
-                            analysis = analysis_result["analysis"]
-                            actual_type_from_model = analysis["type_compliance"].get("actual_type", "").strip()
-
-                            # Нормализуем тип
-                            final_doc_type = actual_type_from_model if actual_type_from_model else "Дополнительные материалы"
-
-                            confidence = analysis["type_compliance"].get("confidence", 0)
-                            is_valid = (
-                                final_doc_type != "Дополнительные материалы"
-                                and confidence >= 0.7
-                            )
-                            
-                            conclusion = analysis["conclusion"]
-                            
-                            # Сохраняем результаты анализа для проверки комплектности
-                            document_analysis_results[filename] = analysis
-
-                            # Сохраняем в БД
-                            try:
-                                save_raw_data(
-                                    procurement_id=procurement_id, 
-                                    document_type=final_doc_type, 
-                                    full_analysis=analysis
-                                )
-                                save_clean_conclusion(
-                                    procurement_id=procurement_id, 
-                                    document_type=final_doc_type, 
-                                    conclusion=conclusion
-                                )
-
-                                logger.info(f"Сохранено в БД: {procurement_id}, {final_doc_type}")
-                            except Exception as db_error:
-                                logger.error(f"Ошибка сохранения в БД: {str(db_error)}")
-                                conclusion += " [Ошибка сохранения в БД]"
-
-                        # Формируем результат для документа
-                        document_result = {
-                            "procurement_id": procurement_id,
-                            "document_type": final_doc_type,
-                            "filename": filename,
-                            "is_valid": is_valid,
-                            "error": None,
-                            "conclusion": conclusion,
-                            "source": "uploaded_file"
-                        }
-                        
-                        documents_results.append(document_result)
-
-                    except Exception as e:
-                        logger.error(f"Ошибка при обработке {filename}: {str(e)}", exc_info=True)
-                        # Формируем результат с ошибкой
-                        document_result = {
-                            "procurement_id": procurement_id,
-                            "document_type": "Дополнительные материалы",
-                            "filename": filename,
-                            "is_valid": False,
-                            "error": str(e),
-                            "conclusion": f"Критическая ошибка обработки: {str(e)}",
-                            "source": "uploaded_file"
-                        }
-                        documents_results.append(document_result)
-
-                    finally:
-                        if os.path.exists(tmp_path):
-                            os.unlink(tmp_path)
-
-                except Exception as e:
-                    logger.error(f"Критическая ошибка при обработке файла {filename}: {str(e)}", exc_info=True)
-                    document_result = {
-                        "procurement_id": procurement_id,
-                        "document_type": "Дополнительные материалы",
-                        "filename": filename,
-                        "is_valid": False,
-                        "error": str(e),
-                        "conclusion": f"Критическая ошибка: {str(e)}",
-                        "source": "uploaded_file"
-                    }
-                    documents_results.append(document_result)
-
-        # ОБРАБОТКА ССЫЛОК
-        if links:
-            logger.info(f"Обработка {len(links)} ссылок для закупки {procurement_id}")
-            
-            for link in links:
-                try:
-                    logger.info(f"Обработка ссылки: {link}")
-                    
-                    # Парсим ссылку напрямую
-                    parse_result = await parse_cloud_storage_link(link, procurement_id)
-                    
-                    if parse_result.get("status") == "success":
-                        analysis = parse_result.get("analysis", {})
-                        filename = parse_result.get("filename", f"cloud_doc_{hash(link)}")
-                        
-                        # Добавляем анализ в общие результаты
-                        document_analysis_results[filename] = analysis
-                        
-                        # Определяем тип документа и валидность
-                        if analysis.get("status") == "success":
-                            doc_analysis = analysis.get("analysis", {})
-                            actual_type = doc_analysis.get("type_compliance", {}).get("actual_type", "")
-                            final_doc_type = actual_type if actual_type else "Дополнительные материалы"
-                            confidence = doc_analysis.get("type_compliance", {}).get("confidence", 0)
-                            is_valid = (
-                                final_doc_type != "Дополнительные материалы" 
-                                and confidence >= 0.7
-                            )
-                            conclusion = doc_analysis.get("conclusion", "Документ обработан из облачного хранилища")
-                        else:
-                            final_doc_type = "Дополнительные материалы"
-                            is_valid = False
-                            conclusion = f"Ошибка анализа облачного документа: {analysis.get('error', 'Неизвестная ошибка')}"
-                        
-                        # Формируем результат для облачного документа
-                        document_result = {
-                            "procurement_id": procurement_id,
-                            "document_type": final_doc_type,
-                            "filename": filename,
-                            "is_valid": is_valid,
-                            "error": None,
-                            "conclusion": conclusion,
-                            "source": "cloud_storage",
-                            "original_link": link
-                        }
-                        
-                        documents_results.append(document_result)
-                        
-                        # Сохраняем в БД
-                        try:
-                            if analysis.get("status") == "success":
-                                save_raw_data(
-                                    procurement_id=procurement_id, 
-                                    document_type=final_doc_type, 
-                                    full_analysis=doc_analysis
-                                )
-                                save_clean_conclusion(
-                                    procurement_id=procurement_id, 
-                                    document_type=final_doc_type, 
-                                    conclusion=conclusion
-                                )
-                                logger.info(f"Сохранен облачный документ: {filename}")
-                        except Exception as db_error:
-                            logger.error(f"Ошибка сохранения облачного документа в БД: {str(db_error)}")
-                    
-                    else:
-                        # Ошибка парсинга
-                        error_msg = parse_result.get("error", "Неизвестная ошибка парсинга")
-                        logger.error(f"Ошибка парсинга ссылки {link}: {error_msg}")
-                        document_result = {
-                            "procurement_id": procurement_id,
-                            "document_type": "Дополнительные материалы",
-                            "filename": f"failed_link_{hash(link)}",
-                            "is_valid": False,
-                            "error": error_msg,
-                            "conclusion": f"Ошибка обработки ссылки: {error_msg}",
-                            "source": "cloud_storage",
-                            "original_link": link
-                        }
-                        documents_results.append(document_result)
-                        
-                except Exception as e:
-                    logger.error(f"Критическая ошибка при обработке ссылки {link}: {str(e)}", exc_info=True)
-                    document_result = {
-                        "procurement_id": procurement_id,
-                        "document_type": "Дополнительные материалы",
-                        "filename": f"error_link_{hash(link)}",
-                        "is_valid": False,
-                        "error": str(e),
-                        "conclusion": f"Критическая ошибка обработки ссылки: {str(e)}",
-                        "source": "cloud_storage", 
-                        "original_link": link
-                    }
-                    documents_results.append(document_result)
-
-        # ПРОВЕРКА КОМПЛЕКТНОСТИ ДОКУМЕНТОВ
-        completeness_check = {}
-        
-        if document_analysis_results:
-            # Используем ИИ для проверки комплектности
-            ai_completeness_result = await check_completeness_with_ai(
-                procurement_id=procurement_id,
-                required_documents=extract_required_docs_from_analysis(document_analysis_results),
-                provided_documents=extract_provided_docs_from_results(documents_results)
-            )
-            
-            # Преобразуем результат ИИ в совместимый формат
-            completeness_check = {
-                "status": "allow" if ai_completeness_result.get("completeness_status") == "полный" else "deny",
-                "declared_attachments": extract_required_docs_from_analysis(document_analysis_results),
-                "missing_in_upload": ai_completeness_result.get("missing_documents", []),
-                "provided_documents": extract_provided_docs_from_results(documents_results),
-                "source_docs_for_attached": list(document_analysis_results.keys()),
-                "feedback": ai_completeness_result.get("reasoning", ""),
-                "detailed_issues": [],
-                "final_feedback": f"Статус комплектности: {ai_completeness_result.get('completeness_status', 'неизвестно')}. {ai_completeness_result.get('reasoning', '')}"
-            }
-            
-            # Сохраняем результат проверки комплектности
-            save_clean_conclusion(
-                procurement_id=procurement_id,
-                document_type="completeness_check",
-                conclusion=completeness_check["final_feedback"]
-            )
-
-        # ПРОВЕРКА СОГЛАСОВАННОСТИ ДАННЫХ
-        consistency_result = await check_documents_consistency(procurement_id)
-        
-        # Формируем общее заключение по согласованности
-        overall_consistency_conclusion = consistency_result["conclusion"]
-        if consistency_result["status"] == "ok":
-            overall_consistency_conclusion = "Данные в документах согласованы."
-        else:
-            overall_consistency_conclusion = f"Обнаружены расхождения в документах: {consistency_result['conclusion']}"
-        
-        # Сохраняем результат проверки согласованности
-        save_clean_conclusion(
-            procurement_id=procurement_id,
-            document_type="consistency_check",
-            conclusion=overall_consistency_conclusion
-        )
-
-        # ФОРМИРУЕМ ОБЩЕЕ ЗАКЛЮЧЕНИЕ
-        overall_conclusion_text, overall_status = generate_overall_conclusion(
-            documents_results, 
-            completeness_check, 
-            consistency_result
-        )
-
-        # КЭШИРУЕМ РЕЗУЛЬТАТЫ
-        document_analysis_cache[procurement_id] = {
-            "documents": documents_results,
-            "completeness_check": completeness_check,
-            "consistency_check": consistency_result,
-            "overall_conclusion": overall_status
-        }
-
-        # СОЗДАЕМ СВОДНЫЙ ОТЧЕТ
-        try:
-            summary_report = create_summary_report(
-                procurement_id=procurement_id,
-                documents_results=documents_results,
-                document_analysis_results=document_analysis_results,
-                completeness_check=completeness_check,
-                consistency_result=consistency_result
-            )
-
-            # Сохраняем сводный отчет
-            save_summary_report(procurement_id, summary_report)
-
-            logger.info(f"Сводный отчет создан и сохранен для procurement_id={procurement_id}")
-        except Exception as e:
-            logger.error(f"Ошибка при создании сводного отчета: {str(e)}")
-
-        # ВОЗВРАЩАЕМ РЕЗУЛЬТАТ
-        result = {
-            "procurement_id": procurement_id,
-            "status": "processing_completed",
-            "documents_processed": len(documents_results),
-            "files_processed": len([d for d in documents_results if d.get("source") == "uploaded_file"]),
-            "links_processed": len([d for d in documents_results if d.get("source") == "cloud_storage"]),
-            "documents": documents_results,
-            "overall_conclusion": overall_status,
-            "completeness_summary": {
-                "status": completeness_check.get("status", "unknown"),
-                "conclusion": completeness_check.get("final_feedback", ""),
-                "missing_documents": completeness_check.get("missing_in_upload", [])
-            },
-            "consistency_summary": {
-                "status": consistency_result.get("status", "unknown"),
-                "conclusion": overall_consistency_conclusion,
-                "issues": consistency_result.get("issues", [])
-            }
-        }
-
-        logger.info(f"Внутренняя обработка завершена для закупки {procurement_id}. Обработано документов: {len(documents_results)}")
-        return result
-
-    except Exception as e:
-        logger.error(f"Критическая ошибка в evaluate_documents_batch_internal: {str(e)}", exc_info=True)
-        return {
-            "procurement_id": task_data.get('procurement_id', 'unknown'),
-            "status": "error",
-            "error": str(e),
-            "documents_processed": 0,
-            "documents": []
-        }
     
 
-async def save_document_data(procurement_id: str, doc_type: str, analysis: dict, conclusion: str):
+def create_summary_report(
+    procurement_id: str,
+    documents_results: List[Dict],
+    document_analysis_results: Dict[str, Dict],
+    completeness_check: Dict,
+    consistency_result: Dict
+) -> Dict[str, Any]:
     """
-    Сохраняет полные и очищенные данные анализа документа в базу данных.
+    Формирует сводный отчёт по результатам анализа комплекта документов закупки.
 
-    Выполняет две операции: сохранение полного JSON-результата анализа и отдельно
-    человекочитаемого заключения. Обе операции выполняются в рамках одного логического
-    действия, и при ошибке в любой из них исключение пробрасывается выше.
+    Объединяет данные из нескольких источников: результаты обработки файлов,
+    детальный анализ каждого документа, проверку комплектности и согласованности.
+    Собирает агрегированные сведения (даты, суммы, юрлица, ссылки на законодательство)
+    и рассчитывает статистику по документам.
 
     Args:
         procurement_id (str): Уникальный идентификатор закупки.
-        doc_type (str): Тип документа (например, "Извещение", "Техническое задание").
-        analysis (dict): Полный словарь с результатами ИИ-анализа документа.
-        conclusion (str): Текстовое заключение по результатам анализа.
+        documents_results (List[Dict]): Список результатов обработки загруженных файлов
+                                       (метаданные, статус валидации и т.д.).
+        document_analysis_results (Dict[str, Dict]): Результаты детального анализа
+                                                    по каждому документу (ключ — имя файла).
+        completeness_check (Dict): Результаты проверки полноты комплекта документов.
+        consistency_result (Dict): Результаты проверки внутренней согласованности данных.
 
-    Raises:
-        e: Любое исключение, возникшее при сохранении в БД (например, ошибка подключения,
-           нарушение ограничений целостности и т.д.).
+    Returns:
+        Dict[str, Any]: Структурированный сводный отчёт, содержащий:
+            - procurement_id и timestamp;
+            - documents_summary: краткая информация по каждому документу;
+            - completeness_check и consistency_check: статусы и выявленные проблемы;
+            - aggregated_data: объединённые данные из всех документов (даты, суммы и др.);
+            - statistics: статистика по количеству и типам документов.
     """
-    try:
-        save_raw_data(procurement_id, doc_type, analysis)
-        save_clean_conclusion(procurement_id, doc_type, conclusion)
-    except Exception as e:
-        logger.error(f"Ошибка сохранения документа {doc_type}: {str(e)}")
-        raise e
+    summary = {
+        "procurement_id": procurement_id,
+        "processing_timestamp": pd.Timestamp.now().isoformat(),
+        "documents_summary": {},
+        "completeness_check": {
+            "status": completeness_check.get("status"),
+            "declared_attachments": completeness_check.get("declared_attachments", []),
+            "missing_documents": completeness_check.get("missing_in_upload", []),
+            "provided_documents": completeness_check.get("provided_documents", [])
+        },
+        "consistency_check": {
+            "status": consistency_result.get("status"),
+            "issues": consistency_result.get("issues", [])
+        }
+    }
+    
+    # Собираем данные из всех документов (исключая conclusion, readability, type_compliance)
+    for doc_name, analysis in document_analysis_results.items():
+        doc_summary = {}
+        
+        # Извлекаем только raw_data и другую полезную информацию
+        if "raw_data" in analysis:
+            raw_data = analysis["raw_data"].copy()
+            
+            # Очищаем данные от ненужных полей если они есть
+            raw_data.pop("conclusion", None)
+            raw_data.pop("readability", None)
+            raw_data.pop("type_compliance", None)
+            
+            doc_summary["raw_data"] = raw_data
+        
+        # Добавляем информацию о документе
+        doc_info = next((doc for doc in documents_results if doc["filename"] == doc_name), {})
+        doc_summary["document_type"] = doc_info.get("document_type", "Дополнительные материалы")
+        doc_summary["is_valid"] = doc_info.get("is_valid", False)
+        
+        summary["documents_summary"][doc_name] = doc_summary
+    
+    # Агрегируем ключевые данные из всех документов
+    all_dates = []
+    all_amounts = []
+    all_legal_entities = []
+    all_law_references = []
+    
+    for doc_name, analysis in document_analysis_results.items():
+        raw_data = analysis.get("raw_data", {})
+        
+        # Собираем даты
+        if "dates" in raw_data:
+            for date_info in raw_data["dates"]:
+                date_info["source_document"] = doc_name
+                all_dates.append(date_info)
+        
+        # Собираем суммы
+        if "amounts" in raw_data:
+            for amount_info in raw_data["amounts"]:
+                amount_info["source_document"] = doc_name
+                all_amounts.append(amount_info)
+        
+        # Собираем юридические лица
+        if "legal_entities" in raw_data:
+            for entity_info in raw_data["legal_entities"]:
+                entity_info["source_document"] = doc_name
+                all_legal_entities.append(entity_info)
+        
+        # Собираем ссылки на законодательство
+        if "law_references" in raw_data:
+            for law_ref in raw_data["law_references"]:
+                all_law_references.append({
+                    "reference": law_ref,
+                    "source_document": doc_name
+                })
+    
+    # Добавляем агрегированные данные в сводный отчет
+    summary["aggregated_data"] = {
+        "dates": all_dates,
+        "amounts": all_amounts,
+        "legal_entities": all_legal_entities,
+        "law_references": all_law_references
+    }
+    
+    # Добавляем статистику
+    summary["statistics"] = {
+        "total_documents": len(documents_results),
+        "valid_documents": len([doc for doc in documents_results if doc.get("is_valid")]),
+        "invalid_documents": len([doc for doc in documents_results if not doc.get("is_valid")]),
+        "unique_document_types": list(set(doc.get("document_type", "Дополнительные материалы") for doc in documents_results)),
+        "total_amounts_found": len(all_amounts),
+        "total_dates_found": len(all_dates),
+        "total_legal_entities_found": len(all_legal_entities)
+    }
+    
+    return summary

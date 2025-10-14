@@ -73,8 +73,8 @@ celery_app.conf.update(
 # Глобальные настройки ретраев для всех задач
 celery_app.conf.task_default_retry_delay = 10
 celery_app.conf.task_max_retries = 3
-celery_app.conf.task_time_limit = 300  # 5 минут на задачу
-celery_app.conf.task_soft_time_limit = 240  # 4 минуты мягкий лимит
+celery_app.conf.task_time_limit = 1800
+celery_app.conf.task_soft_time_limit = 1500
 
 
 if __name__ == '__main__':

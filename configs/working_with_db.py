@@ -1,14 +1,14 @@
-import os
 import logging
 import json
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from psycopg2 import sql
 
 from configs.procurement_requirements import DOCUMENT_TYPE_MAPPING
 from configs.retry_utils import sync_retry, DATABASE_RETRY_CONFIG
+from configs.config import Config
 
 
 logger = logging.getLogger(__name__)
@@ -26,11 +26,11 @@ def get_db_connection():
         psycopg2.extensions.connection: Объект соединения с базой данных PostgreSQL.
     """
     return psycopg2.connect(
-        host=os.getenv("DB_HOST"),
-        port=os.getenv("DB_PORT"),
-        dbname=os.getenv("DB_NAME"),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
+        host=Config.DB_HOST,
+        port=Config.DB_PORT,
+        dbname=Config.DB_NAME,
+        user=Config.DB_USER,
+        password=Config.DB_PASSWORD,
         client_encoding='UTF8'
     )
 

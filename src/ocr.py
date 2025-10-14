@@ -4,13 +4,15 @@ import logging
 
 from openai import OpenAI
 
+from configs.config import Config
+
 
 logger = logging.getLogger(__name__)
 
 
 client = OpenAI(
-    base_url=os.getenv("M_MODEL_API_URL"),
-    api_key=os.getenv("M_MODEL_API_KEY")
+    base_url=Config.M_MODEL_API_URL,
+    api_key=Config.M_MODEL_API_KEY
 )
 
 
@@ -30,7 +32,7 @@ def ocr_image_with_qwen_vl(image_path: str) -> str:
 
     try:
         response = client.chat.completions.create(
-            model=os.getenv("M_MODEL_NAME"),
+            model=Config.M_MODEL_NAME,
             messages=[
                 {
                     "role": "user",
