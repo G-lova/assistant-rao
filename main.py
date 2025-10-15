@@ -1,6 +1,7 @@
 import os
 import tempfile
 import logging
+import json
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,21 +9,18 @@ from typing import List, Optional, Dict
 
 from configs.utils import (APIKeyMiddleware,
                            read_file,
-                           create_summary_report,
-                           generate_overall_conclusion,
-                           extract_provided_docs_from_results,
-                           extract_required_docs_from_analysis)
+                           create_summary_report)
 from configs.working_with_db import (save_raw_data,
                                      save_clean_conclusion,
                                      get_contract_info_from_db,
                                      save_summary_report)
-from src.evaluator import (check_documents_consistency,
-                           analyze_document_chunks,
+from src.evaluator import (analyze_document_chunks,
                            split_large_text,
-                           check_completeness_with_ai)
+                           check_completeness_with_ai,
+                           create_unprocessed_document_analysis)
 from src.scoring import scoring
 from configs.parsing import parse_cloud_storage_link
-from configs.retry_utils import async_retry, CLOUD_PARSING_RETRY_CONFIG
+from configs.retry_utils import async_retry, API_RETRY_CONFIG, CLOUD_PARSING_RETRY_CONFIG
 
 
 app = FastAPI(debug=False)
@@ -56,29 +54,8 @@ async def evaluate_documents_batch(
 ):
     """
     Принимает пакет документов (файлы и/или ссылки) и запускает их комплексную экспертизу.
-
-    Эндпоинт обрабатывает загруженные файлы и ссылки на документы из облачных хранилищ,
-    извлекает текст, определяет типы документов с помощью ИИ, проверяет комплектность
-    и согласованность данных, сохраняет результаты в БД и возвращает структурированный
-    отчёт. Поддерживает повторные попытки при временных ошибках и корректно обрабатывает
-    исключительные ситуации на всех этапах.
-
-    Args:
-        procurement_id (str, optional): Уникальный идентификатор закупки. Обязательный параметр.
-        files (List[UploadFile], optional): Список загружаемых файлов документов.
-        links (List[str], optional): Список URL на документы в облачных хранилищах.
-        legislation (Optional[str], optional): Применимое законодательство (по умолчанию "44-ФЗ").
-        procurement_method (Optional[str], optional): Способ закупки (по умолчанию "Конкурс").
-        expertise_details (Optional[str], optional): Описание комплекта документов (не используется напрямую).
-
-    Raises:
-        HTTPException: Если не переданы ни файлы, ни ссылки.
-        ValueError: При обнаружении пустого файла или невозможности извлечь текст.
-
-    Returns:
-        _type_: JSON-ответ с полной информацией об обработке: список документов с типами
-            и заключениями, результаты проверок комплектности и согласованности,
-            общее заключение и метаданные обработки.
+    Все документы сохраняются в БД. Затем вызывается ИИ-модель, которая получает **все сырые данные из БД**
+    и возвращает структурированный JSON-ответ. Ответ возвращается клиенту **без каких-либо преобразований**.
     """
     global document_analysis_cache
 
@@ -187,7 +164,7 @@ async def evaluate_documents_batch(
                 }
                 documents_results.append(document_result)
 
-    # ОБРАБОТКА ССЫЛОК
+    # === ОБРАБОТКА ССЫЛОК ===
     if links:
         logger.info(f"Обработка {len(links)} ссылок для закупки {procurement_id}")
         for link in links:
@@ -213,10 +190,10 @@ async def evaluate_documents_batch(
                         "original_link": link
                     }
                     documents_results.append(document_result)
+                    document_analysis_results[filename] = create_unprocessed_document_analysis(filename, error_msg)
                     continue
 
-                # === ОБРАБОТКА ОДНОГО ИЛИ НЕСКОЛЬКИХ ФАЙЛОВ ===
-                files_to_process = parse_result.get("files", [parse_result])  # ЕИС возвращает список, облака — один файл
+                files_to_process = parse_result.get("files", [parse_result])
 
                 for file_info in files_to_process:
                     file_path = file_info.get("file_path")
@@ -239,15 +216,12 @@ async def evaluate_documents_batch(
                         continue
 
                     try:
-                        # === ИЗВЛЕЧЕНИЕ ТЕКСТА ===
                         extracted_text = read_file(file_path, original_filename=filename)
                         if not extracted_text or "[Нет читаемого текста]" in extracted_text:
                             raise ValueError("Не удалось извлечь текст из файла")
 
-                        # === РАЗБИВКА НА ЧАНКИ ===
                         chunks = split_large_text(extracted_text, max_chunk_size=20000)
 
-                        # === АНАЛИЗ ДОКУМЕНТА ===
                         analysis_result = await analyze_document_chunks(
                             chunks=chunks,
                             document_name=filename,
@@ -272,7 +246,6 @@ async def evaluate_documents_batch(
                             conclusion = analysis["conclusion"]
                             document_analysis_results[filename] = analysis
 
-                            # === СОХРАНЕНИЕ В БД ===
                             try:
                                 save_raw_data(procurement_id=procurement_id, document_type=final_doc_type, full_analysis=analysis)
                                 save_clean_conclusion(procurement_id=procurement_id, document_type=final_doc_type, conclusion=conclusion)
@@ -281,7 +254,6 @@ async def evaluate_documents_batch(
                                 logger.error(f"Ошибка сохранения в БД: {str(db_error)}")
                                 conclusion += " [Ошибка сохранения в БД]"
 
-                        # === ФОРМИРОВАНИЕ РЕЗУЛЬТАТА ===
                         document_result = {
                             "procurement_id": procurement_id,
                             "document_type": final_doc_type,
@@ -308,7 +280,6 @@ async def evaluate_documents_batch(
                         }
                         documents_results.append(document_result)
                     finally:
-                        # === УДАЛЕНИЕ ВРЕМЕННОГО ФАЙЛА ===
                         try:
                             if os.path.exists(file_path):
                                 os.unlink(file_path)
@@ -329,98 +300,49 @@ async def evaluate_documents_batch(
                     "original_link": link
                 }
                 documents_results.append(document_result)
-                    
-            except Exception as e:
-                logger.error(f"Критическая ошибка при обработке ссылки {link}: {str(e)}", exc_info=True)
-                document_result = {
-                    "procurement_id": procurement_id,
-                    "document_type": "Дополнительные материалы",
-                    "filename": f"error_link_{hash(link)}",
-                    "is_valid": False,
-                    "error": str(e),
-                    "conclusion": f"Критическая ошибка обработки ссылки: {str(e)}",
-                    "source": "cloud_storage", 
-                    "original_link": link
-                }
-                documents_results.append(document_result)
 
-    # === ПРОВЕРКА КОМПЛЕКТНОСТИ ===
-    completeness_check = {}
-    if document_analysis_results:
-        ai_completeness_result = await check_completeness_with_ai(
-            procurement_id=procurement_id,
-            required_documents=extract_required_docs_from_analysis(document_analysis_results),
-            provided_documents=extract_provided_docs_from_results(documents_results)
+    # === ПРОВЕРКА: хотя бы один документ успешно обработан ===
+    if not document_analysis_results:
+        raise HTTPException(status_code=400, detail="Нет данных для анализа: не удалось обработать ни один документ")
+
+    # === ЕДИНСТВЕННЫЙ ВЫЗОВ ИИ С ПОВТОРНЫМИ ПОПЫТКАМИ ===
+    try:
+        final_evaluation_result = await async_retry(API_RETRY_CONFIG)(
+            check_completeness_with_ai
+        )(procurement_id)
+    except Exception as e:
+        logger.error(f"Критическая ошибка после всех попыток вызова модели: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Не удалось выполнить итоговую проверку даже после повторных попыток"
         )
-        completeness_check = {
-            "status": "allow" if ai_completeness_result.get("completeness_status") == "полный" else "deny",
-            "declared_attachments": extract_required_docs_from_analysis(document_analysis_results),
-            "missing_in_upload": ai_completeness_result.get("missing_documents", []),
-            "provided_documents": extract_provided_docs_from_results(documents_results),
-            "source_docs_for_attached": list(document_analysis_results.keys()),
-            "feedback": ai_completeness_result.get("reasoning", ""),
-            "detailed_issues": [],
-            "final_feedback": f"Статус комплектности: {ai_completeness_result.get('completeness_status', 'неизвестно')}. {ai_completeness_result.get('reasoning', '')}"
-        }
-        save_clean_conclusion(procurement_id=procurement_id, document_type="completeness_check", conclusion=completeness_check["final_feedback"])
 
-    # === ПРОВЕРКА СОГЛАСОВАННОСТИ ===
-    consistency_result = await check_documents_consistency(procurement_id)
-    overall_consistency_conclusion = (
-        "Данные в документах согласованы."
-        if consistency_result["status"] == "ok"
-        else f"Обнаружены расхождения в документах: {consistency_result['conclusion']}"
-    )
-    save_clean_conclusion(procurement_id=procurement_id, document_type="consistency_check", conclusion=overall_consistency_conclusion)
+    # === СОХРАНЕНИЕ ИТОГОВОГО ЗАКЛЮЧЕНИЯ ===
+    try:
+        save_clean_conclusion(
+            procurement_id=procurement_id,
+            document_type="completeness_check",
+            conclusion=json.dumps(final_evaluation_result, ensure_ascii=False, indent=2)
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось сохранить итоговое заключение в БД: {e}")
 
-    # === ОБЩЕЕ ЗАКЛЮЧЕНИЕ ===
-    overall_conclusion_text, overall_status = generate_overall_conclusion(
-        documents_results, 
-        completeness_check, 
-        consistency_result
-    )
-
-    # === КЭШИРОВАНИЕ ===
-    document_analysis_cache[procurement_id] = {
-        "documents": documents_results,
-        "completeness_check": completeness_check,
-        "consistency_check": consistency_result,
-        "overall_conclusion": overall_status
-    }
-
-    # === СВОДНЫЙ ОТЧЁТ ===
+    # === СОЗДАНИЕ СВОДНОГО ОТЧЁТА (для внутреннего использования) ===
     try:
         summary_report = create_summary_report(
             procurement_id=procurement_id,
             documents_results=documents_results,
             document_analysis_results=document_analysis_results,
-            completeness_check=completeness_check,
-            consistency_result=consistency_result
+            completeness_check=final_evaluation_result,
+            consistency_result={"status": "ok", "issues": [], "conclusion": "Проверка согласованности отключена"}
         )
         save_summary_report(procurement_id, summary_report)
         logger.info(f"Сводный отчет создан и сохранен для procurement_id={procurement_id}")
     except Exception as e:
         logger.error(f"Ошибка при создании сводного отчета: {str(e)}")
 
-    # === ОТВЕТ ===
-    return {
-        "procurement_id": procurement_id,
-        "documents_processed": len(documents_results),
-        "files_processed": len([d for d in documents_results if d.get("source") == "uploaded_file"]),
-        "links_processed": len([d for d in documents_results if d.get("source") == "cloud_storage"]),
-        "documents": documents_results,
-        "overall_conclusion": overall_status,
-        "completeness_summary": {
-            "status": completeness_check.get("status", "unknown"),
-            "conclusion": completeness_check.get("final_feedback", ""),
-            "missing_documents": completeness_check.get("missing_in_upload", [])
-        },
-        "consistency_summary": {
-            "status": consistency_result.get("status", "unknown"),
-            "conclusion": overall_consistency_conclusion,
-            "issues": consistency_result.get("issues", [])
-        }
-    }
+    # === ВОЗВРАЩАЕМ СЫРОЙ ОТВЕТ МОДЕЛИ ===
+    return final_evaluation_result
 
 
 @app.post("/get-contract-info")

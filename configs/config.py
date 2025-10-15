@@ -58,6 +58,7 @@ class Config:
     
     # API settings
     URL = os.getenv("API_URL")
+    MODEL_API_URL = os.getenv("MODEL_API_URL")
     MODEL_NAME = os.getenv("MODEL_NAME")
     
     # Security

@@ -827,51 +827,30 @@ class CloudStorageParser:
     async def _parse_eis(self, url: str, procurement_id: str = None) -> Dict:
         """
         Парсит страницу документов на портале ЕИС (zakupki.gov.ru) и скачивает прикреплённые файлы.
-
-        Поддерживает как закупки по 44-ФЗ, так и по 223-ФЗ. Извлекает regNumber или noticeInfoId
-        из URL, формирует корректную ссылку на вкладку «Документы», загружает страницу через
-        Playwright, обходит модальные окна и скачивает все доступные файлы из блока
-        .blockFilesTabDocs. Для каждого файла определяется MIME-тип и корректное расширение.
-
-        Args:
-            url (str): URL страницы закупки в ЕИС (может содержать regNumber или noticeInfoId).
-            procurement_id (str, optional): Идентификатор закупки для логирования и привязки результата.
-                По умолчанию None.
-
-        Returns:
-            Dict: Словарь с результатом операции. При успехе содержит список скачанных файлов
-                с путями, именами и метаданными; при ошибке — статус "error" и сообщение об ошибке.
+        Извлекает regNumber или noticeInfoId из URL, формирует корректную ссылку на вкладку «Документы»,
+        загружает страницу через Playwright (только для получения списка ссылок), затем скачивает
+        все файлы напрямую через aiohttp по прямым ссылкам вида /download/file?uid=... с корректными
+        заголовками. Это обходит ошибку 'Download is starting' и позволяет получать настоящие DOCX/XLSX.
         """
         try:
             logger.info(f"Начало парсинга ЕИС: {url}")
             clean_url = url.strip()
-    
-            # --- Шаг 1: извлекаем regNumber или noticeInfoId ---
             parsed = urlparse(clean_url)
             query_params = parse_qs(parsed.query)
             reg_number = query_params.get("regNumber", [None])[0]
             notice_info_id = query_params.get("noticeInfoId", [None])[0]
-    
             if not reg_number and not notice_info_id:
                 raise Exception("Не найден regNumber или noticeInfoId в URL")
     
-            # --- Шаг 2: формируем URL страницы документов ---
             if "notice223" in clean_url:
                 doc_url = f"https://zakupki.gov.ru/epz/order/notice/notice223/documents.html?noticeInfoId={notice_info_id}"
             else:
                 path_parts = parsed.path.split('/')
-                notice_type = None
-                for part in path_parts:
-                    if part in ("zk20", "ea20", "ezt20", "okd20", "okdp20", "oks20"):
-                        notice_type = part
-                        break
-                if not notice_type:
-                    notice_type = "zk20"
+                notice_type = next((part for part in ("zk20", "ea20", "ezt20", "okd20", "okdp20", "oks20") if part in path_parts), "zk20")
                 doc_url = f"https://zakupki.gov.ru/epz/order/notice/{notice_type}/view/documents.html?regNumber={reg_number}"
     
             logger.info(f"URL документов ЕИС: {doc_url}")
     
-            # --- Шаг 3: загружаем страницу через Playwright ---
             async with async_playwright() as p:
                 browser = await p.chromium.launch(
                     args=[
@@ -893,24 +872,6 @@ class CloudStorageParser:
                     await page.goto(doc_url, wait_until="domcontentloaded", timeout=20000)
                     await page.wait_for_selector(".blockFilesTabDocs", timeout=15000)
     
-                    # === ЗАКРЫВАЕМ МОДАЛЬНЫЕ ОКНА ===
-                    close_selectors = [
-                        'button[aria-label="Закрыть"]',
-                        'button:has-text("Принимаю")',
-                        'button:has-text("Согласен")',
-                        'button:has-text("Закрыть")',
-                        '#modal-customer button'
-                    ]
-                    for selector in close_selectors:
-                        try:
-                            btn = await page.query_selector(selector)
-                            if btn:
-                                await btn.click(timeout=5000)
-                                await page.wait_for_timeout(1000)
-                                break
-                        except:
-                            continue
-                        
                     # === ИЗВЛЕКАЕМ ССЫЛКИ ИЗ blockFilesTabDocs ===
                     file_links = await page.eval_on_selector_all(
                         ".blockFilesTabDocs a[href*='filestore']",
@@ -919,10 +880,8 @@ class CloudStorageParser:
                             text: el.innerText.trim() || 'eis_document'
                         }))"""
                     )
-    
                     if not file_links:
                         raise Exception("Не найдено ссылок на документы в блоке 'blockFilesTabDocs'")
-    
                     logger.info(f"Найдено {len(file_links)} документов в ЕИС")
     
                     results = []
@@ -931,47 +890,58 @@ class CloudStorageParser:
                         orig_filename = link_info["text"]
     
                         try:
-                            # === СКАЧИВАЕМ ФАЙЛ ЧЕРЕЗ PLAYWRIGHT ===
-                            async with page.expect_download(timeout=30000) as download_info:
-                                await page.click(f"a[href='{href}']", force=True)
-                            download = await download_info.value
+                            # === ИЗВЛЕКАЕМ UID ИЗ ССЫЛКИ ===
+                            parsed_href = urlparse(href)
+                            uid = parse_qs(parsed_href.query).get("uid", [None])[0]
+                            if not uid:
+                                logger.warning(f"Не удалось извлечь uid из ссылки: {href}")
+                                continue
+                            
+                            # === ФОРМИРУЕМ ПРЯМУЮ ССЫЛКУ НА ФАЙЛ ===
+                            direct_url = f"https://zakupki.gov.ru/44fz/filestore/public/download/file?uid={uid}"
     
-                            # Сохраняем во временный файл
-                            with tempfile.NamedTemporaryFile(delete=False) as tmp:
-                                await download.save_as(tmp.name)
-                                tmp_path = tmp.name
-    
-                            # === ОПРЕДЕЛЯЕМ РЕАЛЬНОЕ РАСШИРЕНИЕ ===
-                            real_mime = magic.from_file(tmp_path, mime=True)
-                            mime_to_ext = {
-                                'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
-                                'application/msword': '.doc',
-                                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
-                                'application/vnd.ms-excel': '.xls',
-                                'application/pdf': '.pdf',
-                                'text/plain': '.txt',
-                                'text/html': '.html',
-                                'application/zip': '.zip',
+                            # === СКАЧИВАЕМ ЧЕРЕЗ aiohttp С ЗАГОЛОВКАМИ ===
+                            headers = {
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                                "Referer": doc_url,
+                                "Accept": "*/*"
                             }
-                            real_ext = mime_to_ext.get(real_mime, '.bin')
     
-                            # Безопасное имя файла
-                            safe_name = re.sub(r'[<>:"/\\|?*]', '_', orig_filename)
-                            if not safe_name.endswith(real_ext):
-                                safe_name += real_ext
+                            async with aiohttp.ClientSession() as session:
+                                async with session.get(direct_url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                                    if resp.status != 200:
+                                        logger.warning(f"Не удалось скачать файл {direct_url}: статус {resp.status}")
+                                        continue
+                                    
+                                    # Определяем расширение по Content-Type
+                                    content_type = resp.headers.get('content-type', '')
+                                    file_ext = self._get_extension_from_content_type(content_type)
+                                    if not file_ext or file_ext == '.bin':
+                                        file_ext = self._get_extension_from_url(direct_url)
     
-                            results.append({
-                                "status": "success",
-                                "filename": safe_name,
-                                "file_path": tmp_path,
-                                "source": "eis",
-                                "original_url": href,
-                                "procurement_id": procurement_id,
-                                "file_extension": real_ext
-                            })
+                                    # Сохраняем во временный файл
+                                    with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
+                                        async for chunk in resp.content.iter_chunked(8192):
+                                            tmp.write(chunk)
+                                        tmp_path = tmp.name
+    
+                                    # Безопасное имя файла
+                                    safe_name = re.sub(r'[<>:"/\\|?*]', '_', orig_filename)
+                                    if not safe_name.endswith(file_ext):
+                                        safe_name += file_ext
+    
+                                    results.append({
+                                        "status": "success",
+                                        "filename": safe_name,
+                                        "file_path": tmp_path,
+                                        "source": "eis",
+                                        "original_url": direct_url,
+                                        "procurement_id": procurement_id,
+                                        "file_extension": file_ext
+                                    })
     
                         except Exception as e:
-                            logger.warning(f"Не удалось скачать файл {href}: {e}")
+                            logger.warning(f"Не удалось обработать файл {href}: {e}")
                             continue
                         
                     if not results:
@@ -994,6 +964,33 @@ class CloudStorageParser:
                 "status": "error",
                 "error": f"Ошибка парсинга ЕИС: {str(e)}"
             }
+
+    
+    async def _extract_real_file_url_from_eis_page(self, page, file_html_url: str) -> Optional[str]:
+        """
+        Загружает страницу вида .../file.html?uid=... и извлекает настоящую ссылку на файл
+        из JavaScript-переменной window.__PRELOADED_STATE__.
+        """
+        try:
+            await page.goto(file_html_url, wait_until="domcontentloaded", timeout=10000)
+            # Получаем весь HTML
+            content = await page.content()
+            # Ищем __PRELOADED_STATE__
+            if "__PRELOADED_STATE__" in content:
+                # Извлекаем JSON из скрипта
+                start = content.find("window.__PRELOADED_STATE__ = ") + len("window.__PRELOADED_STATE__ = ")
+                end = content.find("};", start) + 1
+                if start > len("window.__PRELOADED_STATE__ = ") and end > start:
+                    json_str = content[start:end]
+                    data = json.loads(json_str)
+                    # Извлекаем URL файла
+                    file_url = data.get("file", {}).get("url")
+                    if file_url:
+                        return file_url
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка извлечения реальной ссылки из {file_html_url}: {e}")
+            return None
 
 
 # Глобальный экземпляр парсера

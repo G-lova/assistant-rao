@@ -14,7 +14,6 @@ from typing import Dict, List, Any
 from docx import Document
 from pptx import Presentation
 from pdf2image import convert_from_path
-from dotenv import load_dotenv
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -24,7 +23,6 @@ from src.ocr import ocr_image_with_qwen_vl
 
 
 config = Config.get_model_config()
-load_dotenv()
 
 
 logging.getLogger("PyPDF2").setLevel(logging.ERROR)
