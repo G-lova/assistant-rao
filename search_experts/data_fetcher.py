@@ -25,7 +25,7 @@ class DataFetcher:
         self.headers = headers
 
 
-    def fetch_expertise_data(self, sql_query, expertise_id):
+    def fetch_expertise_data(self, sql_query, expertise_id, defaultWorkload):
         """
         Извлекает данные экспертизы, выполняя параметризованный SQL-запрос.
 
@@ -34,7 +34,8 @@ class DataFetcher:
 
         Args:
             sql_query (str): SQL-запрос с плейсхолдером (например, ?), который будет заменён на expertise_id.
-            expertise_id (Any): Значение, подставляемое в SQL-запрос как параметр (например, ID экспертизы).
+            expertise_id (Any): ID экспертизы - значение, подставляемое в SQL-запрос как параметр.
+            defaultWorkload (int): Рабочая нагрузка на эксперта, выставляемая при подборе экспертов на экспертизу.
 
         Raises:
             Exception: Если запрос завершился с ошибкой HTTP (например, 4xx, 5xx).
@@ -46,7 +47,7 @@ class DataFetcher:
         """
         data = {
             "sql": sql_query,
-            "bindings": [expertise_id]
+            "bindings": [expertise_id, defaultWorkload]
         }
         
         response = requests.post(self.url, headers=self.headers, data=json.dumps(data))

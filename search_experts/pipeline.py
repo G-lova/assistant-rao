@@ -135,23 +135,23 @@ class ScoringPipeline:
         """
         Рассчитывает итоговый рейтинг эксперта на основе нескольких факторов.
 
-        Комбинирует три метрики с весами:
-        - сходство текстов (40%),
-        - дистанционная оценка (40%),
-        - средний рейтинг эксперта (20%).
-        Результат сохраняется в столбце 'rating'.
+        Комбинирует три метрики:
+        - сходство текстов,
+        - дистанционная оценка,
+        - рейтинг эксперта по 5 критериям.
+        Результат сохраняется в столбце 'scoring'.
 
         Args:
-            df (pandas.DataFrame): Датафрейм с колонками 'similarity_embeddings', 'distance_rate', 'avg_rating'.
+            df (pandas.DataFrame): Датафрейм с колонками 'similarity_embeddings', 'distance_rate', 'rating'.
 
         Returns:
-            pandas.DataFrame: Датафрейм с добавленным столбцом 'rating'.
+            pandas.DataFrame: Датафрейм с добавленным столбцом 'scoring'.
         """
-        df['rating'] = df['similarity_embeddings'] * 0.4 + df['distance_rate'] * 0.4 + df['avg_rating'] * 0.2
+        df['scoring'] = (df['similarity_embeddings'] + df['distance_rate'] + df['rating']) / 3
         return df
     
 
-    def run_pipeline(self, sql_file_path, expertise_id):
+    def run_pipeline(self, sql_file_path, expertise_id, defaultWorkload=5):
         """
         Запускает полный конвейер оценки экспертов для заданной экспертизы.
 
@@ -161,6 +161,7 @@ class ScoringPipeline:
         Args:
             sql_file_path (str): Имя файла с SQL-запросом для получения данных об экспертах.
             expertise_id (str или int): Уникальный идентификатор экспертизы.
+            defaultWorkload (int): Рабочая нагрузка на эксперта, выставляемая при подборе экспертов на экспертизу (по умолчанию 5).
 
         Returns:
             pandas.DataFrame: Датафрейм с отфильтрованными и ранжированными экспертами,
@@ -170,7 +171,7 @@ class ScoringPipeline:
         sql_query = self.load_sql_query(sql_file_path)
         
         # Получение данных
-        df = self.data_fetcher.fetch_expertise_data(sql_query, expertise_id)
+        df = self.data_fetcher.fetch_expertise_data(sql_query, expertise_id, defaultWorkload)
         
         # Предобработка
         df = self.preprocess_data(df)
@@ -194,10 +195,10 @@ class ScoringPipeline:
         Возвращает список ID топовых экспертов для дальнейшего использования (например, в рекомендациях).
 
         Args:
-            df (pandas.DataFrame): Датафрейм с колонками 'expert_id' и 'rating'.
+            df (pandas.DataFrame): Датафрейм с колонками 'expert_id' и 'scoring'.
 
         Returns:
             pandas.Series: Серия с идентификаторами экспертов, отсортированная по рейтингу по убыванию.
         """
-        experts = df[['expert_id', 'rating']].sort_values(by='rating', ascending=False)
+        experts = df[['expert_id', 'scoring']].sort_values(by='scoring', ascending=False)
         return experts['expert_id']
