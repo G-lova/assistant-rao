@@ -25,7 +25,7 @@ class DataFetcher:
         self.headers = headers
 
 
-    def fetch_expertise_data(self, sql_query, expertise_id, defaultWorkload):
+    def fetch_expertise_data(self, sql_query, expertise_id):
         """
         Извлекает данные экспертизы, выполняя параметризованный SQL-запрос.
 
@@ -47,7 +47,7 @@ class DataFetcher:
         """
         data = {
             "sql": sql_query,
-            "bindings": [expertise_id, defaultWorkload]
+            "bindings": [expertise_id]
         }
         
         response = requests.post(self.url, headers=self.headers, data=json.dumps(data))

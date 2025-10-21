@@ -93,8 +93,11 @@ class ScoringPipeline:
         """
         Фильтрует экспертов, имеющих конфликт интересов с текущей экспертизой.
 
-        Применяет нечёткое сравнение (fuzzy matching) между текстом экспертизы и описанием эксперта.
-        Исключает записи, где степень совпадения превышает порог (85%), что указывает на возможный конфликт.
+        Применяет нечёткое сравнение (fuzzy matching) между текстом экспертизы и описанием эксперта,
+        а также сравнивает фамилию заказчика экспертизы с фамилиями экспертов в группе.
+
+        Исключает записи, где степень совпадения fuzzy matching превышает порог (85%) или выявлены потенциальные семейные связи,
+        что указывает на возможный конфликт.
 
         Args:
             df (pandas.DataFrame): Датафрейм с текстами и сходством.
@@ -103,7 +106,15 @@ class ScoringPipeline:
             pandas.DataFrame: Отфильтрованный датафрейм, содержащий только экспертов без конфликта интересов.
         """
         df['conflict_fuzzy'] = df.apply(self.conflict_detector.fuzzy_match, axis=1).astype(int)
-        return df[df['conflict_fuzzy'] < 85]
+        df = df[df['conflict_fuzzy'] < 85]
+
+        experts_to_exclude = set()
+        exclude_ids = self.conflict_detector.find_family_conflicts(df)
+        if exclude_ids:
+            experts_to_exclude |= exclude_ids
+        df = df[~df["expert_id"].isin(experts_to_exclude)]
+
+        return df
     
 
     def calculate_similarities(self, df):
@@ -131,6 +142,42 @@ class ScoringPipeline:
         return df.sort_values(by="similarity_embeddings", ascending=False)
     
 
+    def detect_nepotism(self, df):
+        '''
+        Обнаруживает и исключает экспертов, подозреваемых в наличии родственных связей,
+        на основе анализа схожести фамилий в рамках одной экспертной группы.
+
+        Метод делегирует выявление конфликтующих пар экспертов внутреннему детектору
+        (`self.conflict_detector.find_nepotism`), который применяет эвристические правила
+        для сравнения фамилий (полное совпадение или различие на один символ с вложением,
+        например «Иванов» / «Иванова»). При обнаружении такой пары исключается эксперт
+        с более низким значением метрики `similarity_embeddings`, что предполагает
+        его меньшую релевантность или соответствие требованиям экспертизы.
+
+        После определения идентификаторов экспертов для исключения, соответствующие строки
+        удаляются из переданного датафрейма.
+
+        Args:
+            df (pandas.DataFrame): Датафрейм с данными об экспертах, участвующих в одной экспертизе.
+                Должен содержать как минимум следующие столбцы:
+                    - expert_id: Уникальный идентификатор эксперта.
+                    - expert_surname: Фамилия эксперта.
+                    - similarity_embeddings: Числовая метрика соответствия эксперта критериям экспертизы.
+
+        Returns:
+            pandas.DataFrame: Отфильтрованный датафрейм, из которого удалены эксперты,
+                            подозреваемые в непотизме. Структура и состав столбцов сохраняются.
+        '''
+        experts_to_exclude = set()
+
+        exclude_ids = self.conflict_detector.find_nepotism(df)
+        if exclude_ids:
+            experts_to_exclude |= exclude_ids
+
+        df = df[~df["expert_id"].isin(experts_to_exclude)]
+        return df
+    
+
     def calculate_ratings(self, df):
         """
         Рассчитывает итоговый рейтинг эксперта на основе нескольких факторов.
@@ -147,7 +194,7 @@ class ScoringPipeline:
         Returns:
             pandas.DataFrame: Датафрейм с добавленным столбцом 'scoring'.
         """
-        df['scoring'] = (df['similarity_embeddings'] + df['distance_rate'] + df['rating']) / 3
+        df['scoring'] = 0.3 * df['similarity_embeddings'] + 0.3 * df['distance_rate'] + 0.3 * df['criterion_rating'] + 0.1 * df['avg_rating']
         return df
     
 
@@ -171,7 +218,7 @@ class ScoringPipeline:
         sql_query = self.load_sql_query(sql_file_path)
         
         # Получение данных
-        df = self.data_fetcher.fetch_expertise_data(sql_query, expertise_id, defaultWorkload)
+        df = self.data_fetcher.fetch_expertise_data(sql_query, expertise_id)
         
         # Предобработка
         df = self.preprocess_data(df)
@@ -181,6 +228,9 @@ class ScoringPipeline:
         
         # Расчет схожестей
         df = self.calculate_similarities(df)
+        
+        # Расчет семейственности
+        df = self.detect_nepotism(df)
         
         # Расчет рейтингов
         df = self.calculate_ratings(df)

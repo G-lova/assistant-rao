@@ -4,6 +4,11 @@ WITH expertise_info AS (
 		e.subjectContract,
 		u.id AS user_expertise_id,
 		u.name AS expertise_name,
+		CASE 
+		    WHEN u.name IS NOT NULL AND TRIM(u.name) != '' 
+		    THEN LOWER(SUBSTRING_INDEX(TRIM(u.name), ' ', 1))
+		    ELSE ''
+		END AS expertise_surname,
 		u.organization AS expertise_organization,
 		e.priceContract, 
 		e.exucutorContract, 
@@ -29,12 +34,15 @@ WITH expertise_info AS (
 			WHEN 5 THEN 'Закупочная деятельность'
 		END AS experienceExpertise_direction,
 		e.`type`,
-		e.regionExpertise AS expertise_regionExpertise, 
+		CASE 
+			WHEN e.regionExpertise IS NULL THEN 'Общая'
+			ELSE e.regionExpertise
+		END AS expertise_regionExpertise, 
 		REGEXP_REPLACE(
 			CONCAT_WS(' ', LOWER(e.subjectContract), 
 				LOWER(e.directionContract), 
-				LOWER(u.okved_name), 
-				LOWER(u.organization)
+				LOWER(u.organization), 
+				LOWER(u.okved_name)
 			), '["\'«»]', '') AS expertise_text_feature, 
 		CASE 
 			WHEN u.region_id IS NULL 
@@ -248,20 +256,43 @@ WITH expertise_info AS (
 	SELECT 
 		u.id AS expert_id,
 		u.name AS expert_name,
+		CASE 
+		    WHEN u.name IS NOT NULL AND TRIM(u.name) != '' 
+		    THEN LOWER(SUBSTRING_INDEX(TRIM(u.name), ' ', 1))
+		    ELSE ''
+		END AS expert_surname,
 		u.organization AS expert_organization,
 		u.diplom AS expert_diplom, 
+		(CASE WHEN u.email IS NOT NULL THEN 1 ELSE 0 END 
+			+ CASE WHEN u.contactEmail IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.organization IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.snils IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.passport IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.datePassport IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.code IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.birthday IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.phone IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.`number` IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.bank IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.bik IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.correspondentNumber IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.innOplata IS NOT NULL THEN 1 ELSE 0 END
+			+ CASE WHEN u.kpp IS NOT NULL THEN 1 ELSE 0 END) / 15 AS personal_block, 
 		u.directions,
-		u.regionExpertises AS expert_regionExpertises,
+		CASE 
+			WHEN u.regionExpertises IS NULL THEN CAST('["Общая"]' AS JSON)
+			ELSE u.regionExpertises
+		END AS expert_regionExpertises,
 		REGEXP_REPLACE(
-			CONCAT_WS(' ', LOWER(et.name), 
-				LOWER(t.name), 
+			CONCAT_WS(' ', LOWER(t.name), 
+				LOWER(et.name), 
 				LOWER(u.qualification), 
 				LOWER(u.speciality), 
 				LOWER(u.branchScienceDegree), 
 				LOWER(u.branchScienceAcademicTitle),
 				LOWER(u.diplom), 
-				LOWER(u.`position`), 
-				LOWER(u.organization)
+				LOWER(u.organization), 
+				LOWER(u.`position`)
 			), '["\'«»]', '') AS expert_text_feature,
 		u.examination AS expert_examination,		
 		CASE 
@@ -282,7 +313,37 @@ WITH expertise_info AS (
 				END
 			ELSE u.region_id
 		END AS expert_region_id, 
-		COALESCE(u.workExpertise, :defaultWorkload) AS desiredWeekWorkload,
+		u.education,
+		u.experience,
+		COALESCE((YEAR(CURDATE()) - u.yearDegree), 0) AS degreeExperience, 
+		COALESCE((YEAR(CURDATE()) - u.yearAcademicTitle), 0) AS academicTitleExperience, 
+		CASE 
+			WHEN u.publication = 1 
+				OR (JSON_LENGTH(u.linkPublication) > 0 
+				AND CAST(u.linkPublication AS JSON) != CAST('[null]' AS JSON))
+			THEN 1
+			ELSE 0
+		END AS publication,
+		CASE 
+			WHEN CAST(u.linkPublication AS JSON) = CAST('[null]' AS JSON) 
+			THEN 0
+			ELSE JSON_LENGTH(u.linkPublication)
+		END AS countPublications,
+		CASE 
+			WHEN u.monographs = 1 
+				OR (JSON_LENGTH(u.linkMonographs) > 0 
+				AND CAST(u.linkMonographs AS JSON) != CAST('[null]' AS JSON))
+			THEN 1
+			ELSE 0
+		END AS monographs,
+		CASE 
+			WHEN CAST(u.linkMonographs AS JSON) = CAST('[null]' AS JSON) 
+			THEN 0
+			ELSE JSON_LENGTH(u.linkMonographs)
+		END AS countMonographs,
+		u.experienceExpertise,
+		COALESCE(u.workExpertise, 5) AS desiredWeekWorkload,
+		COUNT(CASE WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE status IN (4,5)) THEN 1 END) AS countExpertise,
 		COUNT(CASE 
 				WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
 				THEN 1 
@@ -292,30 +353,30 @@ WITH expertise_info AS (
 			THEN COALESCE(ee.secondUpload, 0)
 		END), 0) AS secondUpload_lastYear,
 		SUM(CASE WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) THEN CASE 
-				WHEN ee.uploadExpertDate >= e.dateStatus3 
-				THEN CASE 
-						WHEN e.dateStatus3 IS NOT NULL AND e.dateStatus3 >= e.dateStatus2 THEN 
-							(DATEDIFF(ee.uploadExpertDate, DATE_ADD(e.dateStatus3, INTERVAL 1 DAY)) + 1) -
-							(SELECT COUNT(*) FROM holidays h 
-							WHERE h.`date` BETWEEN DATE_ADD(e.dateStatus3, INTERVAL 1 DAY) AND ee.uploadExpertDate)
-						WHEN e.dateStatus2 IS NOT NULL AND DATEDIFF(ee.uploadExpertDate, e.dateStatus2) > 0 THEN 
-							(DATEDIFF(ee.uploadExpertDate, DATE_ADD(e.dateStatus2, INTERVAL 1 DAY)) + 1) -
-							(SELECT COUNT(*) FROM holidays h 
-							WHERE h.`date` BETWEEN DATE_ADD(e.dateStatus2, INTERVAL 1 DAY) AND ee.uploadExpertDate)
-						ELSE 0
-					END
-				WHEN ee.uploadExpertDate >= e.dateStatus2
-				THEN CASE
-					WHEN e.dateStatus2 IS NOT NULL AND DATEDIFF(ee.uploadExpertDate, e.dateStatus2) > 0 THEN 
-						(DATEDIFF(ee.uploadExpertDate, e.dateStatus2) + 1) -
+			WHEN ee.uploadExpertDate >= e.dateStatus3 
+			THEN CASE 
+					WHEN e.dateStatus3 IS NOT NULL AND e.dateStatus3 >= e.dateStatus2 THEN 
+						(DATEDIFF(ee.uploadExpertDate, DATE_ADD(e.dateStatus3, INTERVAL 1 DAY)) + 1) -
 						(SELECT COUNT(*) FROM holidays h 
-						WHERE h.`date` BETWEEN e.dateStatus2 AND ee.uploadExpertDate)
+						 WHERE h.`date` BETWEEN DATE_ADD(e.dateStatus3, INTERVAL 1 DAY) AND ee.uploadExpertDate)
+					WHEN e.dateStatus2 IS NOT NULL AND DATEDIFF(ee.uploadExpertDate, e.dateStatus2) > 0 THEN 
+						(DATEDIFF(ee.uploadExpertDate, DATE_ADD(e.dateStatus2, INTERVAL 1 DAY)) + 1) -
+						(SELECT COUNT(*) FROM holidays h 
+						 WHERE h.`date` BETWEEN DATE_ADD(e.dateStatus2, INTERVAL 1 DAY) AND ee.uploadExpertDate)
 					ELSE 0
-				END		
+				END
+			WHEN ee.uploadExpertDate >= e.dateStatus2
+			THEN CASE
+				WHEN e.dateStatus2 IS NOT NULL AND DATEDIFF(ee.uploadExpertDate, e.dateStatus2) > 0 THEN 
+					(DATEDIFF(ee.uploadExpertDate, e.dateStatus2) + 1) -
+					(SELECT COUNT(*) FROM holidays h 
+					 WHERE h.`date` BETWEEN e.dateStatus2 AND ee.uploadExpertDate)
 				ELSE 0
-			END
-			ELSE 0 
-		END > 3) AS overdues,
+			END		
+			ELSE 0
+		END
+		ELSE 0 
+	END > 3) AS overdues,
 		AVG(CASE WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) THEN COALESCE(ee.`range`, 0) ELSE 0 END) AS criterion4,
 		COALESCE(AVG(CASE 
 			WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
@@ -342,8 +403,29 @@ WITH expertise_info AS (
 	AND u.status = 3 
 	AND u.deleted_at IS NULL 
 	AND u.inn != '' AND CAST(SUBSTRING(u.inn, 1, 2) AS UNSIGNED) != 0 AND LOWER(u.name) NOT LIKE '%тест%' AND LOWER(u.name) NOT LIKE '%test%' 
+	AND u.workExpertise != 0
 	GROUP BY u.id
 ), 
+expert_declines AS (
+	SELECT 
+	    expert_id,
+	    COUNT(*) AS expert_declines
+	FROM (
+	    SELECT 
+	        d.id,
+	        d.dateStatus2,
+	        de.expert_id
+	    FROM expertises d
+	    JOIN JSON_TABLE(
+	        d.declineExperts,
+	        "$[*]" COLUMNS (
+	            expert_id INT PATH "$"
+	        )
+	    ) de
+	    WHERE d.dateStatus2 >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
+	) declines
+	GROUP BY expert_id
+),
 expert_requests AS (
 	SELECT 
 	    expert_id,
@@ -549,23 +631,39 @@ experts_with_coords AS (
 			WHEN 88 THEN 39.3078
 			WHEN 89 THEN 32.6169
 		END AS expert_lat,
+		COALESCE(ed.expert_declines, 0) AS expert_declines,
 		COALESCE(er.expert_requests, 0) + e.currentWeekWorkload AS currentWeekWorkloadRequests
 	FROM experts e
+	LEFT JOIN expert_declines ed
+	ON ed.expert_id = e.expert_id
 	LEFT JOIN expert_requests er
 	ON er.expert_id = e.expert_id
 ), ee_joined AS ( 
 	SELECT 
 		ewc.*,
 		u.*,
+		CASE 
+			WHEN JSON_CONTAINS(u.expert_regionExpertises, JSON_QUOTE(ewc.expertise_regionExpertise)) THEN 1
+			ELSE 2
+		END	AS regionExpertise_sort,
 		6371 * 2 * ATAN2(SQRT(SIN(RADIANS(u.expert_lat - ewc.expertise_lat)/2) * SIN(RADIANS(u.expert_lat - ewc.expertise_lat)/2) + 
 			COS(RADIANS(ewc.expertise_lat)) * COS(RADIANS(u.expert_lat)) * SIN(RADIANS(u.expert_lon - ewc.expertise_lon)/2) * 
 			SIN(RADIANS(u.expert_lon - ewc.expertise_lon)/2)), SQRT(1-SIN(RADIANS(u.expert_lat - ewc.expertise_lat)/2) * SIN(RADIANS(u.expert_lat - ewc.expertise_lat)/2) + 
 			COS(RADIANS(ewc.expertise_lat)) * COS(RADIANS(u.expert_lat)) * 
 			SIN(RADIANS(u.expert_lon - ewc.expertise_lon)/2) * SIN(RADIANS(u.expert_lon - ewc.expertise_lon)/2))) AS region_distance_km,
 		CASE 
+			WHEN JSON_CONTAINS(u.experienceExpertise, JSON_QUOTE(ewc.experienceExpertise_direction)) THEN 1
+			ELSE 0
+		END AS 	experienceExpertise_rate,
+		CAST(CASE 
 			WHEN u.desiredWeekWorkload > 0 THEN u.desiredWeekWorkload - u.currentWeekWorkloadRequests
 			ELSE 0
-		END	AS possibleWeekWorkload,
+		END AS FLOAT) AS possibleWeekWorkload,
+		CASE 
+			WHEN MAX(u.countExpertise) OVER(PARTITION BY ewc.expertise_id) > 0
+			THEN u.countExpertise / MAX(u.countExpertise) OVER(PARTITION BY ewc.expertise_id)
+			ELSE 0
+		END AS countExpertise_rate,
 		CASE 
 			WHEN u.countExpertises_lastYear > 0 AND u.countExpertises_lastYear <= 5 THEN 0.25
 			WHEN u.countExpertises_lastYear > 5 AND u.countExpertises_lastYear <= 10 THEN 0.5
@@ -582,13 +680,46 @@ experts_with_coords AS (
 			WHEN u.countExpertises_lastYear > 0
 			THEN 1 - u.secondUpload_lastYear / u.countExpertises_lastYear
 			ELSE 0
-		END AS criterion3
+		END AS criterion3,
+		CASE 
+			WHEN (u.countExpertises_lastYear + u.expert_declines) > 0
+			THEN (u.countExpertises_lastYear) / (u.countExpertises_lastYear + u.expert_declines)
+			ELSE 0
+		END AS declines_rate,
+		CASE 
+			WHEN MAX(u.experience) OVER(PARTITION BY ewc.expertise_id) > 0
+			THEN u.experience / MAX(u.experience) OVER(PARTITION BY ewc.expertise_id)	
+			ELSE 0
+		END AS experience_rate,
+		CASE 
+			WHEN MAX(u.academicTitleExperience) OVER(PARTITION BY ewc.expertise_id) > 0
+			THEN u.academicTitleExperience / MAX(u.academicTitleExperience) OVER(PARTITION BY ewc.expertise_id)
+			ELSE 0
+		END AS academicTitleExperience_rate,
+		CASE 
+			WHEN MAX(u.degreeExperience) OVER(PARTITION BY ewc.expertise_id) > 0
+			THEN u.degreeExperience / MAX(u.degreeExperience) OVER(PARTITION BY ewc.expertise_id)
+			ELSE 0
+		END AS degreeExperience_rate,
+		CASE 
+			WHEN MAX(u.education) OVER(PARTITION BY ewc.expertise_id) > 0
+			THEN u.education / MAX(u.education) OVER(PARTITION BY ewc.expertise_id)
+			ELSE 0
+		END AS education_rate,
+		CASE 
+			WHEN MAX(u.publication + u.monographs) OVER(PARTITION BY ewc.expertise_id)
+			THEN (u.publication + u.monographs) / MAX(u.publication + u.monographs) OVER(PARTITION BY ewc.expertise_id)
+			ELSE 0
+		END AS pubMon_rate,
+		CASE
+			WHEN MAX(u.countPublications + u.countMonographs) OVER(PARTITION BY ewc.expertise_id)
+			THEN (u.countPublications + u.countMonographs) / MAX(u.countPublications + u.countMonographs) OVER(PARTITION BY ewc.expertise_id) 
+			ELSE 0
+		END AS countPubMon_rate
 	FROM expertise_with_coords ewc
 	LEFT JOIN experts_with_coords u
 	ON (JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_direction)) OR JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_monitoring))) 
-	AND (ewc.expertise_regionExpertise IS NULL 
-		OR ((u.expert_regionExpertises IS NULL OR JSON_LENGTH(u.expert_regionExpertises) = 0) AND ewc.expertise_regionExpertise IN ('Общая'))
-		OR JSON_CONTAINS(u.expert_regionExpertises, JSON_QUOTE(ewc.expertise_regionExpertise))) 
+	AND (ewc.expertise_regionExpertise IN ('Общая') OR JSON_CONTAINS(u.expert_regionExpertises, JSON_QUOTE(ewc.expertise_regionExpertise))) 
 	AND ((ewc.expertise_examination = 1 AND ewc.expertise_examination = u.expert_examination) 
 		OR ewc.expertise_examination IS NULL 
 		OR ewc.expertise_examination != 1) 
@@ -600,6 +731,10 @@ SELECT
 		THEN 1 - region_distance_km / MAX(region_distance_km) OVER(PARTITION BY expertise_id)
 		ELSE 1
 	END AS distance_rate,
-	(0.2 * criterion1 + 0.1 * criterion2 + 0.1 * criterion3 + 0.4 * criterion4 + 0.2 * criterion5) AS rating
+	(0.2 * criterion1 + 0.1 * criterion2 + 0.1 * criterion3 + 0.4 * criterion4 + 0.2 * criterion5) AS criterion_rating,
+	CAST((declines_rate + personal_block + education_rate + experience_rate 
+	+ degreeExperience_rate	+ academicTitleExperience_rate + pubMon_rate 
+	+ countPubMon_rate + experienceExpertise_rate + countExpertise_rate 
+	) / 10 AS FLOAT) AS avg_rating
 FROM ee_joined
 WHERE possibleWeekWorkload >= 1;
