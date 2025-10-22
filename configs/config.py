@@ -84,6 +84,7 @@ class Config:
     
     # Qwen/Qwen3-Embedding-0.6B
     EMBEDDING_URL = os.getenv("EMBEDDING_URL")
+    EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
     EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY")
     EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
     BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))
@@ -140,6 +141,7 @@ class Config:
         return EmbeddingConfig(
             api_url=cls.EMBEDDING_URL,
             api_key=cls.EMBEDDING_API_KEY,
+            model = cls.EMBEDDING_MODEL,
             batch_size=cls.BATCH_SIZE
         )
     
