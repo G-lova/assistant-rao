@@ -342,7 +342,7 @@ WITH expertise_info AS (
 			ELSE JSON_LENGTH(u.linkMonographs)
 		END AS countMonographs,
 		u.experienceExpertise,
-		COALESCE(u.workExpertise, 5) AS desiredWeekWorkload,
+		COALESCE(u.workExpertise, 10) AS desiredWeekWorkload,
 		COUNT(CASE WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE status IN (4,5)) THEN 1 END) AS countExpertise,
 		COUNT(CASE 
 				WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
