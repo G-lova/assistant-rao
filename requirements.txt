@@ -40,3 +40,4 @@ httpx
 playwright
 beautifulsoup4
 lxml
+xmltodict

@@ -61,16 +61,14 @@ async def evaluate_documents_batch(
 
     documents_results = []
     document_analysis_results = {}
-    files_dict = {}
 
-    # Проверяем, что есть хотя бы файлы или ссылки
     if not files and not links:
         raise HTTPException(
             status_code=400, 
             detail="Необходимо предоставить либо файлы, либо ссылки на документы"
         )
 
-    # === ОБРАБОТКА ФАЙЛОВ ===
+    # === ОБРАБОТКА ФАЙЛОВ (последовательно) ===
     if files:
         for file in files:
             try:
@@ -81,7 +79,6 @@ async def evaluate_documents_batch(
                         raise ValueError("Файл пустой")
                     tmp.write(content)
                     tmp_path = tmp.name
-                    files_dict[file.filename] = tmp_path
 
                 try:
                     logger.info(f"Обработка файла: {file.filename} для закупки {procurement_id}")
@@ -104,15 +101,13 @@ async def evaluate_documents_batch(
                         final_doc_type = "Дополнительные материалы"
                         is_valid = False
                         conclusion = f"Ошибка анализа: {analysis_result['analysis']['conclusion']}"
+                        analysis = analysis_result["analysis"]
                     else:
                         analysis = analysis_result["analysis"]
-                        actual_type_from_model = analysis["type_compliance"].get("actual_type", "").strip()
-                        final_doc_type = actual_type_from_model if actual_type_from_model else "Дополнительные материалы"
+                        actual_type = analysis["type_compliance"].get("actual_type", "").strip()
+                        final_doc_type = actual_type if actual_type else "Дополнительные материалы"
                         confidence = analysis["type_compliance"].get("confidence", 0)
-                        is_valid = (
-                            final_doc_type != "Дополнительные материалы"
-                            and confidence >= 0.7
-                        )
+                        is_valid = final_doc_type != "Дополнительные материалы" and confidence >= 0.7
                         conclusion = analysis["conclusion"]
                         document_analysis_results[file.filename] = analysis
 
@@ -124,7 +119,7 @@ async def evaluate_documents_batch(
                             logger.error(f"Ошибка сохранения в БД: {str(db_error)}")
                             conclusion += " [Ошибка сохранения в БД]"
 
-                    document_result = {
+                    documents_results.append({
                         "procurement_id": procurement_id,
                         "document_type": final_doc_type,
                         "filename": file.filename,
@@ -132,12 +127,11 @@ async def evaluate_documents_batch(
                         "error": None,
                         "conclusion": conclusion,
                         "source": "uploaded_file"
-                    }
-                    documents_results.append(document_result)
+                    })
 
                 except Exception as e:
                     logger.error(f"Ошибка при обработке {file.filename}: {str(e)}", exc_info=True)
-                    document_result = {
+                    documents_results.append({
                         "procurement_id": procurement_id,
                         "document_type": "Дополнительные материалы",
                         "filename": file.filename,
@@ -145,15 +139,14 @@ async def evaluate_documents_batch(
                         "error": str(e),
                         "conclusion": f"Критическая ошибка обработки: {str(e)}",
                         "source": "uploaded_file"
-                    }
-                    documents_results.append(document_result)
+                    })
                 finally:
                     if os.path.exists(tmp_path):
                         os.unlink(tmp_path)
 
             except Exception as e:
                 logger.error(f"Критическая ошибка при обработке {file.filename}: {str(e)}", exc_info=True)
-                document_result = {
+                documents_results.append({
                     "procurement_id": procurement_id,
                     "document_type": "Дополнительные материалы",
                     "filename": file.filename,
@@ -161,67 +154,61 @@ async def evaluate_documents_batch(
                     "error": str(e),
                     "conclusion": f"Критическая ошибка: {str(e)}",
                     "source": "uploaded_file"
-                }
-                documents_results.append(document_result)
+                })
 
-    # === ОБРАБОТКА ССЫЛОК ===
+    # === ОБРАБОТКА ССЫЛОК (последовательно) ===
     if links:
         logger.info(f"Обработка {len(links)} ссылок для закупки {procurement_id}")
         for link in links:
             try:
                 logger.info(f"Обработка ссылки: {link}")
-
-                # === ПАРСИНГ С РЕТРАЯМИ ===
                 parse_result = await async_retry(CLOUD_PARSING_RETRY_CONFIG)(
                     parse_cloud_storage_link
                 )(link, procurement_id)
 
                 if parse_result.get("status") != "success":
                     error_msg = parse_result.get("error", "Неизвестная ошибка парсинга")
-                    logger.error(f"Ошибка парсинга ссылки {link} после всех ретраев: {error_msg}")
-                    document_result = {
+                    logger.error(f"Ошибка парсинга ссылки {link}: {error_msg}")
+                    filename = f"failed_link_{abs(hash(link)) % (10**8)}"
+                    documents_results.append({
                         "procurement_id": procurement_id,
                         "document_type": "Дополнительные материалы",
-                        "filename": f"failed_link_{hash(link)}",
+                        "filename": filename,
                         "is_valid": False,
                         "error": error_msg,
-                        "conclusion": f"Не удалось обработать ссылку после повторных попыток: {error_msg}",
+                        "conclusion": f"Не удалось обработать ссылку: {error_msg}",
                         "source": "external_link",
                         "original_link": link
-                    }
-                    documents_results.append(document_result)
+                    })
                     document_analysis_results[filename] = create_unprocessed_document_analysis(filename, error_msg)
                     continue
 
                 files_to_process = parse_result.get("files", [parse_result])
-
                 for file_info in files_to_process:
                     file_path = file_info.get("file_path")
-                    filename = file_info.get("filename", f"doc_from_{link}")
+                    filename = file_info.get("filename", f"doc_from_link_{abs(hash(link)) % (10**8)}")
                     source = file_info.get("source", "external_link")
 
                     if not file_path or not os.path.exists(file_path):
-                        logger.warning(f"Файл не найден после парсинга ссылки {link}: {file_path}")
-                        document_result = {
+                        logger.warning(f"Файл не найден: {file_path}")
+                        documents_results.append({
                             "procurement_id": procurement_id,
                             "document_type": "Дополнительные материалы",
                             "filename": filename,
                             "is_valid": False,
-                            "error": "Файл не был скачан",
-                            "conclusion": "Файл не был скачан или повреждён",
+                            "error": "Файл не скачан",
+                            "conclusion": "Файл отсутствует после парсинга",
                             "source": source,
                             "original_link": link
-                        }
-                        documents_results.append(document_result)
+                        })
                         continue
 
                     try:
                         extracted_text = read_file(file_path, original_filename=filename)
                         if not extracted_text or "[Нет читаемого текста]" in extracted_text:
-                            raise ValueError("Не удалось извлечь текст из файла")
+                            raise ValueError("Не удалось извлечь текст")
 
                         chunks = split_large_text(extracted_text, max_chunk_size=20000)
-
                         analysis_result = await analyze_document_chunks(
                             chunks=chunks,
                             document_name=filename,
@@ -234,15 +221,13 @@ async def evaluate_documents_batch(
                             final_doc_type = "Дополнительные материалы"
                             is_valid = False
                             conclusion = f"Ошибка анализа: {analysis_result['analysis']['conclusion']}"
+                            analysis = analysis_result["analysis"]
                         else:
                             analysis = analysis_result["analysis"]
-                            actual_type_from_model = analysis["type_compliance"].get("actual_type", "").strip()
-                            final_doc_type = actual_type_from_model if actual_type_from_model else "Дополнительные материалы"
+                            actual_type = analysis["type_compliance"].get("actual_type", "").strip()
+                            final_doc_type = actual_type if actual_type else "Дополнительные материалы"
                             confidence = analysis["type_compliance"].get("confidence", 0)
-                            is_valid = (
-                                final_doc_type != "Дополнительные материалы"
-                                and confidence >= 0.7
-                            )
+                            is_valid = final_doc_type != "Дополнительные материалы" and confidence >= 0.7
                             conclusion = analysis["conclusion"]
                             document_analysis_results[filename] = analysis
 
@@ -254,7 +239,7 @@ async def evaluate_documents_batch(
                                 logger.error(f"Ошибка сохранения в БД: {str(db_error)}")
                                 conclusion += " [Ошибка сохранения в БД]"
 
-                        document_result = {
+                        documents_results.append({
                             "procurement_id": procurement_id,
                             "document_type": final_doc_type,
                             "filename": filename,
@@ -263,61 +248,56 @@ async def evaluate_documents_batch(
                             "conclusion": conclusion,
                             "source": source,
                             "original_link": link
-                        }
-                        documents_results.append(document_result)
+                        })
 
                     except Exception as processing_error:
                         logger.error(f"Ошибка обработки файла из ссылки {link}: {processing_error}", exc_info=True)
-                        document_result = {
+                        documents_results.append({
                             "procurement_id": procurement_id,
                             "document_type": "Дополнительные материалы",
                             "filename": filename,
                             "is_valid": False,
                             "error": str(processing_error),
-                            "conclusion": f"Ошибка обработки файла: {str(processing_error)}",
+                            "conclusion": f"Ошибка обработки: {str(processing_error)}",
                             "source": source,
                             "original_link": link
-                        }
-                        documents_results.append(document_result)
+                        })
                     finally:
                         try:
                             if os.path.exists(file_path):
                                 os.unlink(file_path)
                                 logger.info(f"Временный файл удалён: {file_path}")
                         except Exception as cleanup_error:
-                            logger.warning(f"Не удалось удалить временный файл {file_path}: {cleanup_error}")
+                            logger.warning(f"Не удалось удалить файл {file_path}: {cleanup_error}")
 
             except Exception as e:
                 logger.error(f"Критическая ошибка при обработке ссылки {link}: {e}", exc_info=True)
-                document_result = {
+                filename = f"error_link_{abs(hash(link)) % (10**8)}"
+                documents_results.append({
                     "procurement_id": procurement_id,
                     "document_type": "Дополнительные материалы",
-                    "filename": f"error_link_{hash(link)}",
+                    "filename": filename,
                     "is_valid": False,
                     "error": str(e),
                     "conclusion": f"Критическая ошибка: {str(e)}",
                     "source": "external_link",
                     "original_link": link
-                }
-                documents_results.append(document_result)
+                })
 
-    # === ПРОВЕРКА: хотя бы один документ успешно обработан ===
+    # === ПРОВЕРКА НАЛИЧИЯ ДАННЫХ ===
     if not document_analysis_results:
         raise HTTPException(status_code=400, detail="Нет данных для анализа: не удалось обработать ни один документ")
 
-    # === ЕДИНСТВЕННЫЙ ВЫЗОВ ИИ С ПОВТОРНЫМИ ПОПЫТКАМИ ===
+    # === ФИНАЛЬНЫЙ ВЫЗОВ ИИ ===
     try:
         final_evaluation_result = await async_retry(API_RETRY_CONFIG)(
             check_completeness_with_ai
         )(procurement_id)
     except Exception as e:
-        logger.error(f"Критическая ошибка после всех попыток вызова модели: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail="Не удалось выполнить итоговую проверку даже после повторных попыток"
-        )
+        logger.error(f"Критическая ошибка вызова модели: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Не удалось выполнить итоговую проверку")
 
-    # === СОХРАНЕНИЕ ИТОГОВОГО ЗАКЛЮЧЕНИЯ ===
+    # === СОХРАНЕНИЕ ИТОГОВ ===
     try:
         save_clean_conclusion(
             procurement_id=procurement_id,
@@ -325,9 +305,8 @@ async def evaluate_documents_batch(
             conclusion=json.dumps(final_evaluation_result, ensure_ascii=False, indent=2)
         )
     except Exception as e:
-        logger.warning(f"Не удалось сохранить итоговое заключение в БД: {e}")
+        logger.warning(f"Не удалось сохранить итоговое заключение: {e}")
 
-    # === СОЗДАНИЕ СВОДНОГО ОТЧЁТА (для внутреннего использования) ===
     try:
         summary_report = create_summary_report(
             procurement_id=procurement_id,
@@ -337,11 +316,10 @@ async def evaluate_documents_batch(
             consistency_result={"status": "ok", "issues": [], "conclusion": "Проверка согласованности отключена"}
         )
         save_summary_report(procurement_id, summary_report)
-        logger.info(f"Сводный отчет создан и сохранен для procurement_id={procurement_id}")
+        logger.info(f"Сводный отчёт сохранён для {procurement_id}")
     except Exception as e:
-        logger.error(f"Ошибка при создании сводного отчета: {str(e)}")
+        logger.error(f"Ошибка создания сводного отчёта: {e}")
 
-    # === ВОЗВРАЩАЕМ СЫРОЙ ОТВЕТ МОДЕЛИ ===
     return final_evaluation_result
 
 

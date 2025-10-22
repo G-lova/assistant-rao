@@ -22,17 +22,20 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-client = OpenAI(
-    base_url=Config.M_MODEL_API_URL,
-    api_key=Config.M_MODEL_API_KEY
-)
-model_name = Config.M_MODEL_NAME
-
+# Это к Qwen/Qwen2.5-VL-7B-Instruct-AWQ
 #client = OpenAI(
-#    base_url=Config.MODEL_API_URL,
+#    base_url=Config.M_MODEL_API_URL,
 #    api_key=Config.M_MODEL_API_KEY
 #)
-#model_name = Config.MODEL_NAME
+#model_name = Config.M_MODEL_NAME
+
+
+# Это к Qwen/Qwen2.5-14B-Instruct-AWQ
+client = OpenAI(
+    base_url=Config.MODEL_API_URL,
+    api_key=Config.MODEL_API_KEY
+)
+model_name = Config.MODEL_NAME
 
 
 ALLOWED_DOC_TYPES = list(DOCUMENT_TYPE_MAPPING.keys())
