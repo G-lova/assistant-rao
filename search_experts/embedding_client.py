@@ -1,5 +1,5 @@
 import numpy as np
-import requests
+from openai import OpenAI
 
 
 class EmbeddingClient:
@@ -10,7 +10,7 @@ class EmbeddingClient:
     с помощью удалённой модели. Поддерживает пакетную обработку для повышения эффективности.
     """
     
-    def __init__(self, api_url, api_key, batch_size):
+    def __init__(self, api_url, api_key, model, batch_size):
         """
         Инициализирует клиент для работы с API генерации эмбеддингов.
 
@@ -21,11 +21,13 @@ class EmbeddingClient:
         """
         self.api_url = api_url
         self.api_key = api_key
+        self.model = model
         self.batch_size = batch_size
-        self.headers = {
-            "X-API-Key": self.api_key,
-            "Content-Type": "application/json"
-        }
+
+        self.client = OpenAI(
+            base_url=self.api_url,
+            api_key=self.api_key
+        )
     
     
     def get_embeddings(self, texts):
@@ -48,9 +50,14 @@ class EmbeddingClient:
         """
         all_embeddings = []
         for i in range(0, len(texts), self.batch_size):
-            batch = texts[i:i+self.batch_size]
-            response = requests.post(self.api_url, headers=self.headers, json={"inputs": batch})
-            response.raise_for_status()
-            batch_embs = response.json()["embeddings"]
+            batch = texts[i:i + self.batch_size]
+
+            response = self.client.embeddings.create(
+                model=self.model,
+                input=batch
+            )
+
+            batch_embs = [item.embedding for item in response.data]
             all_embeddings.extend(batch_embs)
+
         return np.array(all_embeddings)
