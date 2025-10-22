@@ -26,6 +26,7 @@ class EmbeddingConfig:
     """Конфигурация сервиса эмбеддингов"""
     api_url: str
     api_key: str
+    model: str
     batch_size: int = 16
 
 

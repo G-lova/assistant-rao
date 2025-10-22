@@ -42,6 +42,7 @@ class ScoringPipeline:
         self.embedding_client = EmbeddingClient(
             embedding_config.api_url,
             embedding_config.api_key,
+            embedding_config.model,
             batch_size=embedding_config.batch_size
         )
         self.conflict_detector = ConflictDetector()

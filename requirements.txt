@@ -1,4 +1,3 @@
-intertools
 fastapi==0.95.2
 fuzzywuzzy
 gradio==3.50.2
