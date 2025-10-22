@@ -7,15 +7,57 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: ${DB_NAME}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - is_rao_postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     restart: unless-stopped
     ports:
       - "2302:5432"
     networks:
-      - qwen-vl-api_procurement_network
-      - qwen_embedding_network
+      # - qwen-vl-api_procurement_network
+      # - qwen_embedding_network
       - rao_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $DB_USER -d $DB_PASSWORD"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  # PgAdmin для управления PostgreSQL
+  is-rao-pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: is-rao-pgadmin
+    restart: unless-stopped
+    ports:
+      - "2303:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+      PGADMIN_LISTEN_PORT: 80
+      TZ: ${TZ}
+    volumes:
+      - is-rao-pgadmin-data:/var/lib/pgadmin
+      - is-rao-pgadminlogs:/var/log/pgadmin
+      - /pgadmin_config.py:/pgadmin4/config_local.py:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - rao_network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--spider",
+          "--timeout=10",
+          "--quiet",
+          "http://localhost/",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   app:
     build: .
@@ -29,6 +71,7 @@ services:
       PYTHONPATH: /app
       UVICORN_TIMEOUT: 1200
       PYTHONUNBUFFERED: 1
+      TZ: ${TZ}
     depends_on:
       - postgres
     ports:
@@ -40,8 +83,8 @@ services:
     command: uvicorn main:app --host 0.0.0.0 --port 20142 --timeout-keep-alive 1200 --timeout-graceful-shutdown 600 --reload
     restart: unless-stopped
     networks:
-      - qwen-vl-api_procurement_network
-      - qwen_embedding_network
+      # - qwen-vl-api_procurement_network
+      # - qwen_embedding_network
       - rao_network
 
   gradio:
@@ -56,7 +99,7 @@ services:
     command: python -m watchfiles "python gradio_evaluator/gradio_app.py"
     restart: unless-stopped
     networks:
-      - qwen-vl-api_procurement_network
+      # - qwen-vl-api_procurement_network
       - rao_network
     depends_on:
       - app
@@ -66,12 +109,12 @@ services:
   redis:
     image: redis:7-alpine
     container_name: rao_redis
-    ports:
-      - "6379:6379"
+    # ports:
+    #   - "6379:6379"
     networks:
       - rao_network
     volumes:
-      - redis_data:/data
+      - is_rao_redis_data:/data
 
   celery_worker:
     build: .
@@ -82,11 +125,12 @@ services:
       - /tmp:/tmp
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - TZ=${TZ}
     depends_on:
       - redis
     networks:
-      - qwen_embedding_network
-      - qwen-vl-api_procurement_network
+      # - qwen_embedding_network
+      # - qwen-vl-api_procurement_network
       - rao_network
     restart: unless-stopped
 
@@ -99,10 +143,11 @@ services:
       - /tmp:/tmp
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - TZ=${TZ}
     depends_on:
       - redis
     networks:
-      - qwen_embedding_network
+      # - qwen_embedding_network
       - rao_network
     restart: unless-stopped
 
@@ -114,6 +159,7 @@ services:
       - "5555:5555"
     environment:
       - REDIS_URL=redis://redis:6379/0
+      - TZ=${TZ}     
     depends_on:
       - redis
     networks:
@@ -121,13 +167,15 @@ services:
     restart: unless-stopped
 
 networks:
-  qwen-vl-api_procurement_network:
-    external: true
-  qwen_embedding_network:
-    external: true
+  # qwen-vl-api_procurement_network:
+  #   external: true
+  # qwen_embedding_network:
+  #   external: true
   rao_network:
     external: false
 
 volumes:
-  postgres_data:
-  redis_data:
+  is_rao_postgres_data:
+  is_rao_redis_data:
+  is-rao-pgadmin-data:
+  is-rao-pgadminlogs:
