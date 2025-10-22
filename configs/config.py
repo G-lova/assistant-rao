@@ -87,7 +87,6 @@ class Config:
     EMBEDDING_URL = os.getenv("EMBEDDING_URL")
     EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
     EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY")
-    EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
     BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))
     
     # Paths
