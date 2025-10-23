@@ -286,7 +286,6 @@ class ScoringPipeline:
                 return pd.DataFrame(columns=['expert_id', 'scoring'])
             else:
                 raise
-    
 
     def get_top_results(self, df):
         """
