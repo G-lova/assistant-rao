@@ -49,6 +49,32 @@ class ScoringPipeline:
         
         self.sql_queries_path = paths_config.sql_queries
     
+    
+    def _has_valid_experts(self, df):
+        """
+        Вспомогательный метод для проверки наличия валидных экспертов.
+        
+        Args:
+            df (pandas.DataFrame): Датафрейм для проверки
+            
+        Returns:
+            bool: True если есть валидные эксперты, False если DataFrame пустой или все expert_id невалидны
+        """
+        if df.empty:
+            return False
+            
+        if 'expert_id' not in df.columns:
+            return False
+            
+        valid_experts = df['expert_id'].dropna()
+        if len(valid_experts) == 0:
+            return False
+            
+        if (valid_experts.astype(str) == 'None').all():
+            return False
+            
+        return True
+    
 
     def load_sql_query(self, file_name: str) -> str:
         """
@@ -82,6 +108,9 @@ class ScoringPipeline:
         Returns:
             pandas.DataFrame: Датафрейм с очищенными текстовыми полями.
         """
+        if not self._has_valid_experts(df):
+            return df
+        
         for col in ['expert_name', 'expertise_name', 'expertise_organization', 'expert_organization', 'expert_diplom', 'exucutorContract']:
             df[col] = df[col].apply(self.text_processor.normalize_text)
             
@@ -106,6 +135,9 @@ class ScoringPipeline:
         Returns:
             pandas.DataFrame: Отфильтрованный датафрейм, содержащий только экспертов без конфликта интересов.
         """
+        if not self._has_valid_experts(df):
+            return df
+        
         df['conflict_fuzzy'] = df.apply(self.conflict_detector.fuzzy_match, axis=1).astype(int)
         df = df[df['conflict_fuzzy'] < 85]
 
@@ -133,6 +165,10 @@ class ScoringPipeline:
             pandas.DataFrame: Датафрейм с добавленным столбцом 'similarity_embeddings',
             отсортированный по этому столбцу в порядке убывания.
         """
+        if not self._has_valid_experts(df):
+            df["similarity_embeddings"] = pd.Series([], dtype='float64')
+            return df
+            
         exp_text = df["expertise_text_feature"].iloc[0]
         expert_texts = df["expert_text_feature"].tolist()
         
@@ -169,6 +205,9 @@ class ScoringPipeline:
             pandas.DataFrame: Отфильтрованный датафрейм, из которого удалены эксперты,
                             подозреваемые в непотизме. Структура и состав столбцов сохраняются.
         '''
+        if not self._has_valid_experts(df):
+            return df
+        
         experts_to_exclude = set()
 
         exclude_ids = self.conflict_detector.find_nepotism(df)
@@ -195,6 +234,10 @@ class ScoringPipeline:
         Returns:
             pandas.DataFrame: Датафрейм с добавленным столбцом 'scoring'.
         """
+        if not self._has_valid_experts(df):
+            df['scoring'] = pd.Series([], dtype='float64')
+            return df
+        
         df['scoring'] = 0.3 * df['similarity_embeddings'] + 0.3 * df['distance_rate'] + 0.3 * df['criterion_rating'] + 0.1 * df['avg_rating']
         return df
     
@@ -215,28 +258,35 @@ class ScoringPipeline:
             pandas.DataFrame: Датафрейм с отфильтрованными и ранжированными экспертами,
             содержащий колонки 'expert_id' и 'rating'.
         """
-        # Загрузка SQL запроса
-        sql_query = self.load_sql_query(sql_file_path)
+        try:
+            # Загрузка SQL запроса
+            sql_query = self.load_sql_query(sql_file_path)
+            
+            # Получение данных
+            df = self.data_fetcher.fetch_expertise_data(sql_query, expertise_id)
+            
+            # Предобработка
+            df = self.preprocess_data(df)
+            
+            # Обнаружение конфликтов
+            df = self.detect_conflicts(df)
+            
+            # Расчет схожестей
+            df = self.calculate_similarities(df)
+            
+            # Расчет семейственности
+            df = self.detect_nepotism(df)
+            
+            # Расчет рейтингов
+            df = self.calculate_ratings(df)
+            
+            return df
         
-        # Получение данных
-        df = self.data_fetcher.fetch_expertise_data(sql_query, expertise_id)
-        
-        # Предобработка
-        df = self.preprocess_data(df)
-        
-        # Обнаружение конфликтов
-        df = self.detect_conflicts(df)
-        
-        # Расчет схожестей
-        df = self.calculate_similarities(df)
-        
-        # Расчет семейственности
-        df = self.detect_nepotism(df)
-        
-        # Расчет рейтингов
-        df = self.calculate_ratings(df)
-        
-        return df
+        except Exception as e:
+            if str(e) == "Доступных экспертов нет":
+                return pd.DataFrame(columns=['expert_id', 'scoring'])
+            else:
+                raise
     
 
     def get_top_results(self, df):
@@ -251,5 +301,8 @@ class ScoringPipeline:
         Returns:
             pandas.Series: Серия с идентификаторами экспертов, отсортированная по рейтингу по убыванию.
         """
+        if not self._has_valid_experts(df) or 'scoring' not in df.columns:
+            return pd.Series([], dtype='int64')
+        
         experts = df[['expert_id', 'scoring']].sort_values(by='scoring', ascending=False)
         return experts['expert_id']
