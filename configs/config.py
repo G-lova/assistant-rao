@@ -73,8 +73,12 @@ class Config:
     M_MODEL_API_KEY = os.getenv("M_MODEL_API_KEY")
     
     # MySQL
-    MYSQL_URL = os.getenv("MYSQL_URL")
-    MYSQL_API_KEY = os.getenv("MYSQL_API_KEY")
+    MYSQL_URL_PROD = os.getenv("MYSQL_URL_PROD")
+    MYSQL_API_KEY_PROD = os.getenv("MYSQL_API_KEY_PROD")
+    MYSQL_URL_STAGE = os.getenv("MYSQL_URL_STAGE")
+    MYSQL_API_KEY_STAGE = os.getenv("MYSQL_API_KEY_STAGE")
+    MYSQL_URL_DEV = os.getenv("MYSQL_URL_DEV")
+    MYSQL_API_KEY_DEV = os.getenv("MYSQL_API_KEY_DEV")
 
     # Postgres
     DB_HOST = os.getenv("DB_HOST")

@@ -3,7 +3,7 @@ import tempfile
 import logging
 import json
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body, Header
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict
 
@@ -360,7 +360,10 @@ async def api_get_contract_info(request_body: Dict[str, str] = Body(...)):
 
 
 @app.post("/get-experts-for-expertise")
-async def get_experts_for_expertise(request_body: Dict[str, int] = Body(...)):
+async def get_experts_for_expertise(
+    request_body: Dict[str, int] = Body(...),
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
+):
     """
     Подбирает список идентификаторов экспертов для заданной экспертизы с использованием скоринговой модели.
 
@@ -386,7 +389,7 @@ async def get_experts_for_expertise(request_body: Dict[str, int] = Body(...)):
             raise HTTPException(status_code=400, detail="Поле 'expertise_id' обязательно")
         
         # Запускаем скоринг пайплайн
-        results = scoring(expertise_id)
+        results = scoring(expertise_id, x_api_database)
         
         # Преобразуем результат в список целых чисел
         if hasattr(results, 'tolist'):

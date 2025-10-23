@@ -13,7 +13,7 @@ project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
 
 
-def scoring(expertise_id):
+def scoring(expertise_id, x_api_database):
     """
     Запускает пайплайн оценки экспертов для заданной экспертизы.
 
@@ -37,7 +37,7 @@ def scoring(expertise_id):
         logger.info("Starting scoring pipeline...")
         
         # Создание пайплайна
-        pipeline = ScoringPipeline()
+        pipeline = ScoringPipeline(x_api_database)
         
         # Параметры запуска
         sql_file_name = "experts_for_expertise.sql"
