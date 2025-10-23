@@ -124,14 +124,31 @@ class Config:
         }
     
     @classmethod
-    def get_database_config(cls) -> DatabaseConfig:
+    def get_database_config(cls, environment: str = None) -> DatabaseConfig:
         """
         Возвращает конфигурацию базы данных для scoring pipeline.
+        
+        Args:
+            environment: Окружение ('dev', 'stage', 'prod'). 
+                        Если None, используется APP_ENV
         """
-        return DatabaseConfig(
-            url=cls.MYSQL_URL,
-            api_key=cls.MYSQL_API_KEY
-        )
+        env = environment or cls.APP_ENV
+        env = env.lower()
+        
+        if env in ['prod', 'production']:
+            url = cls.MYSQL_URL_PROD
+            api_key = cls.MYSQL_API_KEY_PROD
+        elif env in ['stage', 'staging']:
+            url = cls.MYSQL_URL_STAGE
+            api_key = cls.MYSQL_API_KEY_STAGE
+        elif env in ['dev', 'development']:
+            url = cls.MYSQL_URL_DEV
+            api_key = cls.MYSQL_API_KEY_DEV
+        else:
+            url = cls.MYSQL_URL_DEV
+            api_key = cls.MYSQL_API_KEY_DEV
+        
+        return DatabaseConfig(url=url, api_key=api_key)
     
     @classmethod
     def get_embedding_config(cls) -> EmbeddingConfig:
