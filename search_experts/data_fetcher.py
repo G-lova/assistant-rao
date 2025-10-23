@@ -60,4 +60,10 @@ class DataFetcher:
         if not isinstance(result['data'], list):
             raise ValueError("Ожидался список записей, но получен некорректный формат")
         
-        return pd.DataFrame(result['data'])
+        df = pd.DataFrame(result['data'])
+        
+        
+        if df.empty or df['expert_id'].isna().all() or (df['expert_id'].astype(str) == 'None').all():
+            raise Exception("Доступных экспертов нет")
+        
+        return df
