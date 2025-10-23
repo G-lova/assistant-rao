@@ -18,7 +18,7 @@ class ScoringPipeline:
     к конкретной экспертизе.
     """
 
-    def __init__(self):
+    def __init__(self, environment: str = None):
         """
         Инициализирует компоненты конвейера с использованием глобальной конфигурации.
 
@@ -33,7 +33,7 @@ class ScoringPipeline:
         self.config = Config()
         
         # Инициализация компонентов с конфигурацией
-        db_config = self.config.get_database_config()
+        db_config = self.config.get_database_config(environment)
         embedding_config = self.config.get_embedding_config()
         paths_config = self.config.get_paths_config()
         
