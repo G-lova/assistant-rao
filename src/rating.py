@@ -1,0 +1,73 @@
+from datetime import date
+import json
+import sys
+import os
+
+# Добавляем путь к проекту для корректного импорта
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+sys.path.insert(0, project_root)
+
+from configs.config import Config
+from search_experts.pipeline import RatingPipeline
+from configs.logger import setup_logging, get_logger
+
+
+def rating():
+    """
+    Запускает пайплайн оценки экспертов для заданной экспертизы.
+
+    Функция инициализирует пайплайн ScoringPipeline, выполняет SQL-запрос для получения данных
+    об экспертах, рассчитывает рейтинг на основе критериев и возвращает отсортированный список
+    экспертов по убыванию релевантности. Результаты сохраняются в CSV-файл.
+
+    Args:
+        expertise_id: Идентификатор экспертизы, для которой проводится оценка и подбор экспертов.
+
+    Returns:
+        pd.Series или pd.DataFrame: Отсортированный набор результатов (топ экспертов),
+                                   готовый к использованию или выводу.
+                                   В случае ошибки — исключение не подавляется.
+    """
+    # Настройка логирования
+    setup_logging()
+    logger = get_logger(__name__)
+    
+    try:
+        logger.info("Starting rating pipeline...")
+        
+        # Создание пайплайна
+        pipeline = RatingPipeline()
+        
+        # Параметры запуска
+        sql_file_name = "experts_rating.sql"
+        
+        logger.info("Processing rating pipeline...")
+        
+        # Запуск пайплайна и получение результатов
+        ratings = pipeline.get_experts_rating(sql_file_name)
+        
+        logger.info("Rating pipeline completed successfully")
+        
+        # Вывод результатов
+        print(ratings)
+        
+        # Сохранение результатов
+        output_dir = os.path.join(project_root, "data", "outputs")
+        os.makedirs(output_dir, exist_ok=True)
+
+        output_file = os.path.join(output_dir, f"rating_results_{date.today()}.json")
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(ratings, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"Results saved to: {output_file}")
+        
+        return ratings
+        
+    except Exception as e:
+        logger.error(f"Error in rating pipeline: {e}", exc_info=True)
+        raise
+
+if __name__ == "__main__":
+
+    rating()
