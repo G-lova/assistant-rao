@@ -437,7 +437,7 @@ expert_requests AS (
 	        de.expert_id
 	    FROM expertises d
 	    JOIN JSON_TABLE(
-	        d.requestExperts,
+	        d.experts,
 	        "$[*]" COLUMNS (
 	            expert_id INT PATH "$"
 	        )
