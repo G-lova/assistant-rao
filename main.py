@@ -19,6 +19,7 @@ from src.evaluator import (analyze_document_chunks,
                            check_completeness_with_ai,
                            create_unprocessed_document_analysis)
 from src.scoring import scoring
+from src.rating import rating
 from configs.parsing import parse_cloud_storage_link
 from configs.retry_utils import async_retry, API_RETRY_CONFIG, CLOUD_PARSING_RETRY_CONFIG
 
@@ -407,6 +408,36 @@ async def get_experts_for_expertise(
     except Exception as e:
         logger.error(f"Ошибка при подборе экспертов: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Ошибка при подборе экспертов: {str(e)}")
+
+
+@app.post("/get-experts-rating")
+async def get_experts_rating(
+    request_body: Dict[str, str] = Body(...),
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
+):
+    """
+    Возвращает рейтинги экспертов на основе SQL-запроса `experts_rating.sql`.
+
+    Выполняет SQL-запрос через внешний API (в зависимости от окружения, указанного в X-API-Database)
+    и возвращает словарь { expert_id: rating }.
+
+    Args:
+        request_body (Dict[str, str]): JSON с параметрами (если нужны; здесь не используются).
+        x_api_database (str): Заголовок с указанием среды ('dev', 'prod' и т.д.).
+
+    Returns:
+        dict: Словарь, где ключ — идентификатор эксперта, значение — рейтинг.
+    """
+    try:
+        results = rating()
+
+        logger.info(f"Успешно получено {len(results)} рейтингов экспертов (DB: {x_api_database})")
+
+        return results
+
+    except Exception as e:
+        logger.error(f"Ошибка при получении рейтингов экспертов: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при получении рейтингов экспертов: {str(e)}")
 
 
 @app.get("/health")

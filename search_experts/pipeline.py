@@ -242,7 +242,7 @@ class ScoringPipeline:
         return df
     
 
-    def run_pipeline(self, sql_file_path, expertise_id, defaultWorkload=5):
+    def run_pipeline(self, sql_file_path, expertise_id):
         """
         Запускает полный конвейер оценки экспертов для заданной экспертизы.
 
@@ -252,7 +252,6 @@ class ScoringPipeline:
         Args:
             sql_file_path (str): Имя файла с SQL-запросом для получения данных об экспертах.
             expertise_id (str или int): Уникальный идентификатор экспертизы.
-            defaultWorkload (int): Рабочая нагрузка на эксперта, выставляемая при подборе экспертов на экспертизу (по умолчанию 5).
 
         Returns:
             pandas.DataFrame: Датафрейм с отфильтрованными и ранжированными экспертами,
@@ -263,7 +262,7 @@ class ScoringPipeline:
             sql_query = self.load_sql_query(sql_file_path)
             
             # Получение данных
-            df = self.data_fetcher.fetch_expertise_data(sql_query, expertise_id)
+            df = self.data_fetcher.fetch_expertise_data(sql_query, bindings=[expertise_id])
             
             # Предобработка
             df = self.preprocess_data(df)
@@ -287,7 +286,6 @@ class ScoringPipeline:
                 return pd.DataFrame(columns=['expert_id', 'scoring'])
             else:
                 raise
-    
 
     def get_top_results(self, df):
         """
@@ -306,3 +304,104 @@ class ScoringPipeline:
         
         experts = df[['expert_id', 'scoring']].sort_values(by='scoring', ascending=False)
         return experts['expert_id']
+
+
+class RatingPipeline:
+    """
+    Конвейер для оценки и ранжирования экспертов на основе комплексного расчёта рейтинга по 5 критериям.
+
+    Выполняет полный цикл обработки: загрузку данных из внешнего источника (через HTTP-запрос с SQL),
+    расчёт метрик соответствия и формирование итогового рейтинга экспертов. 
+    Предназначен для поддержки объективного отбора квалифицированных экспертов на конкретную экспертизу.
+    """
+
+    def __init__(self, environment: str = None):
+        """
+        Инициализирует компоненты конвейера с использованием глобальной конфигурации.
+
+        Загружает настройки из конфигурационного файла и создаёт экземпляры зависимостей:
+        - DataFetcher — для выполнения запросов к внешнему API с SQL-запросами,
+        - а также определяет путь к директории с SQL-файлами.
+
+        Args:
+            environment (str, optional): Наименование окружения (например, 'prod', 'dev'),
+                используемое для выбора соответствующих параметров подключения к БД.
+                Если не указано, используется значение по умолчанию из конфигурации.
+        """
+        # Загрузка конфигурации
+        self.config = Config()
+        
+        # Инициализация компонентов с конфигурацией
+        db_config = self.config.get_database_config(environment)
+        paths_config = self.config.get_paths_config()
+        
+        self.data_fetcher = DataFetcher(db_config.url, db_config.headers)        
+        self.sql_queries_path = paths_config.sql_queries
+    
+
+    def load_sql_query(self, file_name: str):
+        """
+        Загружает и нормализует SQL-запрос из файла.
+
+        Читает содержимое SQL-файла из предопределённой директории и удаляет лишние пробелы и переносы,
+        возвращая запрос в виде одной строки для корректной передачи в HTTP-запрос.
+
+        Args:
+            file_name (str): Имя файла с SQL-запросом (например, "get_experts.sql").
+
+        Returns:
+            str: SQL-запрос в виде одной строки без лишних пробельных символов.
+        """
+        file_path = f"{self.sql_queries_path}{file_name}"
+        with open(file_path, encoding="utf-8") as f:
+            sql_query = f.read()
+        return " ".join(sql_query.split())
+
+    @staticmethod
+    def to_rating_dict(data: list):
+        """
+        Преобразует список словарей с данными экспертов в словарь {expert_id: criterion_rating}.
+
+        Извлекает идентификатор эксперта и его рассчитанный рейтинг по критерию,
+        округляя значение рейтинга до двух знаков после запятой.
+
+        Args:
+            data (list of dict): Список записей, полученных от внешнего API.
+                Каждая запись должна содержать ключи:
+                    - 'expert_id': уникальный идентификатор эксперта,
+                    - 'criterion_rating': числовое значение рейтинга.
+
+        Returns:
+            dict: Словарь вида {expert_id: rating}, где rating — float, округлённый до 2 знаков.
+        """    
+        if hasattr(data, 'to_dict'):
+            return data.set_index('expert_id')['criterion_rating'].round(2).to_dict()
+        else:
+            return {}
+
+
+    def get_experts_rating(self, sql_file_path: str):
+        """
+        Запускает полный конвейер получения рейтингов экспертов и сохраняет результат в файл.
+
+        Выполняет следующие шаги:
+            1. Загружает SQL-запрос из файла.
+            2. Отправляет запрос через DataFetcher для получения данных об экспертах.
+            3. Преобразует полученные данные в словарь рейтингов.
+
+        Args:
+            sql_file_path (str): Имя SQL-файла (без пути), расположенного в директории запросов.
+
+        Returns:
+            dict: Словарь с рейтингами экспертов в формате {expert_id: rating}.
+        """
+        # Загрузка SQL запроса
+        sql_query = self.load_sql_query(sql_file_path)
+        
+        # Получение данных с рассчитанными рейтингами
+        df = self.data_fetcher.fetch_expertise_data(sql_query, bindings=[])
+        
+        # Преобразование данных в словарь
+        ratings = self.to_rating_dict(df)
+        
+        return ratings
