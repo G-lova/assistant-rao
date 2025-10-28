@@ -17,8 +17,6 @@ from typing import Dict, List, Optional, Tuple
 from playwright.async_api import async_playwright, Browser
 from urllib.parse import urljoin, urlparse, parse_qs
 from bs4 import BeautifulSoup
-from webdav3.client import Client
-from webdav3.exceptions import WebDavException
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
 from socket import AF_INET
 
