@@ -17,7 +17,10 @@ from typing import Dict, List, Optional, Tuple
 from playwright.async_api import async_playwright, Browser
 from urllib.parse import urljoin, urlparse, parse_qs
 from bs4 import BeautifulSoup
-
+from webdav3.client import Client
+from webdav3.exceptions import WebDavException
+from aiohttp import ClientSession, ClientTimeout, TCPConnector
+from socket import AF_INET
 
 logger = logging.getLogger(__name__)
 
@@ -1013,125 +1016,95 @@ class CloudStorageParser:
 
     async def _parse_mail_cloud(self, url: str, procurement_id: str = None) -> Dict:
         """
-        Обрабатывает публичную ссылку на файл в Облаке Mail.ru с использованием Playwright.
-
-        Использует headless-браузер для загрузки страницы и извлечения клиентского состояния
-        (__PRELOADED_STATE__), из которого определяется pageId. На основе pageId выполняется
-        запрос к официальному API Mail.ru для получения прямой ссылки на скачивание файла.
-        Поддерживает обработку ошибок недоступности файла (удалён, приватный, требует авторизацию).
-
-        Args:
-            url (str): Публичная ссылка на файл в формате https://cloud.mail.ru/public/...
-            procurement_id (str, optional): Идентификатор закупки для логирования и привязки результата.
-                По умолчанию None.
-
-        Returns:
-            Dict: Словарь с результатом операции. При успехе — содержит данные скачанного файла;
-                при ошибке — статус "error" и понятное сообщение об ошибке.
+        Обрабатывает публичную ссылку Mail.ru Cloud БЕЗ Playwright.
+        Извлекает __PRELOADED_STATE__ из HTML даже если отображается сообщение о JavaScript.
         """
         try:
             clean_url = url.strip().rstrip('/')
             if '/public/' not in clean_url:
-                raise Exception("Некорректный формат ссылки Mail.ru")
-
+                raise Exception("Некорректный формат ссылки Mail.ru — должен содержать /public/")
+    
             weblink = clean_url.split('/public/', 1)[1]
             if not weblink:
                 raise Exception("Не удалось извлечь weblink")
-
-            # Формируем URL с weblink-параметром — как делает браузер
+    
             target_url = f"https://cloud.mail.ru/public/{weblink}?weblink={weblink}"
-
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    args=[
-                        "--no-sandbox",
-                        "--disable-setuid-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-gpu",
-                        "--disable-extensions",
-                        "--mute-audio",
-                        "--disable-web-security",
-                    ]
-                )
-                page = await browser.new_page()
-                await page.set_extra_http_headers({
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                })
-
-                try:
-                    # Переходим на страницу
-                    await page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
-
-                    # Ждём до 15 секунд, пока появится __PRELOADED_STATE__ ИЛИ ошибка
-                    await page.wait_for_function(
-                        """
-                        () => {
-                            if (window.__PRELOADED_STATE__) return true;
-                            const errorText = document.body.innerText;
-                            if (errorText.includes('Произошла ошибка') || errorText.includes('отключен JavaScript')) {
-                                // Если ошибка — останавливаем ожидание
-                                window.__MAILRU_ERROR__ = true;
-                                return true;
-                            }
-                            return false;
-                        }
-                        """,
-                        timeout=15000
+    
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+    
+            connector = TCPConnector(family=AF_INET, limit_per_host=10)
+            timeout = ClientTimeout(total=15)
+    
+            async with aiohttp.ClientSession(
+                connector=connector,
+                timeout=timeout,
+                headers=headers,
+                max_field_size=16384,
+                max_line_size=16384
+            ) as session:
+                async with session.get(target_url) as resp:
+                    if resp.status != 200:
+                        raise Exception(f"Страница недоступна: HTTP {resp.status}")
+                    html_content = await resp.text()
+    
+            # === ВАЖНО: НЕ БРОСАЕМ ОШИБКУ ПО ТЕКСТУ "JavaScript" ===
+            # Проверяем НАЛИЧИЕ __PRELOADED_STATE__ ДАЖЕ ЕСЛИ ТЕКСТ ОШИБКИ ЕСТЬ
+            soup = BeautifulSoup(html_content, 'html.parser')
+            script_tag = soup.find('script', string=re.compile(r'window\.__PRELOADED_STATE__'))
+            if not script_tag:
+                # Только если НЕТ __PRELOADED_STATE__ — тогда действительно ошибка
+                if "Произошла ошибка" in html_content or "отключен JavaScript" in html_content:
+                    raise Exception(
+                        "Файл недоступен: удалён, приватный или заблокирован. "
+                        "Ссылка может работать в браузере, но не для автоматического парсинга."
                     )
-
-                    # Получаем состояние
-                    preloaded_state = await page.evaluate("() => window.__PRELOADED_STATE__")
-                    has_error = await page.evaluate("() => window.__MAILRU_ERROR__")
-
-                    content = await page.content()
-                    await browser.close()
-
-                    if has_error or not preloaded_state:
-                        # Анализируем тело на наличие ошибки
-                        if "Произошла ошибка" in content or "отключен JavaScript" in content:
-                            raise Exception(
-                                "Mail.ru Cloud вернул ошибку: файл недоступен, удалён или требует авторизации. "
-                                "Ссылка может быть рабочей в браузере, но недоступна для автоматического парсинга."
-                            )
-                        else:
-                            raise Exception("Данные не загрузились: __PRELOADED_STATE__ отсутствует")
-
-                    # Извлекаем pageId
-                    page_id = preloaded_state.get("pageInfo", {}).get("pageId")
-                    if not page_id:
-                        raise Exception("pageId не найден в __PRELOADED_STATE__")
-
-                except Exception as e:
-                    await browser.close()
-                    raise e
-
-            # === Далее — стандартный API-запрос через aiohttp ===
+                else:
+                    raise Exception("__PRELOADED_STATE__ не найден в HTML")
+    
+            script_text = script_tag.string
+            json_match = re.search(r'window\.__PRELOADED_STATE__\s*=\s*({.*?})\s*;', script_text, re.DOTALL)
+            if not json_match:
+                raise Exception("Не удалось извлечь JSON из __PRELOADED_STATE__")
+    
+            try:
+                preloaded_state = json.loads(json_match.group(1))
+            except json.JSONDecodeError as e:
+                raise Exception(f"Ошибка парсинга JSON: {e}")
+    
+            page_id = preloaded_state.get("pageInfo", {}).get("pageId")
+            if not page_id:
+                raise Exception("pageId не найден в __PRELOADED_STATE__")
+    
+            # Запрос к dispatcher
             dispatcher_url = f"https://cloud.mail.ru/api/v2/dispatcher?x-page-id={page_id}"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(dispatcher_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with aiohttp.ClientSession(timeout=ClientTimeout(total=10)) as session:
+                async with session.get(dispatcher_url) as resp:
                     if resp.status != 200:
                         raise Exception(f"API dispatcher вернул статус {resp.status}")
                     dispatcher_data = await resp.json()
-
+    
             weblink_get_list = dispatcher_data.get("body", {}).get("weblink_get", [])
             if not weblink_get_list:
                 raise Exception("weblink_get отсутствует в ответе API")
+    
             base_url = weblink_get_list[0].get("url")
             if not base_url:
                 raise Exception("base_url не найден в weblink_get")
-
+    
             direct_download_url = f"{base_url}/{weblink}"
             filename = weblink.split('/')[-1] or "mail_cloud_file"
-
+    
             return await self._download_file_only(
                 direct_download_url,
                 "mail_cloud",
                 filename,
                 procurement_id
             )
-
+    
         except Exception as e:
-            logger.error(f"Ошибка парсинга Mail.ru Cloud: {str(e)}")
+            logger.error(f"Ошибка парсинга Mail.ru Cloud (без Playwright): {str(e)}")
             return {
                 "status": "error",
                 "error": f"Ошибка парсинга Mail.ru Cloud: {str(e)}"

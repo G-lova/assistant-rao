@@ -47,8 +47,10 @@ document_analysis_cache = {}
 @app.post("/evaluate-documents")
 async def evaluate_documents_batch(
     procurement_id: str = Form(...),
+    expertise_customer: Optional[str] = Form(None),
     files: List[UploadFile] = File(None),
     links: List[str] = Form(None),
+    eis_links: Optional[str] = Form(None),
     legislation: Optional[str] = Form("44-ФЗ"),
     procurement_method: Optional[str] = Form("Конкурс"),
     expertise_details: Optional[str] = Form("Полный комплект документов о закупке")
@@ -63,7 +65,9 @@ async def evaluate_documents_batch(
     documents_results = []
     document_analysis_results = {}
 
-    if not files and not links:
+    all_links = (links or []) + [eis_links]
+
+    if not files and not all_links:
         raise HTTPException(
             status_code=400, 
             detail="Необходимо предоставить либо файлы, либо ссылки на документы"
@@ -158,9 +162,11 @@ async def evaluate_documents_batch(
                 })
 
     # === ОБРАБОТКА ССЫЛОК (последовательно) ===
-    if links:
-        logger.info(f"Обработка {len(links)} ссылок для закупки {procurement_id}")
-        for link in links:
+    if all_links:
+        logger.info(f"Обработка {len(all_links)} ссылок для закупки {procurement_id}")
+        clean_links = [link.strip() for link in links if link and link.strip()]
+        
+        for link in clean_links:
             try:
                 logger.info(f"Обработка ссылки: {link}")
                 parse_result = await async_retry(CLOUD_PARSING_RETRY_CONFIG)(
@@ -293,7 +299,7 @@ async def evaluate_documents_batch(
     try:
         final_evaluation_result = await async_retry(API_RETRY_CONFIG)(
             check_completeness_with_ai
-        )(procurement_id)
+        )(procurement_id, expertise_customer=expertise_customer, eis_links=eis_links)
     except Exception as e:
         logger.error(f"Критическая ошибка вызова модели: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Не удалось выполнить итоговую проверку")
@@ -412,7 +418,6 @@ async def get_experts_for_expertise(
 
 @app.post("/get-experts-rating")
 async def get_experts_rating(
-    request_body: Dict[str, str] = Body(...),
     x_api_database: str = Header(default="dev", alias="X-API-Database")
 ):
     """

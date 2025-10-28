@@ -22,20 +22,20 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# Это к Qwen/Qwen2.5-VL-7B-Instruct-AWQ
-#client = OpenAI(
-#    base_url=Config.M_MODEL_API_URL,
-#    api_key=Config.M_MODEL_API_KEY
-#)
-#model_name = Config.M_MODEL_NAME
+# Это к Qwen/Qwen2.5-VL
+client = OpenAI(
+    base_url=Config.M_MODEL_API_URL,
+    api_key=Config.M_MODEL_API_KEY
+)
+model_name = Config.M_MODEL_NAME
 
 
 # Это к Qwen/Qwen2.5-14B-Instruct-AWQ
-client = OpenAI(
-    base_url=Config.MODEL_API_URL,
-    api_key=Config.MODEL_API_KEY
-)
-model_name = Config.MODEL_NAME
+#client = OpenAI(
+#    base_url=Config.MODEL_API_URL,
+#    api_key=Config.MODEL_API_KEY
+#)
+#model_name = Config.MODEL_NAME
 
 
 ALLOWED_DOC_TYPES = list(DOCUMENT_TYPE_MAPPING.keys())
@@ -1091,7 +1091,7 @@ def create_unprocessed_document_analysis(filename: str, error: str) -> Dict[str,
     }
 
 
-async def check_completeness_with_ai(procurement_id: str) -> Dict[str, Any]:
+async def check_completeness_with_ai(procurement_id: str, expertise_customer: str = None, eis_links: str = None) -> Dict[str, Any]:
     """
     Выполняет объединённую проверку читаемости, типа/комплекта и полноты документов
     с помощью ИИ, используя СЫРЫЕ ДАННЫЕ ИЗ БД.
@@ -1144,7 +1144,9 @@ async def check_completeness_with_ai(procurement_id: str) -> Dict[str, Any]:
         # === 4. Формируем USER-промпт ===
         user_prompt = USER_FINAL_EVALUATION_PROMPT.format(
             documents_data=documents_data_str,
-            requirements_description=requirements_description_str
+            requirements_description=requirements_description_str,
+            expertise_customer=expertise_customer or "не указан",
+            eis_links=eis_links or "не указан",
         )
 
         # === 5. Вызываем модель ===

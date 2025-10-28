@@ -3,14 +3,14 @@ import json
 import sys
 import os
 
-# Добавляем путь к проекту для корректного импорта
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(current_dir)
-sys.path.insert(0, project_root)
-
 from configs.config import Config
 from search_experts.pipeline import RatingPipeline
 from configs.logger import setup_logging, get_logger
+
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+sys.path.insert(0, project_root)
 
 
 def rating():
