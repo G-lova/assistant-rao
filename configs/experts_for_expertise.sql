@@ -719,7 +719,7 @@ experts_with_coords AS (
 	FROM expertise_with_coords ewc
 	LEFT JOIN experts_with_coords u
 	ON (JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_direction)) OR JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_monitoring))) 
-	AND (ewc.expertise_regionExpertise IN ('Общая') OR JSON_CONTAINS(u.expert_regionExpertises, JSON_QUOTE(ewc.expertise_regionExpertise))) 
+	AND (JSON_CONTAINS(u.expert_regionExpertises, JSON_QUOTE(ewc.expertise_regionExpertise))) 
 	AND ((ewc.expertise_examination = 1 AND ewc.expertise_examination = u.expert_examination) 
 		OR ewc.expertise_examination IS NULL 
 		OR ewc.expertise_examination != 1) 
