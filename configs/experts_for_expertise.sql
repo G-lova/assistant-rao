@@ -9,6 +9,11 @@ WITH expertise_info AS (
 		    THEN LOWER(SUBSTRING_INDEX(TRIM(u.name), ' ', 1))
 		    ELSE ''
 		END AS expertise_surname,
+		CASE 
+		    WHEN u.director IS NOT NULL AND TRIM(u.director) != '' 
+		    THEN LOWER(SUBSTRING_INDEX(TRIM(u.director), ' ', 1))
+		    ELSE ''
+		END AS expertise_director,
 		u.organization AS expertise_organization,
 		e.priceContract, 
 		e.exucutorContract, 
@@ -16,12 +21,12 @@ WITH expertise_info AS (
 			WHEN 2 THEN 0
 			ELSE e.examination
 		END AS expertise_examination,
-		CASE e.`object`
-			WHEN 1 THEN 'Результаты исполнения заключенных контрактов/договоров Минобрнауки России и подведомственных Минобрнауки России организаций на выполнение работ/оказание услуг/поставку товара'
-			WHEN 2 THEN 'Результаты исполнения заключенных Минобрнауки России и подведомственных Минобрнауки России организаций соглашений на предоставление субсидий в виде грантов (основная экспертиза и дополнительные проверки при необходимости)'
-			WHEN 3 THEN 'Проекты государственных заданий Минобрнауки России для подведомственных организаций (предварительная экспертиза)'
-			WHEN 4 THEN 'Результаты исполнения государственных заданий Минобрнауки России для подведомственных организаций'
-			WHEN 5 THEN 'Сведения и документы о закупочной деятельности подведомственных Минобрнауки России организаций'
+		CASE 
+			WHEN e.`object` IN (1,7) THEN 'Результаты исполнения заключенных контрактов/договоров Минобрнауки России и подведомственных Минобрнауки России организаций на выполнение работ/оказание услуг/поставку товара'
+			WHEN e.`object` IN (2) THEN 'Результаты исполнения заключенных Минобрнауки России и подведомственных Минобрнауки России организаций соглашений на предоставление субсидий в виде грантов (основная экспертиза и дополнительные проверки при необходимости)'
+			WHEN e.`object` IN (3) THEN 'Проекты государственных заданий Минобрнауки России для подведомственных организаций (предварительная экспертиза)'
+			WHEN e.`object` IN (4) THEN 'Результаты исполнения государственных заданий Минобрнауки России для подведомственных организаций'
+			WHEN e.`object` IN (5,6) THEN 'Сведения и документы о закупочной деятельности подведомственных Минобрнауки России организаций'
 		END AS expertise_direction,
 		CASE e.checkType 
 			WHEN 2 THEN 'Сведения и документы о закупочной деятельности организации (мониторинг закупок)'
@@ -342,7 +347,7 @@ WITH expertise_info AS (
 			ELSE JSON_LENGTH(u.linkMonographs)
 		END AS countMonographs,
 		u.experienceExpertise,
-		COALESCE(u.workExpertise, 10) AS desiredWeekWorkload,
+		COALESCE(u.workExpertise, (SELECT value FROM settings WHERE `key` IN ('max_applications_per_expert'))) AS desiredWeekWorkload,
 		COUNT(CASE WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE status IN (4,5)) THEN 1 END) AS countExpertise,
 		COUNT(CASE 
 				WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 

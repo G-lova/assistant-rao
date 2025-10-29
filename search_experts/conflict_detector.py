@@ -70,13 +70,16 @@ class ConflictDetector:
 
         """
         expertise_surname = group['expertise_surname'].iloc[0]
+        expertise_director = group['expertise_director'].iloc[0]
         surnames = group[["expert_id", "expert_surname"]].dropna()
         to_exclude = set()
-
+    
         for i, s in zip(surnames["expert_id"], surnames["expert_surname"]):
             if (
-                s == expertise_surname
-                or (abs(len(s) - len(expertise_surname)) == 1 and (expertise_surname in s or s in expertise_surname))
+                (s == expertise_surname
+                or (abs(len(s) - len(expertise_surname)) == 1 and (expertise_surname in s or s in expertise_surname)))
+                or (s == expertise_director
+                    or (abs(len(s) - len(expertise_director)) == 1 and (expertise_director in s or s in expertise_director)))
             ):
                 to_exclude.add(i)
 
