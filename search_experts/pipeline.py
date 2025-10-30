@@ -302,8 +302,12 @@ class ScoringPipeline:
         if not self._has_valid_experts(df) or 'scoring' not in df.columns:
             return pd.Series([], dtype='int64')
         
-        experts = df[['expert_id', 'scoring']].sort_values(by='scoring', ascending=False)
-        return experts['expert_id']
+        df = df.sort_values(by=["scoring"], ascending=False)
+        df = pd.concat([df[df['regionExpertise_sort'] == 1], df[df['regionExpertise_sort'] != 1]])
+        df = pd.concat([df[df['possibleWeekWorkload'] >= 1], 
+                        df[df['possibleWeekWorkload'] < 1].sort_values(by=['currentWeekWorkloadRequests'], ascending=True)])
+
+        return df['expert_id']
 
 
 class RatingPipeline:
