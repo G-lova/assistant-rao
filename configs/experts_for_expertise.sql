@@ -40,7 +40,7 @@ WITH expertise_info AS (
 		END AS experienceExpertise_direction,
 		e.`type`,
 		CASE 
-			WHEN e.regionExpertise IS NULL THEN 'Общая'
+			WHEN e.regionExpertise IS NULL THEN 'Экспертиза отчетов'
 			ELSE e.regionExpertise
 		END AS expertise_regionExpertise, 
 		REGEXP_REPLACE(
@@ -285,7 +285,7 @@ WITH expertise_info AS (
 			+ CASE WHEN u.kpp IS NOT NULL THEN 1 ELSE 0 END) / 15 AS personal_block, 
 		u.directions,
 		CASE 
-			WHEN u.regionExpertises IS NULL THEN CAST('["Общая"]' AS JSON)
+			WHEN u.regionExpertises IS NULL THEN CAST('["Экспертиза отчетов"]' AS JSON)
 			ELSE u.regionExpertises
 		END AS expert_regionExpertises,
 		REGEXP_REPLACE(
@@ -724,7 +724,7 @@ experts_with_coords AS (
 	FROM expertise_with_coords ewc
 	LEFT JOIN experts_with_coords u
 	ON (JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_direction)) OR JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_monitoring))) 
-	AND (ewc.expertise_regionExpertise IN ('Общая') OR JSON_CONTAINS(u.expert_regionExpertises, JSON_QUOTE(ewc.expertise_regionExpertise))) 
+	AND (ewc.expertise_regionExpertise IN ('Экспертиза отчетов') OR JSON_CONTAINS(u.expert_regionExpertises, JSON_QUOTE(ewc.expertise_regionExpertise))) 
 	AND ((ewc.expertise_examination = 1 AND ewc.expertise_examination = u.expert_examination) 
 		OR ewc.expertise_examination IS NULL 
 		OR ewc.expertise_examination != 1) 
