@@ -9,6 +9,11 @@ WITH expertise_info AS (
 		    THEN LOWER(SUBSTRING_INDEX(TRIM(u.name), ' ', 1))
 		    ELSE ''
 		END AS expertise_surname,
+		CASE 
+		    WHEN u.director IS NOT NULL AND TRIM(u.director) != '' 
+		    THEN LOWER(SUBSTRING_INDEX(TRIM(u.director), ' ', 1))
+		    ELSE ''
+		END AS expertise_director,
 		u.organization AS expertise_organization,
 		e.priceContract, 
 		e.exucutorContract, 
@@ -16,26 +21,26 @@ WITH expertise_info AS (
 			WHEN 2 THEN 0
 			ELSE e.examination
 		END AS expertise_examination,
-		CASE e.`object`
-			WHEN 1 THEN 'Результаты исполнения заключенных контрактов/договоров Минобрнауки России и подведомственных Минобрнауки России организаций на выполнение работ/оказание услуг/поставку товара'
-			WHEN 2 THEN 'Результаты исполнения заключенных Минобрнауки России и подведомственных Минобрнауки России организаций соглашений на предоставление субсидий в виде грантов (основная экспертиза и дополнительные проверки при необходимости)'
-			WHEN 3 THEN 'Проекты государственных заданий Минобрнауки России для подведомственных организаций (предварительная экспертиза)'
-			WHEN 4 THEN 'Результаты исполнения государственных заданий Минобрнауки России для подведомственных организаций'
-			WHEN 5 THEN 'Сведения и документы о закупочной деятельности подведомственных Минобрнауки России организаций'
+		CASE 
+			WHEN e.`object` IN (1,7) THEN 'Результаты исполнения заключенных контрактов/договоров Минобрнауки России и подведомственных Минобрнауки России организаций на выполнение работ/оказание услуг/поставку товара'
+			WHEN e.`object` IN (2) THEN 'Результаты исполнения заключенных Минобрнауки России и подведомственных Минобрнауки России организаций соглашений на предоставление субсидий в виде грантов (основная экспертиза и дополнительные проверки при необходимости)'
+			WHEN e.`object` IN (3) THEN 'Проекты государственных заданий Минобрнауки России для подведомственных организаций (предварительная экспертиза)'
+			WHEN e.`object` IN (4) THEN 'Результаты исполнения государственных заданий Минобрнауки России для подведомственных организаций'
+			WHEN e.`object` IN (5,6) THEN 'Сведения и документы о закупочной деятельности подведомственных Минобрнауки России организаций'
 		END AS expertise_direction,
 		CASE e.checkType 
 			WHEN 2 THEN 'Сведения и документы о закупочной деятельности организации (мониторинг закупок)'
 		END AS expertise_monitoring,	
-		CASE e.`object`
-			WHEN 1 THEN 'Результаты исполнения заключенных государственных контрактов/договоров'
-			WHEN 2 THEN 'Результаты исполнения соглашений на предоставление субсидий в виде грантов (основная экспертиза и дополнительные проверки при необходимости)'
-			WHEN 3 THEN 'Проекты государственных заданий (предварительная экспертиза)'
-			WHEN 4 THEN 'Результаты исполнения государственных заданий'
-			WHEN 5 THEN 'Закупочная деятельность'
+		CASE 
+			WHEN e.`object` IN (1,7) THEN 'Результаты исполнения заключенных государственных контрактов/договоров'
+			WHEN e.`object` IN (2) THEN 'Результаты исполнения соглашений на предоставление субсидий в виде грантов (основная экспертиза и дополнительные проверки при необходимости)'
+			WHEN e.`object` IN (3) THEN 'Проекты государственных заданий (предварительная экспертиза)'
+			WHEN e.`object` IN (4) THEN 'Результаты исполнения государственных заданий'
+			WHEN e.`object` IN (5,6) THEN 'Закупочная деятельность'
 		END AS experienceExpertise_direction,
 		e.`type`,
 		CASE 
-			WHEN e.regionExpertise IS NULL THEN 'Общая'
+			WHEN e.regionExpertise IS NULL THEN 'Экспертиза отчетов'
 			ELSE e.regionExpertise
 		END AS expertise_regionExpertise, 
 		REGEXP_REPLACE(
@@ -280,7 +285,7 @@ WITH expertise_info AS (
 			+ CASE WHEN u.kpp IS NOT NULL THEN 1 ELSE 0 END) / 15 AS personal_block, 
 		u.directions,
 		CASE 
-			WHEN u.regionExpertises IS NULL THEN CAST('["Общая"]' AS JSON)
+			WHEN u.regionExpertises IS NULL THEN CAST('["Экспертиза отчетов"]' AS JSON)
 			ELSE u.regionExpertises
 		END AS expert_regionExpertises,
 		REGEXP_REPLACE(
@@ -342,7 +347,7 @@ WITH expertise_info AS (
 			ELSE JSON_LENGTH(u.linkMonographs)
 		END AS countMonographs,
 		u.experienceExpertise,
-		COALESCE(u.workExpertise, 10) AS desiredWeekWorkload,
+		COALESCE(u.workExpertise, (SELECT value FROM settings WHERE `key` IN ('max_applications_per_expert'))) AS desiredWeekWorkload,
 		COUNT(CASE WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE status IN (4,5)) THEN 1 END) AS countExpertise,
 		COUNT(CASE 
 				WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
@@ -719,7 +724,7 @@ experts_with_coords AS (
 	FROM expertise_with_coords ewc
 	LEFT JOIN experts_with_coords u
 	ON (JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_direction)) OR JSON_CONTAINS(u.directions, JSON_QUOTE(ewc.expertise_monitoring))) 
-	AND (JSON_CONTAINS(u.expert_regionExpertises, JSON_QUOTE(ewc.expertise_regionExpertise))) 
+	AND (ewc.expertise_regionExpertise IN ('Экспертиза отчетов') OR JSON_CONTAINS(u.expert_regionExpertises, JSON_QUOTE(ewc.expertise_regionExpertise))) 
 	AND ((ewc.expertise_examination = 1 AND ewc.expertise_examination = u.expert_examination) 
 		OR ewc.expertise_examination IS NULL 
 		OR ewc.expertise_examination != 1) 
@@ -736,5 +741,4 @@ SELECT
 	+ degreeExperience_rate	+ academicTitleExperience_rate + pubMon_rate 
 	+ countPubMon_rate + experienceExpertise_rate + countExpertise_rate 
 	) / 10 AS FLOAT) AS avg_rating
-FROM ee_joined
-WHERE possibleWeekWorkload >= 1;
+FROM ee_joined;
