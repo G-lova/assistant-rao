@@ -17,6 +17,7 @@ celery_app = Celery(
     broker=os.getenv('REDIS_URL', 'redis://localhost:6379/0'),
     backend=os.getenv('REDIS_URL', 'redis://localhost:6379/0'),
     include=[
+        'tasks',
         'main',  # Импортируем задачи из main.py
     ]
 )
@@ -48,8 +49,8 @@ celery_app.conf.update(
                 'interval_max': 30,
             }
         },
-        'main.evaluate_documents_task': {
-            'queue': 'evaluation', 
+        'evaluate_documents_task': {
+            'queue': 'evaluation',
             'retry_policy': {
                 'max_retries': 2,
                 'interval_start': 5,

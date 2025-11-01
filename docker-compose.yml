@@ -166,14 +166,14 @@ services:
       - rao_network
     restart: unless-stopped
 
-  mailru-downloader:
-    build: /mailru-downloader
-    ports:
-      - "8002:8002"
-    volumes:
-      - /tmp:/tmp
-    networks:
-      - rao_network
+#  mailru-downloader:
+#    build: ./mailru-downloader
+#    ports:
+#      - "8002:8002"
+#    volumes:
+#      - /tmp:/tmp
+#    networks:
+#      - rao_network
 
 networks:
   # qwen-vl-api_procurement_network:
