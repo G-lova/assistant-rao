@@ -34,15 +34,25 @@ WITH experts AS (
 			END
 			ELSE 0 
 		END > 3) AS overdues,
-		AVG(CASE WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) THEN COALESCE(ee.`range`, 0) ELSE 0 END) AS criterion4,
+		COALESCE(AVG(CASE WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
+			THEN CASE
+				WHEN ee.status = 1
+				THEN COALESCE(ee.`range`, 0) 
+				ELSE COALESCE(ee.`range`, NULL)
+			END
+			ELSE NULL 
+		END), 0) AS criterion4,
 		COALESCE(AVG(CASE 
 			WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
-			THEN CASE
-				WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE `type` IN (3)) THEN 0.5
-				WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE `type` IN (1)) THEN 0.75
-				WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE `type` IN (2,4,5)) THEN 1
-				ELSE 0
-			END			
+			THEN CASE 
+				WHEN e.object IN (1,7) 
+				THEN CASE
+					WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE `type` IN (3)) THEN 0.5
+					WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE `type` IN (1)) THEN 0.75
+					WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE `type` IN (2,4,5)) THEN 1
+				END	
+				ELSE 1
+			END
 			ELSE NULL
 		END), 0) AS criterion5
 	FROM users u 
