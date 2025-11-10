@@ -1091,47 +1091,82 @@ def create_unprocessed_document_analysis(filename: str, error: str) -> Dict[str,
     }
 
 
-async def check_completeness_with_ai(procurement_id: str, expertise_customer: str = None, eis_links: str = None) -> Dict[str, Any]:
+async def check_completeness_with_ai(
+    procurement_id: str,
+    expertise_customer: str = None,
+    eis_links: str = None
+) -> Dict[str, Any]:
     """
-    Выполняет объединённую проверку читаемости, типа/комплекта и полноты документов
-    с помощью ИИ, используя СЫРЫЕ ДАННЫЕ ИЗ БД.
+    Выполняет финальную ИИ-оценку комплектности и качества документов закупки в новом формате.
+
+    Извлекает из БД все проанализированные документы по идентификатору закупки,
+    формирует структурированный промпт с метаданными (document_code, document_label, comment)
+    и требованиями из списка прилагаемых документов (attached_documents_list), затем
+    отправляет запрос в языковую модель с использованием строгой JSON-схемы.
+    Возвращает детализированный отчёт по каждому документу и общую оценку.
+
+    Args:
+        procurement_id (str): Уникальный идентификатор закупки.
+        expertise_customer (str, optional): Наименование заказчика (используется в промпте).
+            По умолчанию None.
+        eis_links (str, optional): Ссылки на ЕИС (используются в промпте). По умолчанию None.
+
+    Raises:
+        ValueError: Если ответ модели не содержит обязательного поля "documents".
+
+    Returns:
+        Dict[str, Any]: Структурированный результат в соответствии с FINAL_EVALUATION_SCHEMA,
+            включающий массив "documents" с оценками по каждому файлу и поле "overall_status".
+            При ошибке возвращается резервный результат.
     """
     try:
-        logger.info(f"Запуск объединённой проверки (читаемость, тип/комплект, полнота) с ИИ для закупки {procurement_id}")
+        logger.info(f"Запуск финальной проверки в новом формате для закупки {procurement_id}")
 
-        # === 1. Получаем ВСЕ сырые данные из БД ===
+        # === 1. Получаем сырые данные из БД ===
         raw_data_from_db = get_raw_data_by_procurement_id(procurement_id)
         if not raw_data_from_db:
             logger.warning(f"Нет данных в БД для procurement_id={procurement_id}")
-            return create_fallback_final_evaluation()
+            return create_fallback_final_evaluation_new()
 
-        # === 2. Подготавливаем данные для промпта ===
-        # Форматируем как читаемый текст: тип документа + его raw_data
-        documents_data_lines = []
+        # === 2. Собираем информацию по каждому документу, включая document_code и document_label ===
+        documents_for_prompt = []
         for doc_type, analysis in raw_data_from_db.items():
-            if isinstance(analysis, dict):
-                # Убираем служебные поля, если они есть (например, summary_report)
-                clean_analysis = {
-                    k: v for k, v in analysis.items()
-                    if k not in ["summary_report", "id", "created_at", "updated_at"]
-                }
-                documents_data_lines.append(f"=== {doc_type} ===\n{json.dumps(clean_analysis, ensure_ascii=False, indent=2)}")
-            else:
-                # Если значение не словарь (например, строка JSON), попробуем распарсить
+            if doc_type in ["summary_report", "eis_data", "consistency_check", "id", "procurement_id", "created_at", "updated_at"]:
+                continue
+
+            if isinstance(analysis, str):
                 try:
-                    parsed = json.loads(analysis)
-                    documents_data_lines.append(f"=== {doc_type} ===\n{json.dumps(parsed, ensure_ascii=False, indent=2)}")
+                    analysis = json.loads(analysis)
                 except (TypeError, json.JSONDecodeError):
-                    documents_data_lines.append(f"=== {doc_type} ===\n{str(analysis)}")
+                    analysis = {"error": "Некорректные данные"}
 
-        documents_data_str = "\n\n".join(documents_data_lines)
+            if not isinstance(analysis, dict):
+                continue
 
-        # === 3. Подготавливаем требования (из attached_documents_list в Извещении и т.п.) ===
+            # Извлекаем метаданные
+            document_code = analysis.get("document_code", "unknown")
+            document_label = analysis.get("document_label", doc_type)
+            comment = analysis.get("comment", None)
+
+            # Формируем компактное представление для промпта
+            doc_info = {
+                "document_code": document_code,
+                "document_label": document_label,
+                "document_type": doc_type,
+                "comment": comment,
+                "analysis": {k: v for k, v in analysis.items() if k not in ["document_code", "document_label", "comment"]}
+            }
+            documents_for_prompt.append(doc_info)
+
+        if not documents_for_prompt:
+            return create_fallback_final_evaluation_new()
+
+        # === 3. Формируем требования (по attached_documents_list) ===
         requirements_description = []
         for doc_type, analysis in raw_data_from_db.items():
             if doc_type in ["Извещение", "Документация", "Извещение о закупке"]:
                 try:
-                    raw_data = analysis.get("raw_data", {}) if isinstance(analysis, dict) else json.loads(analysis).get("raw_data", {})
+                    raw_data = analysis.get("raw_data", {}) if isinstance(analysis, dict) else {}
                     attached = raw_data.get("attached_documents_list", [])
                     if attached:
                         requirements_description = attached
@@ -1139,9 +1174,10 @@ async def check_completeness_with_ai(procurement_id: str, expertise_customer: st
                 except Exception:
                     continue
 
+        # === 4. USER промпт ===
+        documents_data_str = json.dumps(documents_for_prompt, ensure_ascii=False, indent=2)
         requirements_description_str = json.dumps(requirements_description, ensure_ascii=False, indent=2)
 
-        # === 4. Формируем USER-промпт ===
         user_prompt = USER_FINAL_EVALUATION_PROMPT.format(
             documents_data=documents_data_str,
             requirements_description=requirements_description_str,
@@ -1149,7 +1185,7 @@ async def check_completeness_with_ai(procurement_id: str, expertise_customer: st
             eis_links=eis_links or "не указан",
         )
 
-        # === 5. Вызываем модель ===
+        # === 5. Вызываем модель с новой схемой ===
         response = await asyncio.wait_for(
             asyncio.get_event_loop().run_in_executor(
                 None,
@@ -1159,29 +1195,54 @@ async def check_completeness_with_ai(procurement_id: str, expertise_customer: st
                         {"role": "system", "content": SYSTEM_FINAL_EVALUATION_PROMPT},
                         {"role": "user", "content": user_prompt}
                     ],
-                    extra_body={"guided_json": FINAL_EVALUATION_SCHEMA},
+                    extra_body={"guided_json": FINAL_EVALUATION_SCHEMA}, 
                 )
             ),
             timeout=300.0
         )
 
         raw_response = response.choices[0].message.content.strip()
-        logger.debug(f"Сырой ответ модели (первые 500 символов): {raw_response[:500]}...")
+        logger.debug(f"Ответ модели (первые 500 символов): {raw_response[:500]}...")
 
-        # === 6. Парсим и валидируем ===
         result = json.loads(raw_response)
 
-        # Минимальная валидация структуры
-        required_keys = ["overall_summary", "overall_status", "readability", "type_compliance", "completeness"]
-        if not all(k in result for k in required_keys):
-            raise ValueError("Неполная структура ответа")
+        # Валидация: проверяем наличие documents
+        if "documents" not in result:
+            raise ValueError("Ответ не содержит массив 'documents'")
 
-        logger.info(f"Объединённая проверка завершена успешно для {procurement_id}. Статус: {result['overall_status']}")
+        logger.info(f"Финальная проверка завершена для {procurement_id}. Статус: {result.get('overall_status', 'unknown')}")
         return result
 
     except asyncio.TimeoutError:
-        logger.error(f"Таймаут при выполнении объединённой проверки для {procurement_id}")
-        return create_fallback_final_evaluation()
+        logger.error(f"Таймаут при финальной проверке для {procurement_id}")
+        return create_fallback_final_evaluation_new()
     except Exception as e:
-        logger.error(f"Ошибка в check_completeness_with_ai: {str(e)}", exc_info=True)
-        return create_fallback_final_evaluation()
+        logger.error(f"Ошибка в check_completeness_with_ai (новый формат): {str(e)}", exc_info=True)
+        return create_fallback_final_evaluation_new()
+    
+
+def create_fallback_final_evaluation_new() -> Dict[str, Any]:
+    return {
+        "overall_summary": "Целостная проверка не выполнена из-за технической ошибки.",
+        "overall_status": "deny",
+        "documents": [
+            {
+                "document_code": "unknown",
+                "document_label": "Неизвестный документ",
+                "document_type": "Неизвестный документ",
+                "status": "deny",
+                "readability": {
+                    "status": "deny",
+                    "description": "Ошибка обработки — невозможно оценить читаемость."
+                },
+                "type_compliance": {
+                    "status": "deny",
+                    "description": "Тип документа не определён."
+                },
+                "completeness": {
+                    "status": "deny",
+                    "description": ["Технический сбой при извлечении данных."]
+                }
+            }
+        ]
+    }

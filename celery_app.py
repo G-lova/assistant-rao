@@ -4,6 +4,7 @@ import logging
 from celery import Celery
 from celery.schedules import crontab
 
+from configs.config import Config
 from configs.retry_utils import sync_retry, async_retry, API_RETRY_CONFIG, EXPERTS_RETRY_CONFIG
 
 

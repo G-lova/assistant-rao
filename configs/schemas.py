@@ -23,6 +23,7 @@ class DocumentContentResponse(BaseModel):
     """
     procurement_id: str  # ID закупки
     document_type: str   # Тип документа
+    document_code: str   # Код документа
     filename: str        # Имя файла
     content_type: str    # MIME-тип
     content: str         # Первые 20 символов или "Неверный документ"
@@ -48,3 +49,42 @@ class BatchDocumentResponse(BaseModel):
     status: str
     results: List[DocumentContentResponse]
     errors: List[str] = []
+
+
+class DocumentItem(BaseModel):
+    """
+    Представляет элемент документации в структуре комплекта документов закупки.
+
+    Используется для описания одного вида документа (например, «Техническое задание»),
+    включая его код, название и способы предоставления: ссылки на внешние ресурсы или
+    загруженные файлы (в виде временных путей или данных в формате base64).
+
+    Args:
+        BaseModel (_type_): Базовый класс Pydantic для валидации и сериализации данных.
+    """
+    code: str
+    name: Optional[str] = None
+    links: List[str] = []
+    files: List[str] = []  # это будут временные пути или base64
+    comment: Optional[str] = None
+
+
+class EvaluateRequest(BaseModel):
+    """
+    Модель входного запроса для запуска экспертизы комплекта документов закупки.
+
+    Описывает структуру данных, необходимую для инициации анализа закупочной документации:
+    идентификатор закупки, тип законодательства, способ закупки, объект анализа,
+    информацию об организации, опциональную общую ссылку на документы и список
+    конкретных документов с файлами или ссылками.
+
+    Args:
+        BaseModel (_type_): Базовый класс Pydantic для валидации и сериализации данных.
+    """
+    procurement_id: str
+    type: str  # "44ФЗ" / "223"
+    checkType2: str  # "Конкурс", "Аукцион" и т.д.
+    object: str  # "Закупки", "Отчет"
+    users: Dict[str, Any]  # users.organization
+    linkDocs: Optional[str] = None
+    media: List[DocumentItem]

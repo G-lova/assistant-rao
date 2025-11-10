@@ -6,24 +6,14 @@ import json
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body, Header
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict
+from celery.result import AsyncResult
 
-from configs.utils import (APIKeyMiddleware,
-                           read_file,
-                           create_summary_report)
-from configs.working_with_db import (save_raw_data,
-                                     save_clean_conclusion,
-                                     get_contract_info_from_db,
-                                     save_summary_report)
-from src.evaluator import (analyze_document_chunks,
-                           split_large_text,
-                           check_completeness_with_ai,
-                           create_unprocessed_document_analysis)
+from configs.utils import APIKeyMiddleware
+from configs.working_with_db import get_contract_info_from_db
 from src.scoring import scoring
 from src.rating import rating
-from configs.parsing import parse_cloud_storage_link
-from configs.retry_utils import async_retry, API_RETRY_CONFIG, CLOUD_PARSING_RETRY_CONFIG
 from tasks import evaluate_documents_task
-from celery.result import AsyncResult
+from configs.procurement_requirements import DOCUMENT_CODE_TO_LABEL
 
 
 app = FastAPI(debug=False)
@@ -49,49 +39,103 @@ document_analysis_cache = {}
 @app.post("/evaluate-documents")
 async def evaluate_documents_batch(
     procurement_id: str = Form(...),
-    expertise_customer: Optional[str] = Form(None),
-    files: List[UploadFile] = File(None),
-    links: List[str] = Form(None),
-    eis_links: Optional[str] = Form(None),
-    legislation: Optional[str] = Form("44-ФЗ"),
-    procurement_method: Optional[str] = Form("Конкурс"),
-    expertise_details: Optional[str] = Form("Полный комплект документов о закупке")
+    type: str = Form(...),
+    checkType2: str = Form(...),
+    object: str = Form(...),
+    users_organization: str = Form(..., alias="users.organization"),
+    linkDocs: Optional[str] = Form(None),
+    media_json: Optional[str] = Form(None),
+    files: List[UploadFile] = File(default=None)
 ):
-    if not files and not (links or eis_links):
-        raise HTTPException(status_code=400, detail="Необходимо предоставить либо файлы, либо ссылки")
+    # === Парсинг media_json ===
+    if not media_json or media_json.strip() == "":
+        media = []
+    else:
+        try:
+            media = json.loads(media_json)
+            if not isinstance(media, list):
+                raise ValueError("media_json должен быть массивом объектов")
+        except (json.JSONDecodeError, ValueError) as e:
+            raise HTTPException(status_code=400, detail=f"Некорректный JSON в media: {e}")
 
-    file_paths = []
-    filenames = []
+    # === Списки для передачи в задачу ===
+    all_file_paths = []
+    all_filenames = []
+    all_document_codes = []
+    all_document_labels = []
+    all_comments = []
+    all_links = []
+    link_to_metadata = {}  # ссылка → (code, label, comment)
 
-    # Сохраняем загруженные файлы во временные пути
+    # === Обработка media_json: собираем метаданные и ссылки ===
+    for item in media:
+        code = item.get("code")
+        if not code:
+            continue
+        label = DOCUMENT_CODE_TO_LABEL.get(code, "Неизвестный документ")
+        comment = item.get("comment")
+        links_list = item.get("links", [])
+        files_list = item.get("files", [])  # ссылки как файлы
+
+        # Сохраняем метаданные для КАЖДОЙ ссылки
+        for url in links_list + files_list:
+            link_to_metadata[url] = (code, label, comment)
+
+        all_links.extend(links_list + files_list)
+
+    # === Обработка загруженных файлов ===
     if files:
         for file in files:
-            suffix = os.path.splitext(file.filename)[1] or ".bin"
+            if not file.filename:
+                continue
+            if "___" in file.filename:
+                doc_code, orig_name = file.filename.split("___", 1)
+            else:
+                doc_code = "unknown"
+                orig_name = file.filename
+
+            # Получаем метаданные из media_json по коду, если есть
+            label = DOCUMENT_CODE_TO_LABEL.get(doc_code, "Неизвестный документ")
+            comment = None  # в текущей схеме комментарий к файлу не передаётся, только к ссылке
+            # Если вы хотите комментарий к файлу — добавьте соглашение, но пока оставим None
+
+            suffix = os.path.splitext(orig_name)[1] or ".bin"
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                 content = await file.read()
                 if not content:
                     raise HTTPException(status_code=400, detail=f"Файл {file.filename} пустой")
                 tmp.write(content)
-                file_paths.append(tmp.name)
-                filenames.append(file.filename)
+                all_file_paths.append(tmp.name)
+                all_filenames.append(orig_name)
+                all_document_codes.append(doc_code)
+                all_document_labels.append(label)
+                all_comments.append(comment)
 
-    # Запускаем Celery-задачу
+    # Добавляем linkDocs в all_links (но без метаданных — он для ЕИС)
+    if linkDocs and linkDocs.strip():
+        all_links.append(linkDocs)
+
+    # === Запуск задачи ===
     task = evaluate_documents_task.delay(
         procurement_id=procurement_id,
-        expertise_customer=expertise_customer,
-        file_paths=file_paths,
-        filenames=filenames,
-        links=links,
-        eis_links=eis_links,
-        legislation=legislation,
-        procurement_method=procurement_method,
-        expertise_details=expertise_details
+        expertise_customer=users_organization,
+        file_paths=all_file_paths,
+        filenames=all_filenames,
+        document_codes=all_document_codes,
+        document_labels=all_document_labels,
+        comments=all_comments,
+        links=all_links,
+        eis_links=linkDocs,
+        link_to_metadata=link_to_metadata,
+        legislation=type,
+        procurement_method=checkType2,
+        expertise_details="Полный комплект документов о закупке"
     )
 
     return {
         "task_id": task.id,
         "status": "processing",
-        "message": "Задача по обработке документов запущена"
+        "message": "Задача запущена"
     }
 
 

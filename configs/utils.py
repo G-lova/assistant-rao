@@ -95,12 +95,11 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             
             return await call_next(request)
         
-        except Exception:
-            # Любая ошибка → 401 или 500 без деталей
-            # Поскольку ошибка в аутентификации — лучше 401
+        except Exception as e:
+            logger.exception("Неожиданная ошибка в APIKeyMiddleware")
             return JSONResponse(
-                status_code=401,
-                content={"detail": "Invalid API key"}
+                status_code=500,
+                content={"detail": "Internal server error during authentication"}
             )
 
 

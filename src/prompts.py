@@ -11,9 +11,6 @@ TYPE_DETECTION_PROMPT = """Ты — эксперт по документам з�
 
 **ПРАВИЛО №2: КЛАССИФИКАЦИЯ ПО СОДЕРЖАНИЮ (если явного названия нет)**
 Если точного названия в тексте нет, определи тип по содержанию, используя следующие четкие разграничения:
-
-**ПРАВИЛО №2: КЛАССИФИКАЦИЯ ПО СОДЕРЖАНИЮ (если явного названия нет)**
-Если точного названия в тексте нет, определи тип по содержанию, используя следующие четкие разграничения:
 - Извещение: ТОЛЬКО "Извещение" или "Извещение о закупке...". Это основной документ, объявляющий о закупке.
 - Описание объекта закупки: Содержит детальное описание товара, работы или услуги: технические характеристики, свойства, количественные и качественные показатели. **Может содержать цену за единицу, но его главная цель — ОПИСАТЬ предмет закупки.**
 - Обоснование н(м)цк: **НЕ содержит** детального описания товара. Его цель — **ОБОСНОВАТЬ ЦЕНУ**. Содержит расчеты, методы определения цены, ссылки на ценовые источники (каталоги, коммерческие предложения, аналогичные закупки), формулы. Если видишь таблицу с расчетами "Метод сопоставимых рыночных цен" — это "Обоснование НМЦК". Если видишь таблицу с характеристиками товара — это "Описание объекта закупки".
@@ -289,38 +286,18 @@ SYSTEM_FINAL_EVALUATION_PROMPT = """
 ИНСТРУКЦИЯ ПО ЗАПОЛНЕНИЮ JSON:
 
 {
-  "overall_summary": "Краткое общее заключение (ровно 2 предложения). Укажи, соответствует ли комплект требованиям, имеются ли критические проблемы, и можно ли допускать к дальнейшим этапам.",
-  "overall_status": "allow" или "deny". Используй 'allow' только если ВСЕ три категории (readability, type_compliance, completeness) имеют статус 'allow'. В любом другом случае — 'deny',
-
-  "readability": {
-    "summary": "Общая оценка читаемости всех документов (ровно 2 предложения). Укажи процент читаемых документов и основные проблемы.",
-    "status": "allow" если ВСЕ документы читаемы и пригодны для анализа, иначе "deny",
-    "documents": [
-      {
-        "document_type": "Точное название типа документа (например, 'Извещение о закупке', 'Техническое задание')",
-        "status": "allow" если текст полностью читаем и достаточен для анализа, иначе "deny",
-        "description": "Конкретное техническое описание проблем: 'OCR распознал менее 70% текста', 'файл поврежден', 'скан низкого разрешения', 'текст не машиночитаем'. Если проблем нет — 'Документ читаем, текст распознан корректно'."
-      }
-    ]
-  },
-
-  "type_compliance": {
-    "summary": "Общая оценка соответствия типов и содержания (ровно 2 предложения). Укажи, содержат ли документы все обязательные реквизиты согласно их типу.",
-    "status": "allow" если КАЖДЫЙ документ соответствует заявленному типу и содержит все ключевые реквизиты, иначе "deny",
-    "documents": [
-      {
-        "document_type": "Точное название типа документа",
-        "status": "allow" если документ соответствует типу и содержит ВСЕ ключевые реквизиты, иначе "deny",
-        "description": "Детальный анализ: перечисли отсутствующие обязательные реквизиты (номера, даты, суммы, подписи, печати, реквизиты сторон). Если соответствие полное — 'Документ соответствует типу и содержит все необходимые реквизиты'."
-      }
-    ]
-  },
-
-  "completeness": {
-    "summary": "Общая оценка полноты комплекта (ровно 2 предложения). Укажи, все ли обязательные документы представлены согласно требованиям.",
-    "status": "allow" если представлены ВСЕ обязательные документы (кроме 'Проект контракта'), иначе "deny",
-    "description": "Конкретный перечень недостающих обязательных документов через запятую. Если комплект полный — 'Все обязательные документы представлены'."
-  }
+  "overall_summary": "...",
+  "overall_status": "allow или deny",
+  "documents": [
+    {
+      "document_code": "DOC1",
+      "document_type": "Точное название типа",
+      "status": "allow/deny",
+      "readability": {"status": "...", "description": "..."},
+      "type_compliance": {"status": "...", "description": "..."},
+      "completeness": {"status": "...", "description": ["...", "..."] или []}
+    }
+  ]
 }
 """
 
@@ -693,112 +670,57 @@ RESPONSE_JSON_SCHEMA = {
 
 FINAL_EVALUATION_SCHEMA = {
     "type": "object",
-    "description": "Итоговая оценка комплекта документов закупки, включая анализ каждого документа, общую проверку и статусы.",
     "properties": {
-        "overall_summary": {
-            "type": "string",
-            "description": "Общий вывод по всем пунктам (2 предложения, передающие суть)."
-        },
-        "overall_status": {
-            "type": "string",
-            "enum": ["allow", "deny"],
-            "description": "Общий статус по всем пунктам."
-        },
-        "readability": {
-            "type": "object",
-            "properties": {
-                "summary": {
-                    "type": "string",
-                    "description": "Общее описание по читаемости всех документов (2 предложения, передающие суть)."
-                },
-                "status": {
-                    "type": "string",
-                    "enum": ["allow", "deny"],
-                    "description": "Общий статус по читаемости всех документов."
-                },
-                "documents": {
-                    "type": "array",
-                    "items": {
+        "overall_summary": {"type": "string"},
+        "overall_status": {"type": "string", "enum": ["allow", "deny"]},
+        "documents": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "document_code": {"type": "string"},
+                    "document_type": {"type": "string"},
+                    "status": {"type": "string", "enum": ["allow", "deny"]},
+                    "readability": {
                         "type": "object",
                         "properties": {
-                            "document_type": {
-                                "type": "string",
-                                "description": "Тип документа."
-                            },
-                            "status": {
-                                "type": "string",
-                                "enum": ["allow", "deny"],
-                                "description": "Статус читаемости для конкретного документа."
-                            },
-                            "description": {
-                                "type": "string",
-                                "description": "Подробное описание статуса читаемости для документа."
-                            }
+                            "status": {"type": "string", "enum": ["allow", "deny"]},
+                            "description": {"type": "string"}
                         },
-                        "required": ["document_type", "status", "description"]
+                        "required": ["status", "description"]
                     },
-                    "description": "Массив результатов проверки читаемости по каждому документу."
-                }
-            },
-            "required": ["summary", "status", "documents"]
-        },
-        "type_compliance": {
-            "type": "object",
-            "properties": {
-                "summary": {
-                    "type": "string",
-                    "description": "Общее описание по проверке типа и комплекта документов (2 предложения, передающие суть)."
-                },
-                "status": {
-                    "type": "string",
-                    "enum": ["allow", "deny"],
-                    "description": "Общий статус по проверке типа и комплекта всех документов."
-                },
-                "documents": {
-                    "type": "array",
-                    "items": {
+                    "type_compliance": {
                         "type": "object",
                         "properties": {
-                            "document_type": {
-                                "type": "string",
-                                "description": "Тип документа."
-                            },
-                            "status": {
-                                "type": "string",
-                                "enum": ["allow", "deny"],
-                                "description": "Статус соответствия типа и комплекта для конкретного документа."
-                            },
+                            "status": {"type": "string", "enum": ["allow", "deny"]},
+                            "description": {"type": "string"}
+                        },
+                        "required": ["status", "description"]
+                    },
+                    "completeness": {
+                        "type": "object",
+                        "properties": {
+                            "status": {"type": "string", "enum": ["allow", "deny"]},
                             "description": {
-                                "type": "string",
-                                "description": "Подробное описание статуса соответствия типа и комплекта для документа."
+                                "type": "array",
+                                "items": {"type": "string"}
                             }
                         },
-                        "required": ["document_type", "status", "description"]
-                    },
-                    "description": "Массив результатов проверки типа и комплекта по каждому документу."
-                }
-            },
-            "required": ["summary", "status", "documents"]
-        },
-        "completeness": {
-            "type": "object",
-            "properties": {
-                "summary": {
-                    "type": "string",
-                    "description": "Общее описание по проверке полноты документов (2 предложения, передающие суть)."
+                        "required": ["status", "description"]
+                    }
                 },
-                "status": {
-                    "type": "string",
-                    "enum": ["allow", "deny"],
-                    "description": "Общий статус по проверке полноты документов."
-                },
-                "description": {
-                    "type": "string",
-                    "description": "Подробное описание статуса проверки полноты."
-                }
-            },
-            "required": ["summary", "status", "description"]
+                "required": [
+                    "document_code",
+                    "document_type",
+                    "status",
+                    "readability",
+                    "type_compliance",
+                    "completeness"
+                ],
+                "additionalProperties": False
+            }
         }
     },
-    "required": ["overall_summary", "overall_status", "readability", "type_compliance", "completeness"]
+    "required": ["overall_summary", "overall_status", "documents"],
+    "additionalProperties": False
 }

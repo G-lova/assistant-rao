@@ -119,19 +119,21 @@ services:
   celery_worker:
     build: .
     container_name: rao_celery_worker
-    command: celery -A celery_app worker --loglevel=info --concurrency=4
     volumes:
       - .:/app
       - /tmp:/tmp
+      - .env:/app/.env
     environment:
       - REDIS_URL=redis://redis:6379/0
       - TZ=${TZ}
+      - API_KEY=${API_KEY}
     depends_on:
       - redis
     networks:
       # - qwen_embedding_network
       # - qwen-vl-api_procurement_network
       - rao_network
+    command: celery -A celery_app worker --loglevel=info --concurrency=4 -Q evaluation,parsing,scoring
     restart: unless-stopped
 
   celery_beat:
@@ -141,9 +143,11 @@ services:
     volumes:
       - .:/app
       - /tmp:/tmp
+      - .env:/app/.env
     environment:
       - REDIS_URL=redis://redis:6379/0
       - TZ=${TZ}
+      - API_KEY=${API_KEY}
     depends_on:
       - redis
     networks:

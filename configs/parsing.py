@@ -524,38 +524,67 @@ class CloudStorageParser:
 
     async def _parse_eis_soap_from_web(self, url: str, procurement_id: str = None) -> Dict:
         """
-        Автоматически преобразует веб-URL ЕИС в SOAP запрос и получает документы.
-        Если SOAP API недоступен, использует веб-скрапинг как fallback.
+        Проверяет доступность публичной страницы закупки на портале ЕИС и извлекает её реестровый номер.
+
+        Не выполняет полного парсинга документов, а лишь подтверждает, что URL ведёт на существующую
+        страницу закупки в ЕИС, и корректно извлекает идентификатор закупки (regNumber).
+        Возвращает минимальный результат с подтверждением доступности страницы.
+
+        Args:
+            url (str): URL страницы закупки на zakupki.gov.ru.
+            procurement_id (str, optional): Идентификатор закупки в локальной системе для логирования.
+                По умолчанию None.
+
+        Returns:
+            Dict: Словарь с результатом проверки. При успехе содержит статус "success",
+                номер закупки, источник и исходный URL; при ошибке — статус "error"
+                и диагностическое сообщение. Поле "files" всегда пустое.
         """
         try:
-            # Извлекаем реестровый номер из URL
-            reestr_number = self._extract_reestr_number_from_web_url(url)
+            clean_url = url.strip()
+            reestr_number = self._extract_reestr_number_from_web_url(clean_url)
             if not reestr_number:
                 return {
                     "status": "error",
-                    "error": f"Не удалось извлечь реестровый номер из URL ЕИС: {url}"
+                    "error": f"Не удалось извлечь номер закупки из URL: {clean_url}"
                 }
 
-            logger.info(f"Автоматическое преобразование веб-URL ЕИС в SOAP запрос для реестрового номера: {reestr_number}")
+            # Простая проверка доступности ссылки
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    clean_url,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; procurement-checker)"},
+                    timeout=aiohttp.ClientTimeout(total=15)
+                ) as response:
+                    if response.status != 200:
+                        return {
+                            "status": "error",
+                            "error": f"Страница ЕИС недоступна (HTTP {response.status})",
+                            "procurement_number": reestr_number,
+                            "source": "eis_web",
+                            "original_url": clean_url
+                        }
 
-            # Сначала пробуем SOAP API
-            soap_result = await self._eis_soap_get_docs_by_reestr_number(
-                {'reestrNumber': reestr_number, 'subsystemType': 'PRIZ'}, 
-                procurement_id
-            )
-
-            # Если SOAP API вернул ошибку авторизации, пробуем веб-скрапинг
-            if soap_result.get("status") == "error" and any(error in soap_result.get("error", "") for error in ["токен", "Токен", "token", "Token"]):
-                logger.warning("SOAP API недоступен из-за проблем с токеном. Пробуем веб-скрапинг...")
-                return await self._parse_eis_web_fallback(url, procurement_id)
-
-            return soap_result
+            # УСПЕХ: ссылка доступна, номер извлечён
+            return {
+                "status": "success",
+                "procurement_number": reestr_number,
+                "source": "eis_web",
+                "original_url": clean_url,
+                "procurement_id": procurement_id,
+                "files": []  # Нет файлов — парсинг отключён
+            }
 
         except Exception as e:
-            logger.error(f"Ошибка преобразования веб-URL в SOAP: {str(e)}")
-            # При любой ошибке пробуем веб-скрапинг
-            logger.warning("Пробуем веб-скрапинг как fallback...")
-            return await self._parse_eis_web_fallback(url, procurement_id)
+            logger.error(f"Ошибка при проверке ссылки ЕИС: {str(e)}")
+            reestr_number = self._extract_reestr_number_from_web_url(url)
+            return {
+                "status": "error",
+                "error": f"Ошибка проверки ссылки ЕИС: {str(e)}",
+                "procurement_number": reestr_number,
+                "source": "eis_web",
+                "original_url": url
+            }
 
 
     async def _parse_eis_web_fallback(self, url: str, procurement_id: str = None) -> Dict:
@@ -1654,45 +1683,216 @@ class CloudStorageParser:
             return None
 
 
+    async def parse_cloud_link(self, url: str, procurement_id: str = None) -> Dict:
+        """
+        Определяет тип ссылки и делегирует её обработку соответствующему парсеру.
+
+        Поддерживает специализированные парсеры для известных доменов (например, Mail.ru, Google Drive),
+        обработку SOAP-ссылок на ЕИС и универсальный fallback-механизм для скачивания
+        произвольных файлов по прямым HTTP/HTTPS-ссылкам. Гарантирует, что любая ссылка
+        будет обработана без исключения: в худшем случае возвращается структура с ошибкой.
+
+        Args:
+            url (str): URL на документ или ресурс (поддерживается любой формат, включая soap://).
+            procurement_id (str, optional): Идентификатор закупки для логирования и привязки результата.
+                По умолчанию None.
+
+        Returns:
+            Dict: Словарь с единым форматом результата: при успехе — содержит файл(ы) и метаданные,
+                при ошибке — статус "error" и диагностическое сообщение.
+        """
+        if url.startswith('soap://'):
+            return await self._parse_eis_soap(url, procurement_id)
+
+        parsed = urlparse(url)
+        domain = parsed.netloc
+
+        # 1. Поддерживаемые домены → специализированные парсеры
+        if domain in self.supported_domains:
+            parser_func = self.supported_domains[domain]
+            return await parser_func(url, procurement_id)
+
+        # 2. Любые другие ссылки → попытка скачать напрямую
+        logger.info(f"Домен {domain} не поддерживается. Пробую generic-скачивание для: {url}")
+        result = await self._parse_generic_http_file(url, procurement_id)
+
+        # 3. Если generic тоже не сработал — не падаем, возвращаем ошибку
+        if result["status"] != "success":
+            logger.warning(f"Не удалось обработать ссылку (ни специализированный, ни generic парсер): {url}")
+            return result
+
+        return result
+
+
+    async def _parse_generic_http_file(self, url: str, procurement_id: str = None) -> Dict:
+        """
+        Скачивает файл по прямой HTTP/HTTPS-ссылке без специализированного парсера.
+
+        Используется как fallback для неизвестных доменов. Определяет имя и расширение файла
+        на основе заголовков Content-Disposition и Content-Type, а также из самого URL.
+        Сохраняет содержимое во временный файл и возвращает метаданные в унифицированном формате.
+
+        Args:
+            url (str): Прямая ссылка на файл для скачивания.
+            procurement_id (str, optional): Идентификатор закупки для логирования и привязки результата.
+                По умолчанию None.
+
+        Returns:
+            Dict: Словарь с результатом операции. При успехе содержит имя файла, путь к временному
+                файлу, источник и другие метаданные; при ошибке — статус "error" и сообщение об ошибке.
+        """
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (compatible; procurement-checker/1.0)"
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status != 200:
+                        return {
+                            "status": "error",
+                            "error": f"HTTP {resp.status}: не удалось скачать файл по прямой ссылке"
+                        }
+
+                    # Определяем имя файла: из Content-Disposition или из URL
+                    content_disposition = resp.headers.get("Content-Disposition", "")
+                    original_filename = self._extract_filename_from_content_disposition(content_disposition)
+                    if not original_filename:
+                        original_filename = os.path.basename(urlparse(url).path) or "generic_file"
+
+                    # Определяем расширение
+                    content_type = resp.headers.get("Content-Type", "")
+                    file_ext = self._get_extension_from_content_type(content_type)
+                    if not file_ext or file_ext == ".bin":
+                        file_ext = self._get_extension_from_url(url)
+
+                    # Сохраняем во временный файл
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
+                        async for chunk in resp.content.iter_chunked(8192):
+                            tmp.write(chunk)
+                        tmp_path = tmp.name
+
+                    safe_name = re.sub(r'[<>:"/\\|?*]', '_', original_filename)
+                    if not safe_name.endswith(file_ext):
+                        safe_name += file_ext
+
+                    return {
+                        "status": "success",
+                        "filename": safe_name,
+                        "file_path": tmp_path,
+                        "source": "generic_http",
+                        "original_url": url,
+                        "procurement_id": procurement_id,
+                        "file_extension": file_ext
+                    }
+
+        except Exception as e:
+            logger.error(f"Ошибка скачивания generic-файла {url}: {e}")
+            return {
+                "status": "error",
+                "error": f"Ошибка скачивания: {str(e)}"
+            }
+
+
+    def _extract_filename_from_content_disposition(self, content_disposition: str) -> str:
+        """
+        Извлекает имя файла из заголовка Content-Disposition.
+        Args:
+            content_disposition (str): Значение заголовка Content-Disposition.
+        Returns:
+            str: Имя файла или пустая строка, если не удалось извлечь.
+        """
+        if not content_disposition:
+            return ""
+        # Регулярное выражение для извлечения filename
+        filename_match = re.search(r'filename[^;=\n]*=(([\'"]).*?\2|[^;\n]*)', content_disposition, re.IGNORECASE)
+        if filename_match:
+            filename = filename_match.group(1).strip(' \'"')
+            return filename
+        return ""
+
+
 # Глобальный экземпляр парсера
 cloud_parser = CloudStorageParser()
 
 
 async def parse_cloud_storage_link(url: str, procurement_id: str = None) -> Dict:
     """
-    Унифицирует результат парсинга ссылки на документ из облачного хранилища или ЕИС.
+    Унифицирует обработку ссылок на документы из облаков и портала ЕИС с поддержкой валидации закупок.
 
-    Вызывает парсер, определяющий тип ссылки (Mail.ru, Google Drive, ЕИС и др.),
-    скачивает файл(ы) и возвращает структурированный результат. Для ЕИС возвращает
-    список файлов напрямую, для остальных облачных сервисов — оборачивает единичный
-    результат в список для единообразия. Обеспечивает согласованный формат ответа
-    независимо от источника.
+    Для ссылок на zakupki.gov.ru возвращает только метаданные закупки (включая номер)
+    без скачивания файлов — это позволяет проверить существование закупки, не запуская
+    полный анализ. Для всех остальных облачных сервисов (Mail.ru, Google Drive и пр.)
+    возвращает список скачанных файлов в единообразном формате. Гарантирует наличие
+    ключевых полей (procurement_number, files, source) независимо от источника.
 
     Args:
-        url (str): URL на документ или страницу закупки в облаке или на портале ЕИС.
-        procurement_id (str, optional): Идентификатор закупки для логирования и привязки результата.
+        url (str): URL на документ или страницу закупки (поддерживается ЕИС и публичные облака).
+        procurement_id (str, optional): Идентификатор закупки в локальной системе для привязки результата.
             По умолчанию None.
 
     Returns:
-        Dict: Словарь с единым форматом: при успехе содержит ключ "files" со списком
-            обработанных файлов, источник, исходный URL и procurement_id; при ошибке —
-            статус "error" и описание проблемы.
+        Dict: Словарь с единым интерфейсом ответа:
+            - для ЕИС: содержит procurement_number и пустой список files,
+            - для облаков: содержит список файлов в поле "files",
+            - при ошибке: статус "error" и диагностическое сообщение.
     """
-    result = await cloud_parser.parse_cloud_link(url, procurement_id)
-    if result["status"] == "success":
-        if "files" in result:
-            return result  # ЕИС уже возвращает список
-        else:
-            # Облако: оборачиваем один файл в список
+    try:
+        # Парсим домен для логики ветвления
+        parsed_url = urlparse(url)
+        domain = parsed_url.netloc.lower()
+
+        # === 1. Обработка ЕИС: только метаданные, без файлов ===
+        if "zakupki.gov.ru" in domain:
+            result = await cloud_parser.parse_cloud_link(url, procurement_id)
+            procurement_number = result.get("procurement_number")
             return {
-                "status": "success",
-                "files": [result],
-                "source": result.get("source", "cloud"),
+                "status": "success" if result.get("status") == "success" else "error",
+                "procurement_number": str(procurement_number) if procurement_number else None,
+                "source": "eis_web",
                 "original_url": url,
-                "procurement_id": procurement_id
+                "procurement_id": procurement_id,
+                "files": [],  # Никаких файлов не обрабатываем
+                "error": result.get("error") if result.get("status") != "success" else None
             }
-    else:
-        return result
+
+        # === 2. Обработка всех остальных ссылок через парсер ===
+        result = await cloud_parser.parse_cloud_link(url, procurement_id)
+
+        # === 3. Унификация ответа ===
+        if result["status"] == "success":
+            # Уже содержит "files" — как из ЕИС SOAP, так и из облаков
+            if "files" in result:
+                return result
+            # Одиночный файл (например, из Google Drive) → оборачиваем в список
+            else:
+                return {
+                    "status": "success",
+                    "files": [result],
+                    "source": result.get("source", "cloud"),
+                    "original_url": url,
+                    "procurement_id": procurement_id
+                }
+        else:
+            # Ошибка парсинга — возвращаем её как есть
+            return {
+                "status": "error",
+                "error": result.get("error", "Неизвестная ошибка при обработке ссылки"),
+                "source": result.get("source", "unknown"),
+                "original_url": url,
+                "procurement_id": procurement_id,
+                "files": []
+            }
+
+    except Exception as e:
+        logger.exception(f"Необработанное исключение в parse_cloud_storage_link для URL: {url}")
+        return {
+            "status": "error",
+            "error": f"Внутренняя ошибка обработки ссылки: {str(e)}",
+            "source": "unknown",
+            "original_url": url,
+            "procurement_id": procurement_id,
+            "files": []
+        }
 
 
 def is_cloud_storage_link(url: str) -> bool:
