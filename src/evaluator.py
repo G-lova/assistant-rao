@@ -1094,31 +1094,9 @@ def create_unprocessed_document_analysis(filename: str, error: str) -> Dict[str,
 async def check_completeness_with_ai(
     procurement_id: str,
     expertise_customer: str = None,
-    eis_links: str = None
+    legislation_type: str = "44-ФЗ",
+    procurement_method: str = "Конкурс"
 ) -> Dict[str, Any]:
-    """
-    Выполняет финальную ИИ-оценку комплектности и качества документов закупки в новом формате.
-
-    Извлекает из БД все проанализированные документы по идентификатору закупки,
-    формирует структурированный промпт с метаданными (document_code, document_label, comment)
-    и требованиями из списка прилагаемых документов (attached_documents_list), затем
-    отправляет запрос в языковую модель с использованием строгой JSON-схемы.
-    Возвращает детализированный отчёт по каждому документу и общую оценку.
-
-    Args:
-        procurement_id (str): Уникальный идентификатор закупки.
-        expertise_customer (str, optional): Наименование заказчика (используется в промпте).
-            По умолчанию None.
-        eis_links (str, optional): Ссылки на ЕИС (используются в промпте). По умолчанию None.
-
-    Raises:
-        ValueError: Если ответ модели не содержит обязательного поля "documents".
-
-    Returns:
-        Dict[str, Any]: Структурированный результат в соответствии с FINAL_EVALUATION_SCHEMA,
-            включающий массив "documents" с оценками по каждому файлу и поле "overall_status".
-            При ошибке возвращается резервный результат.
-    """
     try:
         logger.info(f"Запуск финальной проверки в новом формате для закупки {procurement_id}")
 
@@ -1128,7 +1106,19 @@ async def check_completeness_with_ai(
             logger.warning(f"Нет данных в БД для procurement_id={procurement_id}")
             return create_fallback_final_evaluation_new()
 
-        # === 2. Собираем информацию по каждому документу, включая document_code и document_label ===
+        # === 2. Извлекаем данные ЕИС из БД ===
+        eis_data = {}
+        if "eis_data" in raw_data_from_db:
+            try:
+                eis_data = raw_data_from_db["eis_data"]
+                if isinstance(eis_data, str):
+                    eis_data = json.loads(eis_data)
+                logger.info(f"Найдены данные ЕИС: {eis_data}")
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(f"Ошибка парсинга eis_data: {e}")
+                eis_data = {}
+
+        # === 3. Собираем информацию по каждому документу ===
         documents_for_prompt = []
         for doc_type, analysis in raw_data_from_db.items():
             if doc_type in ["summary_report", "eis_data", "consistency_check", "id", "procurement_id", "created_at", "updated_at"]:
@@ -1161,7 +1151,7 @@ async def check_completeness_with_ai(
         if not documents_for_prompt:
             return create_fallback_final_evaluation_new()
 
-        # === 3. Формируем требования (по attached_documents_list) ===
+        # === 4. Формируем требования (по attached_documents_list) ===
         requirements_description = []
         for doc_type, analysis in raw_data_from_db.items():
             if doc_type in ["Извещение", "Документация", "Извещение о закупке"]:
@@ -1174,18 +1164,40 @@ async def check_completeness_with_ai(
                 except Exception:
                     continue
 
-        # === 4. USER промпт ===
+        # === 5. Формируем информацию о ЕИС для промпта ===
+        eis_info = "Нет данных"
+        if eis_data:
+            eis_status = eis_data.get("eis_status", "unknown")
+            eis_procurement_number = eis_data.get("eis_procurement_number")
+            eis_link = eis_data.get("eis_link")
+            
+            if eis_status == "available" and eis_procurement_number:
+                eis_info = f"ЕИС доступен. Номер закупки в ЕИС: {eis_procurement_number}"
+                if eis_link:
+                    eis_info += f" (ссылка: {eis_link})"
+            elif eis_status == "unavailable":
+                eis_info = "ЕИС недоступен"
+            elif eis_status == "error":
+                error_msg = eis_data.get("eis_error", "неизвестная ошибка")
+                eis_info = f"Ошибка проверки ЕИС: {error_msg}"
+            else:
+                eis_info = "Статус ЕИС не определен"
+
+        # === 6. USER промпт с данными ЕИС из БД ===
         documents_data_str = json.dumps(documents_for_prompt, ensure_ascii=False, indent=2)
         requirements_description_str = json.dumps(requirements_description, ensure_ascii=False, indent=2)
 
         user_prompt = USER_FINAL_EVALUATION_PROMPT.format(
-            documents_data=documents_data_str,
-            requirements_description=requirements_description_str,
+            procurement_id=procurement_id,
+            legislation_type=legislation_type,
+            procurement_method=procurement_method,
             expertise_customer=expertise_customer or "не указан",
-            eis_links=eis_links or "не указан",
+            eis_info=eis_info,
+            requirements_description=requirements_description_str,
+            documents_data=documents_data_str,
         )
 
-        # === 5. Вызываем модель с новой схемой ===
+        # === 7. Вызываем модель с новой схемой ===
         response = await asyncio.wait_for(
             asyncio.get_event_loop().run_in_executor(
                 None,
@@ -1246,3 +1258,40 @@ def create_fallback_final_evaluation_new() -> Dict[str, Any]:
             }
         ]
     }
+
+
+def prepare_documents_for_final_evaluation(document_analysis_results: Dict[str, Any]) -> str:
+    """
+    Подготавливает структурированное описание проанализированных документов для финальной ИИ-оценки.
+
+    Преобразует словарь с результатами анализа документов в компактный JSON-формат,
+    включающий имя файла, тип документа, код, метку, комментарий и ключевые аналитические
+    поля (читаемость, соответствие типу, сырые данные). Используется для формирования
+    промпта при финальной комплексной оценке комплектности и качества документов.
+
+    Args:
+        document_analysis_results (Dict[str, Any]): Словарь, где ключи — имена файлов,
+            а значения — полные результаты их ИИ-анализа.
+
+    Returns:
+        str: JSON-строка с отформатированным списком документов, готовая к вставке в промпт модели.
+    """
+    documents_data = []
+    
+    for doc_name, analysis in document_analysis_results.items():
+        if analysis.get("status") == "success":
+            doc_data = {
+                "filename": doc_name,
+                "document_type": analysis.get("document_type", "Неизвестно"),
+                "document_code": analysis.get("document_code", "unknown"),
+                "document_label": analysis.get("document_label", "Неизвестный документ"),
+                "comment": analysis.get("comment"),
+                "analysis": {
+                    "readability": analysis.get("analysis", {}).get("readability", {}),
+                    "type_compliance": analysis.get("analysis", {}).get("type_compliance", {}),
+                    "raw_data": analysis.get("analysis", {}).get("raw_data", {})
+                }
+            }
+            documents_data.append(doc_data)
+    
+    return json.dumps(documents_data, ensure_ascii=False, indent=2)

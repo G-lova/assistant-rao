@@ -247,7 +247,7 @@ def get_raw_data_by_procurement_id(procurement_id: str) -> Dict[str, Any]:
             return {}
 
         data = {}
-        row_dict = dict(row)  # Убедимся, что работаем с dict
+        row_dict = dict(row)
         for col_name, value in row_dict.items():
             # Пропускаем служебные колонки
             if col_name in ['id', 'procurement_id', 'created_at', 'updated_at']:
@@ -255,12 +255,25 @@ def get_raw_data_by_procurement_id(procurement_id: str) -> Dict[str, Any]:
             if value is None:
                 continue
 
+            # Для JSONB колонок пытаемся распарсить JSON
+            if col_name in ['eis_data', 'summary_report'] and isinstance(value, (str, dict)):
+                try:
+                    if isinstance(value, str):
+                        parsed_value = json.loads(value)
+                    else:
+                        parsed_value = value
+                    data[col_name] = parsed_value
+                    continue
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
             # Находим соответствующий тип документа по маппингу
             doc_type = next(
                 (k for k, v in DOCUMENT_TYPE_MAPPING.items() if v == col_name),
                 col_name
             )
             data[doc_type] = value
+        
         return data
 
     except Exception as e:
@@ -377,6 +390,12 @@ def save_summary_report(procurement_id: int, summary_data: Dict[str, Any]):
         # Преобразуем данные в JSON
         json_data = json.dumps(summary_data, ensure_ascii=False, indent=2)
 
+        # Логируем ключевую информацию для отладки
+        logger.info(f"Сохранение summary_report для {procurement_id}:")
+        logger.info(f"- Всего документов: {len(summary_data.get('documents_summary', {}))}")
+        logger.info(f"- Document codes: {[doc.get('document_code') for doc in summary_data.get('documents_summary', {}).values()]}")
+        logger.info(f"- Document labels: {[doc.get('document_label') for doc in summary_data.get('documents_summary', {}).values()]}")
+
         # Проверяем, существует ли уже запись с таким procurement_id
         check_query = "SELECT id FROM raw_document_data WHERE procurement_id = %s"
         cursor.execute(check_query, (procurement_id,))
@@ -403,6 +422,39 @@ def save_summary_report(procurement_id: int, summary_data: Dict[str, Any]):
 
     except Exception as e:
         logger.error(f"Ошибка при сохранении summary_report: {str(e)}", exc_info=True)
+        if conn:
+            conn.rollback()
+    finally:
+        if conn:
+            conn.close()
+
+
+@sync_retry(DATABASE_RETRY_CONFIG)
+def delete_procurement_data(procurement_id: int):
+    """
+    Удаляет все данные, связанные с закупкой, из таблиц БД с поддержкой повторных попыток.
+
+    Выполняет транзакционное удаление записей из таблиц raw_document_data и
+    clean_document_conclusions по указанному идентификатору закупки. В случае ошибки
+    откатывает транзакцию и повторяет операцию в соответствии с настройками
+    DATABASE_RETRY_CONFIG. Гарантирует согласованность данных при временных сбоях БД.
+
+    Args:
+        procurement_id (int): Числовой идентификатор закупки, все данные которой подлежат удалению.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Удаляем из обеих таблиц
+        cursor.execute("DELETE FROM raw_document_data WHERE procurement_id = %s", (procurement_id,))
+        cursor.execute("DELETE FROM clean_document_conclusions WHERE procurement_id = %s", (procurement_id,))
+
+        conn.commit()
+        logger.info(f"Все данные для procurement_id={procurement_id} успешно удалены.")
+    except Exception as e:
+        logger.error(f"Ошибка при удалении данных для procurement_id={procurement_id}: {str(e)}", exc_info=True)
         if conn:
             conn.rollback()
     finally:

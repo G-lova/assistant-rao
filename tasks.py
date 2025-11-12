@@ -9,7 +9,7 @@ from celery_app import celery_app
 
 from configs.config import Config
 from configs.utils import read_file, create_summary_report
-from configs.working_with_db import save_raw_data, save_clean_conclusion, save_summary_report
+from configs.working_with_db import save_raw_data, save_clean_conclusion, save_summary_report, delete_procurement_data
 from src.evaluator import analyze_document_chunks, split_large_text, check_completeness_with_ai, create_unprocessed_document_analysis
 from configs.parsing import parse_cloud_storage_link
 from configs.retry_utils import async_retry, API_RETRY_CONFIG, CLOUD_PARSING_RETRY_CONFIG
@@ -47,11 +47,18 @@ def evaluate_documents_task(
     comments: list = None,
     links: list = None,
     eis_links: str = None,
-    link_to_metadata: dict = None,  # ← новое: маппинг ссылок → (code, label, comment)
+    link_to_metadata: dict = None,
     legislation: str = "44-ФЗ",
     procurement_method: str = "Конкурс",
     expertise_details: str = "Полный комплект документов о закупке"
 ):
+    # === 1. Очистка старых данных ===
+    try:
+        delete_procurement_data(procurement_id)
+        logger.info(f"Запись в БД удалена {procurement_id}")
+    except:
+        logger.info(f"Запись в БД не существует {procurement_id}")
+
     documents_results = []
     document_analysis_results = {}
     all_links = (links or []) + ([eis_links] if eis_links else [])
@@ -287,9 +294,9 @@ def evaluate_documents_task(
                             "conclusion": conclusion,
                             "source": file_info.get("source", "external_link"),
                             "original_link": link,
-                            "document_code": doc_code,
-                            "document_label": doc_label,
-                            "comment": comment
+                            "document_code": doc_code,  # Сохраняем код из link_to_metadata
+                            "document_label": doc_label,  # Сохраняем label из link_to_metadata
+                            "comment": comment  # Сохраняем комментарий из link_to_metadata
                         })
 
                     except Exception as e:
@@ -359,7 +366,10 @@ def evaluate_documents_task(
         raise ValueError("Нет данных для анализа")
 
     final_evaluation_result = run_async(check_completeness_with_ai(
-        procurement_id, expertise_customer=expertise_customer, eis_links=eis_links
+        procurement_id, 
+        expertise_customer=expertise_customer,
+        legislation_type=legislation,
+        procurement_method=procurement_method
     ))
 
     save_clean_conclusion(

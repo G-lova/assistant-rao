@@ -1,383 +1,325 @@
 import os
 import json
+import tempfile
+import requests
+import time
+from typing import List, Dict, Any
 
 import gradio as gr
-import requests
 from dotenv import load_dotenv
-from typing import Dict, Any, List
+
+from utils import (
+    get_document_code_by_label,
+    format_final_response
+)
+from procurement_requirements import DOCUMENT_CODE_TO_LABEL
 
 
 load_dotenv()
 
 
-# Загрузка переменных окружения
 API_ACCESS = os.getenv("API_ACCESS")
 API_KEY = os.getenv("API_KEY")
 
-# Данные для аутентификации
-#AUTH_USERNAME = os.getenv("GRADIO_USERNAME")  # Логин по умолчанию
-#AUTH_PASSWORD = os.getenv("GRADIO_PASSWORD")  # Пароль по умолчанию
+if not API_ACCESS or not API_KEY:
+    raise ValueError("Переменные окружения API_ACCESS и API_KEY обязательны")
 
 
-#def authenticate(username: str, password: str) -> bool:
-#    """Проверяет правильность логина и пароля"""
-#    return username == AUTH_USERNAME and password == AUTH_PASSWORD
+# === Импортируем справочник из configs ===
+LABEL_TO_CODE = {v: k for k, v in DOCUMENT_CODE_TO_LABEL.items()}
+DOCUMENT_LABELS = sorted(DOCUMENT_CODE_TO_LABEL.values())
 
 
-def call_evaluation_api(procurement_id: str, files, legislation: str, procurement_method: str, expertise_details: str) -> Dict[Any, Any]:
+def add_document_to_list(
+    current_media: str,
+    selected_doc: str,
+    file_obj,
+    doc_link: str,
+    comment: str
+) -> tuple:
     """
-    Вызывает внешнее API для анализа загруженных документов по закупке.
+    Добавляет или обновляет документ в списке прикреплённых материалов в формате JSON.
+
+    Принимает текущий список документов (в виде JSON-строки), тип выбранного документа,
+    загруженный файл, ссылку и комментарий, определяет код документа по его названию,
+    формирует новую запись и либо заменяет существующую с тем же кодом, либо добавляет как новую.
+    Возвращает обновлённый список в виде JSON-строки (два одинаковых значения для совместимости с Gradio).
+
+    Args:
+        current_media (str): Текущий список документов в формате JSON-строки (может быть пустым).
+        selected_doc (str): Название выбранного типа документа (например, "Извещение").
+        file_obj (_type_): Объект загруженного файла (ожидается атрибут name и существующий путь).
+        doc_link (str): Ссылка на документ в облаке (опционально).
+        comment (str): Комментарий к документу (опционально).
+
+    Returns:
+        tuple: Кортеж из двух одинаковых строк — обновлённого JSON-списка документов.
     """
-    if not procurement_id.strip():
-        return {"error": "ID закупки обязателен"}
-    
-    if not files:
-        return {"error": "Не загружено ни одного файла"}
+    if not selected_doc:
+        return current_media, current_media
 
     try:
-        # Правильно подготавливаем файлы для отправки
-        file_list = []
-        for f in files:
-            if hasattr(f, 'name') and os.path.exists(f.name):
-                # Получаем MIME-type на основе расширения файла
-                filename = os.path.basename(f.name)
-                file_extension = os.path.splitext(filename)[1].lower()
-                
-                # Определяем content_type на основе расширения
-                content_type = "application/octet-stream"  # по умолчанию
-                if file_extension in ['.pdf']:
-                    content_type = 'application/pdf'
-                elif file_extension in ['.doc', '.docx']:
-                    content_type = 'application/msword'
-                elif file_extension in ['.xls', '.xlsx']:
-                    content_type = 'application/vnd.ms-excel'
-                elif file_extension in ['.jpg', '.jpeg']:
-                    content_type = 'image/jpeg'
-                elif file_extension == '.png':
-                    content_type = 'image/png'
-                elif file_extension == '.txt':
-                    content_type = 'text/plain'
-                
-                file_list.append(("files", (filename, open(f.name, "rb"), content_type)))
-        
-        if not file_list:
-            return {"error": "Нет валидных файлов для отправки"}
-        
-        data = {
+        current_list = json.loads(current_media) if current_media else []
+    except json.JSONDecodeError:
+        current_list = []
+
+    code = LABEL_TO_CODE.get(selected_doc, "unknown")
+
+    files_list = []
+    if file_obj and hasattr(file_obj, 'name') and os.path.exists(file_obj.name):
+        files_list = [os.path.basename(file_obj.name)]
+
+    links_list = []
+    if doc_link and doc_link.strip():
+        links_list = [doc_link.strip()]
+
+    new_item = {
+        "code": code,
+        "name": selected_doc,
+        "links": links_list,
+        "files": files_list,
+        "comment": comment or ""
+    }
+
+    for i, item in enumerate(current_list):
+        if item["code"] == code:
+            current_list[i] = new_item
+            break
+    else:
+        current_list.append(new_item)
+
+    json_str = json.dumps(current_list, ensure_ascii=False)
+    return json_str, json_str
+
+
+def clear_document_list():
+    return "", ""
+
+
+def process_evaluation(
+    procurement_id: str,
+    legislation: str,
+    procurement_method: str,
+    organization: str,
+    eis_link: str,
+    media_json: str,
+    files: list
+):
+    """
+    Запускает и отслеживает процесс комплексной экспертизы документов закупки через внешний API.
+
+    Выполняет валидацию входных данных, формирует multipart-запрос с файлами и метаданными,
+    отправляет задачу на обработку, а затем опрашивает статус выполнения до завершения,
+    ошибки или таймаута. Поддерживает ассоциацию файлов с кодами из media_json и корректное
+    закрытие ресурсов. Возвращает промежуточные и финальные сообщения через генератор.
+
+    Args:
+        procurement_id (str): Уникальный идентификатор закупки.
+        legislation (str): Тип законодательства (например, "44-ФЗ").
+        procurement_method (str): Способ закупки (например, "Конкурс").
+        organization (str): Наименование заказчика.
+        eis_link (str): Ссылка на закупку в ЕИС (опционально).
+        media_json (str): JSON-строка с описанием медиафайлов и их кодов (опционально).
+        files (list): Список объектов файлов для загрузки (например, из Gradio.File).
+
+    Returns:
+        _type_: Не возвращает напрямую (используется yield). Конечный результат — кортеж из
+            строки с сообщением и словаря с данными.
+
+    Yields:
+        _type_: Последовательность кортежей (сообщение: str, данные: dict), отражающих
+            текущий статус обработки: запуск задачи, ожидание, ошибка или финальный результат.
+    """
+    if not procurement_id.strip():
+        return "❌ Укажите ID закупки", {}
+    if not organization.strip():
+        return "❌ Укажите заказчика", {}
+    if not files and not media_json:
+        return "❌ Загрузите хотя бы один документ или укажите ссылку", {}
+
+    try:
+        # === 1. Подготовка файлов с префиксами code___filename ===
+        file_objects = []
+        if files:
+            for f in files:
+                if not hasattr(f, 'name') or not os.path.exists(f.name):
+                    continue
+                orig_name = os.path.basename(f.name)
+                code = "unknown"
+                try:
+                    media_list = json.loads(media_json) if media_json else []
+                    for item in media_list:
+                        if orig_name in [os.path.basename(p) for p in item.get("files", [])]:
+                            code = item["code"]
+                            break
+                except:
+                    pass
+                prefixed_name = f"{code}___{orig_name}"
+                file_objects.append(("files", (prefixed_name, open(f.name, "rb"), "application/octet-stream")))
+
+        # === 2. Отправка задачи ===
+        form_data = {
             "procurement_id": procurement_id,
-            "legislation": legislation,
-            "procurement_method": procurement_method,
-            "expertise_details": expertise_details
+            "type": legislation,
+            "checkType2": procurement_method,
+            "object": "Закупки",
+            "users.organization": organization,
+            "linkDocs": eis_link or "",
+            "media_json": media_json or "[]"
         }
 
         headers = {"X-API-Key": API_KEY}
-        
-        print(f"🔍 Отправка запроса на {API_ACCESS}/evaluate-documents")
-        print(f"🔍 Количество файлов: {len(file_list)}")
-        print(f"🔍 Данные: {data}")
 
         response = requests.post(
             f"{API_ACCESS}/evaluate-documents",
-            files=file_list,
-            data=data,
+            files=file_objects,
+            data=form_data,
             headers=headers,
-            timeout=360
+            timeout=60
         )
 
-        # Закрываем файлы после отправки
-        for _, file_tuple in file_list:
-            filename, file_obj, content_type = file_tuple
-            file_obj.close()
+        # Закрываем файлы
+        for _, (_, f_obj, _) in file_objects:
+            f_obj.close()
 
-        print(f"🔍 Статус ответа: {response.status_code}")
-
-        if response.status_code == 200:
+        if response.status_code != 200:
             try:
-                return response.json()
-            except json.JSONDecodeError as e:
-                print(f"🔍 Ошибка парсинга JSON: {e}")
-                print(f"🔍 Ответ сервера: {response.text[:500]}")
-                return {"error": f"Ошибка парсинга JSON ответа: {str(e)}"}
-        else:
-            try:
-                error_detail = response.json().get("detail", response.text)
+                err = response.json().get("detail", response.text)
             except:
-                error_detail = response.text
-            print(f"🔍 Ошибка API: {response.status_code} - {error_detail}")
-            return {"error": f"Ошибка API: {response.status_code} – {error_detail}"}
+                err = response.text
+            return f"❌ Ошибка запуска задачи: {response.status_code} — {err}", {"error": err}
+
+        task_info = response.json()
+        task_id = task_info.get("task_id")
+        if not task_id:
+            return "❌ Не получен task_id", {"error": "Не получен task_id"}
+
+        yield "🚀 Задача запущена. Ожидание результата...", {"status": "processing", "task_id": task_id}
+
+        # === 3. Polling результата ===
+        polling_url = f"{API_ACCESS}/task/{task_id}"
+        max_wait = 600  # 10 минут
+        poll_interval = 5  # секунд
+        waited = 0
+
+        while waited < max_wait:
+            time.sleep(poll_interval)
+            waited += poll_interval
+
+            try:
+                result_resp = requests.get(polling_url, headers=headers, timeout=10)
+                if result_resp.status_code == 200:
+                    task_result = result_resp.json()
+                    if task_result.get("status") == "completed":
+                        final_result = task_result.get("result", {})
+                        if isinstance(final_result, str):
+                            try:
+                                final_result = json.loads(final_result)
+                            except:
+                                pass
+                        formatted = format_final_response(final_result)
+                        yield formatted, final_result
+                        return
+                    elif task_result.get("status") in ("pending", "started", "retrying"):
+                        yield f"⏳ Задача в обработке... ({waited}/{max_wait} сек)", {"status": "processing", "waited": waited}
+                        continue
+                    elif task_result.get("status") == "failed":
+                        error_detail = task_result.get("error", "Неизвестная ошибка")
+                        yield f"❌ Задача завершилась с ошибкой: {error_detail}", {"error": error_detail}
+                        return
+                else:
+                    yield f"⚠️ Ошибка опроса статуса: {result_resp.status_code}", {"error": "polling_error"}
+
+            except Exception as e:
+                yield f"⚠️ Исключение при опросе: {str(e)}", {"error": str(e)}
+
+        # Таймаут
+        yield f"❌ Превышено время ожидания результата ({max_wait} сек)", {"error": "timeout"}
 
     except Exception as e:
-        print(f"🔍 Исключение при вызове API: {str(e)}")
         import traceback
         traceback.print_exc()
-        return {"error": f"Ошибка соединения: {str(e)}"}
+        yield f"❌ Исключение: {str(e)}", {"error": str(e)}
 
 
-def format_documents_output(api_response: Dict) -> str:
-    """
-    Форматирует вывод документов для красивого отображения в Gradio.
-    """
-    if "error" in api_response:
-        return f"❌ Ошибка: {api_response['error']}"
-    
-    output_parts = []
-    
-    # Заголовок
-    output_parts.append(f"## 📋 Результаты анализа закупки: {api_response.get('procurement_id', 'N/A')}")
-    output_parts.append("")
-    
-    # Раздел по документам
-    output_parts.append("### 📄 Анализ документов")
-    documents = api_response.get("documents", [])
-    
-    if not documents:
-        output_parts.append("Нет данных о документах")
-    else:
-        for i, doc in enumerate(documents, 1):
-            status_emoji = "✅" if doc.get("is_valid") else "❌"
-            output_parts.append(f"**{i}. {doc.get('filename', 'N/A')}** {status_emoji}")
-            output_parts.append(f"   - **Тип:** {doc.get('document_type', 'N/A')}")
-            output_parts.append(f"   - **Статус:** {'Валиден' if doc.get('is_valid') else 'Невалиден'}")
-            
-            if doc.get("error"):
-                output_parts.append(f"   - **Ошибка:** {doc['error']}")
-            
-            conclusion = doc.get('conclusion', 'N/A')
-            # Обрезаем длинное заключение
-            if len(conclusion) > 300:
-                conclusion = conclusion[:300] + "..."
-            output_parts.append(f"   - **Заключение:** {conclusion}")
-            output_parts.append("")
-    
-    # Общее заключение
-    overall_conclusion = api_response.get("overall_conclusion", "")
-    if overall_conclusion:
-        output_parts.append("### 📊 Общее заключение")
-        # Добавляем эмодзи для лучшей визуализации
-        overall_conclusion = overall_conclusion.replace("Обработано документов:", "✅ Обработано документов:")
-        overall_conclusion = overall_conclusion.replace("Комплект документов полный", "✅ Комплект документов полный")
-        overall_conclusion = overall_conclusion.replace("Данные согласованы", "✅ Данные согласованы")
-        overall_conclusion = overall_conclusion.replace("ИТОГ:", "\n\n📊 ИТОГ:")
-        output_parts.append(overall_conclusion)
-        output_parts.append("")
-    
-    # Сводка по комплектности
-    completeness = api_response.get("completeness_summary", {})
-    if completeness:
-        output_parts.append("### 📦 Проверка комплектности")
-        status_emoji = "✅" if completeness.get("status") == "allow" else "❌"
-        conclusion = completeness.get('conclusion', 'N/A')
-        conclusion = conclusion.replace("Комплект документов полный", "✅ Комплект документов полный")
-        conclusion = conclusion.replace("Комплект документов неполный", "❌ Комплект документов неполный")
-        output_parts.append(f"{status_emoji} **Статус:** {conclusion}")
-        
-        missing_docs = completeness.get("missing_documents", [])
-        if missing_docs:
-            output_parts.append("**Отсутствующие документы:**")
-            for doc in missing_docs:
-                output_parts.append(f"   - {doc}")
-        else:
-            output_parts.append("**Все необходимые документы присутствуют**")
-        output_parts.append("")
-    
-    # Сводка по согласованности
-    consistency = api_response.get("consistency_summary", {})
-    if consistency:
-        output_parts.append("### 🔍 Проверка согласованности")
-        status_emoji = "✅" if consistency.get("status") == "ok" else "⚠️"
-        conclusion = consistency.get('conclusion', 'N/A')
-        conclusion = conclusion.replace("Данные в документах согласованы", "✅ Данные в документах согласованы")
-        conclusion = conclusion.replace("Обнаружены расхождения", "❌ Обнаружены расхождения")
-        output_parts.append(f"{status_emoji} **Статус:** {conclusion}")
-        
-        issues = consistency.get("issues", [])
-        if issues:
-            output_parts.append("**Обнаруженные расхождения:**")
-            for issue in issues:
-                if isinstance(issue, dict):
-                    output_parts.append(f"   - **{issue.get('field', 'N/A')}:** {issue.get('details', 'N/A')}")
-                else:
-                    output_parts.append(f"   - {issue}")
-        else:
-            output_parts.append("**Расхождения не обнаружены**")
-    
-    return "\n".join(output_parts)
+# === Gradio Interface ===
 
-
-def safe_json_output(api_response: Dict) -> Dict:
-    """
-    Безопасно подготавливает данные для JSON вывода.
-    """
-    if "error" in api_response:
-        return {"error": api_response["error"]}
-    
-    try:
-        # Просто возвращаем оригинальный ответ, так как он уже валидный JSON
-        return api_response
-        
-    except Exception as e:
-        return {"error": f"Ошибка подготовки JSON: {str(e)}"}
-
-
-def process_evaluation(procurement_id: str, files, legislation: str, procurement_method: str, expertise_details: str):
-    """
-    Основная функция обработки для Gradio интерфейса.
-    """
-    if not procurement_id.strip():
-        return "❌ Введите ID закупки", {"message": "Введите ID закупки"}
-    
-    if not files:
-        return "❌ Загрузите хотя бы один документ", {"message": "Загрузите документы"}
-    
-    # Вызываем API
-    api_response = call_evaluation_api(procurement_id, files, legislation, procurement_method, expertise_details)
-    
-    # Проверяем на ошибки
-    if "error" in api_response:
-        error_msg = f"❌ Ошибка: {api_response['error']}"
-        return error_msg, {"error": api_response["error"]}
-    
-    # Форматируем вывод
-    formatted_output = format_documents_output(api_response)
-    json_output = safe_json_output(api_response)
-    
-    return formatted_output, json_output
-
-
-def clear_all():
-    """
-    Очищает все поля интерфейса.
-    """
-    return (
-        "",  # procurement_id
-        "44-ФЗ",  # legislation
-        "Конкурс",  # procurement_method
-        "Полный комплект документов о закупке",  # expertise_details
-        "## 📋 Результаты анализа\n\nЗагрузите документы для анализа...",  # output_text
-        {"message": "Готов к анализу"}  # json_output
-    )
-
-
-#def login(username: str, password: str):
-#    """Обработчик входа в систему"""
-#    if authenticate(username, password):
-#        return gr.update(visible=True), gr.update(visible=False), ""
-#    else:
-#        return gr.update(visible=False), gr.update(visible=True), "❌ Неверный логин или пароль"
-
-
-def logout():
-    """Обработчик выхода из системы"""
-    return gr.update(visible=False), gr.update(visible=True), ""
-
-
-# Создаем интерфейс Gradio
-with gr.Blocks(title="Эксперт по закупкам", theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="Анализ закупки", theme=gr.themes.Soft()) as demo:
     gr.Markdown("# 📄 Анализ комплекта документов закупки")
-    gr.Markdown("Загрузите документы закупки для автоматического анализа комплектности и согласованности.")
 
     with gr.Row():
-        with gr.Column(scale=1):
-            gr.Markdown("### ⚙️ Параметры закупки")
+        procurement_id = gr.Textbox(label="ID закупки *", placeholder="PR_12345")
+        organization = gr.Textbox(label="Заказчик (организация) *")
+        legislation = gr.Dropdown(label="Законодательство *", choices=["44-ФЗ", "223-ФЗ"], value="44-ФЗ")
+        procurement_method = gr.Dropdown(
+            label="Способ закупки *",
+            choices=["Конкурс", "Аукцион", "Запрос котировок", "Закупка у единственного поставщика"],
+            value="Конкурс"
+        )
+        eis_link = gr.Textbox(label="Ссылка на ЕИС (опционально)")
 
-            procurement_id = gr.Textbox(
-                label="ID закупки *",
-                placeholder="Введите уникальный ID закупки...",
-                value="PR_12345"
-            )
+    gr.Markdown("### ➕ Добавить документ")
 
-            legislation = gr.Dropdown(
-                label="Законодательство *",
-                choices=["44-ФЗ", "223-ФЗ"],
-                value="44-ФЗ"
-            )
+    with gr.Row():
+        available_docs = gr.Dropdown(
+            label="Выберите документ",
+            choices=DOCUMENT_LABELS,
+            value=None,
+            interactive=True
+        )
+        doc_file = gr.File(label="Файл")
+        doc_link = gr.Textbox(label="Ссылка на документ")
+        doc_comment = gr.Textbox(label="Комментарий")
 
-            procurement_method = gr.Dropdown(
-                label="Способ закупки *",
-                choices=["Конкурс", "Аукцион", "Запрос котировок", "Закупка у единственного поставщика"],
-                value="Конкурс"
-            )
+    with gr.Row():
+        add_btn = gr.Button("➕ Добавить")
+        clear_btn = gr.Button("🗑️ Очистить список")
 
-            expertise_details = gr.Dropdown(
-                label="Тип экспертизы *",
-                choices=[
-                    "Полный комплект документов о закупке",
-                    "Описание объекта закупки",
-                    "Обоснование начальной (максимальной) цены контракта"
-                ],
-                value="Полный комплект документов о закупке"
-            )
+    media_json_state = gr.State("")
+    current_media_display = gr.JSON(label="Текущий комплект документов")
 
-            upload_btn = gr.UploadButton(
-                "📤 Загрузить документы",
-                file_count="multiple",
-                file_types=[".pdf", ".docx", ".doc", ".xls", ".xlsx", ".jpg", ".jpeg", ".png"]
-            )
+    add_btn.click(
+        add_document_to_list,
+        inputs=[media_json_state, available_docs, doc_file, doc_link, doc_comment],
+        outputs=[media_json_state, current_media_display]
+    )
 
-            with gr.Row():
-                submit_btn = gr.Button("🚀 Начать анализ", variant="primary")
-                clear_btn = gr.Button("🧹 Очистить", variant="secondary")
+    clear_btn.click(clear_document_list, outputs=[media_json_state, current_media_display])
 
-        with gr.Column(scale=2):
-            gr.Markdown("### 📊 Результаты анализа")
-
-            with gr.Tab("📋 Форматированный отчет"):
-                output_text = gr.Markdown(
-                    value="## 📋 Результаты анализа\n\nЗагрузите документы для анализа..."
-                )
-
-            with gr.Tab("🔧 Сырые данные (JSON)"):
-                json_output = gr.JSON(
-                    value={"message": "Результаты появятся здесь после анализа..."}
-                )
-
-    # Информационный блок
     gr.Markdown("---")
-    with gr.Accordion("ℹ️ Информация о системе", open=False):
-        gr.Markdown("""
-        **Возможности системы:**
+    submit_btn = gr.Button("🚀 Запустить анализ", variant="primary")
 
-        - ✅ Автоматическое определение типов документов
-        - ✅ Проверка комплектности документов
-        - ✅ Анализ согласованности данных между документами
-        - ✅ Формирование детального заключения по каждому документу
-        - ✅ Общая оценка комплекта документов
+    with gr.Tabs():
+        with gr.Tab("📋 Отчёт"):
+            output_text = gr.Markdown(value="Результат появится здесь...")
+        with gr.Tab("🔧 JSON"):
+            json_output = gr.JSON()
 
-        **Поддерживаемые форматы:** PDF, DOCX, DOC, XLS, XLSX, JPG, JPEG, PNG
+    # Для сбора файлов
+    upload_for_api = gr.File(file_count="multiple", visible=False)
 
-        **Пример ID закупки:** PR_12345
-        """)
-
-    # Обработчики событий
     submit_btn.click(
         fn=process_evaluation,
-        inputs=[procurement_id, upload_btn, legislation, procurement_method, expertise_details],
+        inputs=[
+            procurement_id,
+            legislation,
+            procurement_method,
+            organization,
+            eis_link,
+            media_json_state,
+            upload_for_api
+        ],
         outputs=[output_text, json_output]
     )
 
-    clear_btn.click(
-        fn=clear_all,
-        inputs=[],
-        outputs=[procurement_id, legislation, procurement_method, expertise_details, output_text, json_output]
-    )
+    # Синхронизируем загруженные файлы
+    upload_for_api.change(lambda x: x, upload_for_api, upload_for_api)
 
 
 if __name__ == "__main__":
-    print("🚀 Запуск Gradio интерфейса на порту 20141...")
-    print(f"🔍 API endpoint: {API_ACCESS}")
-    print(f"🔍 API key: {'установлен' if API_KEY else 'отсутствует'}")
-    
-#    # Проверка наличия учётных данных
-#    if not AUTH_USERNAME or not AUTH_PASSWORD:
-#        raise ValueError("❌ Переменные GRADIO_USERNAME и GRADIO_PASSWORD должны быть заданы в .env")
-#
-#    print(f"🔐 Требуется аутентификация: {AUTH_USERNAME} / [пароль скрыт]")
-
-    # Включаем встроенную аутентификацию Gradio
+    demo.queue()
     demo.launch(
         server_name="0.0.0.0",
         server_port=20141,
-        share=False,
-        show_error=True,
-#        auth=(AUTH_USERNAME, AUTH_PASSWORD)
+        show_error=True
     )

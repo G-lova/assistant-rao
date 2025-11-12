@@ -878,25 +878,31 @@ def create_summary_report(
         }
     }
     
-    # Собираем данные из всех документов (исключая conclusion, readability, type_compliance)
-    for doc_name, analysis in document_analysis_results.items():
-        doc_summary = {}
+    # Собираем данные из ВСЕХ документов с сохранением document_code и document_label
+    for doc_result in documents_results:
+        doc_name = doc_result["filename"]
+        doc_summary = {
+            # Сохраняем ВСЕ метаданные из эндпойнта
+            "document_code": doc_result.get("document_code", "unknown"),
+            "document_label": doc_result.get("document_label", "Неизвестный документ"),
+            "document_type": doc_result.get("document_type", "Дополнительные материалы"),
+            "source": doc_result.get("source", "unknown"),
+            "is_valid": doc_result.get("is_valid", False),
+            "error": doc_result.get("error"),
+            "conclusion": doc_result.get("conclusion"),
+            "comment": doc_result.get("comment")
+        }
         
-        # Извлекаем только raw_data и другую полезную информацию
-        if "raw_data" in analysis:
-            raw_data = analysis["raw_data"].copy()
-            
-            # Очищаем данные от ненужных полей если они есть
-            raw_data.pop("conclusion", None)
-            raw_data.pop("readability", None)
-            raw_data.pop("type_compliance", None)
-            
-            doc_summary["raw_data"] = raw_data
-        
-        # Добавляем информацию о документе
-        doc_info = next((doc for doc in documents_results if doc["filename"] == doc_name), {})
-        doc_summary["document_type"] = doc_info.get("document_type", "Дополнительные материалы")
-        doc_summary["is_valid"] = doc_info.get("is_valid", False)
+        # Добавляем анализ если он есть
+        if doc_name in document_analysis_results:
+            analysis = document_analysis_results[doc_name]
+            doc_summary.update({
+                "analysis_status": analysis.get("status", "unknown"),
+                "type_compliance": analysis.get("analysis", {}).get("type_compliance", {}),
+                "readability": analysis.get("analysis", {}).get("readability", {}),
+                "raw_data": analysis.get("analysis", {}).get("raw_data", {}),
+                "analysis_conclusion": analysis.get("analysis", {}).get("conclusion", "")
+            })
         
         summary["documents_summary"][doc_name] = doc_summary
     
@@ -905,26 +911,39 @@ def create_summary_report(
     all_amounts = []
     all_legal_entities = []
     all_law_references = []
+    all_document_codes = []
+    all_document_labels = []
     
     for doc_name, analysis in document_analysis_results.items():
         raw_data = analysis.get("raw_data", {})
+        
+        # Собираем метаданные документов
+        doc_result = next((doc for doc in documents_results if doc["filename"] == doc_name), {})
+        all_document_codes.append({
+            "document_code": doc_result.get("document_code", "unknown"),
+            "document_label": doc_result.get("document_label", "Неизвестный документ"),
+            "filename": doc_name
+        })
         
         # Собираем даты
         if "dates" in raw_data:
             for date_info in raw_data["dates"]:
                 date_info["source_document"] = doc_name
+                date_info["document_code"] = doc_result.get("document_code", "unknown")
                 all_dates.append(date_info)
         
         # Собираем суммы
         if "amounts" in raw_data:
             for amount_info in raw_data["amounts"]:
                 amount_info["source_document"] = doc_name
+                amount_info["document_code"] = doc_result.get("document_code", "unknown")
                 all_amounts.append(amount_info)
         
         # Собираем юридические лица
         if "legal_entities" in raw_data:
             for entity_info in raw_data["legal_entities"]:
                 entity_info["source_document"] = doc_name
+                entity_info["document_code"] = doc_result.get("document_code", "unknown")
                 all_legal_entities.append(entity_info)
         
         # Собираем ссылки на законодательство
@@ -932,7 +951,8 @@ def create_summary_report(
             for law_ref in raw_data["law_references"]:
                 all_law_references.append({
                     "reference": law_ref,
-                    "source_document": doc_name
+                    "source_document": doc_name,
+                    "document_code": doc_result.get("document_code", "unknown")
                 })
     
     # Добавляем агрегированные данные в сводный отчет
@@ -940,18 +960,34 @@ def create_summary_report(
         "dates": all_dates,
         "amounts": all_amounts,
         "legal_entities": all_legal_entities,
-        "law_references": all_law_references
+        "law_references": all_law_references,
+        "document_metadata": all_document_codes
     }
     
-    # Добавляем статистику
+    # Добавляем расширенную статистику
     summary["statistics"] = {
         "total_documents": len(documents_results),
         "valid_documents": len([doc for doc in documents_results if doc.get("is_valid")]),
         "invalid_documents": len([doc for doc in documents_results if not doc.get("is_valid")]),
         "unique_document_types": list(set(doc.get("document_type", "Дополнительные материалы") for doc in documents_results)),
+        "unique_document_codes": list(set(doc.get("document_code", "unknown") for doc in documents_results)),
         "total_amounts_found": len(all_amounts),
         "total_dates_found": len(all_dates),
-        "total_legal_entities_found": len(all_legal_entities)
+        "total_legal_entities_found": len(all_legal_entities),
+        "sources_breakdown": {
+            "uploaded_files": len([doc for doc in documents_results if doc.get("source") == "uploaded_file"]),
+            "external_links": len([doc for doc in documents_results if doc.get("source") == "external_link"]),
+            "eis_data": len([doc for doc in documents_results if doc.get("source") == "eis_data"])
+        }
     }
     
+    # Добавляем финальную оценку если есть
+    if completeness_check:
+        summary["final_evaluation"] = {
+            "overall_status": completeness_check.get("overall_status"),
+            "overall_summary": completeness_check.get("overall_summary"),
+            "evaluation_timestamp": pd.Timestamp.now().isoformat()
+        }
+    
+    logger.info(f"Сформирован summary_report для {procurement_id}. Документов: {len(documents_results)}, Кодов: {len(all_document_codes)}")
     return summary
