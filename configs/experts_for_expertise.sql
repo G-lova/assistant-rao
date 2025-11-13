@@ -39,10 +39,7 @@ WITH expertise_info AS (
 			WHEN e.`object` IN (5,6) THEN 'Закупочная деятельность'
 		END AS experienceExpertise_direction,
 		e.`type`,
-		CASE 
-			WHEN e.regionExpertise IS NULL THEN 'Экспертиза отчетов'
-			ELSE e.regionExpertise
-		END AS expertise_regionExpertise, 
+		COALESCE(e.regionExpertise, 'Экспертиза отчетов') AS expertise_regionExpertise,
 		REGEXP_REPLACE(
 			CONCAT_WS(' ', LOWER(e.subjectContract), 
 				LOWER(e.directionContract), 
@@ -418,7 +415,7 @@ WITH expertise_info AS (
 	AND u.status = 3 
 	AND u.deleted_at IS NULL 
 	AND u.inn != '' AND CAST(SUBSTRING(u.inn, 1, 2) AS UNSIGNED) != 0 AND LOWER(u.name) NOT LIKE '%тест%' AND LOWER(u.name) NOT LIKE '%test%' 
-	AND u.workExpertise != 0
+	AND COALESCE(u.workExpertise, (SELECT value FROM settings WHERE `key` IN ('max_applications_per_expert'))) > 0
 	GROUP BY u.id
 ), 
 expert_declines AS (
