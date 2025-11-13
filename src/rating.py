@@ -13,7 +13,7 @@ project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
 
 
-def rating():
+def rating(start_date, end_date, x_api_database):
     """
     Запускает пайплайн оценки экспертов для заданной экспертизы.
 
@@ -37,15 +37,15 @@ def rating():
         logger.info("Starting rating pipeline...")
         
         # Создание пайплайна
-        pipeline = RatingPipeline()
+        pipeline = RatingPipeline(x_api_database)
         
         # Параметры запуска
         sql_file_name = "experts_rating.sql"
         
-        logger.info("Processing rating pipeline...")
+        logger.info(f"Processing {start_date}-{end_date} rating pipeline...")
         
         # Запуск пайплайна и получение результатов
-        ratings = pipeline.get_experts_rating(sql_file_name)
+        ratings = pipeline.get_experts_rating(sql_file_name, start_date, end_date)
         
         logger.info("Rating pipeline completed successfully")
         
@@ -56,7 +56,7 @@ def rating():
         output_dir = os.path.join(project_root, "data", "outputs")
         os.makedirs(output_dir, exist_ok=True)
 
-        output_file = os.path.join(output_dir, f"rating_results_{date.today()}.json")
+        output_file = os.path.join(output_dir, f"{start_date}_{end_date}_rating_results_{date.today()}.json")
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump(ratings, f, ensure_ascii=False, indent=2)
         
@@ -70,4 +70,6 @@ def rating():
 
 if __name__ == "__main__":
 
+    start_date = input('Дата начала интервала:')
+    end_date = input('Дата окончания интервала:')
     rating()

@@ -42,7 +42,7 @@ def scoring(expertise_id, x_api_database):
         # Параметры запуска
         sql_file_name = "experts_for_expertise.sql"
         
-        logger.info(f"Processing expertise_id: {expertise_id}")
+        logger.info(f"Processing expertise_id: {expertise_id}, DB: {x_api_database}")
         
         # Запуск пайплайна
         df = pipeline.run_pipeline(sql_file_name, expertise_id)

@@ -384,7 +384,7 @@ class RatingPipeline:
             return {}
 
 
-    def get_experts_rating(self, sql_file_path: str):
+    def get_experts_rating(self, sql_file_path: str, start_date, end_date):
         """
         Запускает полный конвейер получения рейтингов экспертов и сохраняет результат в файл.
 
@@ -403,7 +403,7 @@ class RatingPipeline:
         sql_query = self.load_sql_query(sql_file_path)
         
         # Получение данных с рассчитанными рейтингами
-        df = self.data_fetcher.fetch_expertise_data(sql_query, bindings=[])
+        df = self.data_fetcher.fetch_expertise_data(sql_query, bindings=[start_date, end_date, start_date, end_date, start_date, end_date, start_date, end_date, start_date, end_date])
         
         # Преобразование данных в словарь
         ratings = self.to_rating_dict(df)

@@ -240,6 +240,7 @@ async def get_experts_for_expertise(
 
 @app.post("/get-experts-rating")
 async def get_experts_rating(
+    request_body: Dict[str, str] = Body(...),
     x_api_database: str = Header(default="dev", alias="X-API-Database")
 ):
     """
@@ -256,11 +257,23 @@ async def get_experts_rating(
         dict: Словарь, где ключ — идентификатор эксперта, значение — рейтинг.
     """
     try:
-        results = rating()
+        start_date = request_body.get("start_date")
+        end_date = request_body.get("end_date")
 
-        logger.info(f"Успешно получено {len(results)} рейтингов экспертов (DB: {x_api_database})")
+        if not start_date or not end_date:
+            raise HTTPException(
+                status_code=400,
+                detail="Указание временного периода обязательно"
+            )
 
-        return results
+        # Вызываем бизнес-логику (например, метод rating)
+        ratings = rating(start_date, end_date, x_api_database)
+
+        logger.info(
+            f"Успешно Получено {len(ratings)} рейтингов экспертов (DB: {x_api_database}, период: {start_date}–{end_date})"
+        )
+
+        return ratings
 
     except Exception as e:
         logger.error(f"Ошибка при получении рейтингов экспертов: {e}", exc_info=True)
