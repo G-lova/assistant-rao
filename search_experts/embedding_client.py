@@ -70,7 +70,7 @@ class EmbeddingClient:
             List[List[float]]: Список векторов эмбеддингов
         """
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "X-API-Key": f"{self.api_key}",
             "Content-Type": "application/json"
         }
         
@@ -82,8 +82,8 @@ class EmbeddingClient:
             input_data = texts
         
         payload = {
-            "model": self.model,
-            "input": input_data
+            # "model": self.model,
+            "inputs": input_data
         }
         
         logger.info(f"Sending request to {self.api_url}")
