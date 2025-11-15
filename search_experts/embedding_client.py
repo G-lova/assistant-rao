@@ -76,10 +76,11 @@ class EmbeddingClient:
         
         # Для Ollama API используем правильный формат payload
         # Если один текст, отправляем как строку, если несколько - как список
-        if len(texts) == 1:
-            input_data = texts[0]
-        else:
-            input_data = texts
+        # if len(texts) == 1:
+        #     input_data = texts[0]
+        # else:
+        #     input_data = texts
+        input_data = texts
         
         payload = {
             # "model": self.model,
