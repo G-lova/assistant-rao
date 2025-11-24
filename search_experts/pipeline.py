@@ -262,7 +262,7 @@ class ScoringPipeline:
             sql_query = self.load_sql_query(sql_file_path)
             
             # Получение данных
-            df = self.data_fetcher.fetch_expertise_data(sql_query, bindings=[expertise_id])
+            df = self.data_fetcher.fetch_expertise_data(sql_query, bindings=[expertise_id, expertise_id, expertise_id])
             
             # Предобработка
             df = self.preprocess_data(df)

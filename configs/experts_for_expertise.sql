@@ -67,7 +67,7 @@ WITH expertise_info AS (
 	FROM expertises e
 	JOIN users u
 	ON e.user_id = u.id
-	WHERE e.id = :expertise_id
+	WHERE e.id = ?
 ), expertise_with_coords AS (
 	SELECT
 		*,
@@ -416,6 +416,11 @@ WITH expertise_info AS (
 	AND u.deleted_at IS NULL 
 	AND u.inn != '' AND CAST(SUBSTRING(u.inn, 1, 2) AS UNSIGNED) != 0 AND LOWER(u.name) NOT LIKE '%тест%' AND LOWER(u.name) NOT LIKE '%test%' 
 	AND COALESCE(u.workExpertise, (SELECT value FROM settings WHERE `key` IN ('max_applications_per_expert'))) > 0
+	AND u.id NOT IN ((SELECT expert_id 
+					FROM (SELECT d.id, de.expert_id FROM expertises d JOIN JSON_TABLE(d.experts, "$[*]" COLUMNS (expert_id INT PATH "$")) de
+                    WHERE d.status IN (2) AND d.id = ?) requests)
+    				UNION 
+    				(SELECT ee.expert_id FROM expertise_experts ee JOIN expertises e ON e.id = ee.expertise_id WHERE e.status IN (3) AND ee.expertise_id = ?))
 	GROUP BY u.id
 ), 
 expert_declines AS (
