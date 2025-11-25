@@ -159,9 +159,12 @@ class Config:
         """
         Возвращает конфигурацию сервиса эмбеддингов.
         """
+        # Если API ключ не задан, используем значение по умолчанию или пустую строку
+        api_key = cls.EMBEDDING_API_KEY if cls.EMBEDDING_API_KEY else ""
+        
         return EmbeddingConfig(
             api_url=cls.EMBEDDING_URL,
-            api_key=cls.EMBEDDING_API_KEY,
+            api_key=api_key,
             model = cls.EMBEDDING_MODEL,
             batch_size=cls.BATCH_SIZE
         )

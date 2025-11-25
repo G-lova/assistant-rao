@@ -70,22 +70,32 @@ class EmbeddingClient:
             List[List[float]]: Список векторов эмбеддингов
         """
         headers = {
-            "X-API-Key": f"{self.api_key}",
             "Content-Type": "application/json"
         }
         
+        # Добавляем API ключ только если он не пустой
+        if self.api_key:
+            headers["X-API-Key"] = f"{self.api_key}"
+        
         # Для Ollama API используем правильный формат payload
         # Если один текст, отправляем как строку, если несколько - как список
-        # if len(texts) == 1:
-        #     input_data = texts[0]
-        # else:
-        #     input_data = texts
-        input_data = texts
+        if len(texts) == 1:
+            input_data = texts[0]
+        else:
+            input_data = texts
         
+        # Пробуем разные форматы payload для совместимости
+        # Формат 1: стандартный OpenAI
         payload = {
             "model": self.model,
             "input": input_data
         }
+        
+        # Если предыдущий формат не сработает, пробуем альтернативный
+        # payload = {
+        #     "model": self.model,
+        #     "prompt": input_data if len(texts) == 1 else input_data
+        # }
         
         logger.info(f"Sending request to {self.api_url}")
         logger.info(f"Model: {self.model}")
@@ -93,44 +103,101 @@ class EmbeddingClient:
         logger.info(f"Request headers: {headers}")
         logger.info(f"Request payload keys: {list(payload.keys())}")
         
-        try:
-            with httpx.Client(timeout=30.0) as client:
-                response = client.post(
-                    self.api_url,
-                    json=payload,
-                    headers=headers
-                )
-                
-                logger.info(f"Response status: {response.status_code}")
-                logger.info(f"Response headers: {dict(response.headers)}")
-                
-                if response.status_code != 200:
-                    logger.error(f"Error response: {response.text}")
-                    response.raise_for_status()
-                
-                response_data = response.json()
-                logger.info(f"Response data keys: {list(response_data.keys())}")
-                
-                # Проверяем структуру ответа от Ollama API
-                if "embedding" in response_data:
-                    # Одиночный эмбеддинг
-                    logger.info(f"Found single embedding in response")
-                    return [response_data["embedding"]]
-                elif "embeddings" in response_data:
-                    # Множественные эмбеддинги
-                    logger.info(f"Found embeddings in response, count: {len(response_data['embeddings'])}")
-                    return response_data["embeddings"]
-                elif "data" in response_data:
-                    # Формат ответа как у OpenAI
-                    logger.info(f"Found data in response, count: {len(response_data['data'])}")
-                    return [item["embedding"] for item in response_data["data"]]
-                else:
-                    logger.error(f"Unexpected response format: {response_data}")
-                    raise KeyError("No embeddings found in response")
+        # Добавляем логирование размера данных для отладки
+        total_chars = sum(len(text) for text in texts)
+        logger.info(f"Total characters in texts: {total_chars}")
+        logger.info(f"Average characters per text: {total_chars / len(texts) if texts else 0}")
+        
+        # Логируем первые 100 символов каждого текста для отладки
+        for i, text in enumerate(texts[:3]):  # Логируем только первые 3 текста
+            logger.info(f"Text {i+1} preview: {text[:100]}...")
+            logger.info(f"Text {i+1} length: {len(text)} characters")
+            logger.info(f"Text {i+1} repr: {repr(text[:200])}")
+        
+        # Добавляем логирование полного payload для отладки (только для первого текста)
+        if len(texts) == 1:
+            import json
+            logger.info(f"Full request payload: {json.dumps(payload, ensure_ascii=False, indent=2)}")
+            # Проверяем, есть ли непечатаемые символы
+            text = texts[0]
+            try:
+                text.encode('utf-8')
+                logger.info("Text encoding: OK")
+            except UnicodeEncodeError as e:
+                logger.error(f"Text encoding error: {e}")
+        
+        # Максимальное количество повторных попыток
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                with httpx.Client(timeout=30.0) as client:
+                    response = client.post(
+                        self.api_url,
+                        json=payload,
+                        headers=headers
+                    )
                     
-        except httpx.HTTPError as e:
-            logger.error(f"HTTP error occurred: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"Error getting embeddings: {e}")
-            raise
+                    logger.info(f"Response status: {response.status_code}")
+                    logger.info(f"Response headers: {dict(response.headers)}")
+                    
+                    if response.status_code != 200:
+                        logger.error(f"Error response: {response.text}")
+                        
+                        # Если это 400 ошибка, попробуем уменьшить размер пакета
+                        if response.status_code == 400 and len(texts) > 1:
+                            logger.warning(f"Received 400 error, retrying with smaller batch size")
+                            # Разделяем пакет пополам и рекурсивно обрабатываем
+                            mid = len(texts) // 2
+                            first_half = self._get_embeddings_direct(texts[:mid])
+                            second_half = self._get_embeddings_direct(texts[mid:])
+                            return first_half + second_half
+                        elif response.status_code == 400 and len(texts) == 1:
+                            # Если 400 ошибка даже для одного текста, логируем полный запрос и выбрасываем исключение
+                            logger.error(f"Received 400 error even for single text. Request failed.")
+                            logger.error(f"Text content: {texts[0]}")
+                            response.raise_for_status()
+                        
+                        # Если это последняя попытка, вызываем исключение
+                        if retry_count == max_retries - 1:
+                            response.raise_for_status()
+                        else:
+                            logger.warning(f"Retry {retry_count + 1}/{max_retries} after error")
+                            retry_count += 1
+                            continue
+                    
+                    response_data = response.json()
+                    logger.info(f"Response data keys: {list(response_data.keys())}")
+                    
+                    # Проверяем структуру ответа от Ollama API
+                    if "embedding" in response_data:
+                        # Одиночный эмбеддинг
+                        logger.info(f"Found single embedding in response")
+                        return [response_data["embedding"]]
+                    elif "embeddings" in response_data:
+                        # Множественные эмбеддинги
+                        logger.info(f"Found embeddings in response, count: {len(response_data['embeddings'])}")
+                        return response_data["embeddings"]
+                    elif "data" in response_data:
+                        # Формат ответа как у OpenAI
+                        logger.info(f"Found data in response, count: {len(response_data['data'])}")
+                        return [item["embedding"] for item in response_data["data"]]
+                    else:
+                        logger.error(f"Unexpected response format: {response_data}")
+                        raise KeyError("No embeddings found in response")
+                        
+            except httpx.HTTPError as e:
+                logger.error(f"HTTP error occurred: {e}")
+                if retry_count == max_retries - 1:
+                    raise
+                else:
+                    logger.warning(f"Retry {retry_count + 1}/{max_retries} after HTTP error")
+                    retry_count += 1
+            except Exception as e:
+                logger.error(f"Error getting embeddings: {e}")
+                if retry_count == max_retries - 1:
+                    raise
+                else:
+                    logger.warning(f"Retry {retry_count + 1}/{max_retries} after error")
+                    retry_count += 1
