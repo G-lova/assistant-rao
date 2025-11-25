@@ -83,8 +83,8 @@ class EmbeddingClient:
         input_data = texts
         
         payload = {
-            # "model": self.model,
-            "inputs": input_data
+            "model": self.model,
+            "input": input_data
         }
         
         logger.info(f"Sending request to {self.api_url}")
