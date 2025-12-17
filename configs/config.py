@@ -71,6 +71,12 @@ class Config:
     M_MODEL_API_URL = os.getenv("M_MODEL_API_URL")
     M_MODEL_NAME = os.getenv("M_MODEL_NAME")
     M_MODEL_API_KEY = os.getenv("M_MODEL_API_KEY")
+
+    #External отправка
+    EXTERNAL_API_URL_DEV = os.getenv("EXTERNAL_API_URL_DEV")
+    EXTERNAL_API_URL_STAGE = os.getenv("EXTERNAL_API_URL_STAGE")
+    EXTERNAL_API_URL_PROD = os.getenv("EXTERNAL_API_URL_PROD")
+    EXTERNAL_API_KEY = os.getenv("EXTERNAL_API_KEY")
     
     # MySQL
     MYSQL_URL_PROD = os.getenv("MYSQL_URL_PROD")
@@ -189,4 +195,36 @@ class Config:
             "environment": cls.APP_ENV,
             "debug": cls.DEBUG,
             "log_level": cls.LOG_LEVEL
+        }
+
+    @classmethod
+    def get_external_api_config(cls, environment: str = None) -> dict:
+        """
+        Возвращает конфигурацию для внешнего API в зависимости от среды
+        
+        Args:
+            environment: Окружение ('dev', 'stage', 'prod'). Если None, используется APP_ENV
+            
+        Returns:
+            dict: Конфигурация с url и headers
+        """
+        env = environment or cls.APP_ENV
+        env = env.lower()
+        
+        # Выбираем URL в зависимости от среды
+        if env in ['prod', 'production']:
+            url = cls.EXTERNAL_API_URL_PROD
+        elif env in ['stage', 'staging']:
+            url = cls.EXTERNAL_API_URL_STAGE
+        else:  # dev, development или любое другое
+            url = cls.EXTERNAL_API_URL_DEV
+        
+        
+        return {
+            "url": url.rstrip('/'),  # Убираем лишний слеш
+            "headers": {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "X-API-Key": cls.EXTERNAL_API_KEY
+            }
         }
