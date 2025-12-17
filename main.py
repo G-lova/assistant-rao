@@ -14,7 +14,10 @@ from src.scoring import scoring
 from src.rating import rating
 from tasks import evaluate_documents_task
 from configs.procurement_requirements import DOCUMENT_CODE_TO_LABEL
-
+from src.external_api_service import ExternalAPIService
+from src.expertise_service import ExpertiseService
+from models.dependencies import get_expertise_service
+from models.merge import router as merge_router
 
 app = FastAPI(debug=False)
 
@@ -27,10 +30,24 @@ app.add_middleware(
 )
 app.add_middleware(APIKeyMiddleware)
 
+app.include_router(merge_router)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+@app.get("/debug/external-api")
+async def debug_external_api():
+    """Проверка конфигурации внешнего API"""
+    config = Config.get_external_api_config()
+    masked_key = config["api_key"][:4] + "*" * (len(config["api_key"]) - 4) if config["api_key"] else "NOT SET"
+    
+    return {
+        "url": config["url"],
+        "api_key_preview": masked_key,
+        "headers": {k: v for k, v in config["headers"].items() if k != "X-API-Key"},
+        "status": "configured" if config["url"] and config["url"] != "https://ваш-сайт/api/update-expertise" else "not_configured"
+    }
 
 # Глобальный словарь для хранения результатов анализа документов
 document_analysis_cache = {}
