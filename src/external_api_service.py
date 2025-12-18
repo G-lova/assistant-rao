@@ -13,9 +13,9 @@ logger = logging.getLogger(__name__)
 class ExternalAPIService:
     """Сервис для отправки данных во внешнее API (исходная версия)"""
     
-    def __init__(self):
-        self.config = Config.get_external_api_config()
-        self.url = self.config["url"].rstrip('/')
+    def __init__(self, environment: str = None)::
+        self.config = Config.get_external_api_config(environment)
+        self.url = self.config["url"]
         self.headers = self.config["headers"]
         
         if not self.url or "ваш-реальный-сайт" in self.url:

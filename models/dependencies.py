@@ -6,6 +6,7 @@ import logging
 from configs.config import Config
 from models.data_fetcher_para import DataFetcher
 from src.expertise_service import ExpertiseService
+from src.external_api_service import ExternalAPIService
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,6 @@ def get_data_fetcher(
         masked_key = db_config.api_key[:4] + "*" * (len(db_config.api_key) - 4) if db_config.api_key else "NULL"
         logger.info(f" Конфигурация для {x_api_database}:")
         logger.info(f"   URL: {db_config.url}")
-        logger.info(f"   API Key: {masked_key}")
         
         # Проверяем наличие обязательных параметров
         if not db_config.url or not db_config.api_key:
@@ -70,4 +70,22 @@ def get_expertise_service(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Ошибка создания сервиса экспертиз: {str(e)}"
+        )
+
+def get_external_api_service(
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
+) -> ExternalAPIService:
+    """
+    Зависимость для получения сервиса внешнего API
+    
+    Использует тот же заголовок X-API-Database, что и для базы данных
+    """
+    try:
+        logger.info(f"🔧 Создание ExternalAPIService для среды: {x_api_database}")
+        return ExternalAPIService(environment=x_api_database)
+    except Exception as e:
+        logger.error(f"❌ Ошибка создания ExternalAPIService: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ошибка создания сервиса внешнего API: {str(e)}"
         )

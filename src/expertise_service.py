@@ -20,7 +20,7 @@ class ExpertiseService:
         """
         Получает два JSON-документа для указанной экспертизы из MySQL
         """
-        # ПРАВИЛЬНЫЙ SQL-ЗАПРОС ДЛЯ MYSQL
+        #  SQL-ЗАПРОС ДЛЯ MYSQL
         sql_query = """
         SELECT 
             JSON_UNQUOTE(JSON_EXTRACT(data, '$')) AS json_data,
@@ -32,14 +32,14 @@ class ExpertiseService:
         LIMIT 2
         """
         
-        logger.info(f"🔍 Выполнение SQL-запроса для MySQL expertise_id={expertise_id}")
+        logger.info(f" Выполнение SQL-запроса для MySQL expertise_id={expertise_id}")
         logger.debug(f"MySQL Query: {sql_query}")
         
         try:
             df = self.data_fetcher.fetch_expertise_data(
                 sql_query=sql_query,
                 bindings=[expertise_id],
-                raw_sql=True  # Отключаем конвертацию ? -> $1 для MySQL
+                raw_sql=True  #
             )
             
             logger.info(f" Получено {len(df)} записей из MySQL")
@@ -64,7 +64,7 @@ class ExpertiseService:
             logger.debug(f"json_1 sample: {str(json_1)[:200]}...")
             logger.debug(f"json_2 sample: {str(json_2)[:200]}...")
             
-            # Конвертируем в OrderedDict - ИСПРАВЛЕНО: правильная сигнатура метода
+            # Конвертируем в OrderedDict 
             json_1_ordered = self._convert_to_ordered_dict(json_1)
             json_2_ordered = self._convert_to_ordered_dict(json_2)
             
@@ -83,11 +83,11 @@ class ExpertiseService:
         # Если данные - строка, пытаемся распарсить JSON
         if isinstance(data, str):
             try:
-                # Убираем возможные лишние кавычки в начале и конце
+                
                 data = data.strip()
                 if data.startswith('"') and data.endswith('"'):
                     data = data[1:-1]
-                # Распарсить JSON
+                
                 parsed_data = json.loads(data)
                 logger.debug(" Успешно распарсен JSON из строки")
                 return self._convert_to_ordered_dict(parsed_data)
