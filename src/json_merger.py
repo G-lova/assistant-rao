@@ -46,7 +46,7 @@ class JSONMerger:
             # Для контекста field: проверяем на разрешенные позитивные фразы
             if in_field:
                 if cleaned in JSONMerger.POSITIVE_IN_FIELD_CONTEXT:
-                    return False  # Это положительное значение
+                    return False  
                 return bool(cleaned)  # Любая непустая строка НЕ из списка = отрицательное
             
             # Для остальных полей: стандартная логика
@@ -114,7 +114,7 @@ class JSONMerger:
             
             # Гарантируем правильный порядок полей q1 -> q2
             return OrderedDict([
-                ("q1", True),  # Всегда отрицательное при объединении
+                ("q1", True),  
                 ("q2", merged_comment)
             ])
         
@@ -296,7 +296,7 @@ class JSONMerger:
         if val2 is None:
             return JSONMerger.deepcopy_as_ordered(val1)
         
-        # Разные типы
+        # Разные типы (Пример форм)
         if type(val1) != type(val2):
             neg1 = JSONMerger.is_negative(val1, field_path)
             neg2 = JSONMerger.is_negative(val2, field_path)
@@ -317,11 +317,11 @@ class JSONMerger:
                 return JSONMerger.merge_q_objects(val1, val2, field_path)
             return JSONMerger.merge_ordered_dicts(val1, val2, field_path)
         
-        # Обработка массивов
+        
         if isinstance(val1, list):
             return JSONMerger.merge_arrays(val1, val2, field_path)
         
-        # Обработка примитивов
+        
         return JSONMerger.merge_primitives(val1, val2, field_path)
 
     @classmethod
