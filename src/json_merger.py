@@ -110,7 +110,7 @@ class JSONMerger:
                     unique_comments.append(comment)
             
             # Формируем объединенный комментарий
-            merged_comment = " или ".join(unique_comments) if unique_comments else ""
+            merged_comment = "\n или \n".join(unique_comments) if unique_comments else ""
             
             # Гарантируем правильный порядок полей q1 -> q2
             return OrderedDict([
@@ -169,7 +169,7 @@ class JSONMerger:
                         unique_comments.append(cmnt)
                 
                 if unique_comments:
-                    return unique_comments[0] if len(unique_comments) == 1 else " или ".join(unique_comments)
+                    return unique_comments[0] if len(unique_comments) == 1 else "\n или \n".join(unique_comments)
     
             if neg1 != neg2:
                 return str_val1 if neg1 else str_val2
@@ -203,7 +203,7 @@ class JSONMerger:
             elif len(unique_comments) == 1:
                 return unique_comments[0]
             else:
-                return " или ".join(unique_comments)
+                return "\n или \n".join(unique_comments)
         
         # Правило (б): Разные значения - берем отрицательное
         if neg1 != neg2:
