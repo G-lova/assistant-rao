@@ -75,6 +75,9 @@ class EmbeddingClient:
         
         # Добавляем API ключ только если он не пустой
         if self.api_key:
+            # Используем стандартный формат Authorization Bearer для совместимости с OpenAI API
+            headers["Authorization"] = f"Bearer {self.api_key}"
+            # Также оставляем X-API-Key как запасной вариант для обратной совместимости
             headers["X-API-Key"] = f"{self.api_key}"
         
         # Для Ollama API используем правильный формат payload
@@ -100,7 +103,15 @@ class EmbeddingClient:
         logger.info(f"Sending request to {self.api_url}")
         logger.info(f"Model: {self.model}")
         logger.info(f"Texts count: {len(texts)}")
-        logger.info(f"Request headers: {headers}")
+        # Маскируем API ключ в логах для безопасности
+        masked_headers = headers.copy()
+        if "Authorization" in masked_headers:
+            auth_parts = masked_headers["Authorization"].split(" ")
+            if len(auth_parts) > 1:
+                masked_headers["Authorization"] = f"{auth_parts[0]} {auth_parts[1][:4]}{'*' * (len(auth_parts[1]) - 4)}"
+        if "X-API-Key" in masked_headers:
+            masked_headers["X-API-Key"] = f"{masked_headers['X-API-Key'][:4]}{'*' * (len(masked_headers['X-API-Key']) - 4)}"
+        logger.info(f"Request headers (masked): {masked_headers}")
         logger.info(f"Request payload keys: {list(payload.keys())}")
         
         # Добавляем логирование размера данных для отладки
