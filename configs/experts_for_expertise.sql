@@ -400,7 +400,7 @@ WITH expertise_info AS (
 			END
 			ELSE NULL
 		END), 0) AS criterion5,
-        SUM(CASE WHEN e.status IN (3) THEN 1 ELSE 0 END) AS currentWeekWorkload 
+        SUM(CASE WHEN e.status IN (3) OR e.dateStatus3 >= DATE_SUB(NOW(), INTERVAL 7 DAY) THEN 1 ELSE 0 END) AS currentWeekWorkload 
 	FROM users u 
 	LEFT JOIN expertise_experts ee 
 	ON u.id = ee.expert_id 
