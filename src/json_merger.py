@@ -12,7 +12,6 @@ class JSONMerger:
         "соответствует", "да", "ok", "принято", "исполнено", "требований нет",
         "претензий не имеется", "все в порядке", ""
     }
-
     @staticmethod
     def is_field_context(field_path: str) -> bool:
         """
@@ -46,7 +45,7 @@ class JSONMerger:
             # Для контекста field: проверяем на разрешенные позитивные фразы
             if in_field:
                 if cleaned in JSONMerger.POSITIVE_IN_FIELD_CONTEXT:
-                    return False  
+                    return False  # Это положительное значение
                 return bool(cleaned)  # Любая непустая строка НЕ из списка = отрицательное
             
             # Для остальных полей: стандартная логика
@@ -77,7 +76,7 @@ class JSONMerger:
             "q1": true,  // true = есть замечание (отрицательное)
             "q2": "Текст замечания"
         }
-        Объединяет комментарии в ЛЮБОМ ПОРЯДКЕ через " или "
+        Объединяет комментарии в ЛЮБОМ ПОРЯДКЕ через "\n или \n(А это отступы шоб не забыть)"
         """
         # Определяем отрицательные значения для q1
         neg1 = JSONMerger.is_negative(obj1["q1"], f"{field_path}.q1")
@@ -114,7 +113,7 @@ class JSONMerger:
             
             # Гарантируем правильный порядок полей q1 -> q2
             return OrderedDict([
-                ("q1", True),  
+                ("q1", True),  # Всегда отрицательное при объединении
                 ("q2", merged_comment)
             ])
         
@@ -296,7 +295,7 @@ class JSONMerger:
         if val2 is None:
             return JSONMerger.deepcopy_as_ordered(val1)
         
-        # Разные типы (Пример форм)
+        # Разные типы
         if type(val1) != type(val2):
             neg1 = JSONMerger.is_negative(val1, field_path)
             neg2 = JSONMerger.is_negative(val2, field_path)
@@ -317,16 +316,85 @@ class JSONMerger:
                 return JSONMerger.merge_q_objects(val1, val2, field_path)
             return JSONMerger.merge_ordered_dicts(val1, val2, field_path)
         
-        
+        # Обработка массивов
         if isinstance(val1, list):
             return JSONMerger.merge_arrays(val1, val2, field_path)
         
-        
+        # Обработка примитивов
         return JSONMerger.merge_primitives(val1, val2, field_path)
-
+    @staticmethod
+    def invert_fields_with_r_suffix(data: Any) -> Any:
+        """
+        Рекурсивно проходит по структуре и инвертирует значения полей,
+        для которых существует поле с суффиксом '_r'.
+        
+        Поддерживаемые типы для инверсии:
+        - bool: true ↔ false
+        - int: 1 ↔ 0
+        
+        Пример:
+            {"q2": 0, "q2_r": "any"} → {"q2": 1, "q2_r": "any"}
+            {"flag": true, "flag_r": 1} → {"flag": false, "flag_r": 1}
+        """
+        if isinstance(data, OrderedDict):
+            # 1. Сначала рекурсивно обрабатываем все значения (без изменения ключей)
+            processed_values = OrderedDict()
+            for key, value in data.items():
+                processed_values[key] = JSONMerger.invert_fields_with_r_suffix(value)
+            
+            # 2. Теперь работаем с обработанными значениями
+            keys = set(processed_values.keys())
+            processed_keys = set()
+            result = OrderedDict()
+            
+            for key in processed_values:
+                if key in processed_keys:
+                    continue
+                    
+                if key.endswith('_r'):
+                    base_key = key[:-2]  # удаляем '_r'
+                    if base_key in keys and base_key not in processed_keys:
+                        # Инвертируем базовое поле
+                        val = processed_values[base_key]
+                        if isinstance(val, bool):
+                            processed_values[base_key] = not val
+                        elif isinstance(val, int) and val in (0, 1):
+                            processed_values[base_key] = 1 - val
+                        # Добавляем пару
+                        result[base_key] = processed_values[base_key]
+                        result[key] = processed_values[key]
+                        processed_keys.update([base_key, key])
+                    else:
+                        # _r без базового — просто добавляем
+                        result[key] = processed_values[key]
+                        processed_keys.add(key)
+                else:
+                    r_key = key + '_r'
+                    if r_key in keys and r_key not in processed_keys:
+                        # Есть пара — инвертируем базовое
+                        val = processed_values[key]
+                        if isinstance(val, bool):
+                            processed_values[key] = not val
+                        elif isinstance(val, int) and val in (0, 1):
+                            processed_values[key] = 1 - val
+                        result[key] = processed_values[key]
+                        result[r_key] = processed_values[r_key]
+                        processed_keys.update([key, r_key])
+                    else:
+                        # Нет пары — оставляем как есть
+                        result[key] = processed_values[key]
+                        processed_keys.add(key)
+            
+            return result
+            
+        elif isinstance(data, list):
+            return [JSONMerger.invert_fields_with_r_suffix(item) for item in data]
+        else:
+            return data
     @classmethod
     def merge_jsons(cls, json1: OrderedDict, json2: OrderedDict) -> dict:
         """Основная функция слияния - возвращает обычный dict для сериализации"""
         merged_ordered = cls.merge_values(json1, json2, is_root=True)
+        merged_ordered = cls.invert_fields_with_r_suffix(merged_ordered)
         # Конвертируем в обычный словарь для JSON-сериализации
         return json.loads(json.dumps(merged_ordered))
