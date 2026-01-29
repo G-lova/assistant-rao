@@ -1,6 +1,5 @@
 fastapi==0.95.2
 fuzzywuzzy
-gradio==3.50.2
 numpy==1.26.4
 openai
 opencv-python>=4.6.0
