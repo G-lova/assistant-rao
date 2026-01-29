@@ -40,8 +40,8 @@ class CloudStorageParser:
             'docs.google.com': self._parse_google_docs,
             'yadi.sk': self._parse_yandex_disk,
             'disk.yandex.ru': self._parse_yandex_disk,
-            'cloud.mail.ru': self._parse_mail_cloud_via_external,
-            'files.mail.ru': self._parse_mail_cloud_via_external,
+            'cloud.mail.ru': self._parse_mail_cloud_via_api,
+            'files.mail.ru': self._parse_mail_cloud_via_api,
             'zakupki.gov.ru': self._parse_eis_soap_from_web,
         }
         
@@ -1135,35 +1135,156 @@ class CloudStorageParser:
         return files
 
 
-    async def _parse_mail_cloud_via_external(self, url: str, procurement_id: str = None) -> Dict:
+    async def _parse_mail_cloud_via_api(self, url: str, procurement_id: str = None) -> Dict:
+        """
+        Скачивает файлы из Mail.ru Cloud по публичной ссылке.
+        Поддерживает папки и вложенные структуры.
+        """
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    "http://mailru-downloader:8002/download",
-                    json={"url": url},
-                    timeout=aiohttp.ClientTimeout(total=150)
-                ) as resp:
-                    if resp.status != 200:
-                        error = await resp.text()
-                        raise Exception(f"Mail.ru Downloader error: {error}")
-                    data = await resp.json()
-            file_path = data["file_path"]
-            filename = data["filename"]
+            clean_url = url.strip().rstrip('/')
+            if '/public/' not in clean_url:
+                raise ValueError("Некорректный формат ссылки Mail.ru")
+
+            # === ИЗВЛЕКАЕМ weblink КОРРЕКТНО ===
+            weblink = clean_url.split('/public/', 1)[1]
+            if not weblink:
+                raise ValueError("Не удалось извлечь weblink")
+            logger.info(f"Извлечён weblink: {weblink}")
+
+            # === ШАГ 1: Получаем pageId из HTML ===
+            page_id = await self._get_page_id_from_html(clean_url)
+            if not page_id:
+                raise ValueError("pageId не найден в HTML")
+            logger.info(f"Получен pageId: {page_id}")
+
+            # === ШАГ 2: Получаем base_url из dispatcher ===
+            base_url = await self._get_base_url(page_id)
+            if not base_url:
+                raise ValueError("base_url не получен из dispatcher")
+            logger.info(f"Получен base_url: {base_url}")
+
+            # === ШАГ 3: Получаем список файлов рекурсивно ===
+            files = await self._get_all_files(weblink, page_id, base_url)
+            if not files:
+                raise ValueError("Файлы не найдены в облаке")
+            logger.info(f"Найдено файлов: {len(files)}")
+
+            results = []
+            for file_info in files:
+                direct_url = file_info["url"]
+                safe_name = file_info["filename"]
+                ext = os.path.splitext(safe_name)[1] or ".bin"
+                
+                # === СКАЧИВАЕМ ФАЙЛ ===
+
+                result = await self._download_file_only(
+                    direct_url,
+                    "mail_cloud_api",
+                    safe_name,
+                    procurement_id,
+                    ext,
+                    safe_name
+                )
+                results.append(result)
+            log = {
+                "status": "success",
+                "files": results,
+                "source": "mail_cloud",
+                "original_url": url,
+                "procurement_id": procurement_id
+            }
+            logger.info(f"Результат парсинга Mail.ru: {log}")
+
             return {
                 "status": "success",
-                "filename": filename,
-                "file_path": file_path,
-                "source": "mail_cloud_external",
+                "files": results,
+                "source": "mail_cloud",
                 "original_url": url,
-                "procurement_id": procurement_id,
-                "file_extension": os.path.splitext(filename)[1] or ".bin"
+                "procurement_id": procurement_id
             }
+
         except Exception as e:
-            logger.error(f"Ошибка внешнего парсера Mail.ru: {str(e)}")
+            logger.error(f"Ошибка парсинга Mail.ru Cloud: {str(e)}")
             return {
                 "status": "error",
-                "error": f"Ошибка внешнего парсера Mail.ru: {str(e)}"
+                "error": f"Ошибка парсинга Mail.ru Cloud: {str(e)}"
             }
+
+    # === ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ (уже есть в коде, но улучшим) ===
+
+    async def _get_page_id_from_html(self, url: str) -> Optional[str]:
+        async with aiohttp.ClientSession(
+            max_field_size=16384,   # Увеличиваем лимит на размер одного поля заголовка
+            max_line_size=16384     # Увеличиваем лимит на длину строки заголовка
+        ) as session:
+            async with session.get(url) as resp:
+                html = await resp.text()
+                # Ищем pageId в любом формате
+                match = re.search(r'pageId["\']?\s*:\s*["\']?([a-zA-Z0-9_-]+)', html)
+                return match.group(1) if match else None
+
+    async def _get_base_url(self, page_id: str) -> Optional[str]:
+        dispatcher_url = f"https://cloud.mail.ru/api/v2/dispatcher?x-page-id={page_id}"
+        async with aiohttp.ClientSession(
+            max_field_size=16384,   # Увеличиваем лимит на размер одного поля заголовка
+            max_line_size=16384     # Увеличиваем лимит на длину строки заголовка
+        ) as session:
+            async with session.get(dispatcher_url) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+            
+                # Попытка получить base_url из weblink_get (старый формат)
+                weblink_get_list = data.get("body", {}).get("weblink_get", [])
+                if weblink_get_list and isinstance(weblink_get_list, list):
+                    base_url = weblink_get_list[0].get("url")
+                    if base_url:
+                        logger.debug(f"Получен base_url из weblink_get: {base_url}")
+                        return base_url
+
+                # Новый формат: weblink_get отсутствует → используем фиксированный URL
+                # Официальный базовый URL для скачивания
+                fixed_base_url = "https://cloclo1.datacloudmail.ru"
+                logger.debug(f"weblink_get не найден. Используем фиксированный base_url: {fixed_base_url}")
+                return fixed_base_url
+                # return data.get("body", {}).get("weblink_get", [{}])[0].get("url")
+
+    async def _get_all_files(self, weblink: str, page_id: str, base_url: str, current_path: str = "") -> List[Dict]:
+        """Рекурсивно получает все файлы из папки"""
+        folder_url = f"https://cloud.mail.ru/api/v2/folder?weblink={weblink}&x-page-id={page_id}"
+        logger.debug(f"Запрос содержимого папки: {folder_url} (текущий путь: '{current_path}')")
+        async with aiohttp.ClientSession(
+            max_field_size=16384,   # Увеличиваем лимит на размер одного поля заголовка
+            max_line_size=16384     # Увеличиваем лимит на длину строки заголовка
+        ) as session:
+            async with session.get(folder_url) as resp:
+                if resp.status != 200:
+                    logger.error(f"API folder вернул статус {resp.status}")
+                    return []
+                data = await resp.json()
+        
+        files = []
+        items = data.get("body", {}).get("list", [])
+        logger.debug(f"Получено элементов в папке: {len(items)}")
+
+        for item in data.get("body", {}).get("list", []):    
+            if item["type"] == "folder":
+                logger.debug(f"Обнаружена подпапка: {item['name']}")
+                sub_files = await self._get_all_files(
+                    weblink=f"{weblink}/{item['name']}",
+                    page_id=page_id,
+                    base_url=base_url,
+                    current_path=f"{current_path}/{item['name']}" if current_path else item['name']
+                )
+                files.extend(sub_files)
+            else:
+                filename = item["name"]
+                full_path = f"{current_path}/{filename}" if current_path else filename
+                safe_name = re.sub(r'[<>:"/\\|?*]', '_', full_path)
+                direct_url = f"{base_url}/{weblink}{f'/{current_path}' if current_path else ''}/{filename}"
+                files.append({"url": direct_url, "filename": safe_name})
+                logger.debug(f"Добавлен файл: {safe_name}")
+        return files
 
 
     async def _download_file_only(self, url: str, source: str, resource_id: str, 
@@ -1185,7 +1306,10 @@ class CloudStorageParser:
         """
         try:
             # Используем aiohttp для асинхронного скачивания
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(
+                max_field_size=16384,   # Увеличиваем лимит на размер одного поля заголовка
+                max_line_size=16384     # Увеличиваем лимит на длину строки заголовка
+            ) as session:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as response:
                     if response.status != 200:
                         # Пробуем альтернативные форматы для Google таблиц

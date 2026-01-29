@@ -87,25 +87,6 @@ services:
       # - qwen_embedding_network
       - rao_network
 
-  gradio:
-    build: .
-    container_name: rao_gradio
-    ports:
-      - "2301:20141"
-    volumes:
-      - .:/app
-      - /tmp:/tmp
-      - .env:/app/.env
-    command: python -m watchfiles "python gradio_evaluator/gradio_app.py"
-    restart: unless-stopped
-    networks:
-      # - qwen-vl-api_procurement_network
-      - rao_network
-    depends_on:
-      - app
-    environment:
-      API_URL: ${API_ACCESS}
-
   redis:
     image: redis:7-alpine
     container_name: rao_redis
@@ -169,15 +150,6 @@ services:
     networks:
       - rao_network
     restart: unless-stopped
-
-#  mailru-downloader:
-#    build: ./mailru-downloader
-#    ports:
-#      - "8002:8002"
-#    volumes:
-#      - /tmp:/tmp
-#    networks:
-#      - rao_network
 
 networks:
   # qwen-vl-api_procurement_network:
