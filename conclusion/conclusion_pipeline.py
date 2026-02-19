@@ -237,23 +237,22 @@ class RaoConclusionPipeline:
 
 
             # Получение полей, основанных на данных контракта
-            # clean_content = self.normalize_numbers(content)
-            ai_conclusion = await self.conclusion_consolidator.get_rao_conclusion(json.dumps(content, ensure_ascii=False), self.expertise_id, expertise_object)
+            # ai_conclusion = await self.conclusion_consolidator.get_rao_conclusion(json.dumps(content, ensure_ascii=False), self.expertise_id, expertise_object)
 
             # Генерация итогового заключения
             rao_conclusion = self.deep_merge_dicts(expertise_object, opinions)
             logger.info(f"Слияние успешно завершено для expertise_id={self.expertise_id}")
 
-            logger.info(f"Попытка использовать значения ИИ для expertise_id={self.expertise_id}")
-            if ai_conclusion and ai_conclusion.get('status', {}) == 'success' and ai_conclusion.get('conclusion', {}):
-                change = 0
-                for key, value in ai_conclusion.get('conclusion', {}).items():
-                    if key in rao_conclusion and value:
-                        rao_conclusion[key] = value
-                        change +=1
-                logger.info(f"Внесено {change} изменений с помощью ИИ")
-            else:
-                logger.info(f"Не удалось внести изменения с помощью ИИ: {ai_conclusion.get('error', {})}")
+            # logger.info(f"Попытка использовать значения ИИ для expertise_id={self.expertise_id}")
+            # if ai_conclusion and ai_conclusion.get('status', {}) == 'success' and ai_conclusion.get('conclusion', {}):
+            #     change = 0
+            #     for key, value in ai_conclusion.get('conclusion', {}).items():
+            #         if key in rao_conclusion and value:
+            #             rao_conclusion[key] = value
+            #             change +=1
+            #     logger.info(f"Внесено {change} изменений с помощью ИИ")
+            # else:
+            #     logger.info(f"Не удалось внести изменения с помощью ИИ: {ai_conclusion.get('error', {})}")
             
             return rao_conclusion
         
