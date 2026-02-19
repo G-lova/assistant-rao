@@ -1,0 +1,41 @@
+{
+    "type": "object",
+    "description": "Структурированное своденое заключение эксперта РАО. Все поля обязательны.",
+    "required": [
+        "status",
+        "conclusion",
+        "error"
+    ],
+    "properties": {
+        "status": {
+            "type": "string",
+            "description": "Статус выполненного заключения.",
+            "enum": [
+                "success",
+                "error"
+            ]
+        },
+        "conclusion": {
+            "type": "object",
+            "description": "Извлечённые структурированные данные для сводного заключения.",
+            "properties": {
+                "field1_1": {
+                    "type": "string",
+                    "description": "Перечень документов и материалов, поступивших на экспертизу, с реквизитами"
+                },
+                "field6_1_2": {
+                    "type": "number",
+                    "description": "Цена контракта"
+                },
+                "field6_1_3": {
+                    "type": "number",
+                    "description": "Стоимость фактически исполненного обязательства"
+                }
+            }
+        },
+        "error": {
+            "type": "string",
+            "description": "Ошибка при статусе 'error'."
+        }
+    }
+}

@@ -1,0 +1,58 @@
+{
+    "type": "object",
+    "description": "Структурированное своденое заключение эксперта РАО. Все поля обязательны.",
+    "required": [
+        "status",
+        "conclusion",
+        "error"
+    ],
+    "properties": {
+        "status": {
+            "type": "string",
+            "description": "Статус выполненного заключения.",
+            "enum": [
+                "success",
+                "error"
+            ]
+        },
+        "conclusion": {
+            "type": "object",
+            "description": "Извлечённые структурированные данные для сводного заключения.",
+            "properties": {
+                "code": {
+                    "type": "integer",
+                    "description": "Шифр документа (реестровый номер в ЕИС)"
+                },
+                "inn": {
+                    "type": "integer",
+                    "default": "",
+                    "description": "Идентификационный код закупки"
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Наименование предмета/объекта закупки."
+                },
+                "documents": {
+                    "type": "string",
+                    "description": "Состав комплекта документации, поступившего на экспертизу. Перечисляются все документы, представленные в комплекте закупочной документации"
+                },
+                "field1_1": {
+                    "type": "number",
+                    "description": "Начальная (максимальная) цена контракта, руб."
+                },
+                "field1_2": {
+                    "type": "number",
+                    "description": "Сумма авансового платежа, руб."
+                },
+                "field1_3": {
+                    "type": "string",
+                    "description": "Способ финансирования проекта."
+                }
+            }
+        },
+        "error": {
+            "type": "string",
+            "description": "Ошибка при статусе 'error'."
+        }
+    }
+}

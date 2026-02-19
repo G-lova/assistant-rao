@@ -88,3 +88,8 @@ class EvaluateRequest(BaseModel):
     users: Dict[str, Any]  # users.organization
     linkDocs: Optional[str] = None
     media: List[DocumentItem]
+    
+
+class RAOConclusionRequest(BaseModel):
+    expertise_id: int
+    send_to_external: bool = False

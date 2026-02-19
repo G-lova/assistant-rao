@@ -1,5 +1,7 @@
-import logging
+import asyncio
+import asyncpg
 import json
+import logging
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -32,6 +34,26 @@ def get_db_connection():
         user=Config.DB_USER,
         password=Config.DB_PASSWORD,
         client_encoding='UTF8'
+    )
+
+
+async def get_async_db_connection():
+    """
+    Устанавливает и возвращает соединение с базой данных PostgreSQL.
+
+    Функция считывает параметры подключения из переменных окружения
+    и устанавливает соединение с использованием библиотеки psycopg2.
+    Кодировка клиента устанавливается в UTF-8 для корректной работы с кириллицей.
+
+    Returns:
+        psycopg2.extensions.connection: Объект соединения с базой данных PostgreSQL.
+    """
+    return await asyncpg.connect(
+        host=Config.DB_HOST,
+        port=Config.DB_PORT,
+        database=Config.DB_NAME,
+        user=Config.DB_USER,
+        password=Config.DB_PASSWORD
     )
 
 
@@ -282,6 +304,74 @@ def get_raw_data_by_procurement_id(procurement_id: str) -> Dict[str, Any]:
     finally:
         if conn:
             conn.close()
+
+
+def get_summary_report_from_db(procurement_id: str):
+    """
+    Извлекает основные реквизиты контракта из базы данных по идентификатору закупки.
+
+    Функция обращается к таблице `raw_document_data`, получает данные из поля `summary_report`.
+
+    Args:
+        procurement_id (str): Уникальный идентификатор закупки.
+
+    Returns:
+        Dict[str, str]: 
+    """
+    conn = None
+    procurement_id = int(procurement_id)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+        query = """
+            SELECT summary_report 
+            FROM raw_document_data 
+            WHERE procurement_id = %s
+        """
+        cursor.execute(query, (procurement_id,))
+        result = cursor.fetchone()
+
+        if not result or not result["summary_report"]:
+            logger.warning(f"Данные summary_report не найдены для procurement_id={procurement_id}")
+            return None
+
+        return result["summary_report"]
+
+    except Exception as e:
+        logger.error(f"Ошибка при получении данных о контракте: {str(e)}", exc_info=True)
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+async def get_async_summary_report_from_db(procurement_id: str):
+    """
+    Асинхронно извлекает summary_report из БД по procurement_id.
+    """
+    conn = None
+    try:
+        procurement_id_int = int(procurement_id)
+        conn = await get_async_db_connection()
+
+        row = await conn.fetchrow(
+            "SELECT summary_report FROM raw_document_data WHERE procurement_id = $1",
+            procurement_id_int
+        )
+
+        if not row or not row["summary_report"]:
+            logger.warning(f"Данные summary_report не найдены для procurement_id={procurement_id}")
+            return None
+
+        # asyncpg автоматически парсит JSONB → dict
+        return row["summary_report"]
+
+    except Exception as e:
+        logger.error(f"Ошибка при получении данных из БД: {str(e)}", exc_info=True)
+        return None
+    finally:
+        if conn:
+            await conn.close()
 
 
 def get_contract_info_from_db(procurement_id: str) -> Dict[str, str]:

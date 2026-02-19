@@ -96,6 +96,7 @@ services:
       - rao_network
     volumes:
       - is_rao_redis_data:/data
+    restart: unless-stopped
 
   celery_worker:
     build: .

@@ -3,6 +3,7 @@ import tempfile
 import logging
 import json
 
+from configs.schemas import RAOConclusionRequest
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body, Header
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict
@@ -14,10 +15,7 @@ from src.scoring import scoring
 from src.rating import rating
 from tasks import evaluate_documents_task
 from configs.procurement_requirements import DOCUMENT_CODE_TO_LABEL
-from src.external_api_service import ExternalAPIService
-from src.expertise_service import ExpertiseService
-from models.dependencies import get_expertise_service
-from models.merge import router as merge_router
+from src.rao_conclusion import rao_conclusion
 
 app = FastAPI(debug=False)
 
@@ -30,24 +28,39 @@ app.add_middleware(
 )
 app.add_middleware(APIKeyMiddleware)
 
-app.include_router(merge_router)
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-@app.get("/debug/external-api")
-async def debug_external_api():
-    """Проверка конфигурации внешнего API"""
-    config = Config.get_external_api_config()
-    masked_key = config["api_key"][:4] + "*" * (len(config["api_key"]) - 4) if config["api_key"] else "NOT SET"
+@app.post("/rao_conclusion")
+async def get_rao_conclusion(
+    request: RAOConclusionRequest,
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
+    ):
+    '''
+    Docstring for get_rao_conclusion
     
-    return {
-        "url": config["url"],
-        "api_key_preview": masked_key,
-        "headers": {k: v for k, v in config["headers"].items() if k != "X-API-Key"},
-        "status": "configured" if config["url"] and config["url"] != "https://ваш-сайт/api/update-expertise" else "not_configured"
-    }
+    :param request_body: Description
+    :type request_body: Dict[str, int]
+    :param send_to_external: Description
+    :type send_to_external: bool
+    :param x_api_database: Description
+    :type x_api_database: str
+    '''
+    try:
+        expertise_id = request.expertise_id
+        send_to_external = request.send_to_external
+        
+        if not expertise_id:
+            raise HTTPException(status_code=400, detail="Поле 'expertise_id' обязательно")
+        
+        # Запускаем пайплайн
+        results = await rao_conclusion(expertise_id, x_api_database, send_to_external)
+
+        return results
+        
+    except Exception as e:
+        logger.error(f"Ошибка при создании сводного отчета эксперта РАО: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при создании сводного отчета эксперта РАО: {str(e)}")
 
 # Глобальный словарь для хранения результатов анализа документов
 document_analysis_cache = {}

@@ -991,3 +991,22 @@ def create_summary_report(
     
     logger.info(f"Сформирован summary_report для {procurement_id}. Документов: {len(documents_results)}, Кодов: {len(all_document_codes)}")
     return summary
+
+def extract_json_objects(text: str):
+    """Возвращает список всех JSON-подобных объектов с учётом вложенности."""
+    objects = []
+    stack = []
+    start_index = None
+
+    for i, char in enumerate(text):
+        if char == '{':
+            if not stack:
+                start_index = i
+            stack.append('{')
+        elif char == '}':
+            if stack:
+                stack.pop()
+                if not stack and start_index is not None:
+                    objects.append(text[start_index:i+1])
+                    start_index = None
+    return objects
