@@ -356,7 +356,7 @@ async def get_async_summary_report_from_db(procurement_id: str):
 
         row = await conn.fetchrow(
             "SELECT summary_report FROM raw_document_data WHERE procurement_id = $1",
-            str(procurement_id_int)
+            procurement_id_int
         )
 
         if not row or not row["summary_report"]:

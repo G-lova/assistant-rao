@@ -214,26 +214,27 @@ class RaoConclusionPipeline:
             df['data'] = df['data'].map(json.loads)
             opinions = df['data'].to_list()
             expertise_object = df['object'].iloc[0]
+            expertise_type = df['checkType2'].iloc[0]
           
             if not opinions:
                 logger.info(f"Нет заключений экспертов для expertise_id={self.expertise_id}")
                 return {}
             
             # Получение данных о загруженных документах
-            summary_report = await get_async_summary_report_from_db(self.expertise_id)
-            if isinstance(summary_report, str):
-                try:
-                    summary_report = json.loads(summary_report)
-                except Exception:
-                    pass
+            # summary_report = await get_async_summary_report_from_db(self.expertise_id)
+            # if isinstance(summary_report, str):
+            #     try:
+            #         summary_report = json.loads(summary_report)
+            #     except Exception:
+            #         pass
 
-            if not summary_report:
-                summary_report = {}
+            # if not summary_report:
+            #     summary_report = {}
             
-            content =  {
-                "summary_report": summary_report,
-                "opinions": opinions
-            }
+            # content =  {
+            #     "summary_report": summary_report,
+            #     "opinions": opinions
+            # }
 
 
             # Получение полей, основанных на данных контракта
@@ -253,6 +254,21 @@ class RaoConclusionPipeline:
             #     logger.info(f"Внесено {change} изменений с помощью ИИ")
             # else:
             #     logger.info(f"Не удалось внести изменения с помощью ИИ: {ai_conclusion.get('error', {})}")
+
+            logger.info(f'Добавление недостающих полей')
+            field = 'field4_4_1' if expertise_type == 14 else 'field4_0_1'
+            rao_conclusion[field] = True
+            if expertise_object == 7 and 'field1_3' in rao_conclusion:
+                for item in rao_conclusion['field1_3']:
+                    item[field] = {
+                        'q1': True,
+                        'q2': '',
+                        'q3': '',
+                        'q4': '',
+                        'q5': '',
+                        'q6': False,
+                        'q7': None
+                    }
             
             return rao_conclusion
         
