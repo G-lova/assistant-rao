@@ -75,6 +75,7 @@ class Config:
     EXTERNAL_API_URL_DEV = os.getenv("EXTERNAL_API_URL_DEV")
     EXTERNAL_API_URL_STAGE = os.getenv("EXTERNAL_API_URL_STAGE")
     EXTERNAL_API_URL_PROD = os.getenv("EXTERNAL_API_URL_PROD")
+    EXTERNAL_API_URL_NEURO = os.getenv("EXTERNAL_API_URL_NEURO")
     EXTERNAL_API_KEY = os.getenv("EXTERNAL_API_KEY")
     # Security
     API_KEY = os.getenv("API_KEY")
@@ -92,6 +93,8 @@ class Config:
     MYSQL_API_KEY_STAGE = os.getenv("MYSQL_API_KEY_STAGE")
     MYSQL_URL_DEV = os.getenv("MYSQL_URL_DEV")
     MYSQL_API_KEY_DEV = os.getenv("MYSQL_API_KEY_DEV")
+    MYSQL_URL_NEURO = os.getenv("MYSQL_URL_NEURO")
+    MYSQL_API_KEY_NEURO = os.getenv("MYSQL_API_KEY_NEURO")
 
     # Postgres
     DB_HOST = os.getenv("DB_HOST")
@@ -113,6 +116,7 @@ class Config:
     STORAGE_PATH_DEV = os.getenv("STORAGE_PATH_DEV", "https://develop.rao0123.1t.ws/storage/")
     STORAGE_PATH_STAGE = os.getenv("STORAGE_PATH_STAGE", "https://stage.rao0123.1t.ws/storage/")
     STORAGE_PATH_PROD = os.getenv("STORAGE_PATH_PROD", "https://expert.rusacademedu.ru/storage/")
+    STORAGE_PATH_NEURO = os.getenv("STORAGE_PATH_NEURO", "https://otchet.almira.cc/storage/")
     
     # Application
     APP_ENV = os.getenv("APP_ENV", "development")
@@ -175,10 +179,10 @@ class Config:
             url = cls.MYSQL_URL_STAGE
             api_key = cls.MYSQL_API_KEY_STAGE
             storage_path = cls.STORAGE_PATH_STAGE
-        elif env in ['dev', 'development']:
-            url = cls.MYSQL_URL_DEV
-            api_key = cls.MYSQL_API_KEY_DEV
-            storage_path = cls.STORAGE_PATH_DEV
+        elif env in ['neuro_assistant_database', 'neuro']:
+            url = cls.MYSQL_URL_NEURO
+            api_key = cls.MYSQL_API_KEY_NEURO
+            storage_path = cls.STORAGE_PATH_NEURO
         else:
             url = cls.MYSQL_URL_DEV
             api_key = cls.MYSQL_API_KEY_DEV
@@ -238,6 +242,8 @@ class Config:
             url = cls.EXTERNAL_API_URL_PROD
         elif env in ['stage', 'staging']:
             url = cls.EXTERNAL_API_URL_STAGE
+        elif env in ['neuro_assistant_database', 'neuro']:
+            url = cls.EXTERNAL_API_URL_NEURO
         else:  # dev, development или любое другое
             url = cls.EXTERNAL_API_URL_DEV
         
