@@ -93,3 +93,6 @@ class EvaluateRequest(BaseModel):
 class RAOConclusionRequest(BaseModel):
     expertise_id: int
     send_to_external: bool = False
+
+class EISParseRequest(BaseModel):
+    eis_link: str

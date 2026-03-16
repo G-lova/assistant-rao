@@ -4,9 +4,9 @@ import httpx
 import pandas as pd
 import requests
 
-from configs.logger import get_logger, setup_logging
+from configs.logger import get_logger
 
-setup_logging()
+
 logger = get_logger(__name__)
 
 

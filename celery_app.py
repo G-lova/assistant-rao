@@ -31,14 +31,13 @@ celery_app.conf.update(
     result_serializer='json',
     timezone='Europe/Moscow',
     enable_utc=True,
-    
+
     # Настройки ретраев
-    # Настройки ретраев для Celery
     task_default_retry_delay=10,
     task_max_retries=3,
     task_acks_late=True,
     task_reject_on_worker_lost=True,
-    
+
     # Роутинг задач с настройками ретраев
     task_routes={
         'main.parse_cloud_link_task': {

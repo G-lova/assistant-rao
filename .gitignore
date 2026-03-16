@@ -1,6 +1,7 @@
 .*
 !/.gitignore
 !/.dockerignore
+.env
 
 **/__pycache__
 **/templates

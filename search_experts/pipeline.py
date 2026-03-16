@@ -2,7 +2,7 @@ import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
 from configs.config import Config
-from search_experts.data_fetcher import DataFetcher
+from configs.data_fetcher import DataFetcher
 from search_experts.text_processor import TextProcessor
 from search_experts.embedding_client import EmbeddingClient
 from search_experts.conflict_detector import ConflictDetector
@@ -238,7 +238,7 @@ class ScoringPipeline:
             df['scoring'] = pd.Series([], dtype='float64')
             return df
         
-        df['scoring'] = 0.4 * df['similarity_embeddings'] + 0.4 * df['criterion_rating'] + 0.2 * df['avg_rating']
+        df['scoring'] = 0.3 * df['similarity_embeddings'] + 0.3 * df['distance_rate'] + 0.3 * df['criterion_rating'] + 0.1 * df['avg_rating']
         return df
     
 
@@ -302,7 +302,7 @@ class ScoringPipeline:
         if not self._has_valid_experts(df) or 'scoring' not in df.columns:
             return pd.Series([], dtype='int64')
         
-        df = df.sort_values(by=['distance_rate', 'scoring'], ascending=False)
+        df = df.sort_values(by=["scoring"], ascending=False)
         df = pd.concat([df[df['regionExpertise_sort'] == 1], df[df['regionExpertise_sort'] != 1]])
         df = pd.concat([df[df['possibleWeekWorkload'] >= 1], 
                         df[df['possibleWeekWorkload'] < 1].sort_values(by=['currentWeekWorkloadRequests'], ascending=True)])

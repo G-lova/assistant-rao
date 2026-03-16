@@ -62,7 +62,7 @@ class ExternalAPIService:
         logger.debug(f" Payload: {json.dumps(payload, ensure_ascii=False, indent=2)}")
         
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with httpx.AsyncClient(timeout=300) as client:
                 response = await client.post(
                     self.url,
                     headers=self.headers,
@@ -106,7 +106,7 @@ class ExternalAPIService:
                 logger.error(f"❌ {error_msg}")
                 raise Exception(error_msg)
 
-            logger.info("Данные успешно отправлены!")
+            logger.info("🎉 Данные успешно отправлены!")
             return response_data
 
         except httpx.RequestError as e:

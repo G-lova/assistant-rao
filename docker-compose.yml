@@ -2,6 +2,9 @@ services:
   postgres:
     image: postgres:15-alpine
     container_name: rao_postgres
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     environment:
       POSTGRES_USER: ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
@@ -13,8 +16,6 @@ services:
     ports:
       - "2302:5432"
     networks:
-      # - qwen-vl-api_procurement_network
-      # - qwen_embedding_network
       - rao_network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $DB_USER -d $DB_NAME"]
@@ -27,6 +28,9 @@ services:
   is-rao-pgadmin:
     image: dpage/pgadmin4:latest
     container_name: is-rao-pgadmin
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     restart: unless-stopped
     ports:
       - "2303:80"
@@ -61,7 +65,12 @@ services:
 
   app:
     build: .
+    env_file:
+      - .env
     container_name: rao_api
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     environment:
       DB_HOST: postgres
       DB_USER: ${DB_USER}
@@ -79,17 +88,17 @@ services:
     volumes:
       - .:/app
       - /tmp:/tmp
-      - .env:/app/.env
     command: uvicorn main:app --host 0.0.0.0 --port 20142 --timeout-keep-alive 1200 --timeout-graceful-shutdown 600 --reload
     restart: unless-stopped
     networks:
-      # - qwen-vl-api_procurement_network
-      # - qwen_embedding_network
       - rao_network
 
   redis:
     image: redis:7-alpine
     container_name: rao_redis
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     # ports:
     #   - "6379:6379"
     networks:
@@ -100,63 +109,74 @@ services:
 
   celery_worker:
     build: .
+    env_file:
+      - .env
     container_name: rao_celery_worker
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     volumes:
       - .:/app
       - /tmp:/tmp
-      - .env:/app/.env
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://rao_redis:6379/0
+      - CELERY_BROKER_URL=redis://rao_redis:6379/0  # Добавьте это
+      - CELERY_RESULT_BACKEND=redis://rao_redis:6379/0  # Добавьте это
       - TZ=${TZ}
       - API_KEY=${API_KEY}
     depends_on:
       - redis
     networks:
-      # - qwen_embedding_network
-      # - qwen-vl-api_procurement_network
       - rao_network
-    command: celery -A celery_app worker --loglevel=info --concurrency=4 -Q evaluation,parsing,scoring
+    command: celery -A celery_app worker -E --pool=solo --loglevel=info --concurrency=4 -Q evaluation,parsing,scoring
     restart: unless-stopped
 
   celery_beat:
     build: .
+    env_file:
+      - .env
     container_name: rao_celery_beat
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     command: celery -A celery_app beat --loglevel=info
     volumes:
       - .:/app
       - /tmp:/tmp
-      - .env:/app/.env
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://rao_redis:6379/0
+      - CELERY_BROKER_URL=redis://rao_redis:6379/0  # Добавьте это
+      - CELERY_RESULT_BACKEND=redis://rao_redis:6379/0  # Добавьте это
       - TZ=${TZ}
       - API_KEY=${API_KEY}
     depends_on:
       - redis
     networks:
-      # - qwen_embedding_network
       - rao_network
     restart: unless-stopped
 
   flower:
     build: .
     container_name: rao_flower
-    command: celery -A celery_app flower --port=5555
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    command: celery -A celery_app flower --port=5555 --inspect-timeout=10000
     ports:
       - "5555:5555"
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://rao_redis:6379/0
+      - CELERY_BROKER_URL=redis://rao_redis:6379/0  # Добавьте это
+      - CELERY_RESULT_BACKEND=redis://rao_redis:6379/0  # Добавьте это
       - TZ=${TZ}     
     depends_on:
       - redis
+      - celery_worker
     networks:
       - rao_network
     restart: unless-stopped
 
 networks:
-  # qwen-vl-api_procurement_network:
-  #   external: true
-  # qwen_embedding_network:
-  #   external: true
   rao_network:
     external: false
 

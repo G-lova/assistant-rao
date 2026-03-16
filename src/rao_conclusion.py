@@ -5,7 +5,7 @@ import os
 from datetime import date
 
 from configs.config import Config
-from configs.logger import setup_logging, get_logger
+from configs.logger import get_logger
 from conclusion.conclusion_pipeline import RaoConclusionPipeline
 
 
@@ -14,34 +14,35 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
 
+# Настройка логирования
+logger = get_logger(__name__)
 
-async def rao_conclusion(expertise_id, x_api_database, send_to_external = False):
+async def rao_conclusion(expertise_id: int, x_api_database: str, send_to_external: bool = False) -> dict:
     """
-    Запускает пайплайн оценки экспертов для заданной экспертизы.
+    Формирует сводное заключение эксперта РАО для заданной экспертизы.
 
-    Функция инициализирует пайплайн ScoringPipeline, выполняет SQL-запрос для получения данных
-    об экспертах, рассчитывает рейтинг на основе критериев и возвращает отсортированный список
-    экспертов по убыванию релевантности. Результаты сохраняются в CSV-файл.
+    Создает экземпляр RaoConclusionPipeline, запускает анализ всех документов
+    экспертизы, формирует заключение на основе результатов анализа и
+    опционально отправляет результаты во внешние системы.
 
     Args:
-        expertise_id: Идентификатор экспертизы, для которой проводится оценка и подбор экспертов.
+        expertise_id: Уникальный идентификатор экспертизы
+        x_api_database: Идентификатор среды базы данных ('dev', 'prod', 'stage')
+        send_to_external: Флаг отправки результатов во внешние системы
 
     Returns:
-        pd.Series или pd.DataFrame: Отсортированный набор результатов (топ экспертов),
-                                   готовый к использованию или выводу.
-                                   В случае ошибки — исключение не подавляется.
+        dict: Сформированное заключение эксперта РАО с результатами анализа
+
+    Raises:
+        Exception: При ошибках в пайплайне формирования заключения
     """
-    # Настройка логирования
-    setup_logging()
-    logger = get_logger(__name__)
-    
     try:
         logger.info("Starting rao_conclusion pipeline...")
-        
+
         # Создание пайплайна
-        pipeline = RaoConclusionPipeline(expertise_id, x_api_database)        
+        pipeline = RaoConclusionPipeline(expertise_id, x_api_database)
         logger.info(f"Processing expertise_id: {expertise_id}, DB: {x_api_database}")
-        
+
         # Запуск пайплайна
         rao_conclusion = await pipeline.run_pipeline()
         

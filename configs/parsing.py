@@ -1,3 +1,4 @@
+import aiofiles
 import os
 import re
 import logging
@@ -13,6 +14,7 @@ import xmltodict
 import httpx
 import zipfile
 import io
+import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Tuple
 from playwright.async_api import async_playwright, Browser
 from urllib.parse import urljoin, urlparse, parse_qs
@@ -40,13 +42,14 @@ class CloudStorageParser:
             'docs.google.com': self._parse_google_docs,
             'yadi.sk': self._parse_yandex_disk,
             'disk.yandex.ru': self._parse_yandex_disk,
-            'cloud.mail.ru': self._parse_mail_cloud_via_api,
-            'files.mail.ru': self._parse_mail_cloud_via_api,
+            'cloud.mail.ru': self._parse_mail_cloud,
+            'files.mail.ru': self._parse_mail_cloud,
             'zakupki.gov.ru': self._parse_eis_soap_from_web,
         }
         
         # Получаем токен ЕИС из переменных окружения
-        self.eis_token = os.getenv('ESV_key')
+        self.eis_token = os.getenv('EIS_INDIVIDUAL_PERSON_TOKEN')
+        self.eis_soap_url = os.getenv('EIS_SOAP_URL')
 
 
 
@@ -167,24 +170,24 @@ class CloudStorageParser:
         create_date = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
         
         xml_template = f'''<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ws="http://zakupki.gov.ru/fz44/get-docs-ip/ws">
-   <soapenv:Header>
-      <individualPerson_token>{self.eis_token}</individualPerson_token>
-   </soapenv:Header>
-   <soapenv:Body>
-      <ws:getDocsByReestrNumberRequest>
-         <index>
-            <id>{request_id}</id>
-            <createDateTime>{create_date}</createDateTime>
-            <mode>PROD</mode>
-         </index>
-         <selectionParams>
-            <subsystemType>{subsystem_type}</subsystemType>
-            <reestrNumber>{reestr_number}</reestrNumber>
-         </selectionParams>
-      </ws:getDocsByReestrNumberRequest>
-   </soapenv:Body>
-</soapenv:Envelope>'''
+            <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ws="http://zakupki.gov.ru/fz44/get-docs-ip/ws">
+            <soapenv:Header>
+                <individualPerson_token>{self.eis_token}</individualPerson_token>
+            </soapenv:Header>
+            <soapenv:Body>
+                <ws:getDocsByReestrNumberRequest>
+                    <index>
+                        <id>{request_id}</id>
+                        <createDateTime>{create_date}</createDateTime>
+                        <mode>PROD</mode>
+                    </index>
+                    <selectionParams>
+                        <subsystemType>{subsystem_type}</subsystemType>
+                        <reestrNumber>{reestr_number}</reestrNumber>
+                    </selectionParams>
+                </ws:getDocsByReestrNumberRequest>
+            </soapenv:Body>
+            </soapenv:Envelope>'''
         
         return await self._send_eis_soap_request(xml_template, f"reestr_{reestr_number}", procurement_id)
 
@@ -214,26 +217,26 @@ class CloudStorageParser:
         create_date = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
         
         xml_template = f'''<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ws="http://zakupki.gov.ru/fz44/get-docs-ip/ws">
-   <soapenv:Header>
-      <individualPerson_token>{self.eis_token}</individualPerson_token>
-   </soapenv:Header>
-   <soapenv:Body>
-      <ws:getDocsByOrgRegionRequest>
-         <index>
-            <id>{request_id}</id>
-            <createDateTime>{create_date}</createDateTime>
-            <mode>PROD</mode>
-         </index>
-         <selectionParams>
-            <orgRegion>{org_region}</orgRegion>
-            <subsystemType>{subsystem_type}</subsystemType>
-            <documentType44>{document_type}</documentType44>
-            {period_info}
-         </selectionParams>
-      </ws:getDocsByOrgRegionRequest>
-   </soapenv:Body>
-</soapenv:Envelope>'''
+            <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ws="http://zakupki.gov.ru/fz44/get-docs-ip/ws">
+            <soapenv:Header>
+                <individualPerson_token>{self.eis_token}</individualPerson_token>
+            </soapenv:Header>
+            <soapenv:Body>
+                <ws:getDocsByOrgRegionRequest>
+                    <index>
+                        <id>{request_id}</id>
+                        <createDateTime>{create_date}</createDateTime>
+                        <mode>PROD</mode>
+                    </index>
+                    <selectionParams>
+                        <orgRegion>{org_region}</orgRegion>
+                        <subsystemType>{subsystem_type}</subsystemType>
+                        <documentType44>{document_type}</documentType44>
+                        {period_info}
+                    </selectionParams>
+                </ws:getDocsByOrgRegionRequest>
+            </soapenv:Body>
+            </soapenv:Envelope>'''
         
         return await self._send_eis_soap_request(xml_template, f"region_{org_region}", procurement_id)
 
@@ -546,7 +549,7 @@ class CloudStorageParser:
             if not reestr_number:
                 return {
                     "status": "error",
-                    "error": f"Не удалось извлечь номер закупки из URL: {clean_url}"
+                    "error": f"Некорректная ссылка"
                 }
 
             # Простая проверка доступности ссылки
@@ -1041,101 +1044,66 @@ class CloudStorageParser:
         }
 
 
+    # async def _parse_mail_cloud(self, url: str, procurement_id: str = None) -> Dict:
+    #     """
+    #     Скачивает файл из Mail.ru Cloud по публичной ссылке через официальный API.
+    #     Аналог PHP-скрипта cloud_mail_downloader.php, но на чистом Python + aiohttp.
+    #     """
+    #     try:
+    #         clean_url = url.strip().rstrip('/')
+    #         if '/public/' not in clean_url:
+    #             raise Exception("Некорректный формат ссылки Mail.ru")
+
+    #         weblink = clean_url.split('/public/', 1)[1]
+    #         if not weblink:
+    #             raise Exception("Не удалось извлечь weblink")
+    #         logger.info(f"Извлечён weblink: {weblink}")
+
+    #         # Шаг 1: Получить pageId из HTML
+    #         page_id = await self._get_page_id_from_html(clean_url)
+    #         if not page_id:
+    #             raise Exception("pageId не найден в HTML")
+    #         logger.info(f"Получен pageId: {page_id}")
+
+    #         # Шаг 2: Получить base_url из dispatcher
+    #         base_url = await self._get_base_url(page_id)
+    #         if not base_url:
+    #             raise Exception("base_url не получен из dispatcher")
+    #         logger.info(f"Получен base_url: {base_url}")
+
+    #         # Шаг 3: Получить список файлов
+    #         files = await self._get_all_files(weblink, page_id, base_url)
+    #         if not files:
+    #             raise Exception("Файлы не найдены")
+    #         logger.info(f"Найдено файлов: {len(files)}")
+
+    #         # Берём первый файл (если их несколько — можно расширить логику)
+    #         file_info = files[0]
+    #         direct_url = file_info["url"]
+    #         safe_name = file_info["filename"]
+    #         ext = safe_name.split('.')[1].lower()
+
+    #         # Шаг 4: Скачать файл
+    #         return await self._download_file_only(
+    #             direct_url,
+    #             "mail_cloud_api",
+    #             safe_name,
+    #             procurement_id,
+    #             ext,
+    #             safe_name
+    #         )
+
+    #     except Exception as e:
+    #         logger.error(f"Ошибка парсинга Mail.ru Cloud (API): {str(e)}")
+    #         return {
+    #             "status": "error",
+    #             "error": f"Ошибка парсинга Mail.ru Cloud: {str(e)}"
+    #         }
+
+
+
+
     async def _parse_mail_cloud(self, url: str, procurement_id: str = None) -> Dict:
-        """
-        Скачивает файл из Mail.ru Cloud по публичной ссылке через официальный API.
-        Аналог PHP-скрипта cloud_mail_downloader.php, но на чистом Python + aiohttp.
-        """
-        try:
-            clean_url = url.strip().rstrip('/')
-            if '/public/' not in clean_url:
-                raise Exception("Некорректный формат ссылки Mail.ru")
-
-            weblink = clean_url.split('/public/', 1)[1]
-            if not weblink:
-                raise Exception("Не удалось извлечь weblink")
-
-            # Шаг 1: Получить pageId из HTML
-            page_id = await self._get_page_id_from_html(clean_url)
-            if not page_id:
-                raise Exception("pageId не найден в HTML")
-
-            # Шаг 2: Получить base_url из dispatcher
-            base_url = await self._get_base_url(page_id)
-            if not base_url:
-                raise Exception("base_url не получен из dispatcher")
-
-            # Шаг 3: Получить список файлов
-            files = await self._get_all_files(weblink, page_id, base_url)
-            if not files:
-                raise Exception("Файлы не найдены")
-
-            # Берём первый файл (если их несколько — можно расширить логику)
-            file_info = files[0]
-            direct_url = file_info["url"]
-            safe_name = file_info["filename"]
-
-            # Шаг 4: Скачать файл
-            return await self._download_file_only(
-                direct_url,
-                "mail_cloud_api",
-                safe_name,
-                procurement_id
-            )
-
-        except Exception as e:
-            logger.error(f"Ошибка парсинга Mail.ru Cloud (API): {str(e)}")
-            return {
-                "status": "error",
-                "error": f"Ошибка парсинга Mail.ru Cloud: {str(e)}"
-            }
-
-    # Вспомогательные методы
-    async def _get_page_id_from_html(self, url: str) -> Optional[str]:
-        async with aiohttp.ClientSession(max_field_size=16384, max_line_size=16384) as session:
-            async with session.get(url) as resp:
-                html = await resp.text()
-        match = re.search(r'pageId["\']?\s*:\s*["\']?([a-zA-Z0-9_-]+)', html)
-        return match.group(1) if match else None
-
-
-    async def _get_base_url(self, page_id: str) -> Optional[str]:
-        dispatcher_url = f"https://cloud.mail.ru/api/v2/dispatcher?x-page-id={page_id}"
-        async with aiohttp.ClientSession(max_field_size=16384, max_line_size=16384) as session:
-            async with session.get(dispatcher_url) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-        return data.get("body", {}).get("weblink_get", [{}])[0].get("url")
-
-
-    async def _get_all_files(self, weblink: str, page_id: str, base_url: str, current_path: str = "") -> List[Dict]:
-        folder_url = f"https://cloud.mail.ru/api/v2/folder?weblink={weblink}&x-page-id={page_id}"
-        async with aiohttp.ClientSession(max_field_size=16384, max_line_size=16384) as session:
-            async with session.get(folder_url) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json()
-        files = []
-        for item in data.get("body", {}).get("list", []):
-            if item["type"] == "folder":
-                sub_files = await self._get_all_files(
-                    weblink=f"{weblink}/{item['name']}",
-                    page_id=page_id,
-                    base_url=base_url,
-                    current_path=f"{current_path}/{item['name']}" if current_path else item['name']
-                )
-                files.extend(sub_files)
-            else:
-                filename = item["name"]
-                full_path = f"{current_path}/{filename}" if current_path else filename
-                safe_name = re.sub(r'[<>:"/\\|?*]', '_', full_path)
-                direct_url = f"{base_url}/{weblink}{f'/{current_path}' if current_path else ''}/{filename}"
-                files.append({"url": direct_url, "filename": safe_name})
-        return files
-
-
-    async def _parse_mail_cloud_via_api(self, url: str, procurement_id: str = None) -> Dict:
         """
         Скачивает файлы из Mail.ru Cloud по публичной ссылке.
         Поддерживает папки и вложенные структуры.
@@ -1186,6 +1154,29 @@ class CloudStorageParser:
                     safe_name
                 )
                 results.append(result)
+
+                # with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(safe_name)[1] or ".bin") as tmp:
+                #     async with aiohttp.ClientSession(
+                #         max_field_size=16384,   # Увеличиваем лимит на размер одного поля заголовка
+                #         max_line_size=16384     # Увеличиваем лимит на длину строки заголовка
+                #     ) as session:
+                #         async with session.get(direct_url, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                #             if resp.status != 200:
+                #                 logger.warning(f"Не удалось скачать {direct_url}: {resp.status}")
+                #                 continue
+                #             async for chunk in resp.content.iter_chunked(8192):
+                #                 tmp.write(chunk)
+                #     tmp_path = tmp.name
+
+                # results.append({
+                #     "status": "success",
+                #     "filename": safe_name,
+                #     "file_path": tmp_path,
+                #     "source": "mail_cloud",
+                #     "original_url": url,
+                #     "procurement_id": procurement_id,
+                #     "file_extension": os.path.splitext(safe_name)[1] or ".bin"
+                # })
             log = {
                 "status": "success",
                 "files": results,
@@ -1935,6 +1926,143 @@ class CloudStorageParser:
         return ""
 
 
+
+
+
+
+
+
+
+
+
+
+    def _extract_reestr_number_from_web_url(self, url: str) -> Optional[str]:
+        """
+        Извлекает реестровый номер из различных форматов URL ЕИС.
+
+        Args:
+            url (str): URL страницы закупки
+
+        Returns:
+            Optional[str]: Реестровый номер или None
+        """
+        try:
+            parsed = urlparse(url)
+            query_params = parse_qs(parsed.query)
+
+            # Пробуем разные параметры, которые могут содержать реестровый номер
+            reestr_number = (
+                query_params.get("regNumber", [None])[0] or
+                query_params.get("reestrNumber", [None])[0] or
+                query_params.get("noticeInfoId", [None])[0]
+            )
+
+            if reestr_number:
+                # Проверяем, что это действительно реестровый номер (обычно 20+ цифр)
+                if re.match(r'^\d{10,}$', reestr_number):
+                    return reestr_number
+
+            # Если в query параметрах нет, пробуем извлечь из пути
+            path_parts = parsed.path.split('/')
+            for part in path_parts:
+                # Реестровые номера обычно имеют формат: 0373200003624000001 (20+ цифр)
+                if re.match(r'^\d{10,}$', part):
+                    return part
+
+            # Для URL типа common-info.html пробуем найти номер в предыдущих частях пути
+            if 'common-info' in parsed.path or 'documents' in parsed.path:
+                # Ищем номер в предыдущих сегментах пути
+                path_segments = parsed.path.split('/')
+                for i, segment in enumerate(path_segments):
+                    if segment in ['common-info.html', 'documents.html', 'view'] and i > 0:
+                        # Берем предыдущий сегмент
+                        prev_segment = path_segments[i-1]
+                        if re.match(r'^\d{10,}$', prev_segment):
+                            return prev_segment
+
+            logger.warning(f"Не удалось извлечь реестровый номер из URL: {url}")
+            return None
+
+        except Exception as e:
+            logger.error(f"Ошибка извлечения реестрового номера из URL {url}: {str(e)}")
+            return None
+
+    async def _parse_eis_soap_ip(self, url: str, procurement_id: str = None) -> Dict:
+        """
+        Парсинг закупки через официальный SOAP API ЕИС для физических лиц.
+        Использует individualPerson_token и метод getDocsByReestrNumber.
+        """
+        try:
+            # === 1. Извлекаем regNumber из URL ===
+            reg_number = self._extract_reestr_number_from_web_url(url)
+            if not reg_number:
+                return {
+                    "status": "error", 
+                    "error": "Некорректная ссылка: не удалось извлечь регистрационный номер закупки"
+                    }
+
+            logger.info(f"Запрос документов ЕИС по regNumber={reg_number} через SOAP API")
+
+            # === 2. Формируем SOAP-запрос ===
+            async with aiofiles.open('xml/getDocsByReestrNumberRequest.xml', 'r', encoding='utf-8') as file:
+                xml_content = await file.read()
+                generated_uuid = str(uuid.uuid4())
+                generated_datetime = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+                subsystem_type = "PRIZ"
+                soap_body = xml_content.replace(
+                    "{{ UUID }}", generated_uuid).replace("{{ datetime }}", generated_datetime).replace(
+                        "{{ token }}", self.eis_token).replace("{{ subsystem_type }}", subsystem_type)
+
+            headers = {
+                "Content-Type": "text/xml; charset=utf-8",
+                "SOAPAction": "\"\""
+            }
+
+            # === 3. Отправляем запрос ===
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.eis_soap_url,
+                    data=soap_body,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=60)
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"SOAP ошибка: {response.status}, тело: {error_text}")
+                        return {"status": "error", "error": f"SOAP ошибка: {response.status}"}
+
+                    soap_response = await response.text()
+                    logger.info(f"Ответ ЕИС: {soap_response}")
+                    response_content = xmltodict.parse(soap_response)
+
+            # === 4. Парсим archiveUrl ===
+            archive_url = self._extract_eis_archive_url(response_content)
+            if not archive_url:
+                error_info = self._extract_eis_error_info(response_content)
+                if error_info:
+                    return {
+                        "status": "error", 
+                        "error": f"Ошибка парсинга ЕИС: {error_info}"
+                        }
+                return {
+                    "status": "error", 
+                    "error": "Не найден archiveUrl в ответе ЕИС"
+                    }
+
+            logger.info(f"Получена ссылка на архив: {archive_url}")
+
+            # === 5. Скачиваем архив ===
+            return await self._download_eis_archive(archive_url, reg_number, procurement_id)
+
+        except Exception as e:
+            logger.error(f"Ошибка SOAP-парсинга ЕИС: {str(e)}", exc_info=True)
+            return {"status": "error", "error": f"Ошибка SOAP-парсинга: {str(e)}"}
+
+
+
+
+
+
 # Глобальный экземпляр парсера
 cloud_parser = CloudStorageParser()
 
@@ -2033,3 +2161,13 @@ def is_cloud_storage_link(url: str) -> bool:
         bool: True, если ссылка ведёт на поддерживаемое облачное хранилище, иначе False.
     """
     return cloud_parser.is_cloud_link(url)
+
+
+
+
+
+
+
+
+
+    

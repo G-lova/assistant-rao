@@ -1,0 +1,49 @@
+{
+  "type": "object",
+  "required": ["has_text", "raw_text", "visual_notes", "image_description", "readability"],
+  "properties": {
+    "has_text": {
+      "type": "boolean",
+      "description": "Содержит ли документ распознанный текст (true/false)"
+    },
+    "raw_text": {
+      "type": "string",
+      "description": "Распознанный текст документа или сообщение об отсутствии текста",
+      "default": ""
+    },
+    "visual_notes": {
+      "type": "string",
+      "description": "Описание графических элементов (если присутствуют в тексте, иначе пустая строка)",
+      "default": ""
+    },
+    "image_description": {
+      "type": "string",
+      "description": "Краткое описание изображения (если has_text=false, иначе пустая строка)",
+      "default": ""
+    },
+    "processing_quality": {
+      "type": "object",
+      "required": ["status", "issues"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "description": "Общая оценка качества обработки документа",
+          "enum": ["high", "medium", "low", "error"]
+        },
+        "ocr_score": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Оценка OCR-распозанавания документа от 0 (невозможно распознать ни текст, ни изображение) до 1 (отличное качество)"
+        },
+        "issues": {
+          "type": "array",
+          "description": "Список обнаруженных проблем при обработке",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

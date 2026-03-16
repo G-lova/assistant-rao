@@ -1,6 +1,9 @@
+aiofiles
 asyncpg
+defusedxml
 fastapi==0.95.2
 fuzzywuzzy
+json-repair
 numpy==1.26.4
 openai
 opencv-python>=4.6.0

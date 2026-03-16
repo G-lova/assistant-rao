@@ -59,6 +59,77 @@ class EmbeddingClient:
 
         return np.array(all_embeddings)
     
+    # def _get_embeddings_direct(self, texts):
+    #     """
+    #     Получает эмбеддинги напрямую через HTTP запрос к Ollama API.
+        
+    #     Args:
+    #         texts (List[str]): Список текстов для эмбеддинга
+            
+    #     Returns:
+    #         List[List[float]]: Список векторов эмбеддингов
+    #     """
+    #     headers = {
+    #         "X-API-Key": f"{self.api_key}",
+    #         "Content-Type": "application/json"
+    #     }
+        
+    #     # Для Ollama API используем правильный формат payload
+    #     # Если один текст, отправляем как строку, если несколько - как список
+    #     # if len(texts) == 1:
+    #     #     input_data = texts[0]
+    #     # else:
+    #     #     input_data = texts
+    #     input_data = texts
+        
+    #     payload = {
+    #         # "model": self.model,
+    #         "inputs": input_data
+    #     }
+        
+    #     try:
+    #         with httpx.Client(timeout=30.0) as client:
+    #             response = client.post(
+    #                 self.api_url,
+    #                 json=payload,
+    #                 headers=headers
+    #             )
+                
+    #             logger.info(f"Response status: {response.status_code}")
+    #             logger.info(f"Response headers: {dict(response.headers)}")
+                
+    #             if response.status_code != 200:
+    #                 logger.error(f"Error response: {response.text}")
+    #                 response.raise_for_status()
+                
+    #             response_data = response.json()
+    #             logger.info(f"Response data keys: {list(response_data.keys())}")
+                
+    #             # Проверяем структуру ответа от Ollama API
+    #             if "embedding" in response_data:
+    #                 # Одиночный эмбеддинг
+    #                 logger.info(f"Found single embedding in response")
+    #                 return [response_data["embedding"]]
+    #             elif "embeddings" in response_data:
+    #                 # Множественные эмбеддинги
+    #                 logger.info(f"Found embeddings in response, count: {len(response_data['embeddings'])}")
+    #                 return response_data["embeddings"]
+    #             elif "data" in response_data:
+    #                 # Формат ответа как у OpenAI
+    #                 logger.info(f"Found data in response, count: {len(response_data['data'])}")
+    #                 return [item["embedding"] for item in response_data["data"]]
+    #             else:
+    #                 logger.error(f"Unexpected response format: {response_data}")
+    #                 raise KeyError("No embeddings found in response")
+                    
+    #     except httpx.HTTPError as e:
+    #         logger.error(f"HTTP error occurred: {e}")
+    #         raise
+    #     except Exception as e:
+    #         logger.error(f"Error getting embeddings: {e}")
+    #         raise
+
+    
     def _get_embeddings_direct(self, texts):
         """
         Получает эмбеддинги напрямую через HTTP запрос к Ollama API.
@@ -101,41 +172,41 @@ class EmbeddingClient:
         # }
         
         logger.info(f"Sending request to {self.api_url}")
-        logger.info(f"Model: {self.model}")
-        logger.info(f"Texts count: {len(texts)}")
-        # Маскируем API ключ в логах для безопасности
-        masked_headers = headers.copy()
-        if "Authorization" in masked_headers:
-            auth_parts = masked_headers["Authorization"].split(" ")
-            if len(auth_parts) > 1:
-                masked_headers["Authorization"] = f"{auth_parts[0]} {auth_parts[1][:4]}{'*' * (len(auth_parts[1]) - 4)}"
-        if "X-API-Key" in masked_headers:
-            masked_headers["X-API-Key"] = f"{masked_headers['X-API-Key'][:4]}{'*' * (len(masked_headers['X-API-Key']) - 4)}"
-        logger.info(f"Request headers (masked): {masked_headers}")
-        logger.info(f"Request payload keys: {list(payload.keys())}")
+        # logger.info(f"Model: {self.model}")
+        # logger.info(f"Texts count: {len(texts)}")
+        # # Маскируем API ключ в логах для безопасности
+        # masked_headers = headers.copy()
+        # if "Authorization" in masked_headers:
+        #     auth_parts = masked_headers["Authorization"].split(" ")
+        #     if len(auth_parts) > 1:
+        #         masked_headers["Authorization"] = f"{auth_parts[0]} {auth_parts[1][:4]}{'*' * (len(auth_parts[1]) - 4)}"
+        # if "X-API-Key" in masked_headers:
+        #     masked_headers["X-API-Key"] = f"{masked_headers['X-API-Key'][:4]}{'*' * (len(masked_headers['X-API-Key']) - 4)}"
+        # logger.info(f"Request headers (masked): {masked_headers}")
+        # logger.info(f"Request payload keys: {list(payload.keys())}")
         
         # Добавляем логирование размера данных для отладки
-        total_chars = sum(len(text) for text in texts)
-        logger.info(f"Total characters in texts: {total_chars}")
-        logger.info(f"Average characters per text: {total_chars / len(texts) if texts else 0}")
+        # total_chars = sum(len(text) for text in texts)
+        # logger.info(f"Total characters in texts: {total_chars}")
+        # logger.info(f"Average characters per text: {total_chars / len(texts) if texts else 0}")
         
-        # Логируем первые 100 символов каждого текста для отладки
-        for i, text in enumerate(texts[:3]):  # Логируем только первые 3 текста
-            logger.info(f"Text {i+1} preview: {text[:100]}...")
-            logger.info(f"Text {i+1} length: {len(text)} characters")
-            logger.info(f"Text {i+1} repr: {repr(text[:200])}")
+        # # Логируем первые 100 символов каждого текста для отладки
+        # for i, text in enumerate(texts[:3]):  # Логируем только первые 3 текста
+        #     logger.info(f"Text {i+1} preview: {text[:100]}...")
+        #     logger.info(f"Text {i+1} length: {len(text)} characters")
+        #     logger.info(f"Text {i+1} repr: {repr(text[:200])}")
         
         # Добавляем логирование полного payload для отладки (только для первого текста)
-        if len(texts) == 1:
-            import json
-            logger.info(f"Full request payload: {json.dumps(payload, ensure_ascii=False, indent=2)}")
-            # Проверяем, есть ли непечатаемые символы
-            text = texts[0]
-            try:
-                text.encode('utf-8')
-                logger.info("Text encoding: OK")
-            except UnicodeEncodeError as e:
-                logger.error(f"Text encoding error: {e}")
+        # if len(texts) == 1:
+        #     import json
+        #     logger.info(f"Full request payload: {json.dumps(payload, ensure_ascii=False, indent=2)}")
+        #     # Проверяем, есть ли непечатаемые символы
+        #     text = texts[0]
+        #     try:
+        #         text.encode('utf-8')
+        #         logger.info("Text encoding: OK")
+        #     except UnicodeEncodeError as e:
+        #         logger.error(f"Text encoding error: {e}")
         
         # Максимальное количество повторных попыток
         max_retries = 3
@@ -151,7 +222,7 @@ class EmbeddingClient:
                     )
                     
                     logger.info(f"Response status: {response.status_code}")
-                    logger.info(f"Response headers: {dict(response.headers)}")
+                    # logger.info(f"Response headers: {dict(response.headers)}")
                     
                     if response.status_code != 200:
                         logger.error(f"Error response: {response.text}")
@@ -179,7 +250,7 @@ class EmbeddingClient:
                             continue
                     
                     response_data = response.json()
-                    logger.info(f"Response data keys: {list(response_data.keys())}")
+                    # logger.info(f"Response data keys: {list(response_data.keys())}")
                     
                     # Проверяем структуру ответа от Ollama API
                     if "embedding" in response_data:

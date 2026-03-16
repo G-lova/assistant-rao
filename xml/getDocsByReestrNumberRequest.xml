@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+    xmlns:ws="http://zakupki.gov.ru/fz44/get-docs-ip/ws">
+    <soapenv:Header>
+        <individualPerson_token>{{ token }}</individualPerson_token>
+    </soapenv:Header>
+    <soapenv:Body>
+        <ws:getDocsByReestrNumberRequest>
+            <index>
+                <id>{{ UUID }}</id>
+                <createDateTime>{{ datetime }}</createDateTime>
+                <mode>PROD</mode>
+            </index>
+            <selectionParams>
+                <subsystemType>{{ subsystem_type }}</subsystemType>
+                <reestrNumber>{{ reg_number }}</reestrNumber>
+            </selectionParams>
+        </ws:getDocsByReestrNumberRequest>
+    </soapenv:Body>
+</soapenv:Envelope>
