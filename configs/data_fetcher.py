@@ -77,8 +77,4 @@ class DataFetcher:
         
         df = pd.DataFrame(result['data'])
         
-        
-        if df.empty or df['id'].isna().all() or (df['id'].astype(str) == 'None').all():
-            raise Exception("Нет данных для анализа")
-        
         return df

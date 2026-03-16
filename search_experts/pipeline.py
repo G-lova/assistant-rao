@@ -1,3 +1,6 @@
+import asyncio
+
+import aiofiles
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -76,7 +79,7 @@ class ScoringPipeline:
         return True
     
 
-    def load_sql_query(self, file_name: str) -> str:
+    async def load_sql_query(self, file_name: str) -> str:
         """
         Загружает и нормализует SQL-запрос из файла.
 
@@ -90,8 +93,8 @@ class ScoringPipeline:
             str: SQL-запрос в виде одной строки без лишних пробельных символов.
         """
         file_path = f"{self.sql_queries_path}{file_name}"
-        with open(file_path, encoding="utf-8") as f:
-            sql_query = f.read()
+        async with aiofiles.open(file_path, encoding="utf-8") as f:
+            sql_query = await f.read()
         return " ".join(sql_query.split())
     
 
@@ -150,7 +153,7 @@ class ScoringPipeline:
         return df
     
 
-    def calculate_similarities(self, df):
+    async def calculate_similarities(self, df):
         """
         Вычисляет косинусное сходство между эмбеддингами текста экспертизы и описаний экспертов.
 
@@ -171,9 +174,14 @@ class ScoringPipeline:
             
         exp_text = df["expertise_text_feature"].iloc[0]
         expert_texts = df["expert_text_feature"].tolist()
-        
-        exp_emb = self.embedding_client.get_embeddings([exp_text])
-        expert_embs = self.embedding_client.get_embeddings(expert_texts)
+
+        exp_emb_task = self.embedding_client.get_embeddings([exp_text])
+        expert_embs_task = self.embedding_client.get_embeddings(expert_texts)
+
+        exp_emb, expert_embs = await asyncio.gather(
+            exp_emb_task,
+            expert_embs_task
+        )
         
         df["similarity_embeddings"] = cosine_similarity(exp_emb, expert_embs).flatten()
         return df.sort_values(by="similarity_embeddings", ascending=False)
@@ -242,7 +250,7 @@ class ScoringPipeline:
         return df
     
 
-    def run_pipeline(self, sql_file_path, expertise_id):
+    async def run_pipeline(self, sql_file_path, expertise_id):
         """
         Запускает полный конвейер оценки экспертов для заданной экспертизы.
 
@@ -259,25 +267,28 @@ class ScoringPipeline:
         """
         try:
             # Загрузка SQL запроса
-            sql_query = self.load_sql_query(sql_file_path)
+            sql_query = await self.load_sql_query(sql_file_path)
             
             # Получение данных
-            df = self.data_fetcher.fetch_expertise_data(sql_query, bindings=[expertise_id, expertise_id, expertise_id])
+            df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[expertise_id, expertise_id, expertise_id])
+        
+            if df.empty or df['expert_id'].isna().all() or (df['expert_id'].astype(str) == 'None').all():
+                raise Exception("Доступных экспертов нет")
             
             # Предобработка
-            df = self.preprocess_data(df)
+            df = await asyncio.to_thread(self.preprocess_data, df)
             
             # Обнаружение конфликтов
-            df = self.detect_conflicts(df)
+            df = await asyncio.to_thread(self.detect_conflicts, df)
             
             # Расчет схожестей
-            df = self.calculate_similarities(df)
+            df = await self.calculate_similarities(df)
             
             # Расчет семейственности
-            df = self.detect_nepotism(df)
+            df = await asyncio.to_thread(self.detect_nepotism, df)
             
             # Расчет рейтингов
-            df = self.calculate_ratings(df)
+            df = await asyncio.to_thread(self.calculate_ratings, df)
             
             return df
         

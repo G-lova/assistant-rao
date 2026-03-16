@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import os
 from datetime import date
@@ -14,7 +15,7 @@ sys.path.insert(0, project_root)
 
 logger = get_logger(__name__)
 
-def scoring(expertise_id: int, x_api_database: str):
+async def scoring(expertise_id: int, x_api_database: str):
     """
     Запускает пайплайн скоринга экспертов для заданной экспертизы.
 
@@ -47,10 +48,10 @@ def scoring(expertise_id: int, x_api_database: str):
         logger.info(f"Processing expertise_id: {expertise_id}, DB: {x_api_database}")
 
         # Запуск пайплайна
-        df = pipeline.run_pipeline(sql_file_name, expertise_id)
+        df = await pipeline.run_pipeline(sql_file_name, expertise_id)
 
         # Получение результатов
-        top_results = pipeline.get_top_results(df)
+        top_results = await asyncio.to_thread(pipeline.get_top_results, df)
 
         logger.info(f"Scoring pipeline completed successfully: expertise_id={expertise_id}, DB={x_api_database}")
 
@@ -72,7 +73,12 @@ def scoring(expertise_id: int, x_api_database: str):
         logger.error(f"Error in scoring pipeline: {e}", exc_info=True)
         raise
 
+    finally:
+        # закрытие клиента
+        if pipeline and hasattr(pipeline, "embedding_client"):
+            await pipeline.embedding_client.close()
+
 if __name__ == "__main__":
 
     expertise_id = int(input('ID экспертизы для подбора эксперта:'))
-    scoring(expertise_id)
+    asyncio.run(scoring(expertise_id, "dev"))

@@ -246,7 +246,7 @@ async def get_experts_for_expertise(
             raise HTTPException(status_code=400, detail="Поле 'expertise_id' обязательно")
 
         # Запускаем скоринг пайплайн
-        results = scoring(expertise_id, x_api_database)
+        results = await scoring(expertise_id, x_api_database)
 
         # Преобразуем результат в список целых чисел
         if hasattr(results, 'tolist'):

@@ -62,6 +62,10 @@ class RaoConclusionPipeline:
             # Получение данных
             logger.info(f"Загрузка даннных для expertise_id={self.expertise_id}")
             df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[self.expertise_id])
+
+            if df.empty or df['id'].isna().all() or (df['id'].astype(str) == 'None').all():
+                raise Exception("Нет данных для анализа")
+                
             logger.info(f"Получено {len(df)} записей из MySQL")
             
             if len(df) < 2:
