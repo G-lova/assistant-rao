@@ -245,20 +245,20 @@ class ConsistencyChecker:
                 if type_compliance:
                     doc_description['type_compliance'] = {
                         'status': type_compliance['status'], 
-                        'description': '\n'.join(i for i in type_compliance.get('issues', []) if i) or ''
+                        'description': ('\n'.join(i for i in type_compliance.get('issues', []) if i) if isinstance(type_compliance.get('issues', []), list) else type_compliance.get('issues', '')) or ''
                     }
 
 
                 # читаемость
                 readability = item.get('readability', {})
                 if readability:
-                    if readability['status'] == 'allow':
+                    if readability.get('status', 'deny') == 'allow':
                         readability['description'] = readability.get('image_description', '')
                     else:
-                        readability['description'] = '\n'.join(i for i in readability.get('issues', []) if i) or ''
+                        readability['description'] = ('\n'.join(i for i in readability.get('issues', []) if i) if isinstance(readability.get('issues', []), list) else readability.get('issues', '')) or ''
                         
                     doc_description['readability'] = {
-                        'status': readability['status'], 
+                        'status': readability.get('status', 'deny'), 
                         'description': readability['description']
                     }
                 
@@ -274,7 +274,7 @@ class ConsistencyChecker:
                 doc_description['raw_data'] = item.get('raw_data', {})
 
                 # статус
-                doc_description['status'] = 'deny' if 'deny' in {type_compliance.get('status', ""), readability.get('status', ""), completeness.get('status', "")} else 'allow'
+                doc_description['status'] = 'deny' if 'deny' in {type_compliance.get('status', ''), readability.get('status', ''), completeness.get('status', '')} else 'allow'
 
 
                 documents_data.append(doc_description)

@@ -195,7 +195,8 @@ JOIN JSON_TABLE(
 				"docValidAllIfFiles", "docCargoTaxFiles", "docReportDoNIRFiles", "docAssetSelOrgFiles", "docPorViewOcenkFiles", "docTrebContentRequestFiles",
 				"docIzvejenieFiles", "docTechDocFiles", "docCertValidFiles", "docPhotoCargoFiles", "docValidCountyFiles", "docActPriemTovFiles",
 				"docPhotoFinishWorkFiles", "docValidCopyriteFiles", "docValidGarantFiles", "docAcceptInafPostavFiles", "docDopConsentContractFiles",
-				"docExpertReportFiles", "docVziskPenyFiles", "docDopMaterialsFiles", "unknown"]' AS JSON),
+				"docExpertReportFiles", "docVziskPenyFiles", "docDopMaterialsFiles", "unknown",
+                "contractFiles", "dopMaterialFiles", "dopContractFiles", "docFiles", "rao", "our"]' AS JSON),
         '$[*]' COLUMNS (d VARCHAR(255) PATH '$')
      ) AS doc_codes
      ON 1=1
@@ -215,6 +216,6 @@ LEFT JOIN (SELECT model_id, collection_name, JSON_ARRAYAGG(CONCAT(?, id, '/', fi
            FROM media
      	   WHERE model_type LIKE '%Expertise'
            GROUP BY model_id, collection_name) m
-     ON m.collection_name = `keys`.k
+     ON m.collection_name = doc_codes.d
      AND m.model_id =e.id
 WHERE e.id = ?;

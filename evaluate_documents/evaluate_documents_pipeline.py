@@ -356,7 +356,9 @@ class TasksPipeline:
                             self.df.loc[self.df['doc_code'] == 'linkDocs', 'provided_docs'] = 1
                         self.df.loc[self.df['doc_code'] == detected_type, 'provided_docs'] = 1
                         # self.df.loc[self.df['doc_code'] == (detected_type if (link.doc_code == 'linkDocs') else link.doc_code), 'documents_results'].iloc[0].append(res)
-                        self.df.loc[self.df['doc_code'] == link.doc_code, 'documents_results'].iloc[0].append(res)
+                        self.df.loc[self.df['doc_code'] == (detected_type if (link.doc_code in ("contractFiles", "dopMaterialFiles", "dopContractFiles", "docFiles", "rao", "our")) else link.doc_code
+                                                            ), 'documents_results'].iloc[0].append(res)
+                        # self.df.loc[self.df['doc_code'] == link.doc_code, 'documents_results'].iloc[0].append(res)
 
             # сохранение данных в БД
             for row in self.df[self.df['documents_results'].map(bool)].itertuples():

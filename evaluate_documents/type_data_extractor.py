@@ -170,7 +170,7 @@ class TypeDataExtractor:
             logger.info(f"Длина контента: {len(content)} символов")
 
             # Загружаем промпт
-            self.type_data_extractor_prompt = Template(self.type_data_extractor_prompt).safe_substitute(
+            prompt = Template(self.type_data_extractor_prompt).safe_substitute(
                 mapping=json.dumps(DOCUMENT_TYPE_MAPPING, ensure_ascii=False, indent=2)
             )
 
@@ -181,7 +181,7 @@ class TypeDataExtractor:
                     img_result = content_splitted[i + 2]
 
 
-            self.TYPE_DATA_EXTRACTOR_SCHEMA = self.TYPE_DATA_EXTRACTOR_SCHEMA.replace(
+            schema = self.TYPE_DATA_EXTRACTOR_SCHEMA.replace(
                 '"ALLOWED_DOC_TYPES"', json.dumps(ALLOWED_DOC_TYPES)).replace(
                 '"img_description"', f'"{img_result}"')
 
@@ -196,14 +196,14 @@ class TypeDataExtractor:
                     model=self.model,
                     messages=[
                         {"role": "system",
-                            "content": self.type_data_extractor_prompt},
+                            "content": prompt},
                         {"role": "user", "content": f"""
                             Определи тип этого документа. Соответствует ли он {doc_type}: ({DOCUMENT_TYPE_MAPPING.get(doc_type)})? 
                             Проанализируй текст, оцени его читаемость, извлеки данные:\n\n{content}
                         """}
                     ],
                     extra_body={
-                        "guided_json": json.loads(self.TYPE_DATA_EXTRACTOR_SCHEMA)},
+                        "guided_json": json.loads(schema)},
                     max_tokens=4096,
                     temperature=0.1
                 )
@@ -226,11 +226,18 @@ class TypeDataExtractor:
 
             # Поиск JSON структур вручную
             try:
+                # result = repair_json(raw_response, return_objects=True, skip_json_loads=True)
                 result = json.loads(repair_json(raw_response))
 
                 if not result:
                     logger.error("JSON структуры не найдены.")
                     return None
+                
+                # # Если repair_json вернул строку (редкий кейс), пробуем распарсить её
+                # if isinstance(result, str):
+                #     result = json.loads(result)
+                # else:
+                #     result = result
                 
                 logger.info("Удалось распарсить JSON из извлечённого фрагмента вручную.")
                 return result
@@ -308,6 +315,8 @@ class TypeDataExtractor:
         }
 
         # --- TYPE_COMPLIANCE ---
+        if not isinstance(chunk_results[0], dict):
+            logger.warning(f"Строковый чанк: {chunk_results[0]}")
 
         type_compliance = chunk_results[0].get('type_compliance', {})
         if type_compliance:
@@ -319,6 +328,12 @@ class TypeDataExtractor:
                     "detected_type": doc_type,
                     "issues": []
                 }
+            elif doc_type in {"contractFiles", "dopMaterialFiles", "dopContractFiles", "docFiles", "rao", "our"}:
+                merged['type_compliance'] = {
+                    "status": "allow",
+                    "detected_type": doc_code,
+                    "issues": []
+                }
             else:
                 merged['type_compliance'] = type_compliance
 
@@ -328,6 +343,8 @@ class TypeDataExtractor:
 
         # ---- МЕРДЖ ЧАНКОВ ----
         for chunk in chunk_results:
+            if not isinstance(chunk, dict):
+                logger.warning(f"Строковый чанк: {chunk}")
 
             # --- RADABILITY ---
             readability = chunk.get("readability", {})

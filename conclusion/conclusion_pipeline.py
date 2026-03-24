@@ -244,7 +244,7 @@ class RaoConclusionPipeline:
             logger.info(f"Слияние успешно завершено для expertise_id={self.expertise_id}")
 
             logger.info(f"Попытка использовать значения ИИ для expertise_id={self.expertise_id}")
-            if ai_conclusion and ai_conclusion.get('status', {}) == 'success' and ai_conclusion.get('conclusion', {}):
+            if ai_conclusion and ai_conclusion.get('status') == 'success' and ai_conclusion.get('conclusion', {}):
                 change = 0
                 for key, value in ai_conclusion.get('conclusion', {}).items():
                     if key in rao_conclusion and value:
