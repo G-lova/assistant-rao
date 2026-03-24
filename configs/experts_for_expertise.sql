@@ -392,8 +392,8 @@ WITH expertise_info AS (
 			THEN CASE 
 				WHEN e.object IN (1,7) 
 				THEN CASE
-					WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE `type` IN (3)) THEN 0.5
-					WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE `type` IN (1)) THEN 0.75
+					WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE `type` IN (3)) OR `checkType2` = 14 THEN 0.5
+					WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE `type` IN (1)) OR `checkType2` = 15 THEN 0.75
 					WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE `type` IN (2,4,5)) THEN 1
 				END	
 				ELSE 1
