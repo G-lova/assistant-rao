@@ -379,15 +379,15 @@ WITH expertise_info AS (
 		END
 		ELSE 0 
 	END > 3) AS overdues,
-		COALESCE(AVG(CASE WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
+		ROUND(COALESCE(AVG(CASE WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
 			THEN CASE
 				WHEN ee.status = 1
 				THEN COALESCE(ee.`range`, 0) 
 				ELSE COALESCE(ee.`range`, NULL)
 			END
 			ELSE NULL 
-		END), 0) AS criterion4,
-		COALESCE(AVG(CASE 
+		END), 0), 2) AS criterion4,
+		ROUND(COALESCE(AVG(CASE 
 			WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
 			THEN CASE 
 				WHEN e.object IN (1,7) 
@@ -399,7 +399,7 @@ WITH expertise_info AS (
 				ELSE 1
 			END
 			ELSE NULL
-		END), 0) AS criterion5,
+		END), 0), 2) AS criterion5,
         SUM(CASE WHEN e.status IN (3) OR e.dateStatus3 >= DATE_SUB(NOW(), INTERVAL 7 DAY) THEN 1 ELSE 0 END) AS currentWeekWorkload 
 	FROM users u 
 	LEFT JOIN expertise_experts ee 
@@ -681,23 +681,23 @@ experts_with_coords AS (
 			THEN u.countExpertise / MAX(u.countExpertise) OVER(PARTITION BY ewc.expertise_id)
 			ELSE 0
 		END AS countExpertise_rate,
-		CASE 
+		ROUND(CASE 
 			WHEN u.countExpertises_lastYear > 0 AND u.countExpertises_lastYear <= 5 THEN 0.25
 			WHEN u.countExpertises_lastYear > 5 AND u.countExpertises_lastYear <= 10 THEN 0.5
 			WHEN u.countExpertises_lastYear > 10 AND u.countExpertises_lastYear <= 15 THEN 0.75
 			WHEN u.countExpertises_lastYear > 15 THEN 1
 			ELSE 0
-		END AS criterion1,	
-		CASE 
+		END, 2) AS criterion1,	
+		ROUND(CASE 
 			WHEN u.countExpertises_lastYear > 0
 			THEN 1 - u.overdues / u.countExpertises_lastYear
 			ELSE 0
-		END AS criterion2,
-		CASE 
+		END, 2) AS criterion2,
+		ROUND(CASE 
 			WHEN u.countExpertises_lastYear > 0
 			THEN 1 - u.secondUpload_lastYear / u.countExpertises_lastYear
 			ELSE 0
-		END AS criterion3,
+		END, 2) AS criterion3,
 		CASE 
 			WHEN (u.countExpertises_lastYear + u.expert_declines) > 0
 			THEN (u.countExpertises_lastYear) / (u.countExpertises_lastYear + u.expert_declines)
@@ -748,7 +748,7 @@ SELECT
 		THEN 1 - region_distance_km / MAX(region_distance_km) OVER(PARTITION BY expertise_id)
 		ELSE 1
 	END AS distance_rate,
-	(0.2 * criterion1 + 0.1 * criterion2 + 0.1 * criterion3 + 0.4 * criterion4 + 0.2 * criterion5) AS criterion_rating,
+	ROUND((0.2 * criterion1 + 0.1 * criterion2 + 0.1 * criterion3 + 0.4 * criterion4 + 0.2 * criterion5), 2) AS criterion_rating,
 	CAST((declines_rate + personal_block + education_rate + experience_rate 
 	+ degreeExperience_rate	+ academicTitleExperience_rate + pubMon_rate 
 	+ countPubMon_rate + experienceExpertise_rate + countExpertise_rate 
