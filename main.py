@@ -5,7 +5,7 @@ import json
 
 from configs.config import Config
 from configs.parsing import CloudStorageParser
-from configs.schemas import EISParseRequest, RAOConclusionRequest
+from configs.schemas import EISParseRequest, ExpertsScoringRequest, RAOConclusionRequest
 from src.evaluator import evaluator
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -216,7 +216,7 @@ async def api_get_contract_info(request_body: Dict[str, str] = Body(...)):
 
 @app.post("/get-experts-for-expertise")
 async def get_experts_for_expertise(
-    request_body: Dict[str, int] = Body(...),
+    request: ExpertsScoringRequest,
     x_api_database: str = Header(default="dev", alias="X-API-Database")
 ):
     """
@@ -240,26 +240,16 @@ async def get_experts_for_expertise(
         HTTPException: 500 - при ошибке выполнения скоринга
     """
     try:
-        expertise_id = request_body.get("expertise_id")
+        expertise_id = request.expertise_id
+        details = request.details
 
         if not expertise_id:
             raise HTTPException(status_code=400, detail="Поле 'expertise_id' обязательно")
 
         # Запускаем скоринг пайплайн
-        results = await scoring(expertise_id, x_api_database)
+        results = await scoring(expertise_id, details, x_api_database)
 
-        # Преобразуем результат в список целых чисел
-        if hasattr(results, 'tolist'):
-            expert_ids = results.tolist()
-        elif isinstance(results, list):
-            expert_ids = results
-        else:
-            col = 'expert_id' if 'expert_id' in results.columns else results.columns[0]
-            expert_ids = results[col].tolist()
-
-        expert_ids = [int(x) for x in expert_ids]
-
-        return expert_ids
+        return results
         
     except Exception as e:
         logger.error(f"Ошибка при подборе экспертов: {str(e)}", exc_info=True)

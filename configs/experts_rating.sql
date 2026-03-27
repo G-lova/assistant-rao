@@ -34,7 +34,7 @@ WITH experts AS (
 			END
 			ELSE 0 
 		END > 3) AS overdues,
-		COALESCE(AVG(CASE 
+		ROUND(COALESCE(AVG(CASE 
 			WHEN ee.uploadExpertDate BETWEEN ? AND ? 
 			THEN CASE
 				WHEN ee.status = 1
@@ -42,8 +42,8 @@ WITH experts AS (
 				ELSE COALESCE(ee.`range`, NULL)
 			END
 			ELSE NULL 
-		END), 0) AS criterion4,
-		COALESCE(AVG(CASE 
+		END), 0) * 100, 1) AS criterion4,
+		ROUND(COALESCE(AVG(CASE 
 			WHEN ee.uploadExpertDate BETWEEN ? AND ?
 			THEN CASE 
 				WHEN e.object IN (1,7) 
@@ -55,7 +55,7 @@ WITH experts AS (
 				ELSE 1
 			END
 			ELSE NULL
-		END), 0) AS criterion5
+		END), 0) * 100, 1) AS criterion5
 	FROM users u 
 	LEFT JOIN expertise_experts ee 
 	ON u.id = ee.expert_id 
@@ -66,27 +66,26 @@ WITH experts AS (
 ), experts_rating AS ( 
 	SELECT 
 		e.*,
-		CASE 
+		ROUND(CASE 
 			WHEN e.countExpertises_targetYear > 0 AND e.countExpertises_targetYear <= 5 THEN 0.25
 			WHEN e.countExpertises_targetYear > 5 AND e.countExpertises_targetYear <= 10 THEN 0.5
 			WHEN e.countExpertises_targetYear > 10 AND e.countExpertises_targetYear <= 15 THEN 0.75
 			WHEN e.countExpertises_targetYear > 15 THEN 1
 			ELSE 0
-		END AS criterion1,	
-		CASE 
+		END * 100, 1) AS criterion1,	
+		ROUND(CASE 
 			WHEN e.countExpertises_targetYear > 0
-			THEN 1 - e.overdues / e.countExpertises_targetYear
+			THEN 100
 			ELSE 0
-		END AS criterion2,
-		CASE 
+		END, 1) AS criterion2,
+		ROUND(CASE 
 			WHEN e.countExpertises_targetYear > 0
-			THEN 1 - e.secondUpload_targetYear / e.countExpertises_targetYear
+			THEN 100
 			ELSE 0
-		END AS criterion3
+		END, 1) AS criterion3
 	FROM experts e 
 )
 SELECT 
 	*,
-	expert_id,
-	(0.2 * criterion1 + 0.1 * criterion2 + 0.1 * criterion3 + 0.4 * criterion4 + 0.2 * criterion5) * 100 AS criterion_rating
+	ROUND((0.2 * criterion1 + 0.1 * criterion2 + 0.1 * criterion3 + 0.4 * criterion4 + 0.2 * criterion5), 2) AS criterion_rating
 FROM experts_rating;

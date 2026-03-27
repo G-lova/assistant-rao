@@ -15,7 +15,7 @@ sys.path.insert(0, project_root)
 
 logger = get_logger(__name__)
 
-async def scoring(expertise_id: int, x_api_database: str):
+async def scoring(expertise_id: int, details: bool, x_api_database: str) -> list:
     """
     Запускает пайплайн скоринга экспертов для заданной экспертизы.
 
@@ -26,10 +26,11 @@ async def scoring(expertise_id: int, x_api_database: str):
 
     Args:
         expertise_id: Уникальный идентификатор экспертизы
+        details: Флаг, указывающий на необходимость получения подробной информации о каждом эксперте (по умолчанию False)
         x_api_database: Идентификатор среды базы данных ('dev', 'prod', 'stage')
 
     Returns:
-        pandas.Series: Отсортированный список ID экспертов по убыванию релевантности
+        list: Отсортированный список ID экспертов по убыванию релевантности
 
     Raises:
         Exception: При ошибках в пайплайне скоринга экспертов
@@ -51,12 +52,12 @@ async def scoring(expertise_id: int, x_api_database: str):
         df = await pipeline.run_pipeline(sql_file_name, expertise_id)
 
         # Получение результатов
-        top_results = await asyncio.to_thread(pipeline.get_top_results, df)
+        top_results = await asyncio.to_thread(pipeline.get_top_results, df, details)
 
-        logger.info(f"Scoring pipeline completed successfully: expertise_id={expertise_id}, DB={x_api_database}")
+        logger.info(f"Scoring pipeline completed successfully: expertise_id={expertise_id}, DB={x_api_database}, details={details}")
 
         # Вывод результатов
-        print(f'Эксперты в порядке убывания рейтинга:\n{top_results.tolist()}')
+        print(f'Эксперты в порядке убывания рейтинга:\n{top_results}')
 
         # # Сохранение результатов
         # output_dir = os.path.join(project_root, "data", "outputs")

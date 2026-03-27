@@ -247,6 +247,12 @@ class ScoringPipeline:
             return df
         
         df['scoring'] = 0.3 * df['similarity_embeddings'] + 0.3 * df['distance_rate'] + 0.3 * df['criterion_rating'] + 0.1 * df['avg_rating']
+        
+        # Сортировка по убыванию рейтинга, региональной экспертизе, а также фильтрация и сортировка по загрузке
+        df = df.sort_values(by=["scoring"], ascending=False)
+        df = pd.concat([df[df['regionExpertise_sort'] == 1], df[df['regionExpertise_sort'] != 1]])
+        df = pd.concat([df[df['possibleWeekWorkload'] >= 1], 
+                        df[df['possibleWeekWorkload'] < 1].sort_values(by=['currentWeekWorkloadRequests'], ascending=True)])
         return df
     
 
@@ -298,7 +304,7 @@ class ScoringPipeline:
             else:
                 raise
 
-    def get_top_results(self, df):
+    def get_top_results(self, df, details):
         """
         Извлекает идентификаторы экспертов, отсортированных по убыванию рейтинга.
 
@@ -308,17 +314,29 @@ class ScoringPipeline:
             df (pandas.DataFrame): Датафрейм с колонками 'expert_id' и 'scoring'.
 
         Returns:
-            pandas.Series: Серия с идентификаторами экспертов, отсортированная по рейтингу по убыванию.
+            list: Серия с идентификаторами экспертов, отсортированная по рейтингу по убыванию.
         """
-        if not self._has_valid_experts(df) or 'scoring' not in df.columns:
-            return pd.Series([], dtype='int64')
+        if not self._has_valid_experts(df):
+            return []        
         
-        df = df.sort_values(by=["scoring"], ascending=False)
-        df = pd.concat([df[df['regionExpertise_sort'] == 1], df[df['regionExpertise_sort'] != 1]])
-        df = pd.concat([df[df['possibleWeekWorkload'] >= 1], 
-                        df[df['possibleWeekWorkload'] < 1].sort_values(by=['currentWeekWorkloadRequests'], ascending=True)])
+        if details:
+            results = []
+            
+            for row in df.itertuples():
+                results.append({
+                    int(row.expert_id): {
+                        "total_rate": f"{round(row.scoring * 100, 2)}",
+                        "predict_rate": None, # добавить предсказание модели, когда будет реализовано
+                        "semantic_rate": f"{round(row.similarity_embeddings * 100, 2)}",
+                        "distance_rate": f"{round(row.distance_rate * 100, 2)}",
+                        "criterion_rate": f"{round(row.criterion_rating * 100, 2)}",
+                        "div_rate": f"{round(row.avg_rating * 100, 2)}"
+                    }
+                })
+        else:
+            results = df['expert_id'].tolist()
 
-        return df['expert_id']
+        return results
 
 
 class RatingPipeline:
