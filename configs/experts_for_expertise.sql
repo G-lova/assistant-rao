@@ -386,7 +386,7 @@ WITH expertise_info AS (
 				ELSE COALESCE(ee.`range`, NULL)
 			END
 			ELSE NULL 
-		END), 0), 2) AS criterion4,
+		END), 0), 3) AS criterion4,
 		ROUND(COALESCE(AVG(CASE 
 			WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
 			THEN CASE 
@@ -399,7 +399,7 @@ WITH expertise_info AS (
 				ELSE 1
 			END
 			ELSE NULL
-		END), 0), 2) AS criterion5,
+		END), 0), 3) AS criterion5,
         SUM(CASE WHEN e.status IN (3) OR e.dateStatus3 >= DATE_SUB(NOW(), INTERVAL 7 DAY) THEN 1 ELSE 0 END) AS currentWeekWorkload 
 	FROM users u 
 	LEFT JOIN expertise_experts ee 
@@ -687,17 +687,17 @@ experts_with_coords AS (
 			WHEN u.countExpertises_lastYear > 10 AND u.countExpertises_lastYear <= 15 THEN 0.75
 			WHEN u.countExpertises_lastYear > 15 THEN 1
 			ELSE 0
-		END, 2) AS criterion1,	
+		END, 3) AS criterion1,	
 		ROUND(CASE 
 			WHEN u.countExpertises_lastYear > 0
-			THEN 1 - u.overdues / u.countExpertises_lastYear
+			THEN 1
 			ELSE 0
-		END, 2) AS criterion2,
+		END, 3) AS criterion2,
 		ROUND(CASE 
 			WHEN u.countExpertises_lastYear > 0
-			THEN 1 - u.secondUpload_lastYear / u.countExpertises_lastYear
+			THEN 1
 			ELSE 0
-		END, 2) AS criterion3,
+		END, 3) AS criterion3,
 		CASE 
 			WHEN (u.countExpertises_lastYear + u.expert_declines) > 0
 			THEN (u.countExpertises_lastYear) / (u.countExpertises_lastYear + u.expert_declines)
@@ -748,7 +748,7 @@ SELECT
 		THEN 1 - region_distance_km / MAX(region_distance_km) OVER(PARTITION BY expertise_id)
 		ELSE 1
 	END AS distance_rate,
-	ROUND((0.2 * criterion1 + 0.1 * criterion2 + 0.1 * criterion3 + 0.4 * criterion4 + 0.2 * criterion5), 2) AS criterion_rating,
+	ROUND((0.2 * criterion1 + 0.1 * criterion2 + 0.1 * criterion3 + 0.4 * criterion4 + 0.2 * criterion5), 4) AS criterion_rating,
 	CAST((declines_rate + personal_block + education_rate + experience_rate 
 	+ degreeExperience_rate	+ academicTitleExperience_rate + pubMon_rate 
 	+ countPubMon_rate + experienceExpertise_rate + countExpertise_rate 

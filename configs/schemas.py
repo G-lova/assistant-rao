@@ -90,6 +90,11 @@ class EvaluateRequest(BaseModel):
     media: List[DocumentItem]
     
 
+class ExpertsScoringRequest(BaseModel):
+    expertise_id: int
+    details: bool = False
+    
+
 class RAOConclusionRequest(BaseModel):
     expertise_id: int
     send_to_external: bool = False

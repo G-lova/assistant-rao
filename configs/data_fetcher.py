@@ -4,9 +4,9 @@ import httpx
 import pandas as pd
 import requests
 
-from configs.logger import get_logger, setup_logging
+from configs.logger import get_logger
 
-setup_logging()
+
 logger = get_logger(__name__)
 
 
@@ -76,9 +76,5 @@ class DataFetcher:
             raise ValueError("Ожидался список записей, но получен некорректный формат")
         
         df = pd.DataFrame(result['data'])
-        
-        
-        if df.empty or df['id'].isna().all() or (df['id'].astype(str) == 'None').all():
-            raise Exception("Нет данных для анализа")
         
         return df

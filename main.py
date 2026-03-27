@@ -3,7 +3,7 @@ import tempfile
 import logging
 import json
 
-from configs.schemas import RAOConclusionRequest
+from configs.schemas import ExpertsScoringRequest, RAOConclusionRequest
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body, Header
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict
@@ -220,48 +220,40 @@ async def api_get_contract_info(request_body: Dict[str, str] = Body(...)):
 
 @app.post("/get-experts-for-expertise")
 async def get_experts_for_expertise(
-    request_body: Dict[str, int] = Body(...),
+    request: ExpertsScoringRequest,
     x_api_database: str = Header(default="dev", alias="X-API-Database")
 ):
     """
-    Подбирает список идентификаторов экспертов для заданной экспертизы с использованием скоринговой модели.
+    Подбирает список идентификаторов экспертов для заданной экспертизы.
 
-    Принимает идентификатор экспертизы, запускает ML-пайплайн скоринга и возвращает
-    отсортированный список ID экспертов, наиболее подходящих для проведения экспертизы.
-    В случае временных сбоев автоматически повторяет запрос согласно настройкам EXERTS_RETRY_CONFIG.
+    Принимает идентификатор экспертизы, запускает ML-пайплайн скоринга
+    и возвращает отсортированный список ID экспертов, наиболее подходящих
+    для проведения экспертизы. При временных сбоях автоматически повторяет
+    запрос согласно настройкам EXPERTS_RETRY_CONFIG.
 
     Args:
-        request_body (Dict[str, int], optional): Тело запроса в формате JSON,
-            содержащее обязательное поле "expertise_id" — числовой идентификатор экспертизы.
-
-    Raises:
-        HTTPException: С кодом 400, если не указан expertise_id.
-        HTTPException: С кодом 500, если произошла ошибка при выполнении скоринга.
+        request_body: Тело запроса с обязательным полем:
+            - expertise_id (int): Идентификатор экспертизы
+        x_api_database: Заголовок с указанием среды базы данных ('dev', 'prod', 'stage')
 
     Returns:
-        _type_: Список целых чисел — идентификаторов экспертов, отобранных моделью.
+        List[int]: Список идентификаторов экспертов, отобранных моделью скоринга
+
+    Raises:
+        HTTPException: 400 - если отсутствует expertise_id
+        HTTPException: 500 - при ошибке выполнения скоринга
     """
     try:
-        expertise_id = request_body.get("expertise_id")
-        
+        expertise_id = request.expertise_id
+        details = request.details
+
         if not expertise_id:
             raise HTTPException(status_code=400, detail="Поле 'expertise_id' обязательно")
-        
+
         # Запускаем скоринг пайплайн
-        results = scoring(expertise_id, x_api_database)
-        
-        # Преобразуем результат в список целых чисел
-        if hasattr(results, 'tolist'):
-            expert_ids = results.tolist()
-        elif isinstance(results, list):
-            expert_ids = results
-        else:
-            col = 'expert_id' if 'expert_id' in results.columns else results.columns[0]
-            expert_ids = results[col].tolist()
-        
-        expert_ids = [int(x) for x in expert_ids]
-        
-        return expert_ids
+        results = await scoring(expertise_id, details, x_api_database)
+
+        return results
         
     except Exception as e:
         logger.error(f"Ошибка при подборе экспертов: {str(e)}", exc_info=True)

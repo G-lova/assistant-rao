@@ -1,8 +1,11 @@
+import asyncio
+
+import aiofiles
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
 from configs.config import Config
-from search_experts.data_fetcher import DataFetcher
+from configs.data_fetcher import DataFetcher
 from search_experts.text_processor import TextProcessor
 from search_experts.embedding_client import EmbeddingClient
 from search_experts.conflict_detector import ConflictDetector
@@ -76,7 +79,7 @@ class ScoringPipeline:
         return True
     
 
-    def load_sql_query(self, file_name: str) -> str:
+    async def load_sql_query(self, file_name: str) -> str:
         """
         Загружает и нормализует SQL-запрос из файла.
 
@@ -90,8 +93,8 @@ class ScoringPipeline:
             str: SQL-запрос в виде одной строки без лишних пробельных символов.
         """
         file_path = f"{self.sql_queries_path}{file_name}"
-        with open(file_path, encoding="utf-8") as f:
-            sql_query = f.read()
+        async with aiofiles.open(file_path, encoding="utf-8") as f:
+            sql_query = await f.read()
         return " ".join(sql_query.split())
     
 
@@ -150,7 +153,7 @@ class ScoringPipeline:
         return df
     
 
-    def calculate_similarities(self, df):
+    async def calculate_similarities(self, df):
         """
         Вычисляет косинусное сходство между эмбеддингами текста экспертизы и описаний экспертов.
 
@@ -171,9 +174,14 @@ class ScoringPipeline:
             
         exp_text = df["expertise_text_feature"].iloc[0]
         expert_texts = df["expert_text_feature"].tolist()
-        
-        exp_emb = self.embedding_client.get_embeddings([exp_text])
-        expert_embs = self.embedding_client.get_embeddings(expert_texts)
+
+        exp_emb_task = self.embedding_client.get_embeddings([exp_text])
+        expert_embs_task = self.embedding_client.get_embeddings(expert_texts)
+
+        exp_emb, expert_embs = await asyncio.gather(
+            exp_emb_task,
+            expert_embs_task
+        )
         
         df["similarity_embeddings"] = cosine_similarity(exp_emb, expert_embs).flatten()
         return df.sort_values(by="similarity_embeddings", ascending=False)
@@ -238,11 +246,17 @@ class ScoringPipeline:
             df['scoring'] = pd.Series([], dtype='float64')
             return df
         
-        df['scoring'] = 0.4 * df['similarity_embeddings'] + 0.4 * df['criterion_rating'] + 0.2 * df['avg_rating']
+        df['scoring'] = 0.3 * df['similarity_embeddings'] + 0.3 * df['distance_rate'] + 0.3 * df['criterion_rating'] + 0.1 * df['avg_rating']
+        
+        # Сортировка по убыванию рейтинга, региональной экспертизе, а также фильтрация и сортировка по загрузке
+        df = df.sort_values(by=["scoring"], ascending=False)
+        df = pd.concat([df[df['regionExpertise_sort'] == 1], df[df['regionExpertise_sort'] != 1]])
+        df = pd.concat([df[df['possibleWeekWorkload'] >= 1], 
+                        df[df['possibleWeekWorkload'] < 1].sort_values(by=['currentWeekWorkloadRequests'], ascending=True)])
         return df
     
 
-    def run_pipeline(self, sql_file_path, expertise_id):
+    async def run_pipeline(self, sql_file_path, expertise_id):
         """
         Запускает полный конвейер оценки экспертов для заданной экспертизы.
 
@@ -259,25 +273,28 @@ class ScoringPipeline:
         """
         try:
             # Загрузка SQL запроса
-            sql_query = self.load_sql_query(sql_file_path)
+            sql_query = await self.load_sql_query(sql_file_path)
             
             # Получение данных
-            df = self.data_fetcher.fetch_expertise_data(sql_query, bindings=[expertise_id, expertise_id, expertise_id])
+            df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[expertise_id, expertise_id, expertise_id])
+        
+            if df.empty or df['expert_id'].isna().all() or (df['expert_id'].astype(str) == 'None').all():
+                raise Exception("Доступных экспертов нет")
             
             # Предобработка
-            df = self.preprocess_data(df)
+            df = await asyncio.to_thread(self.preprocess_data, df)
             
             # Обнаружение конфликтов
-            df = self.detect_conflicts(df)
+            df = await asyncio.to_thread(self.detect_conflicts, df)
             
             # Расчет схожестей
-            df = self.calculate_similarities(df)
+            df = await self.calculate_similarities(df)
             
             # Расчет семейственности
-            df = self.detect_nepotism(df)
+            df = await asyncio.to_thread(self.detect_nepotism, df)
             
             # Расчет рейтингов
-            df = self.calculate_ratings(df)
+            df = await asyncio.to_thread(self.calculate_ratings, df)
             
             return df
         
@@ -287,7 +304,7 @@ class ScoringPipeline:
             else:
                 raise
 
-    def get_top_results(self, df):
+    def get_top_results(self, df, details):
         """
         Извлекает идентификаторы экспертов, отсортированных по убыванию рейтинга.
 
@@ -297,17 +314,29 @@ class ScoringPipeline:
             df (pandas.DataFrame): Датафрейм с колонками 'expert_id' и 'scoring'.
 
         Returns:
-            pandas.Series: Серия с идентификаторами экспертов, отсортированная по рейтингу по убыванию.
+            list: Серия с идентификаторами экспертов, отсортированная по рейтингу по убыванию.
         """
-        if not self._has_valid_experts(df) or 'scoring' not in df.columns:
-            return pd.Series([], dtype='int64')
+        if not self._has_valid_experts(df):
+            return []        
         
-        df = df.sort_values(by=['distance_rate', 'scoring'], ascending=False)
-        df = pd.concat([df[df['regionExpertise_sort'] == 1], df[df['regionExpertise_sort'] != 1]])
-        df = pd.concat([df[df['possibleWeekWorkload'] >= 1], 
-                        df[df['possibleWeekWorkload'] < 1].sort_values(by=['currentWeekWorkloadRequests'], ascending=True)])
+        if details:
+            results = []
+            
+            for row in df.itertuples():
+                results.append({
+                    int(row.expert_id): {
+                        "total_rate": f"{round(row.scoring * 100, 2)}",
+                        "predict_rate": None, # добавить предсказание модели, когда будет реализовано
+                        "semantic_rate": f"{round(row.similarity_embeddings * 100, 2)}",
+                        "distance_rate": f"{round(row.distance_rate * 100, 2)}",
+                        "criterion_rate": f"{round(row.criterion_rating * 100, 2)}",
+                        "div_rate": f"{round(row.avg_rating * 100, 2)}"
+                    }
+                })
+        else:
+            results = df['expert_id'].tolist()
 
-        return df['expert_id']
+        return results
 
 
 class RatingPipeline:
