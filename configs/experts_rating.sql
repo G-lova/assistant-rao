@@ -3,47 +3,35 @@ WITH experts AS (
 		u.id AS expert_id,
 		COUNT(CASE 
 				WHEN ee.uploadExpertDate BETWEEN ? AND ?
+				OR (e.dateStatus3 BETWEEN ? AND ? 
+					AND ee.uploadExpertDate IS NULL 
+					AND e.status IN (4,5))
 				THEN 1 
-			END) AS countExpertises_targetYear,
+			END) AS countTotalExpertises,
+		COUNT(CASE 
+				WHEN ee.uploadExpertDate BETWEEN ? AND ?
+				AND ee.`range` IS NOT NULL AND ee.`range` > 0
+				THEN 1 
+			END) AS countAcceptedExpertises,
 		COALESCE(SUM(CASE 
 			WHEN ee.uploadExpertDate BETWEEN ? AND ?
 			THEN COALESCE(ee.secondUpload, 0)
-		END), 0) AS secondUpload_targetYear,
-		SUM(CASE WHEN ee.uploadExpertDate BETWEEN ? AND ? THEN CASE 
-				WHEN ee.uploadExpertDate >= e.dateStatus3 
-				THEN CASE 
-						WHEN e.dateStatus3 IS NOT NULL AND e.dateStatus3 >= e.dateStatus2 THEN 
-							(DATEDIFF(ee.uploadExpertDate, DATE_ADD(e.dateStatus3, INTERVAL 1 DAY)) + 1) -
-							(SELECT COUNT(*) FROM holidays h 
-							 WHERE h.`date` BETWEEN DATE_ADD(e.dateStatus3, INTERVAL 1 DAY) AND ee.uploadExpertDate)
-						WHEN e.dateStatus2 IS NOT NULL AND DATEDIFF(ee.uploadExpertDate, e.dateStatus2) > 0 THEN 
-							(DATEDIFF(ee.uploadExpertDate, DATE_ADD(e.dateStatus2, INTERVAL 1 DAY)) + 1) -
-							(SELECT COUNT(*) FROM holidays h 
-							 WHERE h.`date` BETWEEN DATE_ADD(e.dateStatus2, INTERVAL 1 DAY) AND ee.uploadExpertDate)
-						ELSE 0
-					END
-				WHEN ee.uploadExpertDate >= e.dateStatus2
-				THEN CASE
-					WHEN e.dateStatus2 IS NOT NULL AND DATEDIFF(ee.uploadExpertDate, e.dateStatus2) > 0 THEN 
-						(DATEDIFF(ee.uploadExpertDate, e.dateStatus2) + 1) -
-						(SELECT COUNT(*) FROM holidays h 
-						 WHERE h.`date` BETWEEN e.dateStatus2 AND ee.uploadExpertDate)
-					ELSE 0
-				END		
-				ELSE 0
-			END
-			ELSE 0 
-		END > 3) AS overdues,
-		ROUND(COALESCE(AVG(CASE 
+		END), 0) AS secondUpload,
+		COALESCE(SUM(CASE WHEN e.dateStatus3 BETWEEN ? AND ? 
+			AND ee.uploadExpertDate IS NULL 
+			AND e.status IN (4,5) 
+			THEN 1
+		END), 0) AS overdues,
+		ROUND(AVG(CASE 
 			WHEN ee.uploadExpertDate BETWEEN ? AND ? 
 			THEN CASE
-				WHEN ee.status = 1
+				WHEN e.status IN (4,5)
 				THEN COALESCE(ee.`range`, 0) 
 				ELSE COALESCE(ee.`range`, NULL)
 			END
 			ELSE NULL 
-		END), 0) * 100, 1) AS criterion4,
-		ROUND(COALESCE(AVG(CASE 
+		END) * 100, 1) AS criterion4,
+		ROUND(AVG(CASE 
 			WHEN ee.uploadExpertDate BETWEEN ? AND ?
 			THEN CASE 
 				WHEN e.object IN (1,7) 
@@ -55,7 +43,7 @@ WITH experts AS (
 				ELSE 1
 			END
 			ELSE NULL
-		END), 0) * 100, 1) AS criterion5
+		END) * 100, 1) AS criterion5
 	FROM users u 
 	LEFT JOIN expertise_experts ee 
 	ON u.id = ee.expert_id 
@@ -67,21 +55,21 @@ WITH experts AS (
 	SELECT 
 		e.*,
 		ROUND(CASE 
-			WHEN e.countExpertises_targetYear > 0 AND e.countExpertises_targetYear <= 5 THEN 0.25
-			WHEN e.countExpertises_targetYear > 5 AND e.countExpertises_targetYear <= 10 THEN 0.5
-			WHEN e.countExpertises_targetYear > 10 AND e.countExpertises_targetYear <= 15 THEN 0.75
-			WHEN e.countExpertises_targetYear > 15 THEN 1
+			WHEN e.countAcceptedExpertises > 0 AND e.countAcceptedExpertises <= 5 THEN 25
+			WHEN e.countAcceptedExpertises > 5 AND e.countAcceptedExpertises <= 10 THEN 50
+			WHEN e.countAcceptedExpertises > 10 AND e.countAcceptedExpertises <= 15 THEN 75
+			WHEN e.countAcceptedExpertises > 15 THEN 100
 			ELSE 0
-		END * 100, 1) AS criterion1,	
+		END, 1) AS criterion1,	
 		ROUND(CASE 
-			WHEN e.countExpertises_targetYear > 0
-			THEN 100
-			ELSE 0
+			WHEN e.countTotalExpertises > 0
+			THEN (e.countTotalExpertises - e.overdues) * 100 / e.countTotalExpertises
+			ELSE NULL
 		END, 1) AS criterion2,
 		ROUND(CASE 
-			WHEN e.countExpertises_targetYear > 0
+			WHEN e.countTotalExpertises > 0
 			THEN 100
-			ELSE 0
+			ELSE NULL
 		END, 1) AS criterion3
 	FROM experts e 
 )

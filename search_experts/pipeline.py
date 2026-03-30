@@ -246,7 +246,7 @@ class ScoringPipeline:
             df['scoring'] = pd.Series([], dtype='float64')
             return df
         
-        df['scoring'] = 0.3 * df['similarity_embeddings'] + 0.3 * df['distance_rate'] + 0.3 * df['criterion_rating'] + 0.1 * df['avg_rating']
+        df['scoring'] = 0.3 * df['similarity_embeddings'] + 0.3 * df['distance_rate'] + 0.3 * df['criterion_rating_for_model'] + 0.1 * df['avg_rating']
         
         # Сортировка по убыванию рейтинга, региональной экспертизе, а также фильтрация и сортировка по загрузке
         df = df.sort_values(by=["scoring"], ascending=False)
@@ -276,7 +276,7 @@ class ScoringPipeline:
             sql_query = await self.load_sql_query(sql_file_path)
             
             # Получение данных
-            df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[expertise_id, expertise_id, expertise_id])
+            df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[expertise_id] * 3)
         
             if df.empty or df['expert_id'].isna().all() or (df['expert_id'].astype(str) == 'None').all():
                 raise Exception("Доступных экспертов нет")
@@ -329,7 +329,7 @@ class ScoringPipeline:
                         "predict_rate": None, # добавить предсказание модели, когда будет реализовано
                         "semantic_rate": f"{round(row.similarity_embeddings * 100, 2)}",
                         "distance_rate": f"{round(row.distance_rate * 100, 2)}",
-                        "criterion_rate": f"{round(row.criterion_rating * 100, 2)}",
+                        "criterion_rate": None if pd.isna(row.criterion_rating) else f"{round(row.criterion_rating * 100, 2)}",
                         "div_rate": f"{round(row.avg_rating * 100, 2)}"
                     }
                 })
@@ -398,6 +398,8 @@ class RatingPipeline:
         Извлекает идентификатор эксперта и его рассчитанный рейтинг по критерию,
         округляя значение рейтинга до двух знаков после запятой.
 
+        Заменяет nan на None для JSON-совместимости.
+
         Args:
             data (list of dict): Список записей, полученных от внешнего API.
                 Каждая запись должна содержать ключи:
@@ -407,8 +409,15 @@ class RatingPipeline:
         Returns:
             dict: Словарь вида {expert_id: rating}, где rating — float, округлённый до 2 знаков.
         """    
+        import math
+        
         if hasattr(data, 'to_dict'):
-            return data.set_index('expert_id')['criterion_rating'].round(2).to_dict()
+            ratings = data.set_index('expert_id')['criterion_rating'].round(2).to_dict()
+            # Заменяем nan на None
+            return {
+                k: (None if (isinstance(v, float) and math.isnan(v)) else v)
+                for k, v in ratings.items()
+            }
         else:
             return {}
 
@@ -432,7 +441,7 @@ class RatingPipeline:
         sql_query = self.load_sql_query(sql_file_path)
         
         # Получение данных с рассчитанными рейтингами
-        df = self.data_fetcher.fetch_expertise_data(sql_query, bindings=[start_date, end_date, start_date, end_date, start_date, end_date, start_date, end_date, start_date, end_date])
+        df = self.data_fetcher.fetch_expertise_data(sql_query, bindings=[start_date, end_date] * 7)
         
         # Преобразование данных в словарь
         ratings = self.to_rating_dict(df)
