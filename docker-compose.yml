@@ -59,7 +59,7 @@ services:
       retries: 5
       start_period: 60s
 
-  app:
+  rao_api:
     build: .
     container_name: rao_api
     environment:
