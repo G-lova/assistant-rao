@@ -372,7 +372,7 @@ class RatingPipeline:
         self.sql_queries_path = paths_config.sql_queries
     
 
-    def load_sql_query(self, file_name: str):
+    async def load_sql_query(self, file_name: str):
         """
         Загружает и нормализует SQL-запрос из файла.
 
@@ -386,8 +386,8 @@ class RatingPipeline:
             str: SQL-запрос в виде одной строки без лишних пробельных символов.
         """
         file_path = f"{self.sql_queries_path}{file_name}"
-        with open(file_path, encoding="utf-8") as f:
-            sql_query = f.read()
+        async with aiofiles.open(file_path, encoding="utf-8") as f:
+            sql_query = await f.read()
         return " ".join(sql_query.split())
 
     @staticmethod
@@ -398,6 +398,8 @@ class RatingPipeline:
         Извлекает идентификатор эксперта и его рассчитанный рейтинг по критерию,
         округляя значение рейтинга до двух знаков после запятой.
 
+        Заменяет nan на None для JSON-совместимости.
+
         Args:
             data (list of dict): Список записей, полученных от внешнего API.
                 Каждая запись должна содержать ключи:
@@ -407,13 +409,20 @@ class RatingPipeline:
         Returns:
             dict: Словарь вида {expert_id: rating}, где rating — float, округлённый до 2 знаков.
         """    
+        import math
+        
         if hasattr(data, 'to_dict'):
-            return data.set_index('expert_id')['criterion_rating'].round(2).to_dict()
+            ratings = data.set_index('expert_id')['criterion_rating'].round(2).to_dict()
+            # Заменяем nan на None
+            return {
+                k: (None if (isinstance(v, float) and math.isnan(v)) else v)
+                for k, v in ratings.items()
+            }
         else:
             return {}
 
 
-    def get_experts_rating(self, sql_file_path: str, start_date, end_date):
+    async def get_experts_rating(self, sql_file_path: str, start_date, end_date):
         """
         Запускает полный конвейер получения рейтингов экспертов и сохраняет результат в файл.
 
@@ -429,12 +438,12 @@ class RatingPipeline:
             dict: Словарь с рейтингами экспертов в формате {expert_id: rating}.
         """
         # Загрузка SQL запроса
-        sql_query = self.load_sql_query(sql_file_path)
+        sql_query = await self.load_sql_query(sql_file_path)
         
         # Получение данных с рассчитанными рейтингами
-        df = self.data_fetcher.fetch_expertise_data(sql_query, bindings=[start_date, end_date, start_date, end_date, start_date, end_date, start_date, end_date, start_date, end_date])
+        df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[start_date, end_date] * 6)
         
         # Преобразование данных в словарь
-        ratings = self.to_rating_dict(df)
+        ratings = await asyncio.to_thread(self.to_rating_dict, df)
         
         return ratings

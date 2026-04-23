@@ -289,7 +289,7 @@ async def get_experts_rating(
             )
 
         # Вызываем бизнес-логику (например, метод rating)
-        ratings = rating(start_date, end_date, x_api_database)
+        ratings = await rating(start_date, end_date, x_api_database)
 
         logger.info(
             f"Успешно Получено {len(ratings)} рейтингов экспертов (DB: {x_api_database}, период: {start_date}–{end_date})"
