@@ -17,12 +17,9 @@ from celery.result import AsyncResult
 
 from configs.config import Config
 from configs.schemas import EISParseRequest, EvaluateRequest, ExpertsScoringRequest, RAOConclusionRequest
-from configs.eis_parsing import EISParser
 from configs.utils import APIKeyMiddleware
 from configs.working_with_db import get_contract_info_from_db
-from configs.procurement_requirements import DOCUMENT_CODE_TO_LABEL
 from configs.logger import setup_logging, get_logger
-from src.law_detector import LawDetector
 from src.rao_conclusion import rao_conclusion
 from src.rating import rating
 from src.scoring import scoring
@@ -268,7 +265,7 @@ async def get_rao_conclusion(
     Raises:
         HTTPException: 400 - если отсутствует expertise_id
         HTTPException: 500 - при ошибке генерации сводного отчета эксперта РАО
-        
+
     Returns:
         dict: Сводный отчет эксперта РАО, сгенерированный ML-пайплайном, содержащий ключевые выводы и рекомендации по экспертизе. 
             Структура отчета может включать различные разделы, такие как анализ документов, выявленные риски, рекомендации по улучшению и т.д., в зависимости от логики пайплайна. 
