@@ -3,6 +3,7 @@ import os
 import pandas as pd
 import tempfile
 import asyncio
+from configs.http_client_manager import HTTPClientManager
 from openai import OpenAI, AsyncOpenAI
 import datetime
 
@@ -18,25 +19,22 @@ from configs.working_with_db import save_raw_data, save_summary_report, delete_p
 from evaluate_documents.completeness_checker import CompletenessChecker
 from evaluate_documents.consistency_checker import ConsistencyChecker
 from evaluate_documents.evaluate_documents_pipeline import TasksPipeline
-from configs.parsing import parse_cloud_storage_link
 from configs.retry_utils import async_retry, API_RETRY_CONFIG, CLOUD_PARSING_RETRY_CONFIG
 from evaluate_documents.type_data_extractor import DOCUMENT_TYPE_MAPPING, TypeDataExtractor
 
 
 logger = get_logger(__name__)
 
+
 def run_async(coro):
     """
-    Выполняет асинхронную корутину в синхронном контексте Celery.
-
-    Создает новый event loop для выполнения асинхронной корутины
-    в синхронной Celery-задаче.
+    Вспомогательная функция для запуска асинхронной корутины в синхронном контексте Celery.
 
     Args:
-        coro: Асинхронная корутина для выполнения
+        coro: Асинхронная корутина, которую нужно выполнить.
 
     Returns:
-        Результат выполнения корутины
+        Результат выполнения корутины.
     """
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -45,20 +43,24 @@ def run_async(coro):
     finally:
         loop.close()
 
-@celery_app.task(bind=True, name="evaluate_documents_task")
-def evaluate_documents_task(self, df):
-    """
-    Celery-задача для оценки документов экспертизы.
 
-    Запускает полный пайплайн анализа документов: извлечение типов данных,
-    проверку полноты и一致ности документов экспертизы.
+@celery_app.task(bind=True, name="evaluate_documents_task")
+def evaluate_documents_task(self, expertise_id: int, environment: str):
+    """
+    Асинхронная задача для оценки документов. Инициализирует менеджер HTTP-клиента и запускает конвейер задач.
 
     Args:
-        df: DataFrame или список словарей с данными документов экспертизы
+        expertise_id (int): Идентификатор экспертизы.
+        environment (str): Окружение (например, "production", "staging").
 
     Returns:
-        dict: Результаты анализа документов
+        Результат выполнения конвейера задач.
     """
-    tasks_piplene = TasksPipeline(df)
-    task_result = run_async(async_retry(CLOUD_PARSING_RETRY_CONFIG)(tasks_piplene.run_pipeline)())
-    return task_result
+    # ✅ Инициализируем менеджер внутри асинхронного контекста задачи
+    async def run_with_manager():
+        async with HTTPClientManager(timeout=90.0) as mgr:
+            tasks_piplene = TasksPipeline(mgr, expertise_id, environment)
+            task_result = await tasks_piplene.run_pipeline()
+            return task_result
+        
+    return run_async(async_retry(CLOUD_PARSING_RETRY_CONFIG)(run_with_manager)())

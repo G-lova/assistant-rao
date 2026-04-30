@@ -1,6 +1,7 @@
 import asyncio
 import json
 
+from configs.rate_limiter import TokenBucket
 from json_repair import repair_json
 
 from configs.logger import get_logger
@@ -38,6 +39,8 @@ class CompletenessChecker:
         self.client = llm_client
         self.model = model
 
+        self.rate_limiter = TokenBucket(rate=1.5)  # 1.5 запроса в секунду
+
         with open("prompts/completeness_prompt.txt") as f:
             self.completeness_prompt = f.read()
 
@@ -71,6 +74,10 @@ class CompletenessChecker:
                 с "status": "deny" и обобщённым сообщением об ошибке.
         """
         logger.info(f"Анализ на полноту и согласованность данных в документе")
+        logger.info(f"completeness_content: {content}")
+
+        # Ждём «разрешения» от глобального лимитера ПЕРЕД запросом
+        await self.rate_limiter.acquire()
 
         try:
             response = await self.client.chat.completions.create(
@@ -85,7 +92,7 @@ class CompletenessChecker:
                     "content": f"""Проанализируй данные, извлеченные из документа:\n\n{content}"""
                 }
             ],
-            max_tokens=3000,
+            max_tokens=500,
             temperature=0.1,
             extra_body={"guided_json": self.COMPLETENESS_SCHEMA}
         )

@@ -8,7 +8,7 @@ from json_repair import repair_json
 from configs.logger import get_logger
 from typing import Any, Dict
 
-from configs.utils import extract_json_objects
+from configs.utils import extract_json_objects, split_large_text
 from evaluate_documents.type_data_extractor import DOCUMENT_TYPE_MAPPING
 
 
@@ -89,6 +89,10 @@ class ConsistencyChecker:
         logger.info(f"Финальный анализ документов")
 
         cleaned_content = self.remove_empty(content)
+        logger.info(f"cleaned_content: {cleaned_content}")
+
+        # Перед запросом к LLM            
+        cleaned_content_chunks = split_large_text(json.dumps(cleaned_content, ensure_ascii=False) if not isinstance(cleaned_content, str) else cleaned_content, max_chunk_size=15000)
 
         try:
             response = await self.client.chat.completions.create(
@@ -100,10 +104,10 @@ class ConsistencyChecker:
                     },
                     {
                         "role": "user",
-                        "content": f"""Проанализируй:\n\n{cleaned_content}"""
+                        "content": f"""Проанализируй:\n\n{cleaned_content_chunks[0]}"""
                     }
                 ],
-                max_tokens=3000,
+                max_tokens=500,
                 temperature=0.1,
                 extra_body={"guided_json": self.CONSISTENCY_SCHEMA}
             )

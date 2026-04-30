@@ -3,9 +3,10 @@ import asyncpg
 import json
 import logging
 import psycopg2
+from contextlib import asynccontextmanager
+from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 from typing import Dict, Any, List
-from psycopg2 import sql
 
 from configs.retry_utils import sync_retry, DATABASE_RETRY_CONFIG
 from configs.config import Config
@@ -13,42 +14,77 @@ from configs.config import Config
 
 logger = logging.getLogger(__name__)
 
-DOCUMENT_TYPE_MAPPING = {
-        "docAcceptInafPostavFiles": "impossible_alternative_doc",
-        "docActPriemTovFiles": "acceptance_act",
-        "docAssetSelOrgFiles": "procurement_policy",
-        "docCargoTaxFiles": "goods_invoice",
-        "docCertValidFiles": "compliance_certificates",
-        "docContractDoWorkFiles": "service_contract",
-        "docContractNIRFiles": "nir_contract",
-        "docContractPostTovarFiles": "goods_contract",
-        "docDocPriemActSdachFiles": "works_acceptance_doc",
-        "docDopConsentContractFiles": "contract_amendments",
-        "docDopMaterialsFiles": "additional_materials",
-        "docExpertReportFiles": "contract_execution_expertise",
-        "docIzvejenieFiles": "notice",
-        "docMaterialValidNMCKFiles": "price_justification_docs",
-        "docObosnNMCKFiles": "price_justification",
-        "docOpusObjectZacupFiles": "description_purchase_object",
-        "docPhotoCargoFiles": "goods_photos",
-        "docPhotoFinishWorkFiles": "work_results_photos",
-        "docPorViewOcenkFiles": "bid_evaluation_procedure",
-        "docPriemTovSchetFiles": "goods_acceptance_doc",
-        "docProjContractFiles": "contract_draft",
-        "docReportDoNIRFiles": "nir_report",
-        "docTechDocFiles": "technical_documentation",
-        "docTrebContentRequestFiles": "bid_requirements",
-        "docValidAllIfFiles": "contract_conditions_docs",
-        "docValidCopyriteFiles": "ip_rights_transfer_docs",
-        "docValidCountyFiles": "goods_origin_docs",
-        "docValidGarantFiles": "warranty_docs",
-        "docVziskPenyFiles": "penalty_recovery_docs",
+_db_pool = None
+
+async def get_db_pool():
+    global _db_pool
+    if _db_pool is None:
+        _db_pool = await asyncpg.create_pool(
+            host=Config.DB_HOST,
+            port=int(Config.DB_PORT),
+            database=Config.DB_NAME,
+            user=Config.DB_USER,
+            password=Config.DB_PASSWORD,
+            min_size=2,
+            max_size=10,
+            max_inactive_connection_lifetime=300,
+        )
+    return _db_pool
+
+@asynccontextmanager
+async def get_async_db_connection():
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        yield conn
+
+DOCUMENT_CODE_TO_LABEL = {
+        # Основные документы закупки
+        "Извещение": "notice",
+        "Проект контракта": "contract_draft",
+        "Обоснование н(м)цк": "price_justification",
+        "Материалы, подтверждающие Обоснование н(м)цк": "price_justification_docs",
+        "Техническое задание": "technical_specification",
+        "Положение о закупках организации": "procurement_policy",
+        "Порядок рассмотрения и оценки заявок на конкурс": "bid_evaluation_procedure",
+        "Требования к содержанию заявки на конкурс": "bid_requirements",
+        "Документация, подтверждающая невозможность использования иных способов определения поставщика": "impossible_alternative_doc",
+        "Описание объекта закупки": "description_purchase_object",
+
+        # Типы контрактов
+        "Контракт на поставку товара": "goods_contract",
+        "Контракт на выполнение работ (оказание услуг)": "service_contract",
+        "Контракт на выполнение НИР (или НИОКР)": "nir_contract",
+
+        # Акты и подтверждения исполнения
+        "Акт о приемке товара": "acceptance_act",
+        "Документ о приемке и/или акт сдачи-приемки работ (услуг)": "works_acceptance_doc",
+        "Документ о приемке товара (УПД, Счет-фактура и др.)": "goods_acceptance_doc",
+        "Товарная накладная": "goods_invoice",
+        "Отчет о выполнении НИР": "nir_report",
+        "Документы, подтверждающие исполнение всех условий контракта": "contract_conditions_docs",
+        "Дополнительные соглашения к контракту": "contract_amendments",
+        "Экспертиза результатов исполнения контракта": "contract_execution_expertise",
+
+        # Гарантии, соответствие, права
+        "Сертификаты соответствия": "compliance_certificates",
+        "Документы, подтверждающие гарантийные обязательства": "warranty_docs",
+        "Документы, подтверждающие передачу авторских прав": "ip_rights_transfer_docs",
+        "Документы, подтверждающие страну происхождения товара": "goods_origin_docs",
+        "Техническая документация, паспорт товара и пр.": "technical_documentation",
+
+        # Фото и мультимедиа
+        "Фото товара": "goods_photos",
+        "Фото результатов выполнения работ": "work_results_photos",
+
+        # Взыскание штрафов
+        "Документы по взысканию пени и штрафов": "penalty_recovery_docs",
+
+        # Дополнительные материалы (fallback)
+        "Дополнительные материалы": "additional_materials",
 
         "consistency_check": "consistency_check",
-        "summary_report": "summary_report",
-        "unknown": "unknown"
+        "eis_data": "eis_data",
 }
-
 
 def get_db_connection():
     """
@@ -71,24 +107,24 @@ def get_db_connection():
     )
 
 
-async def get_async_db_connection():
-    """
-    Устанавливает и возвращает соединение с базой данных PostgreSQL.
+# async def get_async_db_connection():
+#     """
+#     Устанавливает и возвращает соединение с базой данных PostgreSQL.
 
-    Функция считывает параметры подключения из переменных окружения
-    и устанавливает соединение с использованием библиотеки psycopg2.
-    Кодировка клиента устанавливается в UTF-8 для корректной работы с кириллицей.
+#     Функция считывает параметры подключения из переменных окружения
+#     и устанавливает соединение с использованием библиотеки psycopg2.
+#     Кодировка клиента устанавливается в UTF-8 для корректной работы с кириллицей.
 
-    Returns:
-        psycopg2.extensions.connection: Объект соединения с базой данных PostgreSQL.
-    """
-    return await asyncpg.connect(
-        host=Config.DB_HOST,
-        port=Config.DB_PORT,
-        database=Config.DB_NAME,
-        user=Config.DB_USER,
-        password=Config.DB_PASSWORD
-    )
+#     Returns:
+#         psycopg2.extensions.connection: Объект соединения с базой данных PostgreSQL.
+#     """
+#     return await asyncpg.connect(
+#         host=Config.DB_HOST,
+#         port=Config.DB_PORT,
+#         database=Config.DB_NAME,
+#         user=Config.DB_USER,
+#         password=Config.DB_PASSWORD
+#     )
 
 
 @sync_retry(DATABASE_RETRY_CONFIG)
@@ -115,7 +151,7 @@ def save_raw_data(procurement_id: int, document_code: str, analysis: List):
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        column_name = DOCUMENT_TYPE_MAPPING.get(document_code, "unknown")
+        column_name = DOCUMENT_CODE_TO_LABEL.get(document_code, "unknown")
         if not column_name:
             raise ValueError(f"Неизвестный тип документа: {document_code}")
 
@@ -201,28 +237,19 @@ async def get_async_summary_report_from_db(procurement_id: str):
     conn = None
     try:
         procurement_id_int = int(procurement_id)
-        conn = await get_async_db_connection()
-
-        row = await conn.fetchrow(
-            "SELECT summary_report FROM raw_document_data WHERE procurement_id = $1",
-            procurement_id_int
-        )
-
-        if not row or not row["summary_report"]:
-            logger.warning(f"Данные summary_report не найдены для procurement_id={procurement_id}")
-            return None
-
-        # logger.info(f"summary_report: {row['summary_report']}")
-
-        # asyncpg автоматически парсит JSONB → dict
-        return row["summary_report"]
+        async with get_async_db_connection() as conn:
+            row = await conn.fetchrow(
+                "SELECT summary_report FROM raw_document_data WHERE procurement_id = $1",
+                procurement_id_int
+            )
+            if not row or not row["summary_report"]:
+                logger.warning(f"Данные summary_report не найдены для procurement_id={procurement_id}")
+                return None
+            return row["summary_report"]
 
     except Exception as e:
         logger.error(f"Ошибка при получении данных из БД: {str(e)}", exc_info=True)
         return None
-    finally:
-        if conn:
-            await conn.close()
 
 async def get_contract_info_from_db(procurement_id: str) -> Dict[str, str]:
     """
@@ -296,9 +323,11 @@ def save_summary_report(procurement_id: int, summary_data: Dict[str, Any]):
 
         # Логируем ключевую информацию для отладки
         logger.info(f"Сохранение summary_report для {procurement_id}")
-        logger.info(f"- Всего документов: {len(summary_data.get('documents_summary', {}))}")
-        logger.info(f"- Document codes: {[doc.get('document_code') for doc in summary_data.get('documents_summary', {}).values()]}")
-        logger.info(f"- Document labels: {[doc.get('document_label') for doc in summary_data.get('documents_summary', {}).values()]}")
+        logger.info(f"- Всего документов: {len(summary_data.get('documents', {}))}")
+        codes = set([f"{doc.get('document_code')}: {doc.get('document_name')}" for doc in summary_data.get('documents', {})])
+        logger.info(f"- Document codes:")
+        for code in codes:
+            logger.info(f"  -- {code}")
 
         # Проверяем, существует ли уже запись с таким procurement_id
         check_query = "SELECT id FROM raw_document_data WHERE procurement_id = %s"

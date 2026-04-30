@@ -1,27 +1,53 @@
+import base64
+import datetime
+import io
 import os
+import re
 import tempfile
 import logging
 import json
+import zipfile
 
-from configs.config import Config
-from configs.parsing import CloudStorageParser
-from configs.schemas import EISParseRequest, ExpertsScoringRequest, RAOConclusionRequest
-from src.evaluator import evaluator
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body, Header
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body, Header, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from typing import List, Optional, Dict
 from celery.result import AsyncResult
 
-from configs.parsing import CloudStorageParser
+from configs.config import Config
+from configs.schemas import EISParseRequest, EvaluateRequest, ExpertsScoringRequest, RAOConclusionRequest
+from configs.eis_parsing import EISParser
 from configs.utils import APIKeyMiddleware
 from configs.working_with_db import get_contract_info_from_db
-from tasks import evaluate_documents_task
+from configs.procurement_requirements import DOCUMENT_CODE_TO_LABEL
 from configs.logger import setup_logging, get_logger
+from src.law_detector import LawDetector
 from src.rao_conclusion import rao_conclusion
 from src.rating import rating
 from src.scoring import scoring
+from tasks import evaluate_documents_task
 
-app = FastAPI(debug=False)
+# main.py
+from configs.http_client_manager import HTTPClientManager
+
+# Глобальный экземпляр (настраивается под вашу нагрузку)
+http_manager = HTTPClientManager(timeout=120.0, limit=50)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await http_manager.startup()
+    app.state.http_manager = http_manager  # Делаем доступным через app.state
+    yield
+    await http_manager.shutdown()
+
+app = FastAPI(lifespan=lifespan)
+# app = FastAPI(debug=False)
+
+# Функция зависимости для FastAPI-эндпоинтов
+def get_http_manager() -> HTTPClientManager:
+    return app.state.http_manager
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,113 +58,34 @@ app.add_middleware(
 )
 app.add_middleware(APIKeyMiddleware)
 
+# logging.basicConfig(level=logging.INFO)
+# logger = logging.getLogger(__name__)
 setup_logging()
 logger = get_logger(__name__)
-
-@app.post("/rao_conclusion")
-async def get_rao_conclusion(
-    request: RAOConclusionRequest,
-    x_api_database: str = Header(default="dev", alias="X-API-Database")
-):
-    """
-    Создает сводный отчет эксперта РАО для заданной экспертизы.
-
-    Принимает идентификатор экспертизы и флаг отправки во внешние системы,
-    запускает пайплайн формирования заключения РАО и возвращает результаты анализа.
-
-    Args:
-        request: Запрос с параметрами заключения РАО, содержащий:
-            - expertise_id (int): Идентификатор экспертизы
-            - send_to_external (bool): Флаг отправки результатов во внешние системы
-        x_api_database: Заголовок с указанием среды базы данных ('dev', 'prod', 'stage')
-
-    Returns:
-        dict: Результаты анализа документов экспертизы в формате заключения РАО
-
-    Raises:
-        HTTPException: 400 - если отсутствует expertise_id
-        HTTPException: 500 - при ошибке обработки
-    """
-    try:
-        expertise_id = request.expertise_id
-        send_to_external = request.send_to_external
-
-        if not expertise_id:
-            raise HTTPException(status_code=400, detail="Поле 'expertise_id' обязательно")
-
-        # Запускаем пайплайн
-        results = await rao_conclusion(expertise_id, x_api_database, send_to_external)
-
-        return results
-
-    except Exception as e:
-        logger.error(f"Ошибка при создании сводного отчета эксперта РАО: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Ошибка при создании сводного отчета эксперта РАО: {str(e)}")
 
 # Глобальный словарь для хранения результатов анализа документов
 document_analysis_cache = {}
 
-@app.post("/parse-eis")
-async def parse_eis(request: EISParseRequest):
-    """
-    Парсит ссылку на закупку ЕИС и извлекает связанные документы.
-
-    Принимает ссылку на закупку в ЕИС, подключается к SOAP API ЕИС
-    и извлекает все доступные документы для данной закупки.
-
-    Args:
-        request: Запрос с ссылкой на ЕИС, содержащий:
-            - eis_link (str): Ссылка на закупку в ЕИС
-
-    Returns:
-        dict: Информация о найденных документах
-
-    Raises:
-        HTTPException: 400 - если ссылка на ЕИС не указана или пустая
-    """
-    eis_link = request.eis_link.strip()
-    if not eis_link:
-        raise HTTPException(status_code=400, detail="Поле 'eis_link' обязательно")
-
-    cloud_parser = CloudStorageParser()
-    files = await cloud_parser._parse_eis_soap_ip(eis_link, 123)
-    return files
-
 
 @app.post("/evaluate-documents")
 async def evaluate_documents_batch(
-    request_body: Dict[str, int] = Body(...),
+    request: EvaluateRequest,
     x_api_database: str = Header(default="dev", alias="X-API-Database")
 ):
-    """
-    Запускает асинхронную оценку документов для заданной экспертизы.
-
-    Принимает идентификатор экспертизы, запускает Celery-задачу для анализа
-    всех документов экспертизы и возвращает ID задачи для отслеживания прогресса.
-
-    Args:
-        request_body: Тело запроса с обязательным полем:
-            - expertise_id (int): Идентификатор экспертизы для анализа
-        x_api_database: Заголовок с указанием среды базы данных ('dev', 'prod', 'stage')
-
-    Returns:
-        dict: Информация о запущенной задаче с полем task_id
-
-    Raises:
-        HTTPException: 400 - если отсутствует expertise_id
-        HTTPException: 500 - при ошибке запуска анализа
-    """
     try:
-        expertise_id = request_body.get("expertise_id")
-
+        expertise_id = request.expertise_id        
         if not expertise_id:
             raise HTTPException(status_code=400, detail="Поле 'expertise_id' обязательно")
+        
+        logger.info(f"Принят запрос на анализ документов для экспертизы: {expertise_id}, DB: {x_api_database}")
+        task = evaluate_documents_task.delay(expertise_id, x_api_database)
 
-        # Запускаем задачу
-        task = await evaluator(expertise_id, x_api_database)
-
-        return task
-
+        return {
+            "task_id": task.id,
+            "status": "processing",
+            "message": "Задача запущена"
+        }
+        
     except Exception as e:
         logger.error(f"Ошибка при анализе документов: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Ошибка при анализе документов: {str(e)}")
@@ -146,22 +93,6 @@ async def evaluate_documents_batch(
 
 @app.get("/task/{task_id}")
 async def get_task_status(task_id: str):
-    """
-    Получает статус выполнения асинхронной задачи по ее ID.
-
-    Проверяет состояние Celery-задачи и возвращает текущий статус выполнения,
-    результат или информацию об ошибке.
-
-    Args:
-        task_id: Уникальный идентификатор задачи Celery
-
-    Returns:
-        dict: Статус задачи:
-            - status: "pending" - задача в очереди
-            - status: "completed", result: <данные> - задача выполнена успешно
-            - status: "failed", error: <описание> - задача завершилась с ошибкой
-            - status: <другое> - промежуточное состояние задачи
-    """
     task = AsyncResult(task_id)
     if task.state == 'PENDING':
         logger.info(f"Обработка документов в процессе: status: pending")
@@ -180,24 +111,23 @@ async def get_task_status(task_id: str):
 @app.post("/get-contract-info")
 async def api_get_contract_info(request_body: Dict[str, str] = Body(...)):
     """
-    Получает ключевые реквизиты контракта по идентификатору закупки.
-
-    Извлекает из базы данных номер, сумму и дату контракта на основе данных,
-    ранее сохраненных в поле contract_draft таблицы raw_document_data.
-    Возвращает информацию в виде JSON для быстрого доступа к основным параметрам контракта.
+    Получает информацию о контракте для заданного идентификатора закупки.
+    Принимает в теле запроса идентификатор закупки, извлекает из базы данных информацию о контракте и возвращает ее.
+    В случае ошибок возвращает соответствующий HTTP статус и сообщение.
 
     Args:
-        request_body: Тело запроса в формате JSON с обязательным полем:
-            - procurement_id (str): Идентификатор закупки
+        request_body (Dict[str, str]): Тело запроса в формате JSON с полем:
+            - procurement_id (str): Идентификатор закупки, для которой необходимо получить информацию о контракте
+
+    Raises:        
+        HTTPException: 400 - если отсутствует procurement_id
+        HTTPException: 500 - при ошибке получения информации о контракте
 
     Returns:
-        dict: Реквизиты контракта:
-            - contract_number (str): Номер контракта или "0" если не найден
-            - amount (str): Сумма контракта или "0" если не найдена
-            - date (str): Дата контракта или "0" если не найдена
-
-    Raises:
-        HTTPException: 400 - если отсутствует procurement_id
+        Dict[str, str]: Словарь с информацией о контракте, содержащий поля:
+            - contract_number (str): Номер контракта
+            - amount (str): Сумма контракта
+            - date (str): Дата заключения контракта
     """
     procurement_id = request_body.get("procurement_id")
     logger.info(f"Получение данных контракта для экспертизы {procurement_id}")
@@ -247,7 +177,7 @@ async def get_experts_for_expertise(
             raise HTTPException(status_code=400, detail="Поле 'expertise_id' обязательно")
 
         # Запускаем скоринг пайплайн
-        results = await scoring(expertise_id, details, x_api_database)
+        results = await scoring(expertise_id, details, x_api_database, http_manager)
 
         return results
         
@@ -262,24 +192,23 @@ async def get_experts_rating(
     x_api_database: str = Header(default="dev", alias="X-API-Database")
 ):
     """
-    Возвращает рейтинги экспертов за указанный период времени.
-
-    Выполняет SQL-запрос из файла experts_rating.sql через внешний API
-    (в зависимости от окружения в X-API-Database) и возвращает словарь
-    с рейтингами экспертов в формате {expert_id: rating}.
+    Получает рейтинг экспертов для заданного временного периода.
+    Принимает в теле запроса даты начала и конца периода, за который необходимо получить рейтинг. 
+    Вызывает бизнес-логику для получения рейтинга экспертов и возвращает результат. 
+    В случае ошибок возвращает соответствующий HTTP статус и сообщение.
 
     Args:
-        request_body: Тело запроса с обязательными полями:
-            - start_date (str): Начальная дата периода (формат YYYY-MM-DD)
-            - end_date (str): Конечная дата периода (формат YYYY-MM-DD)
-        x_api_database: Заголовок с указанием среды базы данных ('dev', 'prod', 'stage')
-
-    Returns:
-        dict: Словарь рейтингов экспертов в формате {expert_id: rating}
+        request_body (Dict[str, str]): Тело запроса в формате JSON с полями:
+            - start_date (str): Дата начала периода в формате "YYYY-MM-DD"
+            - end_date (str): Дата конца периода в формате "YYYY-MM-DD"
+        x_api_database (str): Заголовок с указанием среды базы данных ('dev', 'prod', 'stage')
 
     Raises:
-        HTTPException: 400 - если не указаны start_date или end_date
-        HTTPException: 500 - при ошибке получения рейтингов
+        HTTPException: 400 - если отсутствуют start_date или end_date
+        HTTPException: 500 - при ошибке получения рейтинга экспертов
+
+    Returns:
+        List[Dict]: Список словарей с рейтингами экспертов, полученными из бизнес-логики. Каждый словарь может содержать информацию об эксперте и его рейтинге.
     """
     try:
         start_date = request_body.get("start_date")
@@ -292,7 +221,7 @@ async def get_experts_rating(
             )
 
         # Вызываем бизнес-логику (например, метод rating)
-        ratings = rating(start_date, end_date, x_api_database)
+        ratings = await rating(start_date, end_date, x_api_database, http_manager)
 
         logger.info(
             f"Успешно Получено {len(ratings)} рейтингов экспертов (DB: {x_api_database}, период: {start_date}–{end_date})"
@@ -319,3 +248,45 @@ async def health_check():
             - service (str): Название микросервиса ("procurement-document-analyzer").
     """
     return {"status": "healthy", "service": "procurement-document-analyzer"}
+
+@app.post("/rao_conclusion")
+async def get_rao_conclusion(
+    request: RAOConclusionRequest,
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
+    ):
+    '''
+    Получает сводный отчет эксперта РАО для заданной экспертизы.
+    Принимает идентификатор экспертизы, запускает ML-пайплайн для генерации сводного отчета эксперта РАО и возвращает результат.
+    В случае ошибок возвращает соответствующий HTTP статус и сообщение.
+
+    Args:
+        request (RAOConclusionRequest): Тело запроса с обязательным полем:
+            - expertise_id (int): Идентификатор экспертизы
+            - send_to_external (bool, optional): Флаг, указывающий, отправлять ли результат во внешнюю систему (по умолчанию False)
+        x_api_database (str): Заголовок с указанием среды базы данных ('dev', 'prod', 'stage')
+
+    Raises:
+        HTTPException: 400 - если отсутствует expertise_id
+        HTTPException: 500 - при ошибке генерации сводного отчета эксперта РАО
+        
+    Returns:
+        dict: Сводный отчет эксперта РАО, сгенерированный ML-пайплайном, содержащий ключевые выводы и рекомендации по экспертизе. 
+            Структура отчета может включать различные разделы, такие как анализ документов, выявленные риски, рекомендации по улучшению и т.д., в зависимости от логики пайплайна. 
+            Если send_to_external установлен в True, результат также будет отправлен во внешнюю систему, и в ответе может быть указано подтверждение отправки.
+
+    '''
+    try:
+        expertise_id = request.expertise_id
+        send_to_external = request.send_to_external
+        
+        if not expertise_id:
+            raise HTTPException(status_code=400, detail="Поле 'expertise_id' обязательно")
+        
+        # Запускаем пайплайн
+        results = await rao_conclusion(expertise_id, x_api_database, http_manager, send_to_external)
+
+        return results
+        
+    except Exception as e:
+        logger.error(f"Ошибка при создании сводного отчета эксперта РАО: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при создании сводного отчета эксперта РАО: {str(e)}")

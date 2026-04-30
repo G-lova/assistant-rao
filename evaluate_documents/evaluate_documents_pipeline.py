@@ -1,7 +1,5 @@
-import aiofiles
 import asyncio
 import json
-import os
 import pandas as pd
 import asyncio
 import datetime
@@ -9,51 +7,64 @@ import datetime
 from configs.config import Config
 from configs.data_fetcher import DataFetcher
 from configs.file_reader import read_file
+from configs.http_client_manager import HTTPClientManager
 from configs.llm_client import get_llm
 from configs.logger import get_logger
 from configs.utils import split_large_text
 from configs.working_with_db import save_raw_data, save_summary_report, delete_procurement_data
 from evaluate_documents.completeness_checker import CompletenessChecker
 from evaluate_documents.consistency_checker import ConsistencyChecker
-from configs.parsing import parse_cloud_storage_link
-from configs.retry_utils import async_retry, API_RETRY_CONFIG, CLOUD_PARSING_RETRY_CONFIG
+from configs.parsing import CloudStorageParser
 from evaluate_documents.type_data_extractor import DOCUMENT_TYPE_MAPPING, TypeDataExtractor
 
 
 logger = get_logger(__name__)
 
 
-class EvaluateDocumentsPipeline:
+class TasksPipeline:
     """
-    Конвейер для оценки и ранжирования экспертов на основе схожести текстов и дополнительных метрик.
-
-    Выполняет полный цикл обработки: загрузку данных из БД по заданному SQL-запросу,
-    предобработку текстов, вычисление эмбеддингов и косинусного сходства, фильтрацию по конфликтам интересов
-    и расчёт итогового рейтинга экспертов. Используется для подбора наиболее подходящих экспертов
-    к конкретной экспертизе.
+    
     """
 
-    def __init__(self, environment: str = None):
+    def __init__(self, http_manager: HTTPClientManager, expertise_id: int, environment: str = None):
         """
-        Инициализирует компоненты конвейера с использованием глобальной конфигурации.
+        
+        """
 
-        Загружает настройки из конфигурационного файла и создаёт экземпляры зависимостей:
-        - DataFetcher — для получения данных из базы.
-        Также сохраняет путь к директории с SQL-запросами.
-        """
         # Загрузка конфигурации
+        client, model = get_llm()
         self.config = Config()
+        self.http_manager = http_manager
         
         # Инициализация компонентов с конфигурацией
         db_config = self.config.get_database_config(environment)
         paths_config = self.config.get_paths_config()
         
         self.file_storage = db_config.storage_path
-        self.data_fetcher = DataFetcher(db_config.url, db_config.headers)        
+        self.data_fetcher = DataFetcher(db_config.url, db_config.headers, self.http_manager)        
         self.sql_queries_path = paths_config.sql_queries
-    
 
-    async def load_sql_query(self, file_name: str) -> str:
+        # try:
+        # Загрузка SQL запроса и получение данных
+        sql_query = self.load_sql_query("evaluate_docs_script.sql")        
+        self.df = self.data_fetcher.fetch_expertise_data(sql_query, bindings=[self.file_storage, expertise_id])
+
+        #     return df
+        
+        # except Exception as e:
+        #     if str(e) == "Нет данных для анализа":
+        #         return []
+        #     else:
+        #         raise
+    
+        
+        self.type_data_extractor = TypeDataExtractor(client, model)
+        self.completeness_checker = CompletenessChecker(client, model)
+        self.consistency_checker = ConsistencyChecker(client, model)
+        self.cloud_parser = CloudStorageParser(self.http_manager, self.df['object'].iloc[0])
+        self.llm_semaphore = asyncio.Semaphore(3)
+
+    def load_sql_query(self, file_name: str) -> str:
         """
         Загружает и нормализует SQL-запрос из файла.
 
@@ -67,60 +78,9 @@ class EvaluateDocumentsPipeline:
             str: SQL-запрос в виде одной строки без лишних пробельных символов.
         """
         file_path = f"{self.sql_queries_path}{file_name}"
-        async with aiofiles.open(file_path, encoding="utf-8") as f:
-            sql_query = await f.read()
+        with open(file_path, encoding="utf-8") as f:
+            sql_query = f.read()
         return " ".join(sql_query.split())
-
-    
-
-    async def run_pipeline(self, sql_file_path, expertise_id):
-        """
-        Запускает полный конвейер оценки экспертов для заданной экспертизы.
-
-        Последовательно выполняет все этапы: загрузку данных, предобработку, расчёт сходства,
-        фильтрацию по конфликтам и вычисление рейтинга.
-
-        Args:
-            sql_file_path (str): Имя файла с SQL-запросом для получения данных об экспертах.
-            expertise_id (str или int): Уникальный идентификатор экспертизы.
-
-        Returns:
-            pandas.DataFrame: Датафрейм с отфильтрованными и ранжированными экспертами,
-            содержащий колонки 'expert_id' и 'rating'.
-        """
-        try:
-            # Загрузка SQL запроса
-            sql_query = await self.load_sql_query(sql_file_path)
-            
-            # Получение данных
-            df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[self.file_storage, expertise_id])
-
-            return df
-        
-        except Exception as e:
-            if str(e) == "Нет данных для анализа":
-                return []
-            else:
-                raise
-
-
-class TasksPipeline:
-    """
-    
-    """
-
-    def __init__(self, df):
-        """
-        
-        """
-        self.df = pd.DataFrame(df) if not isinstance(df, pd.DataFrame) else df
-
-        # Загрузка конфигурации
-        client, model = get_llm()
-        
-        self.type_data_extractor = TypeDataExtractor(client, model)
-        self.completeness_checker = CompletenessChecker(client, model)
-        self.consistency_checker = ConsistencyChecker(client, model)
 
 
     async def process_link(self, link):
@@ -128,56 +88,75 @@ class TasksPipeline:
         
         """
         try:
-            parse_result = await parse_cloud_storage_link(link.media_links, link.id)
+            parse_result = await self.cloud_parser.parse_cloud_storage_link(link.media_links, link.id)
             logger.info(f'Результат парсинга {link.media_links}: {parse_result}')
 
-            if "zakupki.gov.ru" in link.media_links:
+            tasks = []
+            for file_info in parse_result.get("files", [parse_result]):
+                logger.info(f'file_info: {file_info}')
+                file_path = file_info.get("file_path")
+                filename = file_info.get("filename", f"doc_from_link_{file_info.get('original_url')}")
+                tasks.append(self.process_parse_result(file_path, filename, link))
+            async with self.llm_semaphore:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Обрабатываем результаты
+            successful_results = []
+            for file_info, result in zip(parse_result.get("files", [parse_result]), results):
+                if isinstance(result, Exception):
+                    logger.error(f'Ошибка при обработке документа {file_info.get("filename", file_info.get("original_url"))}: {result}')
+                    continue
+                if result != None:
+                    successful_results.append(result)
+
+            # if not successful_results:
+            #     fallback = {
+            #         "type_compliance": {"status": "deny", "issues": ["Не удалось определить тип: документ пустой"], "detected_type": "unknown"},
+            #         "readability": {"status": "deny", "issues": ["Ошибка анализа документа"]},
+            #         "raw_data": {}
+            #     }
+            #     return fallback
+
+            if link.doc_code == 'linkDocs':  
                 eis_procurement_number = parse_result.get("procurement_number")
-                eis_status = "available" if parse_result.get("status") == "success" else "unavailable"
                 eis_error = parse_result.get("error")
 
                 eis_data = {
                     "document_name": "Ссылка на ЕИС",
                     "eis_procurement_number": str(eis_procurement_number) if eis_procurement_number else None,
                     "eis_link": link.media_links,
-                    "eis_status": eis_status,
+                    "eis_status": "available" if parse_result.get("status") == "success" else "unavailable",
                     "eis_error": eis_error,
                     "checked_at": datetime.datetime.utcnow().isoformat()
-                }
-                
+                }    
+
                 result = {                     
                     "type_compliance": {
-                        "status": "allow" if eis_status == "available" else "deny",
+                        "status": "allow" if (parse_result.get("status") == "success" and "zakupki.gov.ru" in link.media_links) else "deny",
                         "detected_type": link.doc_code,
-                        "issues": [eis_error]
+                        "issues": [parse_result.get("error")]
                     },
                     "readability": {
-                        "status": "allow" if eis_status == "available" else "deny",
-                        "issues": [eis_error]
+                        "status": "allow" if parse_result.get("status") == "success" else "deny",
+                        "issues": [parse_result.get("error")]
                     },
                     "raw_data": eis_data,
                     "completeness": {
                         "status": "allow" if eis_procurement_number else "deny",
-                        "description": "Ссылка корректна" if eis_status == "available" and eis_procurement_number else "Некорректная ссылка"
+                        "description": "Ссылка корректна" if (
+                            parse_result.get("status") == "success" and "zakupki.gov.ru" in link.media_links and eis_procurement_number
+                            ) else "Некорректная ссылка"
                     }
                 }
-                return result
 
-            else:
-                tasks = []
-                for file_info in parse_result.get("files", [parse_result]):
-                    logger.info(f'file_info: {file_info}')
-                    file_path = file_info.get("file_path")
-                    filename = file_info.get("filename", f"doc_from_link_{file_info.get('original_url')}")
-                    tasks.append(self.process_parse_result(file_path, filename, link))
-                results = await asyncio.gather(*tasks)
-                return results
+                successful_results.append(result)
 
+            return successful_results
 
         except Exception as e:
-            print(f"Критическая ошибка при обработке ссылки {link.media_links}: {e}")
 
-            if "zakupki.gov.ru" in link.media_links:
+            if link.doc_code == 'linkDocs':  
+            # if "zakupki.gov.ru" in link.media_links:
                 logger.error(f"Ошибка обработки ЕИС-ссылки {link.media_links}: {e}")
                 eis_data = {
                     "document_name": "Ссылка на ЕИС",
@@ -200,10 +179,13 @@ class TasksPipeline:
                     "raw_data": eis_data,
                     "completeness": {
                         "status": "deny",
-                        "description": eis_error
+                        "description": str(e)
                     }
                 }
+
             else:
+                logger.warning(f"Критическая ошибка при обработке ссылки {link.media_links}: {e}")
+
                 fallback = {
                     "type_compliance": {
                         "status": "deny",
@@ -232,7 +214,7 @@ class TasksPipeline:
         if not extracted_text or "[Нет читаемого текста]" in extracted_text:
             raise ValueError("Не удалось извлечь текст")
 
-        chunks = split_large_text(extracted_text, max_chunk_size=20000)
+        chunks = split_large_text(extracted_text, max_chunk_size=10000)
         if not chunks:
             fallback = {
                 "type_compliance": {"status": "deny", "detected_type": "unknown", "issues": ["Пустой документ"]},
@@ -243,7 +225,7 @@ class TasksPipeline:
             return fallback
             
         # ====== Определение типа документа, оценка читаемости и извлечение ключевых данных ======        
-        extracted_data = await self.type_data_extractor.extract_data_from_document(chunks, filename, link.doc_code)
+        extracted_data = await self.type_data_extractor.extract_data_from_document(chunks, filename, link.doc_code, link.object)
         if isinstance(extracted_data, str):
             extracted_data = json.loads(extracted_data)
 
@@ -257,49 +239,7 @@ class TasksPipeline:
             "expertise_details": self.df['expertise_details'].iloc[0]
         }
         data_for_completeness = {**data_for_final_evaluation, **extracted_data['raw_data']}
-        completeness = await self.completeness_checker.check_doc_completeness(data_for_completeness, filename)
-        if isinstance(completeness, str):
-            completeness = json.loads(completeness)
-
-        # собираем результаты обработки документов в единый массив для подачи в llm
-        result = {"completeness": completeness, **extracted_data}
-        return result
-
-
-    async def process_file(self, file_path, filename, link):
-        """
-        
-        """
-        extracted_text = await read_file(file_path, filename)
-        if not extracted_text or "[Нет читаемого текста]" in extracted_text:
-            raise ValueError("Не удалось извлечь текст")
-
-        chunks = split_large_text(extracted_text, max_chunk_size=20000)
-        if not chunks:
-            fallback = {
-                "type_compliance": {"status": "deny", "detected_type": "unknown", "issues": ["Пустой документ"]},
-                "readability": {"status": "deny", "issues": ["Пустой документ"]},
-                "raw_data": {},
-                "completeness": {"status": "deny", "description": "Документ пуст или не содержит читаемого текста"}
-            }
-            return fallback
-            
-        # ====== Определение типа документа, оценка читаемости и извлечение ключевых данных ======        
-        extracted_data = await self.type_data_extractor.extract_data_from_document(chunks, filename, link.doc_code)
-        if isinstance(extracted_data, str):
-            extracted_data = json.loads(extracted_data)
-
-        # ====== Оценка полноты и соответствия данных в документе ======
-        data_for_final_evaluation = {
-            "expertise_id": self.df['id'].iloc[0],
-            "organization": self.df['organization'].iloc[0],
-            "object": self.df['expertise_object'].iloc[0],
-            "law_reference": self.df['law_reference'].iloc[0],
-            "procurement_method": self.df['procurement_method'].iloc[0],
-            "expertise_details": self.df['expertise_details'].iloc[0]
-        }
-        data_for_completeness = {**data_for_final_evaluation, **extracted_data['raw_data']}
-        completeness = await self.completeness_checker.check_doc_completeness(data_for_completeness, filename)
+        completeness = await self.completeness_checker.check_doc_completeness(self.consistency_checker.remove_empty(data_for_completeness), filename)
         if isinstance(completeness, str):
             completeness = json.loads(completeness)
 
@@ -312,13 +252,6 @@ class TasksPipeline:
         """
         
         """
-        # === Очистка старых данных ===
-        try:
-            delete_procurement_data(self.df['id'].iloc[0])
-            logger.info(f"Запись в БД удалена {self.df['id'].iloc[0]}")
-        except:
-            logger.info(f"Запись в БД не существует {self.df['id'].iloc[0]}")
-
         try:
             logger.info(f"Запуск фоновой задачи обработки документов", extra={"expertise_id": self.df['id'].iloc[0]})
 
@@ -332,33 +265,75 @@ class TasksPipeline:
                 "expertise_details": self.df['expertise_details'].iloc[0]
             }
 
+            obj = self.df['object'].iloc[0]
+            check_type2 = self.df['checkType2'].iloc[0]
+            type_ = self.df['type'].iloc[0]
+
+            if obj in [5, 6]:
+                contract_replacement = "docProjContractFiles"
+            elif check_type2 == 13 or type_ == 2:
+                contract_replacement = "docContractNIRFiles"
+            elif check_type2 == 14 or type_ == 3:
+                contract_replacement = "docContractPostTovarFiles"
+            else:
+                contract_replacement = "docContractDoWorkFiles"
+
+            self.df['doc_code'] = self.df['doc_code'].replace({
+                "contractFiles": contract_replacement,
+                "dopMaterialFiles": "docDopMaterialsFiles", 
+                "dopContractFiles": "docDopConsentContractFiles", 
+                "docFiles": "docValidAllIfFiles", 
+                "rao": "docExpertReportFiles", 
+                "our": "docExpertReportFiles"
+            })
+
             # создание нового признака для сохранения результатов проверки документов по типам документов
             self.df['documents_results'] = [[] for _ in range(len(self.df))]
 
             # === Парсинг ссылок ===
-            tasks = []
             media_links = self.df[self.df['media_links'].notna()]
             if len(media_links) > 0:
                 media_links['media_links'] = media_links['media_links'].apply(json.loads)
                 media_links_exploded = media_links.explode('media_links')
                 media_links_exploded = media_links_exploded[media_links_exploded['media_links'].notna()]
-                for link in media_links_exploded.itertuples():
-                    tasks.append(self.process_link(link))
+                
+                async with self.llm_semaphore:
+                    results = await asyncio.gather(*(self.process_link(link) for link in media_links_exploded.itertuples()))
 
-                results = await asyncio.gather(*tasks)
+                # Обрабатываем результаты
+                successful_results = []
                 for link, result in zip(media_links_exploded.itertuples(), results):
+                    if isinstance(result, Exception):
+                        logger.error(f"Ошибка при анализе ссылки {link}: {result}")
+                        continue
+                    if result != None:
+                        successful_results.append(result)
+
+                # 
+                for link, result in zip(media_links_exploded.itertuples(), successful_results):
                     if not isinstance(result, list):
                         result = [result]
                     for res in result:
+                        if isinstance(res, str):
+                            res = json.loads(res)
                         detected_type = res.get('type_compliance', {}).get("detected_type", "unknown")
                         # заполнение столбца данными о предоставленных документах 
-                        if link.doc_code == 'linkDocs':
-                            self.df.loc[self.df['doc_code'] == 'linkDocs', 'provided_docs'] = 1
+                        # if link.doc_code == 'linkDocs':
+                        #     self.df.loc[self.df['doc_code'] == 'linkDocs', 'provided_docs'] = 1
                         self.df.loc[self.df['doc_code'] == detected_type, 'provided_docs'] = 1
-                        # self.df.loc[self.df['doc_code'] == (detected_type if (link.doc_code == 'linkDocs') else link.doc_code), 'documents_results'].iloc[0].append(res)
-                        self.df.loc[self.df['doc_code'] == (detected_type if (link.doc_code in ("contractFiles", "dopMaterialFiles", "dopContractFiles", "docFiles", "rao", "our")) else link.doc_code
-                                                            ), 'documents_results'].iloc[0].append(res)
+                        self.df.loc[self.df['doc_code'] == (detected_type if (
+                            link.doc_code == 'linkDocs' and detected_type in DOCUMENT_TYPE_MAPPING.keys()
+                            ) else link.doc_code), 'documents_results'].iloc[0].append(res)
+                        # self.df.loc[self.df['doc_code'] == (detected_type if (link.doc_code in {"contractFiles", "dopMaterialFiles", "dopContractFiles", "docFiles", "rao", "our"}) else link.doc_code
+                        #                                     ), 'documents_results'].iloc[0].append(res)
                         # self.df.loc[self.df['doc_code'] == link.doc_code, 'documents_results'].iloc[0].append(res)
+
+            # === Очистка старых данных ===
+            try:
+                delete_procurement_data(self.df['id'].iloc[0])
+                logger.info(f"Запись в БД удалена {self.df['id'].iloc[0]}")
+            except:
+                logger.info(f"Запись в БД не существует {self.df['id'].iloc[0]}")
 
             # сохранение данных в БД
             for row in self.df[self.df['documents_results'].map(bool)].itertuples():
@@ -367,20 +342,21 @@ class TasksPipeline:
                                     
             # добавление дополнительных данных для финального анализа    
             dop_fields = {
-                "contract": "Реквизиты контракта",
-                "dateContract": 'Дата контракта',
-                "subjectContract": "Предмет контракта"
+                "contract": "contract_number",
+                "dateContract": "date_contract",
+                "subjectContract": "subject_contract"
             }
             for k, v in dop_fields.items():
                 if self.df.loc[self.df['doc_code'] == k, 'required_docs'].iloc[0] == 1:
-                    result = {
-                        "document_code": k,
-                        "raw_data": {
-                            "document_name": v,
-                            "contract_number": self.df.loc[self.df['doc_code'] == k, k].iloc[0]
-                        }
-                    }
-                    self.df.loc[self.df['doc_code'] == k, 'documents_results'].iloc[0].append(result)
+                    # result = {
+                    #     "document_code": k,
+                    #     "raw_data": {
+                    #         "document_name": v,
+                    #         "contract_number": self.df.loc[self.df['doc_code'] == k, k].iloc[0]
+                    #     }
+                    # }
+                    # self.df.loc[self.df['doc_code'] == k, 'documents_results'].iloc[0].append(result)
+                    data_for_final_evaluation[v] = self.df[k].iloc[0]
 
 
             # Определяем недостающие документы
@@ -392,6 +368,9 @@ class TasksPipeline:
 
 
             df_prepared = self.df[self.df['documents_results'].map(bool)]
+            # в приоритете обязательные документы и ссылка на ЕИС
+            df_prepared = pd.concat([df_prepared[(df_prepared["required_docs"]==1) | (df_prepared["doc_code"]=="linkDocs")], 
+                                     df_prepared[(df_prepared["required_docs"]!=1) & (df_prepared["doc_code"]!="linkDocs")]])
 
 
             for _, row in df_prepared.iterrows():

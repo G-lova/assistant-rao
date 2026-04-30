@@ -1,5 +1,6 @@
 import asyncio
 import json
+from json_repair import repair_json
 from typing import Any, Dict
 from configs.logger import get_logger
 from configs.utils import extract_json_objects
@@ -55,7 +56,7 @@ class ConclusionConsoladator:
                         "content": f"""Сформируй сводное заключение, основываясь на данных, извлеченных из документов, и заключениях экспертов:\n\n{content}"""
                     }
                 ],
-                max_tokens=4096,
+                max_tokens=2000,
                 temperature=0.1,
                 extra_body={"guided_json": json.loads(RAO_CONCLUSION_SCHEMA)}
                 )
@@ -80,33 +81,27 @@ class ConclusionConsoladator:
         except json.JSONDecodeError as e:
             logger.warning(f"Первая попытка парсинга JSON не удалась: {e}")
 
-        # Поиск JSON структур вручную
-        candidates = extract_json_objects(raw_response)
-
-        if not candidates:
-            logger.error("JSON структуры не найдены.")
-            fallback = {
-                "status": "error",
-                "conclusion": {},
-                "error": "Ошибка при формировании сводного заключения"
-            }
-            return fallback
-
-        # Берём самый крупный объект (вероятнее всего полный JSON документа)
-        candidates = sorted(candidates, key=len, reverse=True)
-
-        for candidate in candidates:
+            # Поиск JSON структур вручную
             try:
-                result = json.loads(candidate)
+                result = json.loads(repair_json(raw_response))
+
+                if not result:
+                    logger.error("JSON структуры не найдены.")
+                    fallback = {
+                        "status": "error",
+                        "conclusion": {},
+                        "error": "Ошибка при формировании сводного заключения"
+                    }
+                    return fallback
+                
                 logger.info("Удалось распарсить JSON из извлечённого фрагмента вручную.")
                 return result
+            
             except json.JSONDecodeError:
-                continue
-
-        logger.error("Не удалось распарсить ни одну JSON структуру.")
-        fallback = {
-                "status": "error",
-                "conclusion": {},
-                "error": "Ошибка при формировании сводного заключения"
-        }
-        return fallback
+                logger.error("Не удалось распарсить ни одну JSON структуру.")
+                fallback = {
+                    "status": "error",
+                    "conclusion": {},
+                    "error": "Ошибка при формировании сводного заключения"
+                }
+                return fallback

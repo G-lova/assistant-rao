@@ -4,6 +4,7 @@ import pandas as pd
 
 from typing import Any, Dict, List
 from conclusion.ai_conclusion_consolidator import ConclusionConsoladator
+from configs.http_client_manager import HTTPClientManager
 from configs.llm_client import get_llm
 from configs.logger import get_logger
 from configs.config import Config
@@ -23,7 +24,7 @@ class RaoConclusionPipeline:
     
     """
 
-    def __init__(self, expertise_id: int, environment: str = None):
+    def __init__(self, http_manager: HTTPClientManager, expertise_id: int, environment: str = None):
         """
         
         """
@@ -34,10 +35,11 @@ class RaoConclusionPipeline:
         db_config = self.config.get_database_config(environment)
         paths_config = self.config.get_paths_config()
         llm_client, llm_model = get_llm()
+        self.http_manager = http_manager
         
-        self.data_fetcher = DataFetcher(db_config.url, db_config.headers)
+        self.data_fetcher = DataFetcher(db_config.url, db_config.headers, self.http_manager)
         self.conclusion_consolidator = ConclusionConsoladator(llm_client, llm_model)
-        self.external_api_service = ExternalAPIService(environment)
+        self.external_api_service = ExternalAPIService(self.http_manager, environment)
         
         self.sql_queries_path = paths_config.sql_queries
 

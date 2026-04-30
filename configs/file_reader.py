@@ -61,7 +61,7 @@ async def read_txt_file(file_path: str) -> str:
         return await f.read()
 
 
-async def read_doc_file(file_path: str, ext: str) -> str:
+async def read_doc_file(file_path: str, ext: str, original_filename:str) -> str:
     """
     Читает файл формата .doc или .docx и извлекает из него текстовое содержимое.
 
@@ -87,7 +87,7 @@ async def read_doc_file(file_path: str, ext: str) -> str:
         if os.path.getsize(file_path) == 0:
             raise ValueError("Файл пустой")
         if ext == '.docx':
-            return await extract_text_and_images_from_docx(file_path, ocr_func=ocr_image_with_qwen_vl)
+            return await extract_text_and_images_from_docx(file_path, original_filename, ocr_func=ocr_image_with_qwen_vl)
         elif ext == '.doc':
             with tempfile.TemporaryDirectory() as tmpdir:
                 tmpdir = Path(tmpdir)
@@ -111,6 +111,7 @@ async def read_doc_file(file_path: str, ext: str) -> str:
                     if docx_path.exists():
                         return await extract_text_and_images_from_docx(
                             str(docx_path),
+                            original_filename,
                             ocr_func=ocr_image_with_qwen_vl
                         )
 
@@ -177,7 +178,10 @@ async def read_pptx_file(file_path: str) -> str:
     return "\n".join(text_content)
 
 
-async def read_pdf_file(file_path: str) -> str:
+
+
+
+async def read_pdf_file(file_path: str, original_filename:str) -> str:
     """
     Извлекает текст из PDF-файла ТОЛЬКО с помощью OCR для каждой страницы.
 
@@ -195,31 +199,74 @@ async def read_pdf_file(file_path: str) -> str:
         str: Объединённый текст всех страниц с пометкой "OCR".
              Если текст не распознан, возвращает "[Нет читаемого текста]".
     """
-    ocr_texts = []
+    semaphore = asyncio.Semaphore(3)
+
+    async def process_page(i, image, temp_dir):
+        async with semaphore:
+            img_path = os.path.join(temp_dir, f"page_{i}.jpg")
+
+            # Сохранение изображения в отдельном потоке
+            await asyncio.to_thread(image.save, img_path, "JPEG")
+
+            # OCR
+            ocr_text = await ocr_image_with_qwen_vl(img_path, original_filename)
+
+            return f"Страница {i+1} (OCR): {ocr_text}"
 
     try:
-        # Конвертируем PDF в список изображений
         with tempfile.TemporaryDirectory() as temp_dir:
+            # PDF → изображения (в отдельном потоке)
             images = await asyncio.to_thread(
                 convert_from_path,
                 file_path,
                 output_folder=temp_dir
             )
-            for i, image in enumerate(images):
-                img_path = os.path.join(temp_dir, f"page_{i}.jpg")
-                image.save(img_path, "JPEG")
 
-                # OCR через Qwen-VL
-                ocr_text = await ocr_image_with_qwen_vl(img_path)
+            # Создаём задачи
+            tasks = [
+                process_page(i, image, temp_dir)
+                for i, image in enumerate(images)
+            ]
 
-                # Добавляем с пометкой страницы
-                ocr_texts.append(f"Страница {i+1} (OCR): {ocr_text}")
+            # Параллельный запуск
+            ocr_texts = await asyncio.gather(*tasks, return_exceptions=True)
 
-        result = "\n".join(ocr_texts)
+            # Обработка ошибок
+            results = []
+            for i, res in enumerate(ocr_texts):
+                if isinstance(res, Exception):
+                    results.append(f"Страница {i+1} (OCR): [Ошибка: {res}]")
+                else:
+                    results.append(res)
+
+        result = "\n".join(results)
+
+    # ocr_texts = []
+
+    # try:
+    #     # Конвертируем PDF в список изображений
+    #     with tempfile.TemporaryDirectory() as temp_dir:
+    #         images = await asyncio.to_thread(
+    #             convert_from_path,
+    #             file_path,
+    #             dpi=140,
+    #             output_folder=temp_dir
+    #         )
+    #         for i, image in enumerate(images):
+    #             img_path = os.path.join(temp_dir, f"page_{i}.jpg")
+    #             image.save(img_path, "JPEG")
+
+    #             # OCR через Qwen-VL
+    #             ocr_text = await ocr_image_with_qwen_vl(img_path, original_filename)
+
+    #             # Добавляем с пометкой страницы
+    #             ocr_texts.append(f"Страница {i+1} (OCR): {ocr_text}")
+
+    #     result = "\n".join(ocr_texts)
         return result.strip() if result.strip() else "[Нет читаемого текста]"
 
     except Exception as e:
-        raise ValueError(f"Ошибка при обработке PDF через OCR: {str(e)}")
+        raise ValueError(f"Ошибка при обработке {original_filename} через OCR: {str(e)}")
 
 
 async def read_excel_file(file_path: str, ext: str) -> str:
@@ -393,7 +440,7 @@ async def read_excel_with_libreoffice(file_path: str) -> str:
                 logger.warning(f"Ошибка при очистке временных файлов: {cleanup_error}")
 
 
-async def extract_text_and_images_from_docx(file_path: str, ocr_func=None) -> str:
+async def extract_text_and_images_from_docx(file_path: str, original_filename:str, ocr_func=None) -> str:
     """
     Извлекает текст и распознаёт текст с изображений из файла DOCX.
 
@@ -443,7 +490,7 @@ async def extract_text_and_images_from_docx(file_path: str, ocr_func=None) -> st
                     async with aiofiles.open(img_path, 'wb') as f:
                         await f.write(img_data)
                     if ocr_func:
-                        ocr_text = await ocr_func(img_path)
+                        ocr_text = await ocr_func(img_path, original_filename)
                         image_texts.append(f"[OCR из изображения {os.path.basename(img_file)}]: {ocr_text}")
                     else:
                         image_texts.append(f"[Изображение: {os.path.basename(img_file)}]")
@@ -523,7 +570,7 @@ async def process_archive(file_path: str, ext: str) -> str:
     # return results
 
 
-async def html_to_pdf(html_path: str) -> str:
+async def html_to_pdf(html_path: str, original_filename:str) -> str:
     """Асинхронно конвертирует HTML-файл в PDF с помощью wkhtmltopdf"""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         pdf_path = tmp.name
@@ -533,22 +580,39 @@ async def html_to_pdf(html_path: str) -> str:
             subprocess.run,
             [
                 "wkhtmltopdf",
-                "--no-images",
-                "--disable-javascript",
-                "--load-error-handling", "ignore",
+
+                # 🔥 ключевые настройки
+                "--print-media-type",          # использовать @media print
+                "--enable-local-file-access",  # доступ к локальным ресурсам
                 "--encoding", "utf-8",
+
+                # 📄 формат страницы
+                "--page-size", "A4",
+                "--margin-top", "10mm",
+                "--margin-bottom", "10mm",
+                "--margin-left", "10mm",
+                "--margin-right", "10mm",
+
+                # ⚙️ стабильность
+                "--load-error-handling", "ignore",
+                "--load-media-error-handling", "ignore",
+                # "--no-images",
+                # "--disable-javascript",
+
                 html_path,
                 pdf_path
             ],
             capture_output=True,
             text=True,
             timeout=30)
+        
         if result.returncode != 0:
             raise RuntimeError(f"wkhtmltopdf failed: {result.stderr}")
-        return await read_pdf_file(pdf_path)
+        
+        return await read_pdf_file(pdf_path, original_filename)
     
     except Exception as e:
-        logger.error(f"Ошибка конвертации HTML → PDF: {e}")
+        logger.error(f"Ошибка конвертации HTML → PDF для {original_filename}: {e}")
         raise
 
 
@@ -627,12 +691,12 @@ async def read_file(file_path: str, original_filename: str = None) -> str:
                     # Продолжаем с оригинальным .bin файлом
 
         # Основная логика обработки по расширениям
-        if ext in [".txt", ".csv", ".json"]:
+        if ext in [".txt", ".csv", ".json", ".html"]:
             text = await read_txt_file(file_path)
             logger.info(f"Прочитан {ext.upper()}-файл: {original_filename}, длина: {len(text)}")
             return text 
         elif ext == ".pdf":
-            text = await read_pdf_file(file_path)
+            text = await read_pdf_file(file_path, original_filename)
             logger.info(f"Извлечён текст из PDF: {original_filename}, длина: {len(text)}")
             return text
         elif ext in [".xlsx", ".xls"]:
@@ -644,17 +708,17 @@ async def read_file(file_path: str, original_filename: str = None) -> str:
             logger.info(f"Извлечён текст из PPTX: {original_filename}, длина: {len(text)}")
             return text
         elif ext in [".doc", ".docx"]:
-            text = await read_doc_file(file_path, ext)
+            text = await read_doc_file(file_path, ext, original_filename)
             logger.info(f"Извлечён текст из DOC(X): {original_filename}, длина: {len(text)}")
             return text
         elif ext in [".zip", ".rar"]:
             text = await process_archive(file_path, ext)
             logger.info(f"Извлечён текст из архива: {original_filename}, длина: {len(text)}")
             return text
-        elif ext in [".html"]:
-            text = await html_to_pdf(file_path)
-            logger.info(f"Извлечён текст из HTML: {original_filename}, длина: {len(text)}")
-            return text
+        # elif ext in [".html"]:
+        #     text = await html_to_pdf(file_path, original_filename)
+        #     logger.info(f"Извлечён текст из HTML: {original_filename}, длина: {len(text)}")
+        #     return text
         elif ext in [".xml"]:
             text = await read_xml_file(file_path)
             logger.info(f"Извлечён текст из XML: {original_filename}, длина: {len(text)}")
@@ -666,7 +730,7 @@ async def read_file(file_path: str, original_filename: str = None) -> str:
         elif ext in [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff"]:
             # Обработка изображений через OCR
             try:
-                text = await ocr_image_with_qwen_vl(file_path)
+                text = await ocr_image_with_qwen_vl(file_path, original_filename)
                 logger.info(f"Извлечён текст из изображения через OCR: {original_filename}, длина: {len(text)}")
                 return text
             except Exception as e:

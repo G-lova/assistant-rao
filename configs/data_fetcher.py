@@ -1,6 +1,6 @@
 import asyncio
 import json
-import httpx
+from configs.http_client_manager import HTTPClientManager
 import pandas as pd
 import requests
 
@@ -19,7 +19,7 @@ class DataFetcher:
     доступа к данным экспертизы по заданному идентификатору.
     """
     
-    def __init__(self, url, headers):
+    def __init__(self, url, headers, http_manager: HTTPClientManager):
         """
         Инициализирует объект DataFetcher.
 
@@ -29,15 +29,22 @@ class DataFetcher:
         """
         self.url = url
         self.headers = headers
+        self.http_manager = http_manager
 
     async def fetch_async_expertise_data(self, sql_query: str, bindings: list):
-        async with httpx.AsyncClient() as client:
-            response = await client.post(self.url, headers=self.headers, json={"sql": sql_query, "bindings": bindings})
+        session = self.http_manager.get_session()
+        async with session.post(
+        # async with httpx.AsyncClient() as client:
+        #     response = await client.post(
+                self.url, 
+                headers=self.headers, 
+                json={"sql": sql_query, "bindings": bindings}
+            ) as response:
         
-            if response.status_code != 200:
-                raise Exception(f"Ошибка API: {response.status_code}, {response.text}")
+            if response.status != 200:
+                raise Exception(f"Ошибка API: {response.status}, {await response.text()}")
                 
-            return pd.DataFrame(response.json()["data"])
+            return pd.DataFrame((await response.json())["data"])
 
 
     def fetch_expertise_data(self, sql_query, bindings=None):

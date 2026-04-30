@@ -4,11 +4,16 @@ import aiofiles
 import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
+from configs.http_client_manager import HTTPClientManager
+from configs.logger import get_logger
 from configs.config import Config
 from configs.data_fetcher import DataFetcher
 from search_experts.text_processor import TextProcessor
 from search_experts.embedding_client import EmbeddingClient
 from search_experts.conflict_detector import ConflictDetector
+
+
+logger = get_logger(__name__)
 
 
 class ScoringPipeline:
@@ -21,7 +26,7 @@ class ScoringPipeline:
     к конкретной экспертизе.
     """
 
-    def __init__(self, environment: str = None):
+    def __init__(self, http_manager: HTTPClientManager, environment: str = None):
         """
         Инициализирует компоненты конвейера с использованием глобальной конфигурации.
 
@@ -40,13 +45,14 @@ class ScoringPipeline:
         embedding_config = self.config.get_embedding_config()
         paths_config = self.config.get_paths_config()
         
-        self.data_fetcher = DataFetcher(db_config.url, db_config.headers)
+        self.data_fetcher = DataFetcher(db_config.url, db_config.headers, http_manager)
         self.text_processor = TextProcessor()
         self.embedding_client = EmbeddingClient(
             embedding_config.api_url,
             embedding_config.api_key,
             embedding_config.model,
-            batch_size=embedding_config.batch_size
+            batch_size=embedding_config.batch_size,
+            http_manager=http_manager
         )
         self.conflict_detector = ConflictDetector()
         
@@ -142,13 +148,14 @@ class ScoringPipeline:
             return df
         
         df['conflict_fuzzy'] = df.apply(self.conflict_detector.fuzzy_match, axis=1).astype(int)
-        df = df[df['conflict_fuzzy'] < 85]
+        conflict_ids = set(df.loc[df['conflict_fuzzy'] >= 85, 'expert_id'].unique())
 
-        experts_to_exclude = set()
         exclude_ids = self.conflict_detector.find_family_conflicts(df)
         if exclude_ids:
-            experts_to_exclude |= exclude_ids
-        df = df[~df["expert_id"].isin(experts_to_exclude)]
+            conflict_ids |= exclude_ids
+
+        logger.info(f"Обнаружен конфликт интересов у экспертов: {conflict_ids}")
+        df = df[~df["expert_id"].isin(conflict_ids)]
 
         return df
     
@@ -220,6 +227,7 @@ class ScoringPipeline:
 
         exclude_ids = self.conflict_detector.find_nepotism(df)
         if exclude_ids:
+            logger.info(f"Обнаружена семейственность у экспертов: {exclude_ids}")
             experts_to_exclude |= exclude_ids
 
         df = df[~df["expert_id"].isin(experts_to_exclude)]
@@ -247,12 +255,7 @@ class ScoringPipeline:
             return df
         
         df['scoring'] = 0.3 * df['similarity_embeddings'] + 0.3 * df['distance_rate'] + 0.3 * df['criterion_rating_for_model'] + 0.1 * df['avg_rating']
-        
-        # Сортировка по убыванию рейтинга, региональной экспертизе, а также фильтрация и сортировка по загрузке
-        df = df.sort_values(by=["scoring"], ascending=False)
-        df = pd.concat([df[df['regionExpertise_sort'] == 1], df[df['regionExpertise_sort'] != 1]])
-        df = pd.concat([df[df['possibleWeekWorkload'] >= 1], 
-                        df[df['possibleWeekWorkload'] < 1].sort_values(by=['currentWeekWorkloadRequests'], ascending=True)])
+
         return df
     
 
@@ -276,7 +279,7 @@ class ScoringPipeline:
             sql_query = await self.load_sql_query(sql_file_path)
             
             # Получение данных
-            df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[expertise_id] * 3)
+            df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[expertise_id])
         
             if df.empty or df['expert_id'].isna().all() or (df['expert_id'].astype(str) == 'None').all():
                 raise Exception("Доступных экспертов нет")
@@ -304,6 +307,18 @@ class ScoringPipeline:
             else:
                 raise
 
+    def sort_experts(self, df, sort_column: str = "scoring"):
+        
+        if not self._has_valid_experts(df):
+            return []          
+        
+        # Сортировка по убыванию рейтинга, региональной экспертизе, а также фильтрация и сортировка по загрузке
+        df = df.sort_values(by=[sort_column], ascending=False)
+        df = pd.concat([df[df['regionExpertise_sort'] == 1], df[df['regionExpertise_sort'] != 1]])
+        df = pd.concat([df[df['possibleWeekWorkload'] >= 1], 
+                        df[df['possibleWeekWorkload'] < 1].sort_values(by=['currentWeekWorkloadRequests'], ascending=True)]) 
+        return df
+
     def get_top_results(self, df, details):
         """
         Извлекает идентификаторы экспертов, отсортированных по убыванию рейтинга.
@@ -317,8 +332,34 @@ class ScoringPipeline:
             list: Серия с идентификаторами экспертов, отсортированная по рейтингу по убыванию.
         """
         if not self._has_valid_experts(df):
-            return []        
+            return []          
         
+        # Сортировка по убыванию рейтинга, региональной экспертизе, а также фильтрация и сортировка по загрузке
+        df = self.sort_experts(df, "scoring")
+
+        # Ограничение новичков для приглашения
+        max_newbies = int(df['max_experts_per_invite'].iloc[0]) // 2
+        max_experts_per_invite = []
+        newbies_count = 0
+
+        for row in df.itertuples():
+            if row.is_newbie == 1:
+                if newbies_count >= max_newbies:
+                    continue
+                newbies_count += 1
+
+            max_experts_per_invite.append(row.expert_id)
+
+            if len(max_experts_per_invite) == int(df['max_experts_per_invite'].iloc[0]):
+                break
+
+        # сортировка остальных по семантике
+        df_rest = df[~df['expert_id'].isin(max_experts_per_invite)]
+        # df_rest = self.sort_experts(df_rest, "similarity_embeddings")
+
+        df = pd.concat([df[df['expert_id'].isin(max_experts_per_invite)], df_rest])
+        
+        # Формирование списка экспертов для вывода
         if details:
             results = []
             
@@ -330,7 +371,8 @@ class ScoringPipeline:
                         "semantic_rate": f"{round(row.similarity_embeddings * 100, 2)}",
                         "distance_rate": f"{round(row.distance_rate * 100, 2)}",
                         "criterion_rate": None if pd.isna(row.criterion_rating) else f"{round(row.criterion_rating * 100, 2)}",
-                        "div_rate": f"{round(row.avg_rating * 100, 2)}"
+                        "div_rate": f"{round(row.avg_rating * 100, 2)}",
+                        "is_newbie": bool(row.is_newbie)
                     }
                 })
         else:
@@ -348,7 +390,7 @@ class RatingPipeline:
     Предназначен для поддержки объективного отбора квалифицированных экспертов на конкретную экспертизу.
     """
 
-    def __init__(self, environment: str = None):
+    def __init__(self, http_manager: HTTPClientManager, environment: str = None):
         """
         Инициализирует компоненты конвейера с использованием глобальной конфигурации.
 
@@ -368,11 +410,11 @@ class RatingPipeline:
         db_config = self.config.get_database_config(environment)
         paths_config = self.config.get_paths_config()
         
-        self.data_fetcher = DataFetcher(db_config.url, db_config.headers)        
+        self.data_fetcher = DataFetcher(db_config.url, db_config.headers, http_manager)        
         self.sql_queries_path = paths_config.sql_queries
     
 
-    def load_sql_query(self, file_name: str):
+    async def load_sql_query(self, file_name: str):
         """
         Загружает и нормализует SQL-запрос из файла.
 
@@ -386,8 +428,8 @@ class RatingPipeline:
             str: SQL-запрос в виде одной строки без лишних пробельных символов.
         """
         file_path = f"{self.sql_queries_path}{file_name}"
-        with open(file_path, encoding="utf-8") as f:
-            sql_query = f.read()
+        async with aiofiles.open(file_path, encoding="utf-8") as f:
+            sql_query = await f.read()
         return " ".join(sql_query.split())
 
     @staticmethod
@@ -422,7 +464,7 @@ class RatingPipeline:
             return {}
 
 
-    def get_experts_rating(self, sql_file_path: str, start_date, end_date):
+    async def get_experts_rating(self, sql_file_path: str, start_date, end_date):
         """
         Запускает полный конвейер получения рейтингов экспертов и сохраняет результат в файл.
 
@@ -438,12 +480,12 @@ class RatingPipeline:
             dict: Словарь с рейтингами экспертов в формате {expert_id: rating}.
         """
         # Загрузка SQL запроса
-        sql_query = self.load_sql_query(sql_file_path)
+        sql_query = await self.load_sql_query(sql_file_path)
         
         # Получение данных с рассчитанными рейтингами
-        df = self.data_fetcher.fetch_expertise_data(sql_query, bindings=[start_date, end_date] * 7)
+        df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[start_date, end_date] * 6)
         
         # Преобразование данных в словарь
-        ratings = self.to_rating_dict(df)
+        ratings = await asyncio.to_thread(self.to_rating_dict, df)
         
         return ratings

@@ -1,5 +1,7 @@
 import asyncio
 import json
+from configs.rate_limiter import TokenBucket
+from configs.retry_utils import LLM_RETRY_CONFIG, async_retry
 from json_repair import repair_json
 from string import Template
 
@@ -76,6 +78,10 @@ class TypeDataExtractor:
         self.client = llm_client
         self.model = model
 
+
+        self.semaphore = asyncio.Semaphore(5)
+        self.rate_limiter = TokenBucket(rate=1.5)  # 1.5 запроса в секунду
+
         with open("prompts/type_data_extractor_prompt.txt") as f:
             self.type_data_extractor_prompt = f.read()
 
@@ -83,7 +89,7 @@ class TypeDataExtractor:
             self.TYPE_DATA_EXTRACTOR_SCHEMA = f.read()
             
 
-    async def extract_data_from_document(self, chunks: List[str], document_name: str, doc_type: str) -> Dict[str, Any]:
+    async def extract_data_from_document(self, chunks: List[str], document_name: str, doc_type: str, expertise_object: int) -> Dict[str, Any]:
         """
         Анализирует документ, разбитый на чанки, и возвращает объединённые структурированные данные.
 
@@ -118,9 +124,10 @@ class TypeDataExtractor:
                 doc_type=doc_type
             )
             tasks.append(task)
-
+            
         # Запускаем все задачи параллельно
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        async with self.semaphore:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Обрабатываем результаты
         successful_results = []
@@ -140,12 +147,28 @@ class TypeDataExtractor:
             return fallback
 
         # Объединяем результаты
-        logger.info(f"Объединение извлеченных данных по чанкам для {document_name}")
-        final_result = self.merge_chunk_results(successful_results, doc_type)
-        logger.info(f"Объединение извлеченных данных по чанкам для {document_name} прошло успешно")
-        return final_result
+        try:
+            logger.info(f"Объединение извлеченных данных по чанкам для {document_name}")
+            final_result = self.merge_chunk_results(successful_results, doc_type, expertise_object)
+            logger.info(f"Объединение извлеченных данных по чанкам для {document_name} прошло успешно")
+
+            # logger.info(f"Оптимизация объединенных данных для {document_name}")
+            # detected_type = final_result.get("type_compliance", {}).get("detected_type", doc_type)
+            # opt_result = await self.extract_data_from_chunk(json.dumps(final_result), document_name, detected_type)
+            # logger.info(f"opt_result: {opt_result}")
+
+            # return final_result if not opt_result else opt_result
+            return final_result
+        except Exception as e:
+            logger.error(f"Ошибка объединения извлеченных данных по чанкам: {e}")
+            return {
+                "type_compliance": {"status": "deny", "issues": ["Ошибка объединения извлеченных данных по чанкам"], "detected_type": "unknown"},
+                "readability": {"status": "deny", "issues": ["Ошибка анализа документа"]},
+                "raw_data": {}
+            }
     
 
+    @async_retry(LLM_RETRY_CONFIG)
     async def extract_data_from_chunk(self, content: str, document_name: str, doc_type: str) -> Dict[str, Any]:
         """
         Анализирует отдельный текстовый чанк с помощью LLM и возвращает структурированные данные.
@@ -165,6 +188,9 @@ class TypeDataExtractor:
                                       соответствующий схеме `DATA_EXTRACTOR_SCHEMA`,
                                       или `None` в случае неустранимой ошибки.
         """
+        # Ждём «разрешения» от глобального лимитера ПЕРЕД запросом
+        await self.rate_limiter.acquire()
+        
         try:
             logger.info(f"Анализ чанка '{document_name}'")
             logger.info(f"Длина контента: {len(content)} символов")
@@ -198,13 +224,13 @@ class TypeDataExtractor:
                         {"role": "system",
                             "content": prompt},
                         {"role": "user", "content": f"""
-                            Определи тип этого документа. Соответствует ли он {doc_type}: ({DOCUMENT_TYPE_MAPPING.get(doc_type)})? 
+                            Определи тип этого документа. Соответствует ли он {doc_type if doc_type in DOCUMENT_TYPE_MAPPING.keys() else "docDopMaterialsFiles"}: ({DOCUMENT_TYPE_MAPPING.get(doc_type, "Дополнительные материалы")})? 
                             Проанализируй текст, оцени его читаемость, извлеки данные:\n\n{content}
                         """}
                     ],
                     extra_body={
                         "guided_json": json.loads(schema)},
-                    max_tokens=4096,
+                    max_tokens=3000,
                     temperature=0.1
                 )
             except asyncio.TimeoutError:
@@ -219,6 +245,8 @@ class TypeDataExtractor:
             try:
                 result = json.loads(raw_response)
                 logger.info("Удалось распарсить JSON.")
+                if isinstance(result, list):
+                    result = self.merge_json_objects(result)
                 return result
             
             except json.JSONDecodeError as e:
@@ -226,20 +254,15 @@ class TypeDataExtractor:
 
             # Поиск JSON структур вручную
             try:
-                # result = repair_json(raw_response, return_objects=True, skip_json_loads=True)
                 result = json.loads(repair_json(raw_response))
 
                 if not result:
                     logger.error("JSON структуры не найдены.")
                     return None
                 
-                # # Если repair_json вернул строку (редкий кейс), пробуем распарсить её
-                # if isinstance(result, str):
-                #     result = json.loads(result)
-                # else:
-                #     result = result
-                
                 logger.info("Удалось распарсить JSON из извлечённого фрагмента вручную.")
+                if isinstance(result, list):
+                    result = self.merge_json_objects(result)
                 return result
             
             except json.JSONDecodeError:
@@ -250,8 +273,19 @@ class TypeDataExtractor:
             logger.error(f"Ошибка при анализе {document_name}: {str(e)}")
             return None
 
+    def merge_json_objects(self, json_strings) -> dict:
+        """Объединяет список JSON-строк в один словарь."""
+        result = {}
+        for js in json_strings:
+            try:
+                obj = json.loads(js) if isinstance(js, str) else js
+                result.update(obj)  # поверхностное слияние
+            except json.JSONDecodeError:
+                continue
+        return result
 
-    def merge_chunk_results(self, chunk_results: List[Dict[str, Any]], doc_type: str) -> Dict[str, Any]:
+
+    def merge_chunk_results(self, chunk_results: List[Dict[str, Any]], doc_type: str, expertise_object: int) -> Dict[str, Any]:
         """
         Объединяет результаты анализа нескольких чанков в единый структурированный ответ.
 
@@ -315,27 +349,54 @@ class TypeDataExtractor:
         }
 
         # --- TYPE_COMPLIANCE ---
-        if not isinstance(chunk_results[0], dict):
-            logger.warning(f"Строковый чанк: {chunk_results[0]}")
 
-        type_compliance = chunk_results[0].get('type_compliance', {})
+        type_compliance = chunk_results[0].get("type_compliance", {
+            "status": "deny",
+            "detected_type": "unknown",
+            "issues": [f"Ожидался {DOCUMENT_TYPE_MAPPING.get(doc_type, 'Дополнительные материалы')}, но в документе 'Неизвестный документ'"]
+        })
+    
+        # 🔧 Нормализация: если пришла строка вместо объекта — конвертируем
+        if isinstance(type_compliance, str):
+            logger.warning(f"Нормализация type_compliance: строка '{type_compliance}' → объект")
+            type_compliance = {
+                "status": "allow" if (type_compliance in ALLOWED_DOC_TYPES) and (type_compliance == doc_type) else "deny",
+                "detected_type": type_compliance if type_compliance in ALLOWED_DOC_TYPES else "unknown",
+                "issues": [] if (type_compliance in ALLOWED_DOC_TYPES) and (type_compliance == doc_type) else [
+                    f"Ожидался {DOCUMENT_TYPE_MAPPING.get(doc_type, 'Дополнительные материалы')}, но в документе {DOCUMENT_TYPE_MAPPING.get(type_compliance, 'Неизвестный документ')}"
+                ]
+            }
+        elif not isinstance(type_compliance, dict):
+            logger.warning(f"Некорректный тип type_compliance: {type(type_compliance)}")
+            type_compliance = {
+                "status": "deny",
+                "detected_type": "unknown",
+                "issues": [f"Ожидался {DOCUMENT_TYPE_MAPPING.get(doc_type, 'Дополнительные материалы')}, но в документе 'Неизвестный документ'"]
+            }
+
         if type_compliance:
             doc_code = type_compliance.get('detected_type', 'unknown')
             if ((doc_type == 'docProjContractFiles') and (doc_code in {'docProjContractFiles', 'docContractDoWorkFiles', 'docContractNIRFiles', 'docContractPostTovarFiles'})) or (
                 (doc_type == 'docDopMaterialsFiles') and (doc_code != 'unknown')):
-                merged['type_compliance'] = {
+                merged["type_compliance"] = {
                     "status": "allow",
                     "detected_type": doc_type,
                     "issues": []
                 }
-            elif doc_type in {"contractFiles", "dopMaterialFiles", "dopContractFiles", "docFiles", "rao", "our"}:
+            elif doc_type == 'linkDocs' and expertise_object in (3,5,6) and doc_code in {'docProjContractFiles', 'docContractDoWorkFiles', 'docContractNIRFiles', 'docContractPostTovarFiles'}:
                 merged['type_compliance'] = {
                     "status": "allow",
-                    "detected_type": doc_code,
+                    "detected_type": 'docProjContractFiles',
+                    "issues": []
+                }
+            elif (doc_type == 'linkDocs') and (doc_code != 'unknown'):
+                merged['type_compliance'] = {
+                    "status": "allow",
+                    "detected_type": doc_code if doc_code in DOCUMENT_TYPE_MAPPING.keys() else "docDopMaterialsFiles",
                     "issues": []
                 }
             else:
-                merged['type_compliance'] = type_compliance
+                merged["type_compliance"] = type_compliance
 
         readability_scores = []
         languages = {}
@@ -343,8 +404,6 @@ class TypeDataExtractor:
 
         # ---- МЕРДЖ ЧАНКОВ ----
         for chunk in chunk_results:
-            if not isinstance(chunk, dict):
-                logger.warning(f"Строковый чанк: {chunk}")
 
             # --- RADABILITY ---
             readability = chunk.get("readability", {})
@@ -355,7 +414,11 @@ class TypeDataExtractor:
                     merged["readability"]["image_description"] = img
 
             # Проблемы OCR
-            merged["readability"]["issues"].extend(readability.get("issues", []))
+            readability_issues = readability.get("issues", [])
+            if readability_issues and isinstance(readability_issues, str):
+                merged["readability"]["issues"].append(readability_issues)
+            elif readability_issues and isinstance(readability_issues, list):
+                merged["readability"]["issues"].extend(readability_issues)
 
             # Оценка читаемости
             if "readability_score" in readability:
@@ -415,7 +478,7 @@ class TypeDataExtractor:
 
             # сроки, отчетность, место выполнения
             for key in ["planned_timeline", "reporting_documentation", "execution_location"]:
-                pt = raw_data.get(key)
+                pt = raw_data.get(key, {})
                 if pt:
                     merged["raw_data"][key].update({k: v for k, v in pt.items() if v})
 
@@ -444,9 +507,10 @@ class TypeDataExtractor:
 
         # убрать дубликаты в строковых списках
         merged["raw_data"]["law_references"] = list(set(merged["raw_data"]["law_references"]))
+        merged["raw_data"]["other_data"] = list(set(merged["raw_data"]["other_data"]))
 
         # коррекция названия для проекта контракта
-        if doc_code == merged['type_compliance']['detected_type'] == 'docProjContractFiles':
-            merged['raw_data']['document_name'] = 'Проект контракта'
+        if doc_code == merged["type_compliance"]["detected_type"] == "docProjContractFiles":
+            merged["raw_data"]["document_name"] = "Проект контракта"
 
         return merged

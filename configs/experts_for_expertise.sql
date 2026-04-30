@@ -41,11 +41,15 @@ WITH expertise_info AS (
 		e.`type`,
 		COALESCE(e.regionExpertise, 'Экспертиза отчетов') AS expertise_regionExpertise,
 		REGEXP_REPLACE(
-			CONCAT_WS(' ', LOWER(e.subjectContract), 
+			CONCAT_WS(' ',
+				LOWER(COALESCE(e.regionExpertise, 'контракт, договор')),
+				LOWER(COALESCE(e.regionExpertise, 'контракт, договор')),
+				"руководитель", "начальник",
+				LOWER(e.subjectContract), 
 				LOWER(e.directionContract), 
 				LOWER(u.organization), 
 				LOWER(u.okved_name)
-			), '["\'«»]', '') AS expertise_text_feature, 
+			), '["''«»]', '') AS expertise_text_feature, 
 		CASE 
 			WHEN u.region_id IS NULL 
 			THEN 
@@ -63,7 +67,10 @@ WITH expertise_info AS (
 					ELSE CAST(SUBSTRING(u.inn, 1, 2) AS UNSIGNED)
 				END
 			ELSE u.region_id
-		END AS expertise_region_id 
+		END AS expertise_region_id,
+		e.declineExperts,
+		e.requestExperts,
+		(SELECT value FROM settings WHERE `key` IN ('max_experts_per_invite')) AS max_experts_per_invite
 	FROM expertises e
 	JOIN users u
 	ON e.user_id = u.id
@@ -286,16 +293,17 @@ WITH expertise_info AS (
 			ELSE u.regionExpertises
 		END AS expert_regionExpertises,
 		REGEXP_REPLACE(
-			CONCAT_WS(' ', LOWER(t.name), 
+			CONCAT_WS(' ', 
+				LOWER(u.`position`), 
+				LOWER(u.organization), 
+				LOWER(t.name), 
 				LOWER(et.name), 
 				LOWER(u.qualification), 
 				LOWER(u.speciality), 
 				LOWER(u.branchScienceDegree), 
 				LOWER(u.branchScienceAcademicTitle),
-				LOWER(u.diplom), 
-				LOWER(u.organization), 
-				LOWER(u.`position`)
-			), '["\'«»]', '') AS expert_text_feature,
+				LOWER(u.diplom)
+			), '["''«»]', '') AS expert_text_feature,
 		u.examination AS expert_examination,		
 		CASE 
 			WHEN u.region_id IS NULL 
@@ -344,44 +352,59 @@ WITH expertise_info AS (
 			ELSE JSON_LENGTH(u.linkMonographs)
 		END AS countMonographs,
 		u.experienceExpertise,
-		COALESCE(u.workExpertise, (SELECT value FROM settings WHERE `key` IN ('max_applications_per_expert'))) AS desiredWeekWorkload,
+		u.benefitExpertisesCount,
+		CASE WHEN u.benefitExpertisesCount > 0 
+			AND COALESCE(u.workExpertise, (SELECT value FROM settings WHERE `key` IN ('max_applications_per_expert'))) > 0 
+			THEN 1
+			ELSE COALESCE(u.workExpertise, (SELECT value FROM settings WHERE `key` IN ('max_applications_per_expert')))
+		END AS desiredWeekWorkload,
 		COUNT(CASE WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE status IN (4,5)) THEN 1 END) AS countExpertise,
 		COUNT(CASE 
-				WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
+				WHEN ee.updated_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
 				THEN 1 
 			END) AS countTotalExpertises_lastYear,
 		COUNT(CASE 
-				WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
-				AND ee.`range` IS NOT NULL AND ee.`range` > 0
-				THEN 1 
+				WHEN ee.updated_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
+				THEN COALESCE(ee.accept, 0)
 			END) AS countAcceptedExpertises_lastYear,
 		COALESCE(SUM(CASE 
 			WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
 			THEN COALESCE(ee.secondUpload, 0)
 		END), 0) AS secondUpload_lastYear,
-		COALESCE(SUM(CASE WHEN e.dateStatus3 >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
+		COALESCE(SUM(CASE WHEN ee.deleted_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
 			AND ee.uploadExpertDate IS NULL 
-			AND e.status IN (4,5) 
+			AND u.id MEMBER OF(e.declineExperts) 
 			THEN 1
 		END), 0) AS overdues,
-		ROUND(AVG(CASE WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
-			THEN CASE
-				WHEN ee.status = 1
-				THEN COALESCE(ee.`range`, 0) 
-				ELSE COALESCE(ee.`range`, NULL)
-			END
+    	COALESCE(SUM(CASE WHEN e.dateStatus2 >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
+			AND u.id MEMBER OF(e.declineExperts) 
+            AND NOT EXISTS (
+                SELECT 1 
+                FROM expertise_experts ee
+                WHERE ee.expertise_id = e.id 
+                AND ee.expert_id = u.id
+            )
+			THEN 1
+		END), 0) AS expert_declines,
+		COALESCE(SUM(CASE WHEN e.dateStatus2 >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
+			AND u.id MEMBER OF(e.experts) 
+			THEN 1
+		END), 0) AS expert_requests,
+		ROUND(AVG(CASE 
+			WHEN ee.updated_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
+			THEN ee.`range`
 			ELSE NULL 
 		END), 3) AS criterion4,
 		ROUND(AVG(CASE 
-			WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
+			WHEN ee.updated_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
 			THEN CASE 
-				WHEN e.object IN (1,7) 
+				WHEN e.object IN (1,7) AND ee.accept = 1
 				THEN CASE
 					WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE `type` IN (3)) OR `checkType2` = 14 THEN 0.5
 					WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE `type` IN (1)) OR `checkType2` = 15 THEN 0.75
-					WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE `type` IN (2,4,5)) THEN 1
+					ELSE ee.accept
 				END	
-				ELSE 1
+				ELSE ee.accept
 			END
 			ELSE NULL
 		END), 3) AS criterion5,
@@ -401,53 +424,8 @@ WITH expertise_info AS (
 	AND u.deleted_at IS NULL 
 	AND u.inn != '' AND CAST(SUBSTRING(u.inn, 1, 2) AS UNSIGNED) != 0 AND LOWER(u.name) NOT LIKE '%тест%' AND LOWER(u.name) NOT LIKE '%test%' 
 	AND COALESCE(u.workExpertise, (SELECT value FROM settings WHERE `key` IN ('max_applications_per_expert'))) > 0
-	AND u.id NOT IN ((SELECT expert_id 
-					FROM (SELECT d.id, de.expert_id FROM expertises d JOIN JSON_TABLE(d.experts, "$[*]" COLUMNS (expert_id INT PATH "$")) de
-                    WHERE d.status IN (2) AND d.id = ?) requests)
-    				UNION 
-    				(SELECT ee.expert_id FROM expertise_experts ee JOIN expertises e ON e.id = ee.expertise_id WHERE e.status IN (3) AND ee.expertise_id = ?))
 	GROUP BY u.id
 ), 
-expert_declines AS (
-	SELECT 
-	    expert_id,
-	    COUNT(*) AS expert_declines
-	FROM (
-	    SELECT 
-	        d.id,
-	        d.dateStatus2,
-	        de.expert_id
-	    FROM expertises d
-	    JOIN JSON_TABLE(
-	        d.declineExperts,
-	        "$[*]" COLUMNS (
-	            expert_id INT PATH "$"
-	        )
-	    ) de
-	    WHERE d.dateStatus2 >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
-	) declines
-	GROUP BY expert_id
-),
-expert_requests AS (
-	SELECT 
-	    expert_id,
-	    COUNT(*) AS expert_requests
-	FROM (
-	    SELECT 
-	        d.id,
-	        d.dateStatus2,
-	        de.expert_id
-	    FROM expertises d
-	    JOIN JSON_TABLE(
-	        d.experts,
-	        "$[*]" COLUMNS (
-	            expert_id INT PATH "$"
-	        )
-	    ) de
-	    WHERE d.status IN (2)
-	) requests
-	GROUP BY expert_id
-),
 experts_with_coords AS (
 	SELECT
 		e.*,
@@ -633,13 +611,8 @@ experts_with_coords AS (
 			WHEN 88 THEN 39.3078
 			WHEN 89 THEN 32.6169
 		END AS expert_lat,
-		COALESCE(ed.expert_declines, 0) AS expert_declines,
-		COALESCE(er.expert_requests, 0) + e.currentWeekWorkload AS currentWeekWorkloadRequests
+		COALESCE(e.expert_requests, 0) + e.currentWeekWorkload AS currentWeekWorkloadRequests
 	FROM experts e
-	LEFT JOIN expert_declines ed
-	ON ed.expert_id = e.expert_id
-	LEFT JOIN expert_requests er
-	ON er.expert_id = e.expert_id
 ), ee_joined AS ( 
 	SELECT 
 		ewc.*,
@@ -724,7 +697,9 @@ experts_with_coords AS (
 	AND (ewc.expertise_regionExpertise IN ('Экспертиза отчетов') OR JSON_CONTAINS(u.expert_regionExpertises, JSON_QUOTE(ewc.expertise_regionExpertise))) 
 	AND ((ewc.expertise_examination = 1 AND ewc.expertise_examination = u.expert_examination) 
 		OR ewc.expertise_examination IS NULL 
-		OR ewc.expertise_examination != 1) 
+		OR ewc.expertise_examination != 1) 	
+	AND NOT (u.expert_id MEMBER OF(ewc.declineExperts))
+	AND NOT (u.expert_id MEMBER OF(ewc.requestExperts))
 )
 SELECT 
 	*,
@@ -734,7 +709,8 @@ SELECT
 		ELSE 1
 	END AS distance_rate,
 	ROUND((0.2 * criterion1 + 0.1 * criterion2 + 0.1 * criterion3 + 0.4 * criterion4 + 0.2 * criterion5), 4) AS criterion_rating,
-	ROUND(COALESCE((0.2 * criterion1 + 0.1 * criterion2 + 0.1 * criterion3 + 0.4 * criterion4 + 0.2 * criterion5), 1), 4) AS criterion_rating_for_model,
+	ROUND(COALESCE((0.2 * criterion1 + 0.1 * criterion2 + 0.1 * criterion3 + 0.4 * criterion4 + 0.2 * criterion5), 0.8), 4) AS criterion_rating_for_model,
+	CASE WHEN benefitExpertisesCount = 0 THEN 0 ELSE 1 END AS is_newbie,
 	CAST((declines_rate + personal_block + education_rate + experience_rate 
 	+ degreeExperience_rate	+ academicTitleExperience_rate + pubMon_rate 
 	+ countPubMon_rate + experienceExpertise_rate + countExpertise_rate 

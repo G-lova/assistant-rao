@@ -5,6 +5,7 @@ import os
 from datetime import date
 
 from configs.config import Config
+from configs.http_client_manager import HTTPClientManager
 from configs.logger import get_logger
 from conclusion.conclusion_pipeline import RaoConclusionPipeline
 
@@ -17,32 +18,30 @@ sys.path.insert(0, project_root)
 # Настройка логирования
 logger = get_logger(__name__)
 
-async def rao_conclusion(expertise_id: int, x_api_database: str, send_to_external: bool = False) -> dict:
+async def rao_conclusion(expertise_id, x_api_database, http_manager: HTTPClientManager, send_to_external = False):
     """
-    Формирует сводное заключение эксперта РАО для заданной экспертизы.
+    Запускает пайплайн оценки экспертов для заданной экспертизы.
 
-    Создает экземпляр RaoConclusionPipeline, запускает анализ всех документов
-    экспертизы, формирует заключение на основе результатов анализа и
-    опционально отправляет результаты во внешние системы.
+    Функция инициализирует пайплайн ScoringPipeline, выполняет SQL-запрос для получения данных
+    об экспертах, рассчитывает рейтинг на основе критериев и возвращает отсортированный список
+    экспертов по убыванию релевантности. Результаты сохраняются в CSV-файл.
 
     Args:
-        expertise_id: Уникальный идентификатор экспертизы
-        x_api_database: Идентификатор среды базы данных ('dev', 'prod', 'stage')
-        send_to_external: Флаг отправки результатов во внешние системы
+        expertise_id: Идентификатор экспертизы, для которой проводится оценка и подбор экспертов.
 
     Returns:
-        dict: Сформированное заключение эксперта РАО с результатами анализа
-
-    Raises:
-        Exception: При ошибках в пайплайне формирования заключения
+        pd.Series или pd.DataFrame: Отсортированный набор результатов (топ экспертов),
+                                   готовый к использованию или выводу.
+                                   В случае ошибки — исключение не подавляется.
     """
+    
     try:
         logger.info("Starting rao_conclusion pipeline...")
-
+        
         # Создание пайплайна
-        pipeline = RaoConclusionPipeline(expertise_id, x_api_database)
+        pipeline = RaoConclusionPipeline(http_manager, expertise_id, x_api_database)        
         logger.info(f"Processing expertise_id: {expertise_id}, DB: {x_api_database}")
-
+        
         # Запуск пайплайна
         rao_conclusion = await pipeline.run_pipeline()
         

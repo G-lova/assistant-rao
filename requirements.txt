@@ -27,10 +27,11 @@ python-multipart==0.0.20
 python-pptx==0.6.23
 pyunpack==0.3
 PyYAML==6.0.2
-qdrant-client==1.7.3
+qdrant-client==1.9.0
 rarfile==4.2
 requests==2.32.4 
 scikit-learn
+tiktoken
 textract==1.6.5
 tqdm>=4.66.0
 uvicorn==0.22.0
@@ -41,7 +42,6 @@ celery==5.3.4
 redis==5.0.1
 flower==2.0.1
 aiohttp>=3.13.0
-httpx
 playwright
 beautifulsoup4
 lxml

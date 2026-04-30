@@ -1,6 +1,7 @@
 SELECT
 	e.id,
     u.organization,
+    e.object,
     CASE e.object
         WHEN 1 THEN 'Результаты исполнения заключенных контрактов/договоров Минобрнауки России и подведомственных Минобрнауки России организаций'
         WHEN 2 THEN 'Результаты исполнения заключенных Минобрнауки России и подведомственных Минобрнауки России организаций соглашений на предоставление субсидий в виде грантов'
@@ -11,11 +12,13 @@ SELECT
         WHEN 7 THEN 'Отчетные документы по контракту/договору'
         ELSE ''
     END as expertise_object,
+    e.type,
     CASE e.type
         WHEN 4 THEN 'Федеральный закон "О контрактной системе в сфере закупок товаров, работ, услуг для обеспечения государственных и муниципальных нужд" от 05.04.2013 N 44-ФЗ'
         WHEN 5 THEN 'Федеральный закон "О закупках товаров, работ, услуг отдельными видами юридических лиц" от 18.07.2011 N 223-ФЗ'
         ELSE ''
     END AS law_reference,
+    e.checkType2,
     CASE 
         WHEN e.checkType2 IN (1,2,3) THEN 'Конкурс'
         WHEN e.checkType2 IN (4,5,6) THEN 'Аукцион'
@@ -195,7 +198,7 @@ JOIN JSON_TABLE(
 				"docValidAllIfFiles", "docCargoTaxFiles", "docReportDoNIRFiles", "docAssetSelOrgFiles", "docPorViewOcenkFiles", "docTrebContentRequestFiles",
 				"docIzvejenieFiles", "docTechDocFiles", "docCertValidFiles", "docPhotoCargoFiles", "docValidCountyFiles", "docActPriemTovFiles",
 				"docPhotoFinishWorkFiles", "docValidCopyriteFiles", "docValidGarantFiles", "docAcceptInafPostavFiles", "docDopConsentContractFiles",
-				"docExpertReportFiles", "docVziskPenyFiles", "docDopMaterialsFiles", "unknown",
+				"docExpertReportFiles", "docVziskPenyFiles", "docDopMaterialsFiles", "unknown", 
                 "contractFiles", "dopMaterialFiles", "dopContractFiles", "docFiles", "rao", "our"]' AS JSON),
         '$[*]' COLUMNS (d VARCHAR(255) PATH '$')
      ) AS doc_codes
@@ -216,6 +219,6 @@ LEFT JOIN (SELECT model_id, collection_name, JSON_ARRAYAGG(CONCAT(?, id, '/', fi
            FROM media
      	   WHERE model_type LIKE '%Expertise'
            GROUP BY model_id, collection_name) m
-     ON m.collection_name = doc_codes.d
+     ON m.collection_name = `doc_codes`.d
      AND m.model_id =e.id
 WHERE e.id = ?;

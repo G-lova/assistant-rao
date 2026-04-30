@@ -1,39 +1,63 @@
-import logging
+import magic
 import os
+import pandas as pd
 import re
 import secrets
-import shutil
-import subprocess
-import tempfile
+import tiktoken
 
-import pandas as pd
-import rarfile
-import textract
-import zipfile
-from typing import Dict, List, Any
-from docx import Document
-from pptx import Presentation
-from pdf2image import convert_from_path
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from typing import Optional, Dict, List, Any
+from urllib.parse import urlparse, parse_qs
 
 from configs.config import Config
 from configs.logger import get_logger
-from evaluate_documents.ocr import ocr_image_with_qwen_vl
 
 
 config = Config.get_model_config()
-
-
 logger = get_logger(__name__)
-
 
 
 document_analysis_cache = {}
 
 API_KEY_PATTERN = re.compile(r'^[A-Za-z0-9._\-]+$')
 
+
+# Глобальный энкодер (инициализируется один раз при старте модуля)
+try:
+    _ENCODER = tiktoken.get_encoding("cl100k_base")  # GPT-3.5/4, Qwen, большинство OpenAI-совместимых
+except Exception:
+    _ENCODER = tiktoken.get_encoding("p50k_base")   # Fallback
+
+# Единая карта MIME → расширение (используется во всём проекте)
+MIME_TO_EXT_MAP = {
+    'application/pdf': '.pdf',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
+    'application/msword': '.doc',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
+    'application/vnd.ms-excel': '.xls',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
+    'application/vnd.ms-powerpoint': '.ppt',
+    'text/plain': '.txt',
+    'text/csv': '.csv',
+    'text/html': '.html',
+    'application/json': '.json',
+    'application/xml': '.xml',
+    'text/xml': '.xml',
+    'image/jpeg': '.jpg',
+    'image/png': '.png',
+    'image/gif': '.gif',
+    'image/webp': '.webp',
+    'image/svg+xml': '.svg',
+    'application/zip': '.zip',
+    'application/x-rar-compressed': '.rar',
+    'application/x-7z-compressed': '.7z',
+    'application/gzip': '.gz',
+    'application/x-tar': '.tar',
+    'application/octet-stream': '.bin',
+    'application/download': '.bin',
+}
 
 
 
@@ -105,6 +129,67 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
                 status_code=500,
                 content={"detail": "Internal server error during authentication"}
             )
+
+def get_file_extension(
+    filename: Optional[str] = None,
+    content_type: Optional[str] = None,
+    content: Optional[bytes] = None,
+    url: Optional[str] = None,
+    headers: Optional[Dict[str, str]] = None
+) -> str:
+    """
+    Универсальное определение расширения файла.
+    Проверяет источники в порядке убывания надёжности.
+    
+    Приоритет:
+    1. Явное имя файла (filename)
+    2. Заголовок Content-Type или явно переданный MIME
+    3. Магические байты содержимого (python-magic)
+    4. Путь или параметры URL
+    5. Fallback: '.bin'
+    """
+    # По имени файла (самый надёжный, если передан явно)
+    if filename and '.' in filename:
+        ext = os.path.splitext(filename)[1].lower()
+        if ext:
+            return ext
+
+    # По Content-Type
+    ct = content_type or (headers.get('Content-Type', '') if headers else '')
+    if ct:
+        mime = ct.split(';')[0].strip().lower()
+        if ext := MIME_TO_EXT_MAP.get(mime):
+            return ext
+
+    # По содержимому (magic bytes)
+    if content:
+        try:
+            mime = magic.Magic(mime=True).from_buffer(content)
+            if ext := MIME_TO_EXT_MAP.get(mime):
+                return ext
+        except Exception:
+            pass  # Игнорируем ошибки magic, идём дальше
+
+    # По URL (путь или query-параметр filename)
+    if url:
+        parsed = urlparse(url)
+        # Проверяем расширение в пути
+        path = parsed.path.lower()
+        if '.' in path:
+            ext = os.path.splitext(path)[1].lower()
+            if ext:
+                return ext
+        # Проверяем query-параметр ?filename=...
+        params = parse_qs(parsed.query)
+        if 'filename' in params:
+            fname = params['filename'][0]
+            if '.' in fname:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext:
+                    return ext
+
+    # Fallback
+    return '.bin'
 
 
 
@@ -396,9 +481,7 @@ def create_summary_report(
     logger.info(f"Сформирован summary_report для {procurement_id}. Документов: {len(documents_results)}, Кодов: {len(all_document_codes)}")
     return summary
 
-
-
-def split_large_text(text: str, max_chunk_size: int = 20000) -> List[str]:
+def split_large_text(text: str, max_chunk_size: int = 10000) -> List[str]:
         """
         Разбивает большой текст на фрагменты заданного максимального размера с сохранением смысловой целостности.
 
@@ -416,43 +499,62 @@ def split_large_text(text: str, max_chunk_size: int = 20000) -> List[str]:
                 Если исходный текст короче лимита — возвращается список из одного элемента.
                 Пустые строки не включаются в результат.
         """
-        if len(text) <= max_chunk_size:
+        if not text:
+            return []
+            
+        # Быстрая проверка для коротких текстов
+        if len(_ENCODER.encode(text)) <= max_chunk_size:
             return [text]
+
+        # Нормализуем переносы строк
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+        paragraphs = [p for p in re.split(r'\n{2,}', text) if p.strip()]
         
-        # Разделяем по абзацам, если возможно
-        paragraphs = text.split('\n\n')
         chunks = []
-        current_chunk = ""
-        
+        current_tokens = []
+
+        def flush():
+            """Сбрасывает накопленные токены в новый чанк"""
+            nonlocal current_tokens
+            if current_tokens:
+                chunks.append(_ENCODER.decode(current_tokens).strip())
+                current_tokens = []
+
         for paragraph in paragraphs:
-            if len(current_chunk) + len(paragraph) + 2 <= max_chunk_size:
-                current_chunk += paragraph + "\n\n"
+            p_tokens = _ENCODER.encode(paragraph)
+            
+            # 1. Если абзац влезает в текущий чанк -> добавляем
+            if len(current_tokens) + len(p_tokens) <= max_chunk_size:
+                current_tokens.extend(p_tokens)
+                continue
+                
+            # 2. Не влезает -> закрываем текущий чанк
+            flush()
+            
+            # 3. Если абзац всё ещё больше лимита -> делим на предложения
+            if len(p_tokens) > max_chunk_size:
+                sentences = re.split(r'(?<=[.!?…])\s+', paragraph)
+                sentences = [s.strip() for s in sentences if s.strip()]
+                
+                for sentence in sentences:
+                    s_tokens = _ENCODER.encode(sentence)
+                    
+                    if len(current_tokens) + len(s_tokens) > max_chunk_size:
+                        flush()
+                        # 4. Fallback: если предложение гигантское -> рубим по токенам
+                        if len(s_tokens) > max_chunk_size:
+                            for i in range(0, len(s_tokens), max_chunk_size):
+                                chunks.append(_ENCODER.decode(s_tokens[i:i+max_chunk_size]).strip())
+                        else:
+                            current_tokens.extend(s_tokens)
+                    else:
+                        current_tokens.extend(s_tokens)
             else:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                current_chunk = paragraph + "\n\n"
-        
-        if current_chunk:
-            chunks.append(current_chunk.strip())
-        
-        # Если абзацы слишком большие, разделяем по предложениям
-        if not chunks or any(len(chunk) > max_chunk_size * 1.5 for chunk in chunks):
-            sentences = re.split(r'[.!?]+', text)
-            chunks = []
-            current_chunk = ""
-            
-            for sentence in sentences:
-                if len(current_chunk) + len(sentence) + 1 <= max_chunk_size:
-                    current_chunk += sentence + '. '
-                else:
-                    if current_chunk:
-                        chunks.append(current_chunk.strip())
-                    current_chunk = sentence + '. '
-            
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-        
-        return chunks
+                # Абзац гарантированно влезет в пустой чанк
+                current_tokens.extend(p_tokens)
+                
+        flush()
+        return [c for c in chunks if c]
 
 def extract_json_objects(text: str):
     """Возвращает список всех JSON-подобных объектов с учётом вложенности."""
