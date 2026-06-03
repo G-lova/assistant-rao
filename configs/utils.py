@@ -5,6 +5,7 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import tiktoken
 
 import pandas as pd
 import rarfile
@@ -20,6 +21,13 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from configs.config import Config
 from src.ocr import ocr_image_with_qwen_vl
+
+
+# Глобальный энкодер (инициализируется один раз при старте модуля)
+try:
+    _ENCODER = tiktoken.get_encoding("cl100k_base")  # GPT-3.5/4, Qwen, большинство OpenAI-совместимых
+except Exception:
+    _ENCODER = tiktoken.get_encoding("p50k_base")   # Fallback
 
 
 config = Config.get_model_config()
@@ -991,6 +999,81 @@ def create_summary_report(
     
     logger.info(f"Сформирован summary_report для {procurement_id}. Документов: {len(documents_results)}, Кодов: {len(all_document_codes)}")
     return summary
+
+def split_large_text(text: str, max_chunk_size: int = 10000) -> List[str]:
+        """
+        Разбивает большой текст на фрагменты заданного максимального размера с сохранением смысловой целостности.
+
+        Сначала пытается разделить текст по абзацам, чтобы не разрывать логические блоки.
+        Если после разбиения по абзацам получаются слишком крупные фрагменты — переключается
+        на разбиение по предложениям. Гарантирует, что каждый фрагмент не превышает `max_chunk_size`
+        и при этом максимально сохраняет контекст для последующей обработки (например, LLM).
+
+        Args:
+            text (str): Исходный текст, который необходимо разбить на части.
+            max_chunk_size (int, optional): Максимально допустимый размер одного фрагмента в символах.
+
+        Returns:
+            List[str]: Список строк-фрагментов, каждый из которых имеет длину не более `max_chunk_size`.
+                Если исходный текст короче лимита — возвращается список из одного элемента.
+                Пустые строки не включаются в результат.
+        """
+        if not text:
+            return []
+            
+        # Быстрая проверка для коротких текстов
+        if len(_ENCODER.encode(text)) <= max_chunk_size:
+            return [text]
+
+        # Нормализуем переносы строк
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+        paragraphs = [p for p in re.split(r'\n{2,}', text) if p.strip()]
+        
+        chunks = []
+        current_tokens = []
+
+        def flush():
+            """Сбрасывает накопленные токены в новый чанк"""
+            nonlocal current_tokens
+            if current_tokens:
+                chunks.append(_ENCODER.decode(current_tokens).strip())
+                current_tokens = []
+
+        for paragraph in paragraphs:
+            p_tokens = _ENCODER.encode(paragraph)
+            
+            # 1. Если абзац влезает в текущий чанк -> добавляем
+            if len(current_tokens) + len(p_tokens) <= max_chunk_size:
+                current_tokens.extend(p_tokens)
+                continue
+                
+            # 2. Не влезает -> закрываем текущий чанк
+            flush()
+            
+            # 3. Если абзац всё ещё больше лимита -> делим на предложения
+            if len(p_tokens) > max_chunk_size:
+                sentences = re.split(r'(?<=[.!?…])\s+', paragraph)
+                sentences = [s.strip() for s in sentences if s.strip()]
+                
+                for sentence in sentences:
+                    s_tokens = _ENCODER.encode(sentence)
+                    
+                    if len(current_tokens) + len(s_tokens) > max_chunk_size:
+                        flush()
+                        # 4. Fallback: если предложение гигантское -> рубим по токенам
+                        if len(s_tokens) > max_chunk_size:
+                            for i in range(0, len(s_tokens), max_chunk_size):
+                                chunks.append(_ENCODER.decode(s_tokens[i:i+max_chunk_size]).strip())
+                        else:
+                            current_tokens.extend(s_tokens)
+                    else:
+                        current_tokens.extend(s_tokens)
+            else:
+                # Абзац гарантированно влезет в пустой чанк
+                current_tokens.extend(p_tokens)
+                
+        flush()
+        return [c for c in chunks if c]
 
 def extract_json_objects(text: str):
     """Возвращает список всех JSON-подобных объектов с учётом вложенности."""

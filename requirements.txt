@@ -2,6 +2,7 @@ aiofiles
 asyncpg
 fastapi==0.95.2
 fuzzywuzzy
+json-repair
 numpy==1.26.4
 openai
 opencv-python>=4.6.0
@@ -29,6 +30,7 @@ rarfile==4.2
 requests==2.32.4 
 scikit-learn
 textract==1.6.5
+tiktoken
 tqdm>=4.66.0
 uvicorn==0.22.0
 watchfiles

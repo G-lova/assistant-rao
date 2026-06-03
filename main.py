@@ -3,7 +3,7 @@ import tempfile
 import logging
 import json
 
-from configs.schemas import ExpertsScoringRequest, RAOConclusionRequest
+from configs.schemas import ExpertsScoringRequest, RAOConclusionRequest, ViolationsReportRequest
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body, Header
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict
@@ -16,6 +16,8 @@ from src.rating import rating
 from tasks import evaluate_documents_task
 from configs.procurement_requirements import DOCUMENT_CODE_TO_LABEL
 from src.rao_conclusion import rao_conclusion
+from src.violations_reporter import ViolationsReporter
+from configs.llm_client import get_llm
 
 app = FastAPI(debug=False)
 
@@ -37,14 +39,23 @@ async def get_rao_conclusion(
     x_api_database: str = Header(default="dev", alias="X-API-Database")
     ):
     '''
-    Docstring for get_rao_conclusion
-    
-    :param request_body: Description
-    :type request_body: Dict[str, int]
-    :param send_to_external: Description
-    :type send_to_external: bool
-    :param x_api_database: Description
-    :type x_api_database: str
+    Эндпоинт для получения сводного отчета эксперта РАО по результатам экспертизы.
+    Принимает идентификатор экспертизы и флаг отправки отчета во внешний сервис.
+    Инициализирует пайплайн генерации заключения и возвращает результат.
+    Args:
+        request (RAOConclusionRequest): Тело запроса, содержащее:
+            - expertise_id (int): Идентификатор экспертизы для анализа.
+            - send_to_external (bool): Флаг, указывающий, нужно ли отправлять отчет во внешний сервис.
+        x_api_database (str): Заголовок с указанием среды базы данных ('dev', 'prod', 'stage').
+    Returns:
+        Dict[str, Any]: Словарь с результатами анализа, содержащий:
+            - status (str): Статус выполнения ('success' или 'error').
+            - results (List[DocumentContentResponse]): Список детальных результатов анализа каждого документа.
+            - errors (List[str]): Список сообщений об ошибках, произошедших при обработке отдельных файлов (если есть).
+    Raises:
+        HTTPException:
+            - 400: Если поле 'expertise_id' в запросе отсутствует.
+            - 500: Если произошла внутренняя ошибка при генерации отчета.
     '''
     try:
         expertise_id = request.expertise_id
@@ -316,3 +327,52 @@ async def health_check():
             - service (str): Название микросервиса ("procurement-document-analyzer").
     """
     return {"status": "healthy", "service": "procurement-document-analyzer"}
+
+
+@app.post("/get-violations-report")
+async def get_violations_report(request: ViolationsReportRequest):
+    '''
+    Эндпоинт для формирования аналитического отчета о нарушениях на основе переданных данных.
+    
+    Принимает на вход метрику, фильтры, сырые данные и список доступных типов графиков.
+    Инициализирует LLM-клиент и передает управление в пайплайн генерации отчета.
+    
+    Args:
+        request (ViolationsReportRequest): Тело запроса, содержащее:
+            - metric (str): Название анализируемой метрики.
+            - filters (Dict[str, Any]): Словарь с примененными фильтрами.
+            - data (Any): Сырые данные для анализа (словарь, список или JSON-строка).
+            - charts (List[str]): Список доступных типов графиков для выбора LLM.
+            
+    Returns:
+        Dict[str, Any]: Словарь с результатами анализа, содержащий:
+            - status (str): Статус выполнения ('success' или 'error').
+            - raw_text (str): Сгенерированный аналитический текст.
+            - chart_type (str): Рекомендуемый тип графика.
+            - chart_title (str): Заголовок для рекомендуемого графика.
+            
+    Raises:
+        HTTPException: 
+            - 400: Если поле 'data' в запросе пустое или отсутствует.
+            - 500: Если произошла внутренняя ошибка при генерации отчета.
+    '''
+    try:
+        metric = request.metric
+        filters = request.filters
+        data = request.data
+        charts = request.charts
+        
+        if not data:
+            raise HTTPException(status_code=400, detail="Поле 'data' обязательно")
+        
+        llm_client, llm_model = get_llm()
+        
+        # Запускаем пайплайн
+        reporter = ViolationsReporter(llm_client, llm_model)
+        report = await reporter.analize_data_from_content(metric, filters, data, charts)
+
+        return report
+        
+    except Exception as e:
+        logger.error(f"Ошибка при создании аналитического отчета: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при создании аналитического отчета: {str(e)}")

@@ -98,3 +98,10 @@ class ExpertsScoringRequest(BaseModel):
 class RAOConclusionRequest(BaseModel):
     expertise_id: int
     send_to_external: bool = False
+    
+
+class ViolationsReportRequest(BaseModel):
+    metric: str = ""
+    filters: Dict[str, Any] = {}
+    data: Dict[str, Any]
+    charts: List = []
