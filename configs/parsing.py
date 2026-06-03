@@ -229,7 +229,7 @@ class CloudStorageParser:
                 soap_url, 
                 data=xml_data, 
                 headers=headers, 
-                timeout=aiohttp.ClientTimeout(total=60)
+                # timeout=aiohttp.ClientTimeout(total=60)
             ) as response:
                 response_content = await response.text()
                 logger.info(f"SOAP ответ: статус {response.status}")
@@ -1664,7 +1664,7 @@ class CloudStorageParser:
                 self.eis_soap_url,
                 data=soap_body,
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=60)
+                timeout=aiohttp.ClientTimeout(total=160)
             ) as response:
                 if response.status != 200:
                     error_text = await response.text()

@@ -1,26 +1,12 @@
-import json
-import os
-import pandas as pd
-import tempfile
 import asyncio
 from configs.http_client_manager import HTTPClientManager
-from openai import OpenAI, AsyncOpenAI
-import datetime
 
 from celery import current_task
 from celery_app import celery_app
 
-from configs.config import Config
-from configs.file_reader import read_file
-from configs.llm_client import get_llm
 from configs.logger import get_logger
-from configs.utils import split_large_text
-from configs.working_with_db import save_raw_data, save_summary_report, delete_procurement_data
-from evaluate_documents.completeness_checker import CompletenessChecker
-from evaluate_documents.consistency_checker import ConsistencyChecker
 from evaluate_documents.evaluate_documents_pipeline import TasksPipeline
 from configs.retry_utils import async_retry, API_RETRY_CONFIG, CLOUD_PARSING_RETRY_CONFIG
-from evaluate_documents.type_data_extractor import DOCUMENT_TYPE_MAPPING, TypeDataExtractor
 
 
 logger = get_logger(__name__)

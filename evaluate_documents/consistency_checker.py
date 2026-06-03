@@ -237,51 +237,43 @@ class ConsistencyChecker:
 
         for item in content['documents']:
             
-            if item.get('document_code') not in {"contract", "dateContract", "subjectContract"}:
+            # if item.get('document_code') not in {"contract", "dateContract", "subjectContract"}:
 
-                doc_description = {}
+            doc_description = {}
 
-                doc_description['document_code'] = item.get('document_code')
-                doc_description['document_name'] = 'Ссылка на ЕИС' if item.get('document_code') == 'linkDocs' else DOCUMENT_TYPE_MAPPING.get(doc_description['document_code'])
+            doc_description['document_code'] = item.get('doc_code')
+            doc_description['document_name'] = item.get('doc_type')
 
-                # соответствие типу
-                type_compliance = item.get('type_compliance', {})
-                if type_compliance:
-                    doc_description['type_compliance'] = {
-                        'status': type_compliance['status'], 
-                        'description': ('\n'.join(i for i in type_compliance.get('issues', []) if i) if isinstance(type_compliance.get('issues', []), list) else type_compliance.get('issues', '')) or ''
+            # статус
+            doc_description['status'] = 'allow'
+
+            # соответствие типу, читабельность, полнота
+            for key in ['type_compliance', 'readability', 'completeness']:
+                indicator = item.get(key, {})
+                if indicator:
+                    status = indicator.get('status', 'allow' if (key == 'readability' and indicator.get('readability_score', 0) >= 0.7) else 'deny')
+                    description = indicator.get('description', '' if status == 'allow' else 'Ошибка анализа данных в документе')
+
+                    doc_description[key] = {
+                        'status': status,
+                        'description': description
                     }
 
+                    if status == 'deny':
+                        doc_description['status'] = 'deny'
 
-                # читаемость
-                readability = item.get('readability', {})
-                if readability:
-                    if readability.get('status', 'deny') == 'allow':
-                        readability['description'] = readability.get('image_description', '')
-                    else:
-                        readability['description'] = ('\n'.join(i for i in readability.get('issues', []) if i) if isinstance(readability.get('issues', []), list) else readability.get('issues', '')) or ''
-                        
-                    doc_description['readability'] = {
-                        'status': readability.get('status', 'deny'), 
-                        'description': readability['description']
+                else:
+                    doc_description[key] = {
+                        'status': 'deny',
+                        'description': 'Ошибка анализа данных в документе'
                     }
-                
-                # полнота и согласованность
-                completeness = item.get('completeness', {})
-                if completeness:
-                    doc_description['completeness'] = {
-                        'status': completeness.get('status', 'deny'), 
-                        'description': completeness.get('description', 'Ошибка обработки документа')
-                    }
-                
-                # извлеченные данные
-                doc_description['raw_data'] = item.get('raw_data', {})
-
-                # статус
-                doc_description['status'] = 'deny' if 'deny' in {type_compliance.get('status', ''), readability.get('status', ''), completeness.get('status', '')} else 'allow'
+                    doc_description['status'] = 'deny'
+            
+            # извлеченные данные
+            doc_description['raw_data'] = item.get('raw_data', [])
 
 
-                documents_data.append(doc_description)
+            documents_data.append(doc_description)
 
         result['documents'] = documents_data
         return result

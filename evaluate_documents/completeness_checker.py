@@ -48,7 +48,7 @@ class CompletenessChecker:
             self.COMPLETENESS_SCHEMA = f.read()
 
 
-    async def check_doc_completeness(self, content: str, document_name: str) -> Dict[str, Any]:
+    async def check_doc_completeness(self, content: str, document_code: str) -> Dict[str, Any]:
         """
         Анализирует согласованность и полноту данных, извлечённых из документа.
 
@@ -73,7 +73,7 @@ class CompletenessChecker:
                 В случае неустранимых ошибок парсинга возвращается резервный словарь
                 с "status": "deny" и обобщённым сообщением об ошибке.
         """
-        logger.info(f"Анализ на полноту и согласованность данных в документе")
+        logger.info(f"Анализ на полноту и согласованность данных в документах")
         logger.info(f"completeness_content: {content}")
 
         # Ждём «разрешения» от глобального лимитера ПЕРЕД запросом
@@ -89,7 +89,7 @@ class CompletenessChecker:
                 },
                 {
                     "role": "user",
-                    "content": f"""Проанализируй данные, извлеченные из документа:\n\n{content}"""
+                    "content": f"""Проанализируй данные, извлеченные из документов:\n\n{content}"""
                 }
             ],
             max_tokens=500,
@@ -97,10 +97,22 @@ class CompletenessChecker:
             extra_body={"guided_json": self.COMPLETENESS_SCHEMA}
         )
         except asyncio.TimeoutError:
-            logger.error(f"Таймаут при анализе {document_name}")
+            logger.error(f"Таймаут при анализе {document_code}")
+            content = json.loads(content)
             fallback = {
-                "status": "deny",
-                "description": "Ошибка анализа данных в документе"
+                "type_compliance": {
+                    "status": "allow" if any(item.get('status') == "allow" for item in content.get("type_compliance", {})) else "deny",
+                    "description": "\n".join([f"- {item.get('description', '')}" for item in content.get("type_compliance", {})]) or "Ошибка анализа данных в документах"
+                },
+                "readability": {
+                    "status": "allow" if any(item.get('status') == "allow" for item in content.get("readability", {})) else "deny",
+                    "description": "\n".join([f"- {item.get('description', '')}" for item in content.get("readability", {})]) or "Ошибка анализа данных в документах"
+                },
+                "completeness": {
+                    "status": "deny",
+                    "description": "Ошибка анализа данных в документах"
+                },
+                "raw_data": [data.get("raw_data", {}) for data in content.get("documents", [])]
             }
             return fallback
 
@@ -111,6 +123,7 @@ class CompletenessChecker:
         try:
             result = json.loads(raw_response)
             logger.info("Удалось распарсить JSON.")
+            result["raw_data"] = [data.get("raw_data", {}) for data in content.get("documents", [])]
             return result
         
         except json.JSONDecodeError as e:
@@ -122,20 +135,47 @@ class CompletenessChecker:
 
                 if not result:
                     logger.error("JSON структуры не найдены.")
+                    if isinstance(content, str):
+                        content = json.loads(content)
                     fallback = {
-                        "status": "deny",
-                        "description": "Ошибка анализа данных в документе"
+                        "type_compliance": {
+                            "status": "allow" if any(item.get('status') == "allow" for item in content.get("type_compliance", {})) else "deny",
+                            "description": "\n".join([f"- {item.get('description', '')}" for item in content.get("type_compliance", {})]) or "Ошибка анализа данных в документах"
+                        },
+                        "readability": {
+                            "status": "allow" if any(item.get('status') == "allow" for item in content.get("readability", {})) else "deny",
+                            "description": "\n".join([f"- {item.get('description', '')}" for item in content.get("readability", {})]) or "Ошибка анализа данных в документах"
+                        },
+                        "completeness": {
+                            "status": "deny",
+                            "description": "Ошибка анализа данных в документах"
+                        },
+                        "raw_data": [data.get("raw_data", {}) for data in content.get("documents", [])]
                     }
                     return fallback
                 
                 logger.info("Удалось распарсить JSON из извлечённого фрагмента вручную.")
                 logger.info(f"type: {type(result)}, completeness: {result}")
+                result["raw_data"] = [data.get("raw_data", {}) for data in content.get("documents", [])]
                 return result
             
             except json.JSONDecodeError:
                 logger.error("Не удалось распарсить ни одну JSON структуру.")
+                if isinstance(content, str):
+                    content = json.loads(content)
                 fallback = {
-                    "status": "deny",
-                    "description": "Ошибка анализа данных в документе"
+                    "type_compliance": {
+                        "status": "allow" if any(item.get('status') == "allow" for item in content.get("type_compliance", {})) else "deny",
+                        "description": "\n".join([f"- {item.get('description', '')}" for item in content.get("type_compliance", {})]) or "Ошибка анализа данных в документах"
+                    },
+                    "readability": {
+                        "status": "allow" if any(item.get('status') == "allow" for item in content.get("readability", {})) else "deny",
+                        "description": "\n".join([f"- {item.get('description', '')}" for item in content.get("readability", {})]) or "Ошибка анализа данных в документах"
+                    },
+                    "completeness": {
+                        "status": "deny",
+                        "description": "Ошибка анализа данных в документах"
+                    },
+                    "raw_data": [data.get("raw_data", {}) for data in content.get("documents", [])]
                 }
                 return fallback

@@ -36,7 +36,7 @@
 
 **Основные типы (смысл)**
 
-- 'docIzvejenieFiles' (Извещение) → объявление закупки
+- 'docIzvejenieFiles' (Извещение) → объявление закупки (печатная форма)
 - 'docOpusObjectZacupFiles' (Описание объекта) → характеристики
 - 'docObosnNMCKFiles' (Обоснование НМЦК) → расчет цены
 - 'docMaterialValidNMCKFiles' (Подтверждение НМЦК) → источники цен

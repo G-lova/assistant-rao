@@ -8,7 +8,7 @@ from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
 from typing import Dict, Any, List
 
-from configs.retry_utils import sync_retry, DATABASE_RETRY_CONFIG
+from configs.retry_utils import async_retry, sync_retry, DATABASE_RETRY_CONFIG
 from configs.config import Config
 
 
@@ -37,98 +37,45 @@ async def get_async_db_connection():
     async with pool.acquire() as conn:
         yield conn
 
-DOCUMENT_CODE_TO_LABEL = {
-        # Основные документы закупки
-        "Извещение": "notice",
-        "Проект контракта": "contract_draft",
-        "Обоснование н(м)цк": "price_justification",
-        "Материалы, подтверждающие Обоснование н(м)цк": "price_justification_docs",
-        "Техническое задание": "technical_specification",
-        "Положение о закупках организации": "procurement_policy",
-        "Порядок рассмотрения и оценки заявок на конкурс": "bid_evaluation_procedure",
-        "Требования к содержанию заявки на конкурс": "bid_requirements",
-        "Документация, подтверждающая невозможность использования иных способов определения поставщика": "impossible_alternative_doc",
-        "Описание объекта закупки": "description_purchase_object",
-
-        # Типы контрактов
-        "Контракт на поставку товара": "goods_contract",
-        "Контракт на выполнение работ (оказание услуг)": "service_contract",
-        "Контракт на выполнение НИР (или НИОКР)": "nir_contract",
-
-        # Акты и подтверждения исполнения
-        "Акт о приемке товара": "acceptance_act",
-        "Документ о приемке и/или акт сдачи-приемки работ (услуг)": "works_acceptance_doc",
-        "Документ о приемке товара (УПД, Счет-фактура и др.)": "goods_acceptance_doc",
-        "Товарная накладная": "goods_invoice",
-        "Отчет о выполнении НИР": "nir_report",
-        "Документы, подтверждающие исполнение всех условий контракта": "contract_conditions_docs",
-        "Дополнительные соглашения к контракту": "contract_amendments",
-        "Экспертиза результатов исполнения контракта": "contract_execution_expertise",
-
-        # Гарантии, соответствие, права
-        "Сертификаты соответствия": "compliance_certificates",
-        "Документы, подтверждающие гарантийные обязательства": "warranty_docs",
-        "Документы, подтверждающие передачу авторских прав": "ip_rights_transfer_docs",
-        "Документы, подтверждающие страну происхождения товара": "goods_origin_docs",
-        "Техническая документация, паспорт товара и пр.": "technical_documentation",
-
-        # Фото и мультимедиа
-        "Фото товара": "goods_photos",
-        "Фото результатов выполнения работ": "work_results_photos",
-
-        # Взыскание штрафов
-        "Документы по взысканию пени и штрафов": "penalty_recovery_docs",
-
-        # Дополнительные материалы (fallback)
-        "Дополнительные материалы": "additional_materials",
+DOCUMENT_CODE_TO_COLUMN = {
+        "docAcceptInafPostavFiles": "impossible_alternative_doc",
+        "docActPriemTovFiles": "acceptance_act",
+        "docAssetSelOrgFiles": "procurement_policy",
+        "docCargoTaxFiles": "goods_invoice",
+        "docCertValidFiles": "compliance_certificates",
+        "docContractDoWorkFiles": "service_contract",
+        "docContractNIRFiles": "nir_contract",
+        "docContractPostTovarFiles": "goods_contract",
+        "docDocPriemActSdachFiles": "works_acceptance_doc",
+        "docDopConsentContractFiles": "contract_amendments",
+        "docDopMaterialsFiles": "additional_materials",
+        "docExpertReportFiles": "contract_execution_expertise",
+        "docIzvejenieFiles": "notice",
+        "docMaterialValidNMCKFiles": "price_justification_docs",
+        "docObosnNMCKFiles": "price_justification",
+        "docOpusObjectZacupFiles": "description_purchase_object",
+        "docPhotoCargoFiles": "goods_photos",
+        "docPhotoFinishWorkFiles": "work_results_photos",
+        "docPorViewOcenkFiles": "bid_evaluation_procedure",
+        "docPriemTovSchetFiles": "goods_acceptance_doc",
+        "docProjContractFiles": "contract_draft",
+        "docReportDoNIRFiles": "nir_report",
+        "docTechDocFiles": "technical_documentation",
+        "docTrebContentRequestFiles": "bid_requirements",
+        "docValidAllIfFiles": "contract_conditions_docs",
+        "docValidCopyriteFiles": "ip_rights_transfer_docs",
+        "docValidCountyFiles": "goods_origin_docs",
+        "docValidGarantFiles": "warranty_docs",
+        "docVziskPenyFiles": "penalty_recovery_docs",
 
         "consistency_check": "consistency_check",
-        "eis_data": "eis_data",
+        "summary_report": "summary_report",
+        "unknown": "unknown"
 }
 
-def get_db_connection():
-    """
-    Устанавливает и возвращает соединение с базой данных PostgreSQL.
 
-    Функция считывает параметры подключения из переменных окружения
-    и устанавливает соединение с использованием библиотеки psycopg2.
-    Кодировка клиента устанавливается в UTF-8 для корректной работы с кириллицей.
-
-    Returns:
-        psycopg2.extensions.connection: Объект соединения с базой данных PostgreSQL.
-    """
-    return psycopg2.connect(
-        host=Config.DB_HOST,
-        port=Config.DB_PORT,
-        dbname=Config.DB_NAME,
-        user=Config.DB_USER,
-        password=Config.DB_PASSWORD,
-        client_encoding='UTF8'
-    )
-
-
-# async def get_async_db_connection():
-#     """
-#     Устанавливает и возвращает соединение с базой данных PostgreSQL.
-
-#     Функция считывает параметры подключения из переменных окружения
-#     и устанавливает соединение с использованием библиотеки psycopg2.
-#     Кодировка клиента устанавливается в UTF-8 для корректной работы с кириллицей.
-
-#     Returns:
-#         psycopg2.extensions.connection: Объект соединения с базой данных PostgreSQL.
-#     """
-#     return await asyncpg.connect(
-#         host=Config.DB_HOST,
-#         port=Config.DB_PORT,
-#         database=Config.DB_NAME,
-#         user=Config.DB_USER,
-#         password=Config.DB_PASSWORD
-#     )
-
-
-@sync_retry(DATABASE_RETRY_CONFIG)
-def save_raw_data(procurement_id: int, document_code: str, analysis: List):
+@async_retry(DATABASE_RETRY_CONFIG)
+async def save_raw_data(procurement_id: int, document_code: str, analysis: List):
     """
     Сохраняет полный анализ документа в таблицу сырых данных.
 
@@ -145,90 +92,41 @@ def save_raw_data(procurement_id: int, document_code: str, analysis: List):
     Raises:
         Исключения логируются, транзакция откатывается при ошибке.
     """
-    conn = None
     procurement_id = int(procurement_id)
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        async with get_async_db_connection() as conn:
 
-        column_name = DOCUMENT_CODE_TO_LABEL.get(document_code, "unknown")
-        if not column_name:
-            raise ValueError(f"Неизвестный тип документа: {document_code}")
+            column_name = DOCUMENT_CODE_TO_COLUMN.get(document_code, "unknown")
+            if not column_name:
+                raise ValueError(f"Неизвестный тип документа: {document_code}")
 
-        # Преобразуем данные в JSON
-        json_data = json.dumps(analysis, ensure_ascii=False, indent=2)
+            # Преобразуем данные в JSON
+            json_data = json.dumps(analysis, ensure_ascii=False, indent=2)
+        
+            # Проверяем существование записи по procurement_id
+            check_result = await conn.fetchrow(
+                "SELECT id FROM raw_document_data WHERE procurement_id = $1",
+                procurement_id
+            )
 
-        # Проверяем, существует ли уже запись с таким procurement_id
-        check_query = "SELECT id FROM raw_document_data WHERE procurement_id = %s"
-        cursor.execute(check_query, (procurement_id,))
-        exists = cursor.fetchone()
+            if check_result:
+                # UPDATE: обновляем только целевой столбец
+                await conn.execute(
+                    f'UPDATE raw_document_data SET "{column_name}" = $1, updated_at = NOW() WHERE procurement_id = $2',
+                    json_data, procurement_id
+                )
+            else:
+                # INSERT: создаём новую запись с одним заполненным полем
+                await conn.execute(
+                    f'INSERT INTO raw_document_data (procurement_id, "{column_name}") VALUES ($1, $2)',
+                    procurement_id, json_data
+                )
 
-        if exists:
-            # Обновляем конкретное поле
-            query = sql.SQL("""
-                UPDATE raw_document_data 
-                SET {column} = %s, updated_at = NOW() 
-                WHERE procurement_id = %s
-            """).format(column=sql.Identifier(column_name))
-            cursor.execute(query, (json_data, procurement_id))
-        else:
-            # Вставляем новую запись, только с одним заполненным полем
-            query = sql.SQL("""
-                INSERT INTO raw_document_data (procurement_id, {column}) 
-                VALUES (%s, %s)
-            """).format(column=sql.Identifier(column_name))
-            cursor.execute(query, (procurement_id, json_data))
-
-        conn.commit()
-        logger.info(f"Сохранено в raw_document_data: {document_code} для procurement_id={procurement_id}")
+            logger.info(f"Сохранено в raw_document_data: {document_code} для procurement_id={procurement_id}")
 
     except Exception as e:
         logger.error(f"Ошибка при сохранении raw_data: {str(e)}", exc_info=True)
-        if conn:
-            conn.rollback()
-    finally:
-        if conn:
-            conn.close()
-
-
-def get_summary_report_from_db(procurement_id: str):
-    """
-    Извлекает основные реквизиты контракта из базы данных по идентификатору закупки.
-
-    Функция обращается к таблице `raw_document_data`, получает данные из поля `summary_report`.
-
-    Args:
-        procurement_id (str): Уникальный идентификатор закупки.
-
-    Returns:
-        Dict[str, str]: 
-    """
-    conn = None
-    procurement_id = int(procurement_id)
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-
-        query = """
-            SELECT summary_report 
-            FROM raw_document_data 
-            WHERE procurement_id = %s
-        """
-        cursor.execute(query, (procurement_id,))
-        result = cursor.fetchone()
-
-        if not result or not result["summary_report"]:
-            logger.warning(f"Данные summary_report не найдены для procurement_id={procurement_id}")
-            return None
-
-        return result["summary_report"]
-
-    except Exception as e:
-        logger.error(f"Ошибка при получении данных о контракте: {str(e)}", exc_info=True)
-        return None
-    finally:
-        if conn:
-            conn.close()
+        raise
 
 async def get_async_summary_report_from_db(procurement_id: str):
     """
@@ -296,7 +194,7 @@ async def get_contract_info_from_db(procurement_id: str) -> Dict[str, str]:
         return {"contract_number": "0", "amount": "0", "date": "0"}
 
 
-def save_summary_report(procurement_id: int, summary_data: Dict[str, Any]):
+async def save_summary_report(procurement_id: int, summary_data: Dict[str, Any]):
     """
     Сохраняет сводный отчёт по закупке в базу данных.
 
@@ -315,76 +213,69 @@ def save_summary_report(procurement_id: int, summary_data: Dict[str, Any]):
     conn = None
     procurement_id = int(procurement_id)
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        async with get_async_db_connection() as conn:
+            # Преобразуем данные в JSON
+            json_data = json.dumps(summary_data, ensure_ascii=False, indent=2)
 
-        # Преобразуем данные в JSON
-        json_data = json.dumps(summary_data, ensure_ascii=False, indent=2)
+            # Логируем ключевую информацию для отладки
+            logger.info(f"Сохранение summary_report для {procurement_id}")
+            logger.info(f"- Всего документов: {len(summary_data.get('documents', {}))}")
+            codes = set([f"{doc.get('document_code')}: {doc.get('document_name')}" for doc in summary_data.get('documents', {})])
+            logger.info(f"- Document codes:")
+            for code in codes:
+                logger.info(f"  -- {code}")
 
-        # Логируем ключевую информацию для отладки
-        logger.info(f"Сохранение summary_report для {procurement_id}")
-        logger.info(f"- Всего документов: {len(summary_data.get('documents', {}))}")
-        codes = set([f"{doc.get('document_code')}: {doc.get('document_name')}" for doc in summary_data.get('documents', {})])
-        logger.info(f"- Document codes:")
-        for code in codes:
-            logger.info(f"  -- {code}")
+            # Проверка существования записи (asyncpg: $1 вместо %s)
+            check_result = await conn.fetchrow(
+                "SELECT id FROM raw_document_data WHERE procurement_id = $1",
+                procurement_id
+            )
 
-        # Проверяем, существует ли уже запись с таким procurement_id
-        check_query = "SELECT id FROM raw_document_data WHERE procurement_id = %s"
-        cursor.execute(check_query, (procurement_id,))
-        exists = cursor.fetchone()
+            if check_result:
+                # UPDATE
+                await conn.execute("""
+                    UPDATE raw_document_data 
+                    SET summary_report = $1, updated_at = NOW() 
+                    WHERE procurement_id = $2
+                """, json_data, procurement_id)
+            else:
+                # INSERT
+                await conn.execute("""
+                    INSERT INTO raw_document_data (procurement_id, summary_report) 
+                    VALUES ($1, $2)
+                """, procurement_id, json_data)
 
-        if exists:
-            # Обновляем поле summary_report
-            query = sql.SQL("""
-                UPDATE raw_document_data 
-                SET summary_report = %s, updated_at = NOW() 
-                WHERE procurement_id = %s
-            """)
-            cursor.execute(query, (json_data, procurement_id))
-        else:
-            # Вставляем новую запись
-            query = sql.SQL("""
-                INSERT INTO raw_document_data (procurement_id, summary_report) 
-                VALUES (%s, %s)
-            """)
-            cursor.execute(query, (procurement_id, json_data))
-
-        conn.commit()
-        logger.info(f"Сводный отчет сохранен для procurement_id={procurement_id}")
+            logger.info(f"Сводный отчет сохранен для procurement_id={procurement_id}")
 
     except Exception as e:
         logger.error(f"Ошибка при сохранении summary_report: {str(e)}", exc_info=True)
-        if conn:
-            conn.rollback()
-    finally:
-        if conn:
-            conn.close()
+        raise
 
 
-@sync_retry(DATABASE_RETRY_CONFIG)
-def delete_procurement_data(procurement_id: int):
+@async_retry(DATABASE_RETRY_CONFIG)
+async def delete_procurement_data(procurement_id: int):
     """_summary_
 
     Args:
         procurement_id (int): _description_
     """
-    conn = None
     procurement_id = int(procurement_id)
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        async with get_async_db_connection() as conn:
+            # Выполняем удаление в рамках одной транзакции
+            async with conn.transaction():
+                await conn.execute(
+                    "DELETE FROM raw_document_data WHERE procurement_id = $1",
+                    procurement_id
+                )
+                # При необходимости раскомментируйте удаление из второй таблицы:
+                # await conn.execute(
+                #     "DELETE FROM clean_document_conclusions WHERE procurement_id = $1",
+                #     procurement_id
+                # )
+            
+            logger.info(f"Все данные для procurement_id={procurement_id} успешно удалены.")
 
-        # Удаляем из обеих таблиц
-        cursor.execute("DELETE FROM raw_document_data WHERE procurement_id = %s", (procurement_id,))
-        # cursor.execute("DELETE FROM clean_document_conclusions WHERE procurement_id = %s", (procurement_id,))
-
-        conn.commit()
-        logger.info(f"Все данные для procurement_id={procurement_id} успешно удалены.")
     except Exception as e:
         logger.error(f"Ошибка при удалении данных для procurement_id={procurement_id}: {str(e)}", exc_info=True)
-        if conn:
-            conn.rollback()
-    finally:
-        if conn:
-            conn.close()
+        raise
