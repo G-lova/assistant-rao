@@ -5,6 +5,7 @@ import sys
 import os
 
 from configs.config import Config
+from configs.http_client_manager import HTTPClientManager
 from search_experts.pipeline import RatingPipeline
 from configs.logger import get_logger
 
@@ -16,7 +17,11 @@ sys.path.insert(0, project_root)
 # Настройка логирования
 logger = get_logger(__name__)
 
+<<<<<<< HEAD
 async def rating(start_date, end_date, x_api_database):
+=======
+async def rating(start_date, end_date, x_api_database, http_manager: HTTPClientManager):
+>>>>>>> develop
     """
     Запускает пайплайн оценки экспертов для заданной экспертизы.
 
@@ -36,7 +41,7 @@ async def rating(start_date, end_date, x_api_database):
         logger.info("Starting rating pipeline...")
         
         # Создание пайплайна
-        pipeline = RatingPipeline(x_api_database)
+        pipeline = RatingPipeline(http_manager, x_api_database)
         
         # Параметры запуска
         sql_file_name = "experts_rating.sql"
@@ -51,6 +56,19 @@ async def rating(start_date, end_date, x_api_database):
         # Вывод результатов
         print(ratings)
         
+<<<<<<< HEAD
+=======
+        # # Сохранение результатов
+        # output_dir = os.path.join(project_root, "data", "outputs")
+        # os.makedirs(output_dir, exist_ok=True)
+
+        # output_file = os.path.join(output_dir, f"{start_date}_{end_date}_rating_results_{date.today()}.json")
+        # with open(output_file, "w", encoding="utf-8") as f:
+        #     json.dump(ratings, f, ensure_ascii=False, indent=2)
+        
+        # logger.info(f"Results saved to: {output_file}")
+        
+>>>>>>> develop
         return ratings
         
     except Exception as e:
@@ -61,4 +79,8 @@ if __name__ == "__main__":
 
     start_date = input('Дата начала интервала:')
     end_date = input('Дата окончания интервала:')
+<<<<<<< HEAD
     asyncio.run(rating(start_date, end_date, "prod"))
+=======
+    asyncio.run(rating(start_date, end_date, "dev", http_manager))
+>>>>>>> develop

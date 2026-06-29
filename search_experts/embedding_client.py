@@ -1,190 +1,158 @@
+# search_experts/embedding_client.py
 import asyncio
-
-import numpy as np
-import httpx
+import json
 import logging
+import numpy as np
+from typing import List, Optional
+from aiohttp import ClientSession, ClientTimeout
+
+# Импортируем наш менеджер
+from configs.http_client_manager import HTTPClientManager
 
 logger = logging.getLogger(__name__)
-
 
 class EmbeddingClient:
     """
     Клиент для получения векторных эмбеддингов текста из внешнего API.
-
-    Класс позволяет преобразовать список текстов в их числовые векторные представления (эмбеддинги)
-    с помощью удалённой модели. Поддерживает пакетную обработку для повышения эффективности.
+    Использует общий HTTPClientManager для управления соединениями.
     """
-
-    def __init__(self, api_url, api_key, model, batch_size):
+    
+    def __init__(
+        self, 
+        api_url: str, 
+        api_key: str, 
+        model: str, 
+        batch_size: int,
+        http_manager: HTTPClientManager 
+    ):
         """
-        Инициализирует клиент для работы с API генерации эмбеддингов.
-
         Args:
-            api_url (str): URL эндпоинта API, принимающего запросы на генерацию эмбеддингов.
-            api_key (str): Ключ аутентификации для доступа к API.
-            batch_size (int): Максимальное количество текстов, отправляемых за один запрос.
+            api_url: URL эндпоинта API эмбеддингов
+            api_key: Ключ аутентификации
+            model: Название модели
+            batch_size: Размер пакета для пакетной обработки
+            http_manager: Глобальный менеджер HTTP-сессий (обязателен)
         """
-        self.api_url = api_url
+        self.api_url = api_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.batch_size = batch_size
-        self.semaphore = asyncio.Semaphore(10)  # Ограничение на количество одновременных запросов
-        self.client = httpx.AsyncClient(
-            timeout=httpx.Timeout(30.0, connect=5.0),
-            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20)
-        )
+        self.http_manager = http_manager 
+        
+        # Ограничитель параллелизма (остаётся локальным, т.к. относится к бизнес-логике)
+        self._semaphore = asyncio.Semaphore(10)
+        
+        logger.info(f"EmbeddingClient initialized with shared HTTP manager: {api_url}")
 
-        # Используем URL из настроек без изменений
-        logger.info(f"Initialized EmbeddingClient with URL: {self.api_url}")
-
-
-    async def close(self):
-        """Закрывает HTTP соединения."""
-        await self.client.aclose()
-
-
-    async def get_embeddings(self, texts):
+    async def get_embeddings(self, texts: List[str]) -> np.ndarray:
         """
-        Асинхронно генерирует векторные эмбеддинги для списка текстов.
-
-        Разбивает входной список текстов на пакеты заданного размера, отправляет их в API
-        и собирает полученные векторные представления. Возвращает массив numpy со всеми эмбеддингами.
-
-        Args:
-            texts (List[str]): Список текстовых строк, для которых необходимо получить эмбеддинги.
-
-        Returns:
-            np.ndarray: Двумерный массив формы (len(texts), embedding_dim), где каждая строка —
-                        векторное представление соответствующего текста.
-
-        Raises:
-            httpx.HTTPError: Если запрос к API завершился неуспешно (например, 4xx или 5xx).
-            KeyError: Если в ответе API отсутствует ожидаемое поле 'embeddings'.
+        Асинхронно генерирует эмбеддинги для списка текстов.
         """
-        embedding_tasks = []
-        # all_embeddings = []
-
-        # Разбиваем на пакеты в соответствии с batch_size
+        if not texts:
+            return np.array([])
+        
+        tasks = []
+        # Разбиваем на пакеты
         for i in range(0, len(texts), self.batch_size):
             batch = texts[i:i + self.batch_size]
-            embedding_tasks.append(self._get_embeddings_direct(batch))
+            task = self._get_embeddings_batch(batch)
+            tasks.append(task)
+        
+        # Выполняем все пакеты параллельно
+        all_batches = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Собираем результаты, фильтруя ошибки
+        all_embeddings = []
+        for batch_result in all_batches:
+            if isinstance(batch_result, Exception):
+                logger.error(f"Ошибка в пакете эмбеддингов: {batch_result}")
+                continue
+            if batch_result:
+                all_embeddings.extend(batch_result)
+        
+        return np.array(all_embeddings) if all_embeddings else np.array([])
 
-        all_batches = await asyncio.gather(*embedding_tasks)
-
-        # flatten
-        all_embeddings = [emb for batch in all_batches for emb in batch]
-            # batch_embs = await self._get_embeddings_direct(batch)
-            # all_embeddings.extend(batch_embs)
-
-        return np.array(all_embeddings)
-
-    async def _get_embeddings_direct(self, texts):
+    async def _get_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
         """
-        Асинхронно получает эмбеддинги напрямую через HTTP запрос к API.
-
-        Args:
-            texts (List[str]): Список текстов для эмбеддинга
-
-        Returns:
-            List[List[float]]: Список векторов эмбеддингов
+        Получает эмбеддинги для одного пакета текстов через общий aiohttp-сессия.
         """
-        headers = {
-            "Content-Type": "application/json"
-        }
-
-        # Добавляем API ключ только если он не пустой
-        if self.api_key:
-            # Используем стандартный формат Authorization Bearer для совместимости с OpenAI API
-            headers["Authorization"] = f"Bearer {self.api_key}"
-            # Также оставляем X-API-Key как запасной вариант для обратной совместимости
-            headers["X-API-Key"] = f"{self.api_key}"
-
-        # Для API используем правильный формат payload
-        # Если один текст, отправляем как строку, если несколько - как список
-        if len(texts) == 1:
-            input_data = texts[0]
-        else:
-            input_data = texts
-
-        # Пробуем разные форматы payload для совместимости
-        # Формат 1: стандартный OpenAI
+        # Формируем payload (совместимый с OpenAI-like API)
+        input_data = texts[0] if len(texts) == 1 else texts
         payload = {
             "model": self.model,
             "input": input_data
         }
+        
+        # Формируем заголовки
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+            headers["X-API-Key"] = self.api_key
 
-        logger.info(f"Sending async request to {self.api_url}")
-
-        # Максимальное количество повторных попыток
+        # ✅ Получаем сессию из менеджера
+        session: ClientSession = self.http_manager.get_session()
+        
         max_retries = 3
-        retry_count = 0
-
-        while retry_count < max_retries:
+        last_error = None
+        
+        for attempt in range(max_retries):
             try:
-                async with self.semaphore:
-                    response = await self.client.post(
+                # ✅ Ограничиваем параллелизм на уровне бизнес-логики
+                async with self._semaphore:
+                    async with session.post(
                         self.api_url,
                         json=payload,
-                        headers=headers
-                    )
-
-                    logger.info(f"Response status: {response.status_code}")
-
-                    if response.status_code != 200:
-                        logger.error(f"Error response: {response.text}")
-
-                        # Если это 400 ошибка, попробуем уменьшить размер пакета
-                        if response.status_code == 400 and len(texts) > 1:
-                            logger.warning(f"Received 400 error, retrying with smaller batch size")
-                            # Разделяем пакет пополам и рекурсивно обрабатываем
+                        headers=headers,
+                        timeout=ClientTimeout(total=30, connect=5)
+                    ) as response:
+                        
+                        # Обработка ошибок
+                        if response.status == 400 and len(texts) > 1:
+                            # Рекурсивное разбиение пакета при 400 ошибке
+                            logger.warning(f"400 ошибка, разбиваем пакет: {len(texts)} текстов")
                             mid = len(texts) // 2
-                            first_half = await self._get_embeddings_direct(texts[:mid])
-                            second_half = await self._get_embeddings_direct(texts[mid:])
-                            return first_half + second_half
-                        elif response.status_code == 400 and len(texts) == 1:
-                            # Если 400 ошибка даже для одного текста, логируем и выбрасываем исключение
-                            logger.error(f"Received 400 error even for single text. Request failed.")
-                            logger.error(f"Text content: {texts[0]}")
-                            response.raise_for_status()
-
-                        # Если это последняя попытка, вызываем исключение
-                        if retry_count == max_retries - 1:
-                            response.raise_for_status()
-                        else:
-                            logger.warning(f"Retry {retry_count + 1}/{max_retries} after error")
-                            retry_count += 1
-                            continue
-
-                    response_data = response.json()
-
-                    # Проверяем структуру ответа от API
-                    if "embedding" in response_data:
-                        # Одиночный эмбеддинг
-                        logger.info(f"Found single embedding in response")
-                        return [response_data["embedding"]]
-                    elif "embeddings" in response_data:
-                        # Множественные эмбеддинги
-                        logger.info(f"Found embeddings in response, count: {len(response_data['embeddings'])}")
-                        return response_data["embeddings"]
-                    elif "data" in response_data:
-                        # Формат ответа как у OpenAI
-                        logger.info(f"Found data in response, count: {len(response_data['data'])}")
-                        return [item["embedding"] for item in response_data["data"]]
-                    else:
-                        logger.error(f"Unexpected response format: {response_data}")
-                        raise KeyError("No embeddings found in response")
-
-            except httpx.HTTPError as e:
-                logger.error(f"HTTP error occurred: {e}")
-                if retry_count == max_retries - 1:
-                    raise
-                else:
-                    logger.warning(f"Retry {retry_count + 1}/{max_retries} after HTTP error")
-                    retry_count += 1
+                            first = await self._get_embeddings_batch(texts[:mid])
+                            second = await self._get_embeddings_batch(texts[mid:])
+                            return first + second
+                        
+                        response.raise_for_status()
+                        data = await response.json()
+                        
+                        # Парсинг ответа (поддержка разных форматов)
+                        embeddings = self._extract_embeddings(data)
+                        if embeddings is not None:
+                            return embeddings
+                        
+                        logger.error(f"Неизвестный формат ответа: {data}")
+                        raise ValueError("No embeddings in response")
+                        
             except Exception as e:
-                logger.error(f"Error getting embeddings: {e}")
-                if retry_count == max_retries - 1:
-                    raise
-                else:
-                    logger.warning(f"Retry {retry_count + 1}/{max_retries} after error")
-                    retry_count += 1
+                last_error = e
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # экспоненциальная задержка
+                    logger.warning(f"Попытка {attempt + 1}/{max_retries} не удалась: {e}. Ждём {wait_time}с...")
+                    await asyncio.sleep(wait_time)
+                    continue
+                logger.error(f"Исчерпаны попытки после {max_retries} попыток: {e}")
+                raise last_error
+        
+        raise last_error
+
+    @staticmethod
+    def _extract_embeddings(data: dict) -> Optional[List[List[float]]]:
+        """
+        Извлекает эмбеддинги из ответа API, поддерживая разные форматы.
+        """
+        # Формат 1: одиночный эмбеддинг
+        if "embedding" in data and isinstance(data["embedding"], list):
+            return [data["embedding"]]
+        
+        # Формат 2: множественные эмбеддинги
+        if "embeddings" in data and isinstance(data["embeddings"], list):
+            return data["embeddings"]
+        
+        # Формат 3: OpenAI-style с массивом data
+        if "data" in data and isinstance(data["data"], list):
+            return [item["embedding"] for item in data["data"] if "embedding" in item]
+        
+        return None

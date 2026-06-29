@@ -18,6 +18,15 @@
         "conclusion": {
             "type": "object",
             "description": "Извлечённые структурированные данные для сводного заключения.",
+            "required": [
+                "code",
+                "inn",
+                "name",
+                "documents",
+                "field1_1",
+                "field1_2",
+                "field1_3"
+            ],
             "properties": {
                 "code": {
                     "type": "integer",
@@ -26,7 +35,7 @@
                 "inn": {
                     "type": "integer",
                     "default": "",
-                    "description": "Идентификационный код закупки"
+                    "description": "Идентификационный код закупки (не более 36 цифр)"
                 },
                 "name": {
                     "type": "string",

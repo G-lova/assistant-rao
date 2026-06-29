@@ -1,4 +1,16 @@
-# AI Assistant RAO
+- ├── src/                       # Основная логика
+- │   ├── evaluator.py          # Анализ документов
+- │   ├── scoring.py            # Подбор экспертов
+- │   ├── ocr.py                # OCR обработка
+- │   └── prompts.py            # Промпты для LLM
++ ├── conclusion/                # Формирование заключений РАО
++ ├── evaluate_documents/        # Оценка документов
++ ├── search_experts/           # Поиск и скоринг экспертов
++ ├── configs/                  # Конфигурация
++ ├── src/                      # Основные сервисы
++ ├── schemas/                  # JSON схемы для LLM
++ ├── prompts/                  # Промпты
++ └── xml/                      # XML шаблоны# AI Assistant RAO
 
 AI-ассистент для комплексного анализа документов закупок и подбора экспертов.
 
@@ -174,34 +186,37 @@ flowchart TD
 
 ```
 assistant-rao/
-├── main.py                     # Основное FastAPI приложение
+├── main.py                    # Основное FastAPI приложение
+├── tasks.py                   # Celery-задача по оценке документов
 ├── celery_app.py              # Конфигурация Celery
 ├── docker-compose.yml         # Docker композиция
 ├── Dockerfile                 # Docker образ приложения
 ├── init.sql                   # Инициализация БД
 ├── requirements.txt           # Python зависимости
 ├── configs/                   # Конфигурационные модули
-│   ├── config.py             # Основная конфигурация
-│   ├── working_with_db.py    # Работа с БД
-│   ├── parsing.py            # Парсинг документов
-│   ├── retry_utils.py        # Механизмы повторных попыток
+│   ├── config.py              # Основная конфигурация
+│   ├── working_with_db.py     # Работа с БД
+│   ├── parsing.py             # Парсинг документов
+│   ├── retry_utils.py         # Механизмы повторных попыток
 │   └── ...
 ├── src/                       # Основная логика
-│   ├── evaluator.py          # Анализ документов
-│   ├── scoring.py            # Подбор экспертов
-│   ├── ocr.py                # OCR обработка
-│   └── prompts.py            # Промпты для LLM
-├── search_experts/            # ML пайплайн подбора экспертов
-│   ├── pipeline.py           # Основной пайплайн
-│   ├── data_fetcher.py       # Загрузка данных
-│   ├── embedding_client.py   # Клиент эмбеддингов
-│   ├── text_processor.py     # Обработка текстов
-│   └── conflict_detector.py  # Детектор конфликтов
-├── gradio_evaluator/          # Gradio интерфейс
-│   ├── gradio_app.py         # Основное приложение
-│   └── utils.py              # Утилиты
+│   ├── evaluator.py           # Анализ документов
+│   ├── scoring.py             # Подбор экспертов
+│   ├── ocr.py                 # OCR обработка
+│   └── prompts.py             # Промпты для LLM
+├── conclusion/                # Формирование заключений РАО
+├── evaluate_documents/        # Оценка документов
+├── search_experts/            # Подбор и скоринг экспертов
+│   ├── pipeline.py            # Основной пайплайн
+│   ├── data_fetcher.py        # Загрузка данных
+│   ├── embedding_client.py    # Клиент эмбеддингов
+│   ├── text_processor.py      # Обработка текстов
+│   └── conflict_detector.py   # Детектор конфликтов
+├── schemas/                   # JSON схемы для LLM
+├── prompts/                   # Промпты
+└── xml/                       # XML шаблоны
 └── test/                      # Тесты
-    └── load_test.py          # Нагрузочные тесты
+    └── load_test.py           # Нагрузочные тесты
 ```
 
 ## API Эндпоинты

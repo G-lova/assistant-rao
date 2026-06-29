@@ -1,3 +1,4 @@
+import aiofiles
 import os
 import re
 import logging
@@ -10,14 +11,19 @@ import datetime
 import aiohttp
 import magic
 import xmltodict
-import httpx
+from configs.config import RetryConfig
+from configs.rate_limiter import TokenBucket
+from configs.retry_utils import EIS_RETRY_CONFIG, EISArchiveNotReadyError, EISRateLimitError, async_retry
+from configs.utils import get_file_extension
 import zipfile
 import io
+import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Tuple
 from playwright.async_api import async_playwright, Browser
-from urllib.parse import urljoin, urlparse, parse_qs
+from urllib.parse import quote, unquote, urljoin, urlparse, parse_qs
 from bs4 import BeautifulSoup
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
+from configs.http_client_manager import HTTPClientManager
 from socket import AF_INET
 
 logger = logging.getLogger(__name__)
@@ -33,20 +39,27 @@ class CloudStorageParser:
     их для дальнейшего анализа.
     """
     
-    def __init__(self):
+    def __init__(self, http_manager: HTTPClientManager, expertise_object):
         """Инициализирует парсер с маппингом поддерживаемых доменов и соответствующих методов обработки."""
         self.supported_domains = {
             'drive.google.com': self._parse_google_drive,
             'docs.google.com': self._parse_google_docs,
             'yadi.sk': self._parse_yandex_disk,
             'disk.yandex.ru': self._parse_yandex_disk,
-            'cloud.mail.ru': self._parse_mail_cloud_via_api,
-            'files.mail.ru': self._parse_mail_cloud_via_api,
+            'cloud.mail.ru': self._parse_mail_cloud,
+            'files.mail.ru': self._parse_mail_cloud,
             'zakupki.gov.ru': self._parse_eis_soap_from_web,
         }
         
         # Получаем токен ЕИС из переменных окружения
-        self.eis_token = os.getenv('ESV_key')
+        self.eis_token = os.getenv('EIS_INDIVIDUAL_PERSON_TOKEN')
+        self.eis_soap_url = os.getenv('EIS_SOAP_URL')
+
+        self.http_manager = http_manager
+        self.semaphore = asyncio.Semaphore(3)
+        self.rate_limiter = TokenBucket(rate=1.5)  # 1.5 запроса в секунду — безопасно для ЕИС
+
+        self.expertise_object = expertise_object
 
 
 
@@ -65,43 +78,6 @@ class CloudStorageParser:
             
         parsed = urlparse(url)
         return parsed.netloc in self.supported_domains
-
-
-    async def parse_cloud_link(self, url: str, procurement_id: str = None) -> Dict:
-        """
-        Асинхронно обрабатывает ссылку на документ в облаке или ЕИС.
-
-        Выполняет маршрутизацию к соответствующему парсеру по домену.
-        Поддерживает SOAP запросы к ЕИС в формате soap://method?params.
-
-        Args:
-            url (str): Ссылка на документ в облачном хранилище или SOAP запрос.
-            procurement_id (str, optional): Идентификатор закупки для логирования.
-                По умолчанию None.
-
-        Returns:
-            Dict: Результат обработки: либо данные для скачивания файла, либо ошибка.
-        """
-        # Обработка SOAP запросов к ЕИС
-        if url.startswith('soap://'):
-            return await self._parse_eis_soap(url, procurement_id)
-            
-        if not self.is_cloud_link(url):
-            return {
-                "status": "error",
-                "error": "Неподдерживаемый домен облачного хранилища"
-            }
-
-        parsed = urlparse(url)
-        parser_func = self.supported_domains.get(parsed.netloc)
-
-        if parser_func:
-            return await parser_func(url, procurement_id)
-        else:
-            return {
-                "status": "error", 
-                "error": f"Парсер для домена {parsed.netloc} не реализован"
-            }
 
 
     async def _parse_eis_soap(self, url: str, procurement_id: str = None) -> Dict:
@@ -167,24 +143,24 @@ class CloudStorageParser:
         create_date = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
         
         xml_template = f'''<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ws="http://zakupki.gov.ru/fz44/get-docs-ip/ws">
-   <soapenv:Header>
-      <individualPerson_token>{self.eis_token}</individualPerson_token>
-   </soapenv:Header>
-   <soapenv:Body>
-      <ws:getDocsByReestrNumberRequest>
-         <index>
-            <id>{request_id}</id>
-            <createDateTime>{create_date}</createDateTime>
-            <mode>PROD</mode>
-         </index>
-         <selectionParams>
-            <subsystemType>{subsystem_type}</subsystemType>
-            <reestrNumber>{reestr_number}</reestrNumber>
-         </selectionParams>
-      </ws:getDocsByReestrNumberRequest>
-   </soapenv:Body>
-</soapenv:Envelope>'''
+            <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ws="http://zakupki.gov.ru/fz44/get-docs-ip/ws">
+            <soapenv:Header>
+                <individualPerson_token>{self.eis_token}</individualPerson_token>
+            </soapenv:Header>
+            <soapenv:Body>
+                <ws:getDocsByReestrNumberRequest>
+                    <index>
+                        <id>{request_id}</id>
+                        <createDateTime>{create_date}</createDateTime>
+                        <mode>PROD</mode>
+                    </index>
+                    <selectionParams>
+                        <subsystemType>{subsystem_type}</subsystemType>
+                        <reestrNumber>{reestr_number}</reestrNumber>
+                    </selectionParams>
+                </ws:getDocsByReestrNumberRequest>
+            </soapenv:Body>
+            </soapenv:Envelope>'''
         
         return await self._send_eis_soap_request(xml_template, f"reestr_{reestr_number}", procurement_id)
 
@@ -214,84 +190,85 @@ class CloudStorageParser:
         create_date = datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
         
         xml_template = f'''<?xml version="1.0" encoding="UTF-8"?>
-<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ws="http://zakupki.gov.ru/fz44/get-docs-ip/ws">
-   <soapenv:Header>
-      <individualPerson_token>{self.eis_token}</individualPerson_token>
-   </soapenv:Header>
-   <soapenv:Body>
-      <ws:getDocsByOrgRegionRequest>
-         <index>
-            <id>{request_id}</id>
-            <createDateTime>{create_date}</createDateTime>
-            <mode>PROD</mode>
-         </index>
-         <selectionParams>
-            <orgRegion>{org_region}</orgRegion>
-            <subsystemType>{subsystem_type}</subsystemType>
-            <documentType44>{document_type}</documentType44>
-            {period_info}
-         </selectionParams>
-      </ws:getDocsByOrgRegionRequest>
-   </soapenv:Body>
-</soapenv:Envelope>'''
+            <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ws="http://zakupki.gov.ru/fz44/get-docs-ip/ws">
+            <soapenv:Header>
+                <individualPerson_token>{self.eis_token}</individualPerson_token>
+            </soapenv:Header>
+            <soapenv:Body>
+                <ws:getDocsByOrgRegionRequest>
+                    <index>
+                        <id>{request_id}</id>
+                        <createDateTime>{create_date}</createDateTime>
+                        <mode>PROD</mode>
+                    </index>
+                    <selectionParams>
+                        <orgRegion>{org_region}</orgRegion>
+                        <subsystemType>{subsystem_type}</subsystemType>
+                        <documentType44>{document_type}</documentType44>
+                        {period_info}
+                    </selectionParams>
+                </ws:getDocsByOrgRegionRequest>
+            </soapenv:Body>
+            </soapenv:Envelope>'''
         
         return await self._send_eis_soap_request(xml_template, f"region_{org_region}", procurement_id)
 
 
     async def _send_eis_soap_request(self, xml_data: str, identifier: str, procurement_id: str = None) -> Dict:
         """Отправляет SOAP запрос к ЕИС и обрабатывает ответ"""
+        session = self.http_manager.get_session() # ✅ Используем общий пул
         soap_url = "https://int44.zakupki.gov.ru/eis-integration/services/getDocsIP"
         headers = {
             'Content-Type': 'text/xml; charset=utf-8',
         }
         
         try:
-            async with aiohttp.ClientSession() as session:
-                # Отправляем SOAP запрос
-                async with session.post(
-                    soap_url, 
-                    data=xml_data, 
-                    headers=headers, 
-                    timeout=aiohttp.ClientTimeout(total=60)
-                ) as response:
-                    response_content = await response.text()
-                    logger.info(f"SOAP ответ: статус {response.status}")
-                    
-                    if response.status != 200:
-                        return {
-                            "status": "error",
-                            "error": f"SOAP API вернул статус {response.status}: {response_content}"
-                        }
-                    
-                    # Парсим ответ
-                    try:
-                        response_dict = xmltodict.parse(response_content)
-                    except Exception as parse_error:
-                        logger.error(f"Ошибка парсинга XML ответа: {parse_error}")
-                        return {
-                            "status": "error",
-                            "error": f"Ошибка парсинга XML ответа: {parse_error}"
-                        }
-                    
-                    # Проверяем наличие ошибки в ответе
-                    error_info = self._extract_eis_error_info(response_dict)
-                    if error_info:
-                        logger.warning(f"SOAP API вернул ошибку: {error_info}")
-                        return {
-                            "status": "error",
-                            "error": f"SOAP API ошибка: {error_info}"
-                        }
-                    
-                    # Извлекаем URL архива
-                    archive_url = self._extract_eis_archive_url(response_dict)
-                    if not archive_url:
-                        return {
-                            "status": "error",
-                            "error": f"Не удалось извлечь URL архива из ответа ЕИС"
-                        }
-                    
-                    # Скачиваем и обрабатываем архив
-                    return await self._download_eis_archive(archive_url, identifier, procurement_id)
+            # async with aiohttp.ClientSession() as session:
+            # Отправляем SOAP запрос
+            async with session.post(
+                soap_url, 
+                data=xml_data, 
+                headers=headers, 
+                timeout=aiohttp.ClientTimeout(total=60)
+            ) as response:
+                response_content = await response.text()
+                logger.info(f"SOAP ответ: статус {response.status}")
+                
+                if response.status != 200:
+                    return {
+                        "status": "error",
+                        "error": f"SOAP API вернул статус {response.status}: {response_content}"
+                    }
+                
+                # Парсим ответ
+                try:
+                    response_dict = await asyncio.to_thread(xmltodict.parse, response_content)
+                except Exception as parse_error:
+                    logger.error(f"Ошибка парсинга XML ответа: {parse_error}")
+                    return {
+                        "status": "error",
+                        "error": f"Ошибка парсинга XML ответа: {parse_error}"
+                    }
+                
+                # Проверяем наличие ошибки в ответе
+                error_info = self._extract_eis_error_info(response_dict)
+                if error_info:
+                    logger.warning(f"SOAP API вернул ошибку: {error_info}")
+                    return {
+                        "status": "error",
+                        "error": f"SOAP API ошибка: {error_info}"
+                    }
+                
+                # Извлекаем URL архива
+                archive_url = self._extract_eis_archive_url(response_dict)
+                if not archive_url:
+                    return {
+                        "status": "error",
+                        "error": f"Не удалось извлечь URL архива из ответа ЕИС"
+                    }
+                
+                # Скачиваем и обрабатываем архив
+                return await self._download_eis_archive(archive_url, identifier, procurement_id)
                     
         except Exception as e:
             logger.error(f"Ошибка SOAP запроса к ЕИС: {str(e)}")
@@ -331,56 +308,42 @@ class CloudStorageParser:
             body = envelope.get('soap:Body', {})
 
             # Ищем в различных возможных структурах ответа
+
             for key, value in body.items():
                 if 'Response' in key:
                     data_info = value.get('dataInfo', {})
 
-                    # Если dataInfo - строка (прямой URL)
-                    if isinstance(data_info, str):
-                        if data_info.startswith('http'):
-                            return data_info
+                    # Случай 1: dataInfo - строка (прямой URL)
+                    if isinstance(data_info, str) and data_info.startswith('http'):
+                        return data_info
 
-                    # Если dataInfo - словарь
-                    elif isinstance(data_info, dict):
+                    # Случай 2: archiveUrl внутри dataInfo (строка или список)
+                    if isinstance(data_info, dict):
                         archive_url = data_info.get('archiveUrl')
-                        if archive_url and archive_url.startswith('http'):
-                            return archive_url
+                        if archive_url:
+                            if isinstance(archive_url, str) and archive_url.startswith('http'):
+                                return archive_url
+                            elif isinstance(archive_url, list):
+                                # Возвращаем список валидных URL
+                                return [url for url in archive_url if isinstance(url, str) and url.startswith('http')]                            
 
-                    # Пробуем найти archiveUrl на верхнем уровне
+                    # Случай 3: archiveUrl на уровне ответа (строка или список)
                     archive_url = value.get('archiveUrl')
-                    if archive_url and archive_url.startswith('http'):
-                        return archive_url
+                    if archive_url:
+                        if isinstance(archive_url, str) and archive_url.startswith('http'):
+                            return archive_url
+                        elif isinstance(archive_url, list):
+                            return [url for url in archive_url if isinstance(url, str) and url.startswith('http')]
 
-                    # Пробуем найти href или downloadUrl
-                    for field in ['href', 'downloadUrl', 'url']:
-                        url_candidate = value.get(field)
-                        if url_candidate and url_candidate.startswith('http'):
-                            return url_candidate
-
-            # Дополнительные попытки найти URL в других полях
-            def find_url_in_dict(d, depth=0):
-                if depth > 5:  # Ограничиваем глубину рекурсии
-                    return None
-
-                if isinstance(d, dict):
-                    for k, v in d.items():
-                        if isinstance(v, str) and v.startswith('http') and any(x in v.lower() for x in ['archive', 'download', 'file']):
-                            return v
-                        elif isinstance(v, (dict, list)):
-                            result = find_url_in_dict(v, depth + 1)
-                            if result:
-                                return result
-                elif isinstance(d, list):
-                    for item in d:
-                        result = find_url_in_dict(item, depth + 1)
-                        if result:
-                            return result
-                return None
-
-            archive_url = find_url_in_dict(response_dict)
-            if archive_url:
-                return archive_url
-
+                    # Случай 4: archiveUrl внутри nsiArchiveInfo (для getNsiResponse)
+                    nsi_archive = data_info.get('nsiArchiveInfo', {})
+                    if isinstance(nsi_archive, dict):
+                        archive_url = nsi_archive.get('archiveUrl')
+                        if archive_url and isinstance(archive_url, str) and archive_url.startswith('http'):
+                            return archive_url
+                    elif isinstance(nsi_archive, list):
+                        return [archive.get('archiveUrl') for archive in nsi_archive if isinstance(archive.get('archiveUrl', ''), str) and archive.get('archiveUrl', '').startswith('http')]
+                            
             logger.error("Не удалось найти URL архива в ответе ЕИС")
             return None
 
@@ -389,36 +352,57 @@ class CloudStorageParser:
             return None
 
 
+    @async_retry(EIS_RETRY_CONFIG)
     async def _download_eis_archive(self, archive_url: str, identifier: str, procurement_id: str = None) -> Dict:
         """Скачивает и обрабатывает архив из ЕИС"""
         try:
+            session = self.http_manager.get_session()
             headers = {
                 'individualPerson_token': self.eis_token,
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
+        
+            logger.info(f"→ Запрос архива: {archive_url[:100]}...")
             
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    archive_url, 
-                    headers=headers, 
-                    timeout=aiohttp.ClientTimeout(total=120)
-                ) as response:
-                    if response.status != 200:
-                        return {
-                            "status": "error",
-                            "error": f"Не удалось скачать архив ЕИС: статус {response.status}"
-                        }
-                    
-                    # Читаем содержимое архива
-                    archive_content = await response.read()
-                    
-                    # Обрабатываем архив и извлекаем файлы
-                    return await self._process_eis_archive(archive_content, identifier, archive_url, procurement_id)
-                    
+            # async with aiohttp.ClientSession() as session:
+            async with session.get(
+                archive_url, 
+                headers=headers, 
+                timeout=aiohttp.ClientTimeout(total=120)
+            ) as response:
+            
+                # Статус 425 — превращаем в исключение для retry
+                if response.status == 425:
+                    raise EISArchiveNotReadyError(
+                        f"Архив ещё не готов (статус 425), ссылка: {archive_url[:80]}..."
+                    )
+                
+                # Другие ошибки HTTP
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"❌ Ошибка скачивания: {response.status}, тело: {error_text[:300]}")
+                    return {
+                        "status": "error",
+                        "procurement_number": identifier,
+                        "error": f"Не удалось скачать архив ЕИС: статус {response.status}"
+                    }
+                
+                # Успех
+                archive_content = await response.read()
+                logger.info(f"Архив скачан: {len(archive_content)} байт")
+                
+                return await self._process_eis_archive(archive_content, identifier, archive_url, procurement_id)
+                        
+        except EISArchiveNotReadyError:
+            # Переподнимаем, чтобы декоратор retry мог перехватить
+            raise
+
         except Exception as e:
-            logger.error(f"Ошибка скачивания архива ЕИС: {str(e)}")
+            # Все остальные ошибки — логируем и возвращаем как error-ответ
+            logger.error(f"❌ Исключение при скачивании архива ЕИС: {type(e).__name__}: {str(e)}", exc_info=True)
             return {
                 "status": "error", 
+                "procurement_number": identifier,
                 "error": f"Ошибка скачивания архива ЕИС: {str(e)}"
             }
 
@@ -438,7 +422,7 @@ class CloudStorageParser:
                         # Определяем расширение
                         _, file_extension = os.path.splitext(file_info.filename)
                         if not file_extension:
-                            file_extension = self._get_extension_from_content(extracted_data)
+                            file_extension = get_file_extension(content=extracted_data)
                         
                         # Создаем временный файл
                         with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp_file:
@@ -461,11 +445,13 @@ class CloudStorageParser:
             if not files:
                 return {
                     "status": "error",
+                    "procurement_number": identifier,
                     "error": "В архиве ЕИС не найдено файлов"
                 }
             
             return {
                 "status": "success",
+                "procurement_number": identifier,
                 "files": files,
                 "source": "eis_soap",
                 "original_url": original_url,
@@ -480,46 +466,6 @@ class CloudStorageParser:
                 "status": "error",
                 "error": f"Ошибка обработки архива ЕИС: {str(e)}"
             }
-
-
-    def _get_extension_from_content_type(self, content_type: str) -> str:
-        """
-        Определяет расширение файла по MIME-типу.
-
-        Args:
-            content_type (str): MIME-тип контента.
-
-        Returns:
-            str: Расширение файла (например, ".pdf") или ".bin" по умолчанию.
-        """
-        extension_map = {
-            'application/pdf': '.pdf',
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
-            'application/msword': '.doc',
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
-            'application/vnd.ms-excel': '.xls',
-            'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
-            'application/vnd.ms-powerpoint': '.ppt',
-            'text/plain': '.txt',
-            'text/csv': '.csv',
-            'text/html': '.html',
-            'application/json': '.json',
-            'application/xml': '.xml',
-            'image/jpeg': '.jpg',
-            'image/jpg': '.jpg',
-            'image/png': '.png',
-            'image/gif': '.gif',
-            'image/webp': '.webp',
-            'image/svg+xml': '.svg',
-            'application/zip': '.zip',
-            'application/x-rar-compressed': '.rar',
-            'application/x-7z-compressed': '.7z',
-            'application/gzip': '.gz',
-            'application/x-tar': '.tar',
-        }
-
-        main_content_type = content_type.split(';')[0].strip().lower()
-        return extension_map.get(main_content_type, '.bin')
 
 
     async def _parse_eis_soap_from_web(self, url: str, procurement_id: str = None) -> Dict:
@@ -544,36 +490,9 @@ class CloudStorageParser:
             clean_url = url.strip()
             reestr_number = self._extract_reestr_number_from_web_url(clean_url)
             if not reestr_number:
-                return {
-                    "status": "error",
-                    "error": f"Не удалось извлечь номер закупки из URL: {clean_url}"
-                }
+                return await self._download_http_file(url=url, procurement_id=procurement_id, source="eis_web", handle_rate_limit=True)
 
-            # Простая проверка доступности ссылки
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    clean_url,
-                    headers={"User-Agent": "Mozilla/5.0 (compatible; procurement-checker)"},
-                    timeout=aiohttp.ClientTimeout(total=15)
-                ) as response:
-                    if response.status != 200:
-                        return {
-                            "status": "error",
-                            "error": f"Страница ЕИС недоступна (HTTP {response.status})",
-                            "procurement_number": reestr_number,
-                            "source": "eis_web",
-                            "original_url": clean_url
-                        }
-
-            # УСПЕХ: ссылка доступна, номер извлечён
-            return {
-                "status": "success",
-                "procurement_number": reestr_number,
-                "source": "eis_web",
-                "original_url": clean_url,
-                "procurement_id": procurement_id,
-                "files": []  # Нет файлов — парсинг отключён
-            }
+            return await self._parse_eis_soap_ip(reestr_number, procurement_id)
 
         except Exception as e:
             logger.error(f"Ошибка при проверке ссылки ЕИС: {str(e)}")
@@ -661,44 +580,45 @@ class CloudStorageParser:
                             direct_url = f"https://zakupki.gov.ru/44fz/filestore/public/download/file?uid={uid}"
 
                             # Скачиваем через aiohttp с заголовками
+                            session = self.http_manager.get_session()
                             headers = {
                                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                                 "Referer": doc_url,
                                 "Accept": "*/*"
                             }
 
-                            async with aiohttp.ClientSession() as session:
-                                async with session.get(direct_url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                                    if resp.status != 200:
-                                        logger.warning(f"Не удалось скачать файл {direct_url}: статус {resp.status}")
-                                        continue
-                                    
-                                    # Определяем расширение по Content-Type
-                                    content_type = resp.headers.get('content-type', '')
-                                    file_ext = self._get_extension_from_content_type(content_type)
-                                    if not file_ext or file_ext == '.bin':
-                                        file_ext = self._get_extension_from_url(direct_url)
+                            # async with aiohttp.ClientSession() as session:
+                            async with session.get(direct_url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                                if resp.status != 200:
+                                    logger.warning(f"Не удалось скачать файл {direct_url}: статус {resp.status}")
+                                    continue
+                                
+                                # Определяем расширение по Content-Type
+                                # content_type = resp.headers.get('content-type', '')
+                                file_ext = get_file_extension(content_type=resp.headers.get('Content-Type', ''))
+                                if not file_ext or file_ext == '.bin':
+                                    file_ext = get_file_extension(url=direct_url)
 
-                                    # Сохраняем во временный файл
-                                    with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
-                                        async for chunk in resp.content.iter_chunked(8192):
-                                            tmp.write(chunk)
-                                        tmp_path = tmp.name
+                                # Сохраняем во временный файл
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
+                                    async for chunk in resp.content.iter_chunked(8192):
+                                        tmp.write(chunk)
+                                    tmp_path = tmp.name
 
-                                    # Безопасное имя файла
-                                    safe_name = re.sub(r'[<>:"/\\|?*]', '_', orig_filename)
-                                    if not safe_name.endswith(file_ext):
-                                        safe_name += file_ext
+                                # Безопасное имя файла
+                                safe_name = re.sub(r'[<>:"/\\|?*]', '_', orig_filename)
+                                if not safe_name.endswith(file_ext):
+                                    safe_name += file_ext
 
-                                    results.append({
-                                        "status": "success",
-                                        "filename": safe_name,
-                                        "file_path": tmp_path,
-                                        "source": "eis_web",
-                                        "original_url": direct_url,
-                                        "procurement_id": procurement_id,
-                                        "file_extension": file_ext
-                                    })
+                                results.append({
+                                    "status": "success",
+                                    "filename": safe_name,
+                                    "file_path": tmp_path,
+                                    "source": "eis_web",
+                                    "original_url": direct_url,
+                                    "procurement_id": procurement_id,
+                                    "file_extension": file_ext
+                                })
 
                         except Exception as e:
                             logger.warning(f"Не удалось обработать файл {href}: {e}")
@@ -726,58 +646,6 @@ class CloudStorageParser:
             }
 
 
-    def _extract_reestr_number_from_web_url(self, url: str) -> Optional[str]:
-        """
-        Извлекает реестровый номер из различных форматов URL ЕИС.
-
-        Args:
-            url (str): URL страницы закупки
-
-        Returns:
-            Optional[str]: Реестровый номер или None
-        """
-        try:
-            parsed = urlparse(url)
-            query_params = parse_qs(parsed.query)
-
-            # Пробуем разные параметры, которые могут содержать реестровый номер
-            reestr_number = (
-                query_params.get("regNumber", [None])[0] or
-                query_params.get("reestrNumber", [None])[0] or
-                query_params.get("noticeInfoId", [None])[0]
-            )
-
-            if reestr_number:
-                # Проверяем, что это действительно реестровый номер (обычно 20+ цифр)
-                if re.match(r'^\d{10,}$', reestr_number):
-                    return reestr_number
-
-            # Если в query параметрах нет, пробуем извлечь из пути
-            path_parts = parsed.path.split('/')
-            for part in path_parts:
-                # Реестровые номера обычно имеют формат: 0373200003624000001 (20+ цифр)
-                if re.match(r'^\d{10,}$', part):
-                    return part
-
-            # Для URL типа common-info.html пробуем найти номер в предыдущих частях пути
-            if 'common-info' in parsed.path or 'documents' in parsed.path:
-                # Ищем номер в предыдущих сегментах пути
-                path_segments = parsed.path.split('/')
-                for i, segment in enumerate(path_segments):
-                    if segment in ['common-info.html', 'documents.html', 'view'] and i > 0:
-                        # Берем предыдущий сегмент
-                        prev_segment = path_segments[i-1]
-                        if re.match(r'^\d{10,}$', prev_segment):
-                            return prev_segment
-
-            logger.warning(f"Не удалось извлечь реестровый номер из URL: {url}")
-            return None
-
-        except Exception as e:
-            logger.error(f"Ошибка извлечения реестрового номера из URL {url}: {str(e)}")
-            return None
-
-
     async def _parse_google_drive(self, url: str, procurement_id: str = None) -> Dict:
         """
         Обрабатывает ссылку на файл в Google Drive и формирует прямую ссылку для скачивания.
@@ -802,11 +670,17 @@ class CloudStorageParser:
             download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
             
             # Скачиваем файл
-            return await self._download_file_only(
-                download_url, 
-                "google_drive", 
-                file_id,
-                procurement_id
+            # return await self._download_file_only(
+            #     download_url, 
+            #     "google_drive", 
+            #     file_id,
+            #     procurement_id
+            # )
+            return await self._download_http_file(
+                url=download_url, 
+                source="google_drive", 
+                resource_id=file_id,
+                procurement_id=procurement_id
             )
             
         except Exception as e:
@@ -848,12 +722,17 @@ class CloudStorageParser:
                 export_url = f"https://docs.google.com/document/d/{doc_id}/export?format=pdf"
                 file_extension = ".pdf"
             
-            return await self._download_file_only(
-                export_url,
-                "google_docs",
-                doc_id,
-                procurement_id,
-                file_extension
+            return await self._download_http_file(
+                url=export_url,
+                source="google_docs",
+                resource_id=doc_id,
+                procurement_id=procurement_id,
+                file_extension=file_extension,
+                fallback_formats=[
+                    ("https://docs.google.com/spreadsheets/d/{}/export?format=xlsx", ".xlsx"),
+                    ("https://docs.google.com/spreadsheets/d/{}/export?format=pdf", ".pdf"),
+                    ("https://docs.google.com/spreadsheets/d/{}/gviz/tq?tqx=out:csv", ".csv"),
+                ]
             )
             
         except Exception as e:
@@ -916,12 +795,13 @@ class CloudStorageParser:
                 }
             download_url = download_info['url']
             file_extension = download_info.get('extension', '.bin')
-            return await self._download_file_only(
-                download_url,
-                "yandex_disk",
-                resource_id,
-                procurement_id,
-                file_extension,
+            
+            return await self._download_http_file(
+                url=download_url,
+                source="yandex_disk",
+                resource_id=resource_id,
+                procurement_id=procurement_id,
+                file_extension=file_extension,
                 original_filename=download_info.get('original_filename')
             )
         except Exception as e:
@@ -944,31 +824,32 @@ class CloudStorageParser:
             Dict: Информация для скачивания: URL, расширение, тип контента и имя файла.
         """
         try:
-            async with aiohttp.ClientSession() as session:
-                # Передаём ПОЛНУЮ ОЧИЩЕННУЮ ссылку как public_key
-                params = {"public_key": url}
-                api_url = "https://cloud-api.yandex.net/v1/disk/public/resources/download"
-                async with session.get(api_url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                    if response.status != 200:
-                        logger.error(f"API Яндекс.Диска вернул статус {response.status} для {url}")
-                        return await self._try_yandex_disk_alternative_methods(url, resource_id)
+            # async with aiohttp.ClientSession() as session:
+            session = self.http_manager.get_session()
+            # Передаём ПОЛНУЮ ОЧИЩЕННУЮ ссылку как public_key
+            params = {"public_key": url}
+            api_url = "https://cloud-api.yandex.net/v1/disk/public/resources/download"
+            async with session.get(api_url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status != 200:
+                    logger.error(f"API Яндекс.Диска вернул статус {response.status} для {url}")
+                    return await self._try_yandex_disk_alternative_methods(url, resource_id)
 
-                    data = await response.json()
-                    download_url = data.get("href")
-                    if not download_url:
-                        logger.error("API не вернул поле 'href'")
-                        return await self._try_yandex_disk_alternative_methods(url, resource_id)
+                data = await response.json()
+                download_url = data.get("href")
+                if not download_url:
+                    logger.error("API не вернул поле 'href'")
+                    return await self._try_yandex_disk_alternative_methods(url, resource_id)
 
-                    file_extension = self._get_extension_from_url(download_url)
-                    if not file_extension:
-                        file_extension = ".bin"
+                file_extension = get_file_extension(url=download_url)
+                if not file_extension:
+                    file_extension = ".bin"
 
-                    return {
-                        'url': download_url,
-                        'extension': file_extension,
-                        'content_type': 'application/octet-stream',
-                        'original_filename': self._extract_filename_from_url(download_url)
-                    }
+                return {
+                    'url': download_url,
+                    'extension': file_extension,
+                    'content_type': 'application/octet-stream',
+                    'original_filename': self._extract_filename_from_url(download_url)
+                }
         except Exception as e:
             logger.error(f"Ошибка при обращении к API Яндекс.Диска для {url}: {str(e)}")
             return await self._try_yandex_disk_alternative_methods(url, resource_id)
@@ -1016,22 +897,23 @@ class CloudStorageParser:
             f"https://yadi.sk/i/{resource_id}/download",
         ]
 
-        async with aiohttp.ClientSession() as session:
-            for alt_url in alternative_urls:
-                try:
-                    async with session.head(alt_url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=5)) as response:
-                        if response.status == 200:
-                            content_type = response.headers.get('content-type', '')
-                            file_extension = self._get_extension_from_content_type(content_type)
+        session = self.http_manager.get_session()
+        # async with aiohttp.ClientSession() as session:
+        for alt_url in alternative_urls:
+            try:
+                async with session.head(alt_url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=5)) as response:
+                    if response.status == 200:
+                        content_type = response.headers.get('content-type', '')
+                        file_extension = get_file_extension(content_type=response.headers.get('Content-Type', ''))
 
-                            return {
-                                'url': alt_url,
-                                'extension': file_extension or '.bin',
-                                'content_type': content_type
-                            }
-                except Exception as e:
-                    logger.warning(f"Альтернативный URL {alt_url} не сработал: {str(e)}")
-                    continue
+                        return {
+                            'url': alt_url,
+                            'extension': file_extension or '.bin',
+                            'content_type': content_type
+                        }
+            except Exception as e:
+                logger.warning(f"Альтернативный URL {alt_url} не сработал: {str(e)}")
+                continue
             
         # Если ничего не сработало, возвращаем базовую ссылку
         return {
@@ -1041,101 +923,8 @@ class CloudStorageParser:
         }
 
 
+
     async def _parse_mail_cloud(self, url: str, procurement_id: str = None) -> Dict:
-        """
-        Скачивает файл из Mail.ru Cloud по публичной ссылке через официальный API.
-        Аналог PHP-скрипта cloud_mail_downloader.php, но на чистом Python + aiohttp.
-        """
-        try:
-            clean_url = url.strip().rstrip('/')
-            if '/public/' not in clean_url:
-                raise Exception("Некорректный формат ссылки Mail.ru")
-
-            weblink = clean_url.split('/public/', 1)[1]
-            if not weblink:
-                raise Exception("Не удалось извлечь weblink")
-
-            # Шаг 1: Получить pageId из HTML
-            page_id = await self._get_page_id_from_html(clean_url)
-            if not page_id:
-                raise Exception("pageId не найден в HTML")
-
-            # Шаг 2: Получить base_url из dispatcher
-            base_url = await self._get_base_url(page_id)
-            if not base_url:
-                raise Exception("base_url не получен из dispatcher")
-
-            # Шаг 3: Получить список файлов
-            files = await self._get_all_files(weblink, page_id, base_url)
-            if not files:
-                raise Exception("Файлы не найдены")
-
-            # Берём первый файл (если их несколько — можно расширить логику)
-            file_info = files[0]
-            direct_url = file_info["url"]
-            safe_name = file_info["filename"]
-
-            # Шаг 4: Скачать файл
-            return await self._download_file_only(
-                direct_url,
-                "mail_cloud_api",
-                safe_name,
-                procurement_id
-            )
-
-        except Exception as e:
-            logger.error(f"Ошибка парсинга Mail.ru Cloud (API): {str(e)}")
-            return {
-                "status": "error",
-                "error": f"Ошибка парсинга Mail.ru Cloud: {str(e)}"
-            }
-
-    # Вспомогательные методы
-    async def _get_page_id_from_html(self, url: str) -> Optional[str]:
-        async with aiohttp.ClientSession(max_field_size=16384, max_line_size=16384) as session:
-            async with session.get(url) as resp:
-                html = await resp.text()
-        match = re.search(r'pageId["\']?\s*:\s*["\']?([a-zA-Z0-9_-]+)', html)
-        return match.group(1) if match else None
-
-
-    async def _get_base_url(self, page_id: str) -> Optional[str]:
-        dispatcher_url = f"https://cloud.mail.ru/api/v2/dispatcher?x-page-id={page_id}"
-        async with aiohttp.ClientSession(max_field_size=16384, max_line_size=16384) as session:
-            async with session.get(dispatcher_url) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-        return data.get("body", {}).get("weblink_get", [{}])[0].get("url")
-
-
-    async def _get_all_files(self, weblink: str, page_id: str, base_url: str, current_path: str = "") -> List[Dict]:
-        folder_url = f"https://cloud.mail.ru/api/v2/folder?weblink={weblink}&x-page-id={page_id}"
-        async with aiohttp.ClientSession(max_field_size=16384, max_line_size=16384) as session:
-            async with session.get(folder_url) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json()
-        files = []
-        for item in data.get("body", {}).get("list", []):
-            if item["type"] == "folder":
-                sub_files = await self._get_all_files(
-                    weblink=f"{weblink}/{item['name']}",
-                    page_id=page_id,
-                    base_url=base_url,
-                    current_path=f"{current_path}/{item['name']}" if current_path else item['name']
-                )
-                files.extend(sub_files)
-            else:
-                filename = item["name"]
-                full_path = f"{current_path}/{filename}" if current_path else filename
-                safe_name = re.sub(r'[<>:"/\\|?*]', '_', full_path)
-                direct_url = f"{base_url}/{weblink}{f'/{current_path}' if current_path else ''}/{filename}"
-                files.append({"url": direct_url, "filename": safe_name})
-        return files
-
-
-    async def _parse_mail_cloud_via_api(self, url: str, procurement_id: str = None) -> Dict:
         """
         Скачивает файлы из Mail.ru Cloud по публичной ссылке.
         Поддерживает папки и вложенные структуры.
@@ -1172,20 +961,22 @@ class CloudStorageParser:
             results = []
             for file_info in files:
                 direct_url = file_info["url"]
+                fallback_url = "/".join(direct_url.split("/")[:-1])
                 safe_name = file_info["filename"]
                 ext = os.path.splitext(safe_name)[1] or ".bin"
                 
                 # === СКАЧИВАЕМ ФАЙЛ ===
-
-                result = await self._download_file_only(
-                    direct_url,
-                    "mail_cloud_api",
-                    safe_name,
-                    procurement_id,
-                    ext,
-                    safe_name
+                result = await self._download_http_file(
+                    url=direct_url,
+                    procurement_id=procurement_id,
+                    source="mail_cloud",
+                    resource_id=safe_name,
+                    file_extension=ext,
+                    original_filename=safe_name,
+                    fallback_formats=[(fallback_url, ext)]
                 )
                 results.append(result)
+
             log = {
                 "status": "success",
                 "files": results,
@@ -1213,55 +1004,58 @@ class CloudStorageParser:
     # === ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ (уже есть в коде, но улучшим) ===
 
     async def _get_page_id_from_html(self, url: str) -> Optional[str]:
-        async with aiohttp.ClientSession(
-            max_field_size=16384,   # Увеличиваем лимит на размер одного поля заголовка
-            max_line_size=16384     # Увеличиваем лимит на длину строки заголовка
-        ) as session:
-            async with session.get(url) as resp:
-                html = await resp.text()
-                # Ищем pageId в любом формате
-                match = re.search(r'pageId["\']?\s*:\s*["\']?([a-zA-Z0-9_-]+)', html)
-                return match.group(1) if match else None
+        session = self.http_manager.get_session()
+        # async with aiohttp.ClientSession(
+        #     max_field_size=16384,   # Увеличиваем лимит на размер одного поля заголовка
+        #     max_line_size=16384     # Увеличиваем лимит на длину строки заголовка
+        # ) as session:
+        async with session.get(url) as resp:
+            html = await resp.text()
+            # Ищем pageId в любом формате
+            match = re.search(r'pageId["\']?\s*:\s*["\']?([a-zA-Z0-9_-]+)', html)
+            return match.group(1) if match else None
 
     async def _get_base_url(self, page_id: str) -> Optional[str]:
         dispatcher_url = f"https://cloud.mail.ru/api/v2/dispatcher?x-page-id={page_id}"
-        async with aiohttp.ClientSession(
-            max_field_size=16384,   # Увеличиваем лимит на размер одного поля заголовка
-            max_line_size=16384     # Увеличиваем лимит на длину строки заголовка
-        ) as session:
-            async with session.get(dispatcher_url) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-            
-                # Попытка получить base_url из weblink_get (старый формат)
-                weblink_get_list = data.get("body", {}).get("weblink_get", [])
-                if weblink_get_list and isinstance(weblink_get_list, list):
-                    base_url = weblink_get_list[0].get("url")
-                    if base_url:
-                        logger.debug(f"Получен base_url из weblink_get: {base_url}")
-                        return base_url
+        session = self.http_manager.get_session()
+        # async with aiohttp.ClientSession(
+        #     max_field_size=16384,   # Увеличиваем лимит на размер одного поля заголовка
+        #     max_line_size=16384     # Увеличиваем лимит на длину строки заголовка
+        # ) as session:
+        async with session.get(dispatcher_url) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+        
+            # Попытка получить base_url из weblink_get (старый формат)
+            weblink_get_list = data.get("body", {}).get("weblink_get", [])
+            if weblink_get_list and isinstance(weblink_get_list, list):
+                base_url = weblink_get_list[0].get("url")
+                if base_url:
+                    logger.debug(f"Получен base_url из weblink_get: {base_url}")
+                    return base_url
 
-                # Новый формат: weblink_get отсутствует → используем фиксированный URL
-                # Официальный базовый URL для скачивания
-                fixed_base_url = "https://cloclo1.datacloudmail.ru"
-                logger.debug(f"weblink_get не найден. Используем фиксированный base_url: {fixed_base_url}")
-                return fixed_base_url
-                # return data.get("body", {}).get("weblink_get", [{}])[0].get("url")
+            # Новый формат: weblink_get отсутствует → используем фиксированный URL
+            # Официальный базовый URL для скачивания
+            fixed_base_url = "https://cloclo1.datacloudmail.ru"
+            logger.debug(f"weblink_get не найден. Используем фиксированный base_url: {fixed_base_url}")
+            return fixed_base_url
+            # return data.get("body", {}).get("weblink_get", [{}])[0].get("url")
 
     async def _get_all_files(self, weblink: str, page_id: str, base_url: str, current_path: str = "") -> List[Dict]:
         """Рекурсивно получает все файлы из папки"""
         folder_url = f"https://cloud.mail.ru/api/v2/folder?weblink={weblink}&x-page-id={page_id}"
         logger.debug(f"Запрос содержимого папки: {folder_url} (текущий путь: '{current_path}')")
-        async with aiohttp.ClientSession(
-            max_field_size=16384,   # Увеличиваем лимит на размер одного поля заголовка
-            max_line_size=16384     # Увеличиваем лимит на длину строки заголовка
-        ) as session:
-            async with session.get(folder_url) as resp:
-                if resp.status != 200:
-                    logger.error(f"API folder вернул статус {resp.status}")
-                    return []
-                data = await resp.json()
+        session = self.http_manager.get_session()
+        # async with aiohttp.ClientSession(
+        #     max_field_size=16384,   # Увеличиваем лимит на размер одного поля заголовка
+        #     max_line_size=16384     # Увеличиваем лимит на длину строки заголовка
+        # ) as session:
+        async with session.get(folder_url) as resp:
+            if resp.status != 200:
+                logger.error(f"API folder вернул статус {resp.status}")
+                return []
+            data = await resp.json()
         
         files = []
         items = data.get("body", {}).get("list", [])
@@ -1281,88 +1075,12 @@ class CloudStorageParser:
                 filename = item["name"]
                 full_path = f"{current_path}/{filename}" if current_path else filename
                 safe_name = re.sub(r'[<>:"/\\|?*]', '_', full_path)
+                # safe_name = quote(safe_name, safe='')
                 direct_url = f"{base_url}/{weblink}{f'/{current_path}' if current_path else ''}/{filename}"
+                # direct_url = f"{base_url}/{weblink}{f'/{current_path}' if current_path else ''}"
                 files.append({"url": direct_url, "filename": safe_name})
                 logger.debug(f"Добавлен файл: {safe_name}")
         return files
-
-
-    async def _download_file_only(self, url: str, source: str, resource_id: str, 
-                                procurement_id: str = None, file_extension: str = None,
-                                original_filename: str = None) -> Dict:
-        """
-        Скачивает файл по прямой ссылке и сохраняет его во временный файл.
-
-        Args:
-            url (str): Прямая ссылка для скачивания.
-            source (str): Источник (например, "google_drive").
-            resource_id (str): Идентификатор ресурса.
-            procurement_id (str, optional): Идентификатор закупки. По умолчанию None.
-            file_extension (str, optional): Расширение файла. По умолчанию None.
-            original_filename (str, optional): Оригинальное имя файла. По умолчанию None.
-
-        Returns:
-            Dict: Результат с путём к временному файлу и метаданными или ошибкой.
-        """
-        try:
-            # Используем aiohttp для асинхронного скачивания
-            async with aiohttp.ClientSession(
-                max_field_size=16384,   # Увеличиваем лимит на размер одного поля заголовка
-                max_line_size=16384     # Увеличиваем лимит на длину строки заголовка
-            ) as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as response:
-                    if response.status != 200:
-                        # Пробуем альтернативные форматы для Google таблиц
-                        if "spreadsheets" in url and "export" in url:
-                            return await self._try_alternative_google_sheets_formats(resource_id, procurement_id)
-                        else:
-                            raise Exception(f"HTTP {response.status}: {response.reason}")
-                    
-                    # Определяем расширение файла из заголовков или URL
-                    if not file_extension:
-                        content_type = response.headers.get('content-type', '')
-                        file_extension = self._get_extension_from_content_type(content_type)
-                        
-                        if not file_extension:
-                            file_extension = self._get_extension_from_url(url)
-                    
-                    # Создаем временный файл
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp_file:
-                        # Читаем данные чанками и пишем в файл
-                        async for chunk in response.content.iter_chunked(8192):
-                            tmp_file.write(chunk)
-                        tmp_path = tmp_file.name
-                    
-                    # Используем original_filename, если есть
-                    if original_filename:
-                        # Очищаем от недопустимых символов
-                        safe_name = re.sub(r'[<>:"/\\|?*]', '_', original_filename)
-                        filename = safe_name
-                    else:
-                        filename = f"{source}_{resource_id}{file_extension}"
-                    
-                    # Возвращаем информацию о скачанном файле, а не анализируем его
-                    return {
-                        "status": "success",
-                        "filename": filename,
-                        "file_path": tmp_path,  # Путь к скачанному файлу
-                        "source": "cloud_storage",
-                        "original_url": url,
-                        "procurement_id": procurement_id,
-                        "file_extension": file_extension
-                    }
-                    
-        except Exception as e:
-            logger.error(f"Ошибка скачивания файла {url}: {str(e)}")
-            
-            # Для Google таблиц пробуем CSV как запасной вариант
-            if "spreadsheets" in url:
-                return await self._try_google_sheets_csv(resource_id, procurement_id)
-            
-            return {
-                "status": "error",
-                "error": f"Ошибка скачивания файла: {str(e)}"
-            }
 
 
     async def _try_alternative_google_sheets_formats(self, sheet_id: str, procurement_id: str = None) -> Dict:
@@ -1382,32 +1100,33 @@ class CloudStorageParser:
             ("https://docs.google.com/spreadsheets/d/{}/export?format=ods", ".ods"),
         ]
 
-        async with aiohttp.ClientSession() as session:
-            for url_template, extension in formats_to_try:
-                try:
-                    url = url_template.format(sheet_id)
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
-                        if response.status == 200:
-                            with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as tmp_file:
-                                async for chunk in response.content.iter_chunked(8192):
-                                    tmp_file.write(chunk)
-                                tmp_path = tmp_file.name
+        session = self.http_manager.get_session()
+        # async with aiohttp.ClientSession() as session:
+        for url_template, extension in formats_to_try:
+            try:
+                url = url_template.format(sheet_id)
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                    if response.status == 200:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as tmp_file:
+                            async for chunk in response.content.iter_chunked(8192):
+                                tmp_file.write(chunk)
+                            tmp_path = tmp_file.name
 
-                            filename = f"google_sheets_{sheet_id}{extension}"
-                            
-                            return {
-                                "status": "success",
-                                "filename": filename,
-                                "file_path": tmp_path,
-                                "source": "cloud_storage", 
-                                "original_url": url,
-                                "procurement_id": procurement_id,
-                                "file_extension": extension
-                            }
+                        filename = f"google_sheets_{sheet_id}{extension}"
+                        
+                        return {
+                            "status": "success",
+                            "filename": filename,
+                            "file_path": tmp_path,
+                            "source": "cloud_storage", 
+                            "original_url": url,
+                            "procurement_id": procurement_id,
+                            "file_extension": extension
+                        }
 
-                except Exception as e:
-                    logger.warning(f"Формат {extension} не сработал: {str(e)}")
-                    continue
+            except Exception as e:
+                logger.warning(f"Формат {extension} не сработал: {str(e)}")
+                continue
             
         # Если все форматы не сработали, пробуем CSV
         return await self._try_google_sheets_csv(sheet_id, procurement_id)
@@ -1426,28 +1145,28 @@ class CloudStorageParser:
         """
         try:
             csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv"
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.get(csv_url, timeout=aiohttp.ClientTimeout(total=30)) as response:
-                    if response.status == 200:
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp_file:
-                            content = await response.read()
-                            tmp_file.write(content)
-                            tmp_path = tmp_file.name
+            session = self.http_manager.get_session()
+            # async with aiohttp.ClientSession() as session:
+            async with session.get(csv_url, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                if response.status == 200:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp_file:
+                        content = await response.read()
+                        tmp_file.write(content)
+                        tmp_path = tmp_file.name
 
-                        filename = f"google_sheets_{sheet_id}.csv"
-                        
-                        return {
-                            "status": "success",
-                            "filename": filename,
-                            "file_path": tmp_path,
-                            "source": "cloud_storage",
-                            "original_url": csv_url,
-                            "procurement_id": procurement_id,
-                            "file_extension": ".csv"
-                        }
-                    else:
-                        raise Exception(f"CSV export failed with status {response.status}")
+                    filename = f"google_sheets_{sheet_id}.csv"
+                    
+                    return {
+                        "status": "success",
+                        "filename": filename,
+                        "file_path": tmp_path,
+                        "source": "cloud_storage",
+                        "original_url": csv_url,
+                        "procurement_id": procurement_id,
+                        "file_extension": ".csv"
+                    }
+                else:
+                    raise Exception(f"CSV export failed with status {response.status}")
 
         except Exception as e:
             logger.error(f"CSV export также не сработал: {str(e)}")
@@ -1535,92 +1254,6 @@ class CloudStorageParser:
             return f"{url}&format=download"
         else:
             return f"{url}?format=download"
-
-
-    def _get_extension_from_content(self, content: bytes) -> str:
-        """
-        Определяет расширение файла по MIME-типу.
-
-        Args:
-            content_type (str): MIME-тип контента.
-
-        Returns:
-            str: Расширение файла (например, ".pdf") или ".bin" по умолчанию.
-        """
-        try:
-            mime = magic.Magic(mime=True)
-            mime_type = mime.from_buffer(content)
-            
-            extension_map = {
-            'application/pdf': '.pdf',
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx',
-            'application/msword': '.doc',
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx',
-            'application/vnd.ms-excel': '.xls',
-            'application/vnd.openxmlformats-officedocument.presentationml.presentation': '.pptx',
-            'application/vnd.ms-powerpoint': '.ppt',
-            'text/plain': '.txt',
-            'text/csv': '.csv',
-            'text/html': '.html',
-            'application/json': '.json',
-            'application/xml': '.xml',
-            'image/jpeg': '.jpg',
-            'image/jpg': '.jpg',
-            'image/png': '.png',
-            'image/gif': '.gif',
-            'image/webp': '.webp',
-            'image/svg+xml': '.svg',
-            'application/zip': '.zip',
-            'application/x-rar-compressed': '.rar',
-            'application/x-7z-compressed': '.7z',
-            'application/gzip': '.gz',
-            'application/x-tar': '.tar',
-        }
-
-            return extension_map.get(mime_type, '.bin')
-        except:
-            return '.bin'
-
-
-    def _get_extension_from_url(self, url: str) -> str:
-        """
-        Определяет расширение файла по URL.
-
-        Args:
-            url (str): URL файла.
-
-        Returns:
-            str: Расширение файла или ".bin" по умолчанию.
-        """
-        parsed = urlparse(url)
-        path = parsed.path.lower()
-
-        # Сначала пробуем по пути
-        extension_map = {
-            '.pdf': '.pdf',
-            '.docx': '.docx', '.doc': '.doc',
-            '.xlsx': '.xlsx', '.xls': '.xls',
-            '.pptx': '.pptx', '.ppt': '.ppt',
-            '.txt': '.txt', '.csv': '.csv',
-            '.zip': '.zip', '.rar': '.rar', '.7z': '.7z',
-            '.jpg': '.jpg', '.jpeg': '.jpg', '.png': '.png', '.gif': '.gif',
-            '.html': '.html', '.htm': '.html',
-        }
-        for ext in extension_map:
-            if path.endswith(ext):
-                return extension_map[ext]
-
-        # Затем пробуем из параметра filename в query string
-        query_params = parse_qs(parsed.query)
-        filenames = query_params.get('filename', [])
-        if filenames:
-            filename = filenames[0]
-            _, ext = os.path.splitext(filename)
-            ext = ext.lower()
-            if ext in extension_map:
-                return extension_map[ext]
-
-        return '.bin'
 
 
     def _extract_filename_from_url(self, url: str) -> str:
@@ -1721,38 +1354,39 @@ class CloudStorageParser:
                                 "Accept": "*/*"
                             }
     
-                            async with aiohttp.ClientSession() as session:
-                                async with session.get(direct_url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                                    if resp.status != 200:
-                                        logger.warning(f"Не удалось скачать файл {direct_url}: статус {resp.status}")
-                                        continue
-                                    
-                                    # Определяем расширение по Content-Type
-                                    content_type = resp.headers.get('content-type', '')
-                                    file_ext = self._get_extension_from_content_type(content_type)
-                                    if not file_ext or file_ext == '.bin':
-                                        file_ext = self._get_extension_from_url(direct_url)
-    
-                                    # Сохраняем во временный файл
-                                    with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
-                                        async for chunk in resp.content.iter_chunked(8192):
-                                            tmp.write(chunk)
-                                        tmp_path = tmp.name
-    
-                                    # Безопасное имя файла
-                                    safe_name = re.sub(r'[<>:"/\\|?*]', '_', orig_filename)
-                                    if not safe_name.endswith(file_ext):
-                                        safe_name += file_ext
-    
-                                    results.append({
-                                        "status": "success",
-                                        "filename": safe_name,
-                                        "file_path": tmp_path,
-                                        "source": "eis",
-                                        "original_url": direct_url,
-                                        "procurement_id": procurement_id,
-                                        "file_extension": file_ext
-                                    })
+                            session = self.http_manager.get_session()
+                            # async with aiohttp.ClientSession() as session:
+                            async with session.get(direct_url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                                if resp.status != 200:
+                                    logger.warning(f"Не удалось скачать файл {direct_url}: статус {resp.status}")
+                                    continue
+                                
+                                # Определяем расширение по Content-Type
+                                # content_type = resp.headers.get('content-type', '')
+                                file_ext = get_file_extension(content_type=resp.headers.get('Content-Type', ''))
+                                if not file_ext or file_ext == '.bin':
+                                    file_ext = get_file_extension(url=direct_url)
+
+                                # Сохраняем во временный файл
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
+                                    async for chunk in resp.content.iter_chunked(8192):
+                                        tmp.write(chunk)
+                                    tmp_path = tmp.name
+
+                                # Безопасное имя файла
+                                safe_name = re.sub(r'[<>:"/\\|?*]', '_', orig_filename)
+                                if not safe_name.endswith(file_ext):
+                                    safe_name += file_ext
+
+                                results.append({
+                                    "status": "success",
+                                    "filename": safe_name,
+                                    "file_path": tmp_path,
+                                    "source": "eis",
+                                    "original_url": direct_url,
+                                    "procurement_id": procurement_id,
+                                    "file_extension": file_ext
+                                })
     
                         except Exception as e:
                             logger.warning(f"Не удалось обработать файл {href}: {e}")
@@ -1838,7 +1472,7 @@ class CloudStorageParser:
 
         # 2. Любые другие ссылки → попытка скачать напрямую
         logger.info(f"Домен {domain} не поддерживается. Пробую generic-скачивание для: {url}")
-        result = await self._parse_generic_http_file(url, procurement_id)
+        result = await self._download_http_file(url=url, procurement_id=procurement_id, source="generic", handle_rate_limit=True)
 
         # 3. Если generic тоже не сработал — не падаем, возвращаем ошибку
         if result["status"] != "success":
@@ -1846,75 +1480,59 @@ class CloudStorageParser:
             return result
 
         return result
+    
 
-
-    async def _parse_generic_http_file(self, url: str, procurement_id: str = None) -> Dict:
+    def _extract_filename_from_headers(self, headers: dict, fallback_url: str) -> str:
         """
-        Скачивает файл по прямой HTTP/HTTPS-ссылке без специализированного парсера.
-
-        Используется как fallback для неизвестных доменов. Определяет имя и расширение файла
-        на основе заголовков Content-Disposition и Content-Type, а также из самого URL.
-        Сохраняет содержимое во временный файл и возвращает метаданные в унифицированном формате.
-
-        Args:
-            url (str): Прямая ссылка на файл для скачивания.
-            procurement_id (str, optional): Идентификатор закупки для логирования и привязки результата.
-                По умолчанию None.
-
-        Returns:
-            Dict: Словарь с результатом операции. При успехе содержит имя файла, путь к временному
-                файлу, источник и другие метаданные; при ошибке — статус "error" и сообщение об ошибке.
+        Извлекает имя файла из заголовка Content-Disposition.
+        
+        Поддерживает:
+        - filename="name.docx"
+        - filename*=UTF-8''name.docx (RFC 5987)
         """
-        try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (compatible; procurement-checker/1.0)"
-            }
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                    if resp.status != 200:
-                        return {
-                            "status": "error",
-                            "error": f"HTTP {resp.status}: не удалось скачать файл по прямой ссылке"
-                        }
+        content_disposition = headers.get('Content-Disposition', '')
+        
+        if not content_disposition:
+            # Fallback: извлекаем из URL
+            return self._extract_filename_from_url(fallback_url)
+        
+        # Пробуем filename* (RFC 5987, приоритетный)
+        # Пример: filename*=UTF-8''%D0%A4%D0%B0%D0%B9%D0%BB.docx
+        filename_star_match = re.search(r"filename\*\s*=\s*([^;]+)", content_disposition, re.IGNORECASE)
+        if filename_star_match:
+            value = filename_star_match.group(1).strip()
+            # Формат: UTF-8''encoded_name или utf-8''encoded_name
+            if "''" in value:
+                encoded_part = value.split("''", 1)[1]
+                try:
+                    return unquote(encoded_part)
+                except:
+                    pass
+        
+        # Пробуем обычный filename
+        # Пример: filename="%D0%A4%D0%B0%D0%B9%D0%BB.docx"
+        filename_match = re.search(r'filename\s*=\s*["\']?([^";\'\n]+)["\']?', content_disposition, re.IGNORECASE)
+        if filename_match:
+            filename = filename_match.group(1).strip()
+            try:
+                # URL-декодируем (кириллица в заголовках часто закодирована)
+                return unquote(filename)
+            except:
+                return filename
+        
+        # Fallback: из URL
+        return self._extract_filename_from_url(fallback_url)
 
-                    # Определяем имя файла: из Content-Disposition или из URL
-                    content_disposition = resp.headers.get("Content-Disposition", "")
-                    original_filename = self._extract_filename_from_content_disposition(content_disposition)
-                    if not original_filename:
-                        original_filename = os.path.basename(urlparse(url).path) or "generic_file"
 
-                    # Определяем расширение
-                    content_type = resp.headers.get("Content-Type", "")
-                    file_ext = self._get_extension_from_content_type(content_type)
-                    if not file_ext or file_ext == ".bin":
-                        file_ext = self._get_extension_from_url(url)
-
-                    # Сохраняем во временный файл
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
-                        async for chunk in resp.content.iter_chunked(8192):
-                            tmp.write(chunk)
-                        tmp_path = tmp.name
-
-                    safe_name = re.sub(r'[<>:"/\\|?*]', '_', original_filename)
-                    if not safe_name.endswith(file_ext):
-                        safe_name += file_ext
-
-                    return {
-                        "status": "success",
-                        "filename": safe_name,
-                        "file_path": tmp_path,
-                        "source": "generic_http",
-                        "original_url": url,
-                        "procurement_id": procurement_id,
-                        "file_extension": file_ext
-                    }
-
-        except Exception as e:
-            logger.error(f"Ошибка скачивания generic-файла {url}: {e}")
-            return {
-                "status": "error",
-                "error": f"Ошибка скачивания: {str(e)}"
-            }
+    def _sanitize_filename(self, filename: str) -> str:
+        """Очищает имя файла от недопустимых символов"""
+        # Удаляем проблемные символы для разных ОС
+        sanitized = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '_', filename)
+        # Ограничиваем длину
+        if len(sanitized) > 200:
+            name, ext = os.path.splitext(sanitized)
+            sanitized = name[:190] + ext
+        return sanitized.strip() or f"file_{uuid.uuid4().hex[:8]}"
 
 
     def _extract_filename_from_content_disposition(self, content_disposition: str) -> str:
@@ -1935,101 +1553,470 @@ class CloudStorageParser:
         return ""
 
 
-# Глобальный экземпляр парсера
-cloud_parser = CloudStorageParser()
 
 
-async def parse_cloud_storage_link(url: str, procurement_id: str = None) -> Dict:
-    """
-    Унифицирует обработку ссылок на документы из облаков и портала ЕИС с поддержкой валидации закупок.
 
-    Для ссылок на zakupki.gov.ru возвращает только метаданные закупки (включая номер)
-    без скачивания файлов — это позволяет проверить существование закупки, не запуская
-    полный анализ. Для всех остальных облачных сервисов (Mail.ru, Google Drive и пр.)
-    возвращает список скачанных файлов в единообразном формате. Гарантирует наличие
-    ключевых полей (procurement_number, files, source) независимо от источника.
 
-    Args:
-        url (str): URL на документ или страницу закупки (поддерживается ЕИС и публичные облака).
-        procurement_id (str, optional): Идентификатор закупки в локальной системе для привязки результата.
-            По умолчанию None.
 
-    Returns:
-        Dict: Словарь с единым интерфейсом ответа:
-            - для ЕИС: содержит procurement_number и пустой список files,
-            - для облаков: содержит список файлов в поле "files",
-            - при ошибке: статус "error" и диагностическое сообщение.
-    """
-    try:
-        # Парсим домен для логики ветвления
-        parsed_url = urlparse(url)
-        domain = parsed_url.netloc.lower()
 
-        # === 1. Обработка ЕИС: только метаданные, без файлов ===
-        if "zakupki.gov.ru" in domain:
-            result = await cloud_parser.parse_cloud_link(url, procurement_id)
-            procurement_number = result.get("procurement_number")
-            return {
-                "status": "success" if result.get("status") == "success" else "error",
-                "procurement_number": str(procurement_number) if procurement_number else None,
-                "source": "eis_web",
-                "original_url": url,
-                "procurement_id": procurement_id,
-                "files": [],  # Никаких файлов не обрабатываем
-                "error": result.get("error") if result.get("status") != "success" else None
+    def _extract_reestr_number_from_web_url(self, url: str) -> Optional[str]:
+        """
+        Извлекает реестровый номер из различных форматов URL ЕИС.
+
+        Args:
+            url (str): URL страницы закупки
+
+        Returns:
+            Optional[str]: Реестровый номер или None
+        """
+        try:
+            parsed = urlparse(url)
+            query_params = parse_qs(parsed.query)
+
+            # Пробуем разные параметры, которые могут содержать реестровый номер
+            reestr_number = (
+                query_params.get("regNumber", [None])[0] or
+                query_params.get("reestrNumber", [None])[0] 
+                # or query_params.get("noticeInfoId", [None])[0]
+            )
+
+            if reestr_number:
+                # Проверяем, что это действительно реестровый номер (обычно 20+ цифр)
+                if re.match(r'^\d{10,}$', reestr_number):
+                    return reestr_number
+
+            # Если в query параметрах нет, пробуем извлечь из пути
+            path_parts = parsed.path.split('/')
+            for part in path_parts:
+                # Реестровые номера обычно имеют формат: 0373200003624000001 (20+ цифр)
+                if re.match(r'^\d{10,}$', part):
+                    return part
+
+            # Для URL типа common-info.html пробуем найти номер в предыдущих частях пути
+            if 'common-info' in parsed.path or 'documents' in parsed.path:
+                # Ищем номер в предыдущих сегментах пути
+                path_segments = parsed.path.split('/')
+                for i, segment in enumerate(path_segments):
+                    if segment in ['common-info.html', 'documents.html', 'view'] and i > 0:
+                        # Берем предыдущий сегмент
+                        prev_segment = path_segments[i-1]
+                        if re.match(r'^\d{10,}$', prev_segment):
+                            return prev_segment
+
+            logger.warning(f"Не удалось извлечь реестровый номер из URL: {url}")
+            return None
+
+        except Exception as e:
+            logger.error(f"Ошибка извлечения реестрового номера из URL {url}: {str(e)}")
+            return None
+
+
+    def extract_urls_from_dict(self, data):
+        """Рекурсивно собирает все значения из словаря (или списка), 
+        где ключ заканчивается на 'url' (регистронезависимо)."""
+        urls = []
+        
+        if isinstance(data, dict):
+            for key, value in data.items():
+                # Проверяем окончание ключа (учитываем namespace-префиксы, например ns2:url)
+                if isinstance(key, str) and key.lower().endswith('url'):
+                    if isinstance(value, str):
+                        urls.append(value.strip())
+                
+                # Рекурсивно обходим вложенные значения
+                urls.extend(self.extract_urls_from_dict(value))
+                
+        elif isinstance(data, list):
+            for item in data:
+                urls.extend(self.extract_urls_from_dict(item))
+                
+        return urls
+
+    async def _parse_eis_soap_ip(self, reg_number: str, procurement_id: str = None) -> Dict:
+        """
+        Парсинг закупки через официальный SOAP API ЕИС для физических лиц.
+        Использует individualPerson_token и метод getDocsByReestrNumber.
+        """
+        try:
+            logger.info(f"Запрос документов ЕИС по regNumber={reg_number} через SOAP API")
+
+            # Формируем SOAP-запрос
+            async with aiofiles.open('xml/getDocsByReestrNumberRequest.xml', 'r', encoding='utf-8') as file:
+                xml_content = await file.read()
+                generated_uuid = str(uuid.uuid4())
+                generated_datetime = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+                subsystem_type = "PRIZ" if self.expertise_object in (3,5,6) else "RGK"
+                soap_body = (xml_content
+                    .replace("{{ UUID }}", generated_uuid)
+                    .replace("{{ datetime }}", generated_datetime)
+                    .replace("{{ token }}", self.eis_token)
+                    .replace("{{ subsystem_type }}", subsystem_type)
+                    .replace("{{ reg_number }}", reg_number)
+                )
+
+            headers = {
+                "Content-Type": "text/xml; charset=utf-8",
+                "SOAPAction": "\"\""
             }
 
-        # === 2. Обработка всех остальных ссылок через парсер ===
-        result = await cloud_parser.parse_cloud_link(url, procurement_id)
+            # === 3. Отправляем запрос ===
+            session = self.http_manager.get_session()
+            # async with aiohttp.ClientSession() as session:
+            async with session.post(
+                self.eis_soap_url,
+                data=soap_body,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=60)
+            ) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"SOAP ошибка: {response.status}, тело: {error_text}")
+                    return {"status": "error", "error": f"SOAP ошибка: {response.status}"}
 
-        # === 3. Унификация ответа ===
-        if result["status"] == "success":
-            # Уже содержит "files" — как из ЕИС SOAP, так и из облаков
-            if "files" in result:
-                return result
-            # Одиночный файл (например, из Google Drive) → оборачиваем в список
-            else:
+                soap_response = await response.text()
+                logger.info(f"Ответ ЕИС: {soap_response}")
+                response_content = await asyncio.to_thread(xmltodict.parse, soap_response)
+
+            # === 4. Парсим archiveUrl ===
+            archive_url = self._extract_eis_archive_url(response_content)
+            if not archive_url:
+                error_info = self._extract_eis_error_info(response_content)
+                if error_info:
+                    return {
+                        "status": "error", 
+                        "error": f"Ошибка парсинга ЕИС: {error_info}"
+                        }
                 return {
-                    "status": "success",
-                    "files": [result],
-                    "source": result.get("source", "cloud"),
+                    "status": "error", 
+                    "error": "Не найден archiveUrl в ответе ЕИС"
+                    }
+
+            logger.info(f"Получена ссылка на архив: {archive_url}")
+
+            # === 5. Скачиваем архив ===
+            logger.info(f"type(archive_url): {type(archive_url)}")
+
+            # Обработка: один URL или список
+            if isinstance(archive_url, list):
+                # Обрабатываем каждый архив параллельно
+                tasks = [
+                    self._download_eis_archive(url, f"{reg_number}_{i}", procurement_id)
+                    for i, url in enumerate(archive_url)
+                ]
+                async with self.semaphore:
+                    results = await asyncio.gather(*tasks)
+                
+                # Объединяем успешные результаты
+                all_files = []
+                errors = []
+                for res in results:
+                    if res.get("status") == "success" and "files" in res:
+                        all_files.extend(res["files"])
+                    elif res.get("status") == "error":
+                        errors.append(res.get("error"))
+                
+                if all_files:
+                    return {
+                        "status": "success",
+                        "procurement_number": reg_number,
+                        "files": all_files,
+                        "source": "eis_soap",
+                        "original_url": archive_url,
+                        "procurement_id": procurement_id,
+                        "archive_count": len(archive_url),
+                        "file_count": len(all_files)
+                    }
+                else:
+                    return {
+                        "status": "error",
+                        "procurement_number": reg_number,
+                        "error": f"Не удалось скачать ни один архив. Ошибки: {errors}",
+                        "eis_response": response_content
+                    }
+            else:
+                # Один URL — обрабатываем как раньше
+                result = await self._download_eis_archive(archive_url, reg_number, procurement_id)
+                result["eis_response"] = response_content
+
+                # logger.info(f"result before: {result}")
+
+                # скачиваем закупочную документацию
+                if result["status"] == "success":
+                    logger.info(f"request_method = 'getDocsByReestrNumberRequest'")
+
+                    # Фильтруем только успешные XML-файлы
+                    xml_files = [
+                        f for f in result["files"] 
+                        if f["status"] == "success" and f["file_extension"] == ".xml"
+                    ]
+                    
+                    if not xml_files:
+                        return result
+
+                    # Ограничитель параллелизма (настраивается)
+                    semaphore = asyncio.Semaphore(10)
+                    
+                    async def process_xml_file(file_info):
+                        async with semaphore:
+                            try:
+                                # Чтение файла
+                                async with aiofiles.open(file_info["file_path"], "r", encoding="utf-8") as f:
+                                    extracted_text = await f.read()
+                                
+                                if not extracted_text:
+                                    return []
+                                
+                                # Выносим CPU-bound операции в отдельный поток
+                                content = await asyncio.to_thread(xmltodict.parse, extracted_text)
+                                attachment_urls = await asyncio.to_thread(self.extract_urls_from_dict, content)
+                                
+                                logger.info(f"Найдено ссылок в {file_info['file_path']}: {len(attachment_urls)}")
+
+                                return attachment_urls
+                                
+                            except Exception as e:
+                                logger.error(f"Ошибка обработки {file_info.get('file_path')}: {e}", exc_info=True)
+                                return []
+                            
+                    
+                    # Запускаем обработку всех XML параллельно
+                    async with self.semaphore:
+                        attachment_urls = await asyncio.gather(
+                            *(process_xml_file(f) for f in xml_files),
+                            return_exceptions=True
+                        )
+                    # оставляем уникальные ссылки
+                    unique_urls = set([
+                        item for sublist in attachment_urls if isinstance(sublist, list)
+                        for item in sublist if "zakupki.gov.ru" in item
+                    ])
+                            
+                    # Параллельное скачивание ссылок 
+                    async with semaphore:
+                        if unique_urls:
+                            download_tasks = [
+                                self._download_http_file(url=url, procurement_id=procurement_id, source="eis_web", handle_rate_limit=True)
+                                for url in unique_urls
+                            ]
+                            async with self.semaphore:
+                                all_results = await asyncio.gather(*download_tasks, return_exceptions=True)
+                            
+                    # Фильтруем успешные результаты и исключения
+                    successful_downloads = [
+                        res for res in all_results 
+                        if isinstance(res, dict) and res.get("status") == "success"
+                    ]
+                    
+                    if successful_downloads:
+                        # result = successful_downloads
+                        result["files"] = successful_downloads
+                        # result["archive_size"] = sum(res["file_size"] for res in successful_downloads)
+                        # result["file_count"] = len(successful_downloads)
+
+                
+                return result
+
+        except Exception as e:
+            logger.error(f"Ошибка SOAP-парсинга ЕИС: {str(e)}", exc_info=True)
+            return {"status": "error", "procurement_number": reg_number, "error": f"Ошибка SOAP-парсинга: {str(e)}"}
+
+
+
+    async def parse_cloud_storage_link(self, url: str, procurement_id: str = None) -> Dict:
+        """
+        Унифицирует обработку ссылок на документы из облаков и портала ЕИС с поддержкой валидации закупок.
+
+        Для ссылок на zakupki.gov.ru возвращает только метаданные закупки (включая номер)
+        без скачивания файлов — это позволяет проверить существование закупки, не запуская
+        полный анализ. Для всех остальных облачных сервисов (Mail.ru, Google Drive и пр.)
+        возвращает список скачанных файлов в единообразном формате. Гарантирует наличие
+        ключевых полей (procurement_number, files, source) независимо от источника.
+
+        Args:
+            url (str): URL на документ или страницу закупки (поддерживается ЕИС и публичные облака).
+            procurement_id (str, optional): Идентификатор закупки в локальной системе для привязки результата.
+                По умолчанию None.
+
+        Returns:
+            Dict: Словарь с единым интерфейсом ответа:
+                - для ЕИС: содержит procurement_number и пустой список files,
+                - для облаков: содержит список файлов в поле "files",
+                - при ошибке: статус "error" и диагностическое сообщение.
+        """
+        try:
+            # Парсим домен для логики ветвления
+            parsed_url = urlparse(url)
+            domain = parsed_url.netloc.lower()
+
+            # # === 1. Обработка ЕИС: только метаданные, без файлов ===
+            # if "zakupki.gov.ru" in domain:
+            #     result = await self.parse_cloud_link(url, procurement_id)
+            #     procurement_number = result.get("procurement_number")
+            #     return {
+            #         "status": "success" if result.get("status") == "success" else "error",
+            #         "procurement_number": str(procurement_number) if procurement_number else None,
+            #         "source": "eis_web",
+            #         "original_url": url,
+            #         "procurement_id": procurement_id,
+            #         "files": [],  # Никаких файлов не обрабатываем
+            #         "error": result.get("error") if result.get("status") != "success" else None
+            #     }
+
+            # === 2. Обработка всех остальных ссылок через парсер ===
+            result = await self.parse_cloud_link(url, procurement_id)
+
+            # === 3. Унификация ответа ===
+            if result["status"] == "success":
+                # Уже содержит "files" — как из ЕИС SOAP, так и из облаков
+                if "files" in result:
+                    return result
+                # Одиночный файл (например, из Google Drive) → оборачиваем в список
+                else:
+                    return {
+                        "status": "success",
+                        "files": [result],
+                        "source": result.get("source", "cloud"),
+                        "original_url": url,
+                        "procurement_id": procurement_id
+                    }
+            else:
+                # Ошибка парсинга — возвращаем её как есть
+                return {
+                    "status": "error",
+                    "error": result.get("error", "Неизвестная ошибка при обработке ссылки"),
+                    "source": result.get("source", "unknown"),
                     "original_url": url,
-                    "procurement_id": procurement_id
+                    "procurement_id": procurement_id,
+                    "files": []
                 }
-        else:
-            # Ошибка парсинга — возвращаем её как есть
+
+        except Exception as e:
+            logger.exception(f"Необработанное исключение в parse_cloud_storage_link для URL: {url}")
             return {
                 "status": "error",
-                "error": result.get("error", "Неизвестная ошибка при обработке ссылки"),
-                "source": result.get("source", "unknown"),
+                "error": f"Внутренняя ошибка обработки ссылки: {str(e)}",
+                "source": "unknown",
                 "original_url": url,
                 "procurement_id": procurement_id,
                 "files": []
             }
 
-    except Exception as e:
-        logger.exception(f"Необработанное исключение в parse_cloud_storage_link для URL: {url}")
-        return {
-            "status": "error",
-            "error": f"Внутренняя ошибка обработки ссылки: {str(e)}",
-            "source": "unknown",
-            "original_url": url,
-            "procurement_id": procurement_id,
-            "files": []
-        }
 
 
-def is_cloud_storage_link(url: str) -> bool:
-    """
-    Проверяет, является ли URL ссылкой на документ в поддерживаемом облачном хранилище.
-
-    Использует внутреннюю логику парсера для распознавания ссылок на популярные
-    облачные сервисы, такие как Яндекс.Диск, Google Drive и другие.
-
-    Args:
-        url (str): Проверяемый URL.
-
-    Returns:
-        bool: True, если ссылка ведёт на поддерживаемое облачное хранилище, иначе False.
-    """
-    return cloud_parser.is_cloud_link(url)
+    @async_retry(EIS_RETRY_CONFIG)
+    async def _download_http_file(
+        self,
+        url: str,
+        procurement_id: str = None,
+        source: str = "generic",
+        resource_id: str = None,
+        file_extension: str = None,
+        original_filename: str = None,
+        handle_rate_limit: bool = True,
+        fallback_formats: List[Tuple[str, str]] = None  # Для Google Sheets и подобных
+    ) -> Dict:
+        """
+        Универсальная функция для скачивания файлов по прямым HTTP/HTTPS-ссылкам.
+        
+        Args:
+            url: Прямая ссылка на файл
+            procurement_id: Идентификатор закупки
+            source: Источник файла (для логирования)
+            resource_id: Идентификатор ресурса (опционально)
+            file_extension: Предопределённое расширение (опционально)
+            original_filename: Оригинальное имя файла (опционально)
+            handle_rate_limit: Обрабатывать ли 429 ошибки (по умолчанию True)
+            fallback_formats: Список альтернативных форматов для повторных попыток
+                            [(url_template, extension), ...]
+        
+        Returns:
+            Dict с результатом скачивания в унифицированном формате
+        """
+        try:
+            # Ждём «разрешения» от глобального лимитера ПЕРЕД запросом
+            await self.rate_limiter.acquire()
+            
+            headers = {"User-Agent": "Mozilla/5.0 (compatible; procurement-checker/1.0)"}
+            session = self.http_manager.get_session()
+            # async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=120)
+            ) as resp:
+                # Обработка 429 (слишком много запросов)
+                if handle_rate_limit and resp.status == 429:
+                    retry_after = resp.headers.get('Retry-After')
+                    retry_after_sec = int(retry_after) if retry_after else None
+                    raise EISRateLimitError(
+                        f"Rate limit exceeded: {url}",
+                        retry_after=retry_after_sec
+                    )
+                
+                # Обработка ошибок с попыткой альтернативных форматов
+                if resp.status != 200:
+                    if fallback_formats and len(fallback_formats) > 0:
+                        # Пробуем следующий формат рекурсивно
+                        next_url, next_ext = fallback_formats.pop(0)
+                        return await self._download_http_file(
+                            url=next_url.format(resource_id),
+                            procurement_id=procurement_id,
+                            source=source,
+                            resource_id=resource_id,
+                            file_extension=next_ext,
+                            original_filename=original_filename,
+                            handle_rate_limit=handle_rate_limit,
+                            fallback_formats=fallback_formats
+                        )
+                    else:
+                        error_text = await resp.text()
+                        logger.info(f"Ошибка скачивания: {resp.status}, тело: {error_text[:300]}")
+                        return {
+                            "status": "error",
+                            "error": f"HTTP {resp.status}: не удалось скачать файл"
+                        }
+                
+                # Читаем контент
+                content = await resp.read()
+                
+                # Определяем имя файла
+                if original_filename:
+                    filename = self._sanitize_filename(original_filename)
+                else:
+                    filename = self._extract_filename_from_headers(resp.headers, url)
+                
+                # Определяем расширение
+                if not file_extension:
+                    file_extension = get_file_extension(filename=filename, content_type=resp.headers.get('Content-Type', ''))
+                    if not file_extension or file_extension == '.bin':
+                        file_extension = get_file_extension(url=url)
+                
+                # Финальная очистка имени
+                safe_name = self._sanitize_filename(filename)
+                if not safe_name.endswith(file_extension):
+                    safe_name += file_extension
+                
+                # Создаём временный файл
+                with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp_file:
+                    tmp_file.write(content)
+                    tmp_path = tmp_file.name
+                
+                return {
+                    "status": "success",
+                    "filename": safe_name,
+                    "file_path": tmp_path,
+                    "source": source,
+                    "original_url": url,
+                    "procurement_id": procurement_id,
+                    "file_extension": file_extension
+                }
+                    
+        except EISRateLimitError:
+            logger.error(f"Исчерпаны попытки скачивания {url}")
+            return {"status": "error", "error": "Исчерпаны попытки скачивания"}
+        except (ConnectionError, TimeoutError):
+            logger.error(f"Сетевая ошибка для {url}")
+            return {"status": "error", "error": "Network error after retries"}
+        except Exception as e:
+            logger.warning(f"Ошибка скачивания файла {url}: {str(e)}")
+            return {"status": "error", "error": f"Ошибка скачивания: {str(e)}"}

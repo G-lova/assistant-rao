@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope 
+    xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" 
+    xmlns:ws="http://zakupki.gov.ru/fz44/get-docs-ip/ws">
+   <soapenv:Header>
+      <individualPerson_token>{{ token }}</individualPerson_token>
+   </soapenv:Header>
+   <soapenv:Body>
+      <ws:getNsiRequest>
+         <index>
+            <id>{{ UUID }}</id>
+            <createDateTime>{{ datetime }}</createDateTime>
+            <mode>PROD</mode>
+         </index>
+         <selectionParams>
+            {{ nsi_code_fz }}
+            <nsiKind>{{ nsi_kind }}</nsiKind>
+         </selectionParams>
+      </ws:getNsiRequest>
+   </soapenv:Body>
+</soapenv:Envelope>

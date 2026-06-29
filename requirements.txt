@@ -1,5 +1,6 @@
 aiofiles
 asyncpg
+defusedxml
 fastapi==0.95.2
 fuzzywuzzy
 json-repair
@@ -14,6 +15,7 @@ pdf2image
 pillow
 psycopg2-binary==2.9.9
 pydantic==1.10.8
+scipy==1.11.4
 pyod==2.0.5
 PyPDF2==3.0.1
 python-dateutil
@@ -25,10 +27,11 @@ python-multipart==0.0.20
 python-pptx==0.6.23
 pyunpack==0.3
 PyYAML==6.0.2
-qdrant-client==1.7.3
+qdrant-client==1.9.0
 rarfile==4.2
 requests==2.32.4 
 scikit-learn
+tiktoken
 textract==1.6.5
 tiktoken
 tqdm>=4.66.0
@@ -40,7 +43,6 @@ celery==5.3.4
 redis==5.0.1
 flower==2.0.1
 aiohttp>=3.13.0
-httpx
 playwright
 beautifulsoup4
 lxml

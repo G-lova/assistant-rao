@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Создаем экземпляр Celery
 celery_app = Celery(
-    'procurement_analyzer',
+    'celery_app',
     broker=os.getenv('REDIS_URL', 'redis://localhost:6379/0'),
     backend=os.getenv('REDIS_URL', 'redis://localhost:6379/0'),
     include=[
@@ -31,8 +31,12 @@ celery_app.conf.update(
     result_serializer='json',
     timezone='Europe/Moscow',
     enable_utc=True,
+
+    task_time_limit=1800,      # 30 минут максимум
+    task_soft_time_limit=1500, # 25 минут мягкий лимит
+    worker_max_tasks_per_child=50,  # Перезапуск воркера после 50 задач
+    worker_max_memory_per_child=2000000,  # 2GB - перезапуск при утечке
     
-    # Настройки ретраев
     # Настройки ретраев для Celery
     task_default_retry_delay=10,
     task_max_retries=3,
@@ -77,6 +81,7 @@ celery_app.conf.task_default_retry_delay = 10
 celery_app.conf.task_max_retries = 3
 celery_app.conf.task_time_limit = 1800
 celery_app.conf.task_soft_time_limit = 1500
+celery_app.conf.broker_connection_retry_on_startup = True
 
 
 if __name__ == '__main__':

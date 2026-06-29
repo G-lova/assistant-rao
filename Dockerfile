@@ -1,5 +1,6 @@
 # Use an official Python runtime as a parent image
-FROM python:3.11-slim
+# FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 # Install necessary system dependencies and build tools
 RUN apt-get update && \
@@ -8,6 +9,7 @@ RUN apt-get update && \
         libssl-dev \
         libffi-dev \
         python3-dev \
+        ca-certificates \
         antiword \
         libmagic1 \
         libreoffice \
@@ -21,7 +23,9 @@ RUN apt-get update && \
         libgl1 \
         libglib2.0-0 \
         libxml2-dev \
-        libxslt-dev && \
+        libxslt-dev \
+        wkhtmltopdf && \
+    update-ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 RUN wget https://www.rarlab.com/rar/unrar_5.2.5-0.1_amd64.deb && \
@@ -36,7 +40,6 @@ COPY . .
 
 # Install any needed packages specified in requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
-RUN playwright install --with-deps chromium
 
 # Run the application with auto-reload
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "20142", "--reload"]

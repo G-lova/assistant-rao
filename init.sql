@@ -1,7 +1,7 @@
 -- Таблица для хранения извлечённых "сырых" данных из документов
 CREATE TABLE raw_document_data (
     id SERIAL PRIMARY KEY,
-    procurement_id TEXT NOT NULL,  -- id закупки
+    procurement_id INTEGER NOT NULL,  -- id закупки
     acceptance_act JSONB, -- Акт о приемке товара
     works_acceptance_doc JSONB, -- Документ о приемке и/или акт сдачи-приемки работ (услуг)
     goods_acceptance_doc JSONB, -- Документ о приемке товара (УПД, Счет-фактура и др.)
@@ -33,7 +33,7 @@ CREATE TABLE raw_document_data (
     work_results_photos JSONB, -- Фото результатов выполнения работ (оказания услуг)
     goods_photos JSONB, -- Фото товара
     contract_execution_expertise JSONB, -- Экспертиза результатов исполнения контракта
-    eis_data JSONB, -- Проверка доступности ЕИС и номер закупки
+    unknown JSONB, -- Неизвестный документ
     summary_report JSONB,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -82,3 +82,7 @@ CREATE TABLE clean_document_conclusions (
 -- Индексы для производительности
 CREATE INDEX idx_raw_procurement_id ON raw_document_data (procurement_id);
 CREATE INDEX idx_clean_procurement_id ON clean_document_conclusions (procurement_id);
+    summary_report JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);

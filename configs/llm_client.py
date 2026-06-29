@@ -1,5 +1,7 @@
 from openai import AsyncOpenAI
 from configs.config import Config
+
+
 from functools import lru_cache
 
 @lru_cache(maxsize=1)

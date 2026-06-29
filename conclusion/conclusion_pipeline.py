@@ -4,6 +4,8 @@ import pandas as pd
 
 from typing import Any, Dict, List
 from conclusion.ai_conclusion_consolidator import ConclusionConsoladator
+from configs.http_client_manager import HTTPClientManager
+from configs.llm_client import get_llm
 from configs.logger import get_logger
 from configs.config import Config
 from conclusion.external_api_service import ExternalAPIService
@@ -22,7 +24,7 @@ class RaoConclusionPipeline:
     
     """
 
-    def __init__(self, expertise_id: int, environment: str = None):
+    def __init__(self, http_manager: HTTPClientManager, expertise_id: int, environment: str = None):
         """
         
         """
@@ -32,17 +34,12 @@ class RaoConclusionPipeline:
         # Инициализация компонентов с конфигурацией
         db_config = self.config.get_database_config(environment)
         paths_config = self.config.get_paths_config()
-        llm_config = self.config.get_m_model_config()
+        llm_client, llm_model = get_llm()
+        self.http_manager = http_manager
         
-        # llm_client = OpenAI(
-        llm_client = AsyncOpenAI(
-            base_url=llm_config.api_url, 
-            api_key=llm_config.api_key
-        )
-        
-        self.data_fetcher = DataFetcher(db_config.url, db_config.headers)
-        self.conclusion_consolidator = ConclusionConsoladator(llm_client, llm_config.model)
-        self.external_api_service = ExternalAPIService(environment)
+        self.data_fetcher = DataFetcher(db_config.url, db_config.headers, self.http_manager)
+        self.conclusion_consolidator = ConclusionConsoladator(llm_client, llm_model)
+        self.external_api_service = ExternalAPIService(self.http_manager, environment)
         
         self.sql_queries_path = paths_config.sql_queries
 
@@ -67,12 +64,13 @@ class RaoConclusionPipeline:
             # Получение данных
             logger.info(f"Загрузка даннных для expertise_id={self.expertise_id}")
             df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[self.expertise_id])
-            logger.info(f"Получено {len(df)} записей из MySQL")
             
-            if len(df) < 2:
+            if df.empty or df['id'].isna().all() or (df['id'].astype(str) == 'None').all() or (len(df) < 2):
                 error_msg = (f"Недостаточно данных для expertise_id={self.expertise_id}. Требуется не менее 2 записей.")
                 logger.error(error_msg)
                 return pd.DataFrame()
+                
+            logger.info(f"Получено {len(df)} записей из MySQL")
             
             return df
         
@@ -221,39 +219,51 @@ class RaoConclusionPipeline:
                 return {}
             
             # Получение данных о загруженных документах
-            # summary_report = await get_async_summary_report_from_db(self.expertise_id)
-            # if isinstance(summary_report, str):
-            #     try:
-            #         summary_report = json.loads(summary_report)
-            #     except Exception:
-            #         pass
+            summary_report = await get_async_summary_report_from_db(self.expertise_id)
+            if isinstance(summary_report, str):
+                try:
+                    summary_report = json.loads(summary_report)
+                except Exception:
+                    pass
 
-            # if not summary_report:
-            #     summary_report = {}
+            if not summary_report:
+                summary_report = {}
             
-            # content =  {
-            #     "summary_report": summary_report,
-            #     "opinions": opinions
-            # }
+            content =  {
+                "opinions": [],
+                "summary_report": summary_report
+            }
+
+            fields = (
+                ("code", "inn", "name", "documents", "field1_1", "field1_2", "field1_3")
+                if expertise_object in (5, 6)
+                else ("field1_1", "field6_1_2", "field6_1_3")
+            )
+
+            for opinion in opinions:
+                content["opinions"].append({key: opinion.get(key, "") for key in fields})
 
 
             # Получение полей, основанных на данных контракта
-            # ai_conclusion = await self.conclusion_consolidator.get_rao_conclusion(json.dumps(content, ensure_ascii=False), self.expertise_id, expertise_object)
+            ai_conclusion = await self.conclusion_consolidator.get_rao_conclusion(json.dumps(content, ensure_ascii=False), self.expertise_id, expertise_object)
 
             # Генерация итогового заключения
             rao_conclusion = self.deep_merge_dicts(expertise_object, opinions)
             logger.info(f"Слияние успешно завершено для expertise_id={self.expertise_id}")
+            logger.info(f"rao_conclusion: {rao_conclusion}")
 
-            # logger.info(f"Попытка использовать значения ИИ для expertise_id={self.expertise_id}")
-            # if ai_conclusion and ai_conclusion.get('status', {}) == 'success' and ai_conclusion.get('conclusion', {}):
-            #     change = 0
-            #     for key, value in ai_conclusion.get('conclusion', {}).items():
-            #         if key in rao_conclusion and value:
-            #             rao_conclusion[key] = value
-            #             change +=1
-            #     logger.info(f"Внесено {change} изменений с помощью ИИ")
-            # else:
-            #     logger.info(f"Не удалось внести изменения с помощью ИИ: {ai_conclusion.get('error', {})}")
+            logger.info(f"Попытка использовать значения ИИ для expertise_id={self.expertise_id}")
+            if ai_conclusion and ai_conclusion.get('status') == 'success' and ai_conclusion.get('conclusion', {}):
+                change = 0
+                for key, value in ai_conclusion.get('conclusion', {}).items():
+                    if (key in rao_conclusion) and (value) and (not isinstance(value, list)):
+                        rao_conclusion[key] = value
+                        change +=1
+                logger.info(f"Внесено {change} изменений с помощью ИИ")
+            else:
+                logger.info(f"Не удалось внести изменения с помощью ИИ: {ai_conclusion.get('error', {})}")
+
+            logger.info(f"rao_conclusion: {rao_conclusion}")
 
             logger.info(f'Добавление недостающих полей')
             field = 'field4_4_1' if expertise_type == 14 else 'field4_0_1'

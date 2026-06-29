@@ -4,6 +4,7 @@ import os
 from datetime import date
 
 from configs.config import Config
+from configs.http_client_manager import HTTPClientManager
 from search_experts.pipeline import ScoringPipeline
 from configs.logger import get_logger
 
@@ -15,7 +16,11 @@ sys.path.insert(0, project_root)
 
 logger = get_logger(__name__)
 
+<<<<<<< HEAD
 async def scoring(expertise_id: int, details: bool, x_api_database: str) -> list:
+=======
+async def scoring(expertise_id: int, details: bool, x_api_database: str, http_manager: HTTPClientManager) -> list:
+>>>>>>> develop
     """
     Запускает пайплайн скоринга экспертов для заданной экспертизы.
 
@@ -41,7 +46,11 @@ async def scoring(expertise_id: int, details: bool, x_api_database: str) -> list
         logger.info("Starting scoring pipeline...")
 
         # Создание пайплайна
+<<<<<<< HEAD
         pipeline = ScoringPipeline(x_api_database)
+=======
+        pipeline = ScoringPipeline(http_manager, x_api_database)
+>>>>>>> develop
 
         # Параметры запуска
         sql_file_name = "experts_for_expertise.sql"
@@ -74,12 +83,23 @@ async def scoring(expertise_id: int, details: bool, x_api_database: str) -> list
         logger.error(f"Error in scoring pipeline: {e}", exc_info=True)
         raise
 
+<<<<<<< HEAD
     finally:
         # закрытие клиента
         if pipeline and hasattr(pipeline, "embedding_client"):
             await pipeline.embedding_client.close()
+=======
+    # finally:
+    #     # закрытие клиента
+    #     if pipeline and hasattr(pipeline, "embedding_client"):
+    #         await pipeline.embedding_client.close()
+>>>>>>> develop
 
 if __name__ == "__main__":
 
     expertise_id = int(input('ID экспертизы для подбора эксперта:'))
+<<<<<<< HEAD
     asyncio.run(scoring(expertise_id, False, "dev"))
+=======
+    asyncio.run(scoring(expertise_id, False, "dev", http_manager))
+>>>>>>> develop

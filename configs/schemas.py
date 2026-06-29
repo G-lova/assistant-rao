@@ -81,13 +81,12 @@ class EvaluateRequest(BaseModel):
     Args:
         BaseModel (_type_): Базовый класс Pydantic для валидации и сериализации данных.
     """
-    procurement_id: str
-    type: str  # "44ФЗ" / "223"
-    checkType2: str  # "Конкурс", "Аукцион" и т.д.
-    object: str  # "Закупки", "Отчет"
-    users: Dict[str, Any]  # users.organization
-    linkDocs: Optional[str] = None
-    media: List[DocumentItem]
+    expertise_id: int
+    
+
+class ExpertsScoringRequest(BaseModel):
+    expertise_id: int
+    details: bool = False
     
 
 class ExpertsScoringRequest(BaseModel):
@@ -105,3 +104,16 @@ class ViolationsReportRequest(BaseModel):
     filters: Dict[str, Any] = {}
     data: Dict[str, Any]
     charts: List = []
+
+
+class EISParseRequest(BaseModel):
+    request_method: str
+    subsystem_type: str = "PRIZ"
+    reg_number: str = ""
+    org_region: str = ""
+    fz: int = 44
+    document_type: str = "contract"
+    nsi_code: str = "nsiAllList"
+    nsi_kind: str = "all"
+    exact_date: str = ""
+    procurement_id: str = None

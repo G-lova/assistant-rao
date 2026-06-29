@@ -1,0 +1,407 @@
+{
+    "type": "object",
+    "description": "Структурированный анализ документа закупки. Все поля обязательны.",
+    "required": [
+        "type_compliance",
+        "readability",
+        "raw_data"
+    ],
+    "properties": {
+        "type_compliance": {
+            "type": "object",
+            "required": [
+                "status",
+                "detected_type",
+                "issues"
+            ],
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "allow",
+                        "deny"
+                    ],
+                    "description": "Статус соответствия типа документа ожидаемому."
+                },
+                "detected_type": {
+                    "type": "string",
+                    "enum": "ALLOWED_DOC_TYPES",
+                    "description": "Один из ключей словаря или 'docDopMaterialsFiles'"
+                },
+                "issues": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "description": "Тип проблемы (например, 'ожидался проект контракта, но в документе — техническое задание' или 'не удалось определить тип: пустой документ')"
+                    },
+                    "description": "Проблемы соответствия или распознавания типа документа"
+                },
+                "confidence": {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                    "description": "Вероятность отнесения документа к определенному типу"
+                },
+                "key_indicators": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "description": "Ключевые маркеры определения типа документа"
+                }
+            }
+        },
+        "readability": {
+            "type": "object",
+            "description": "Оценка качества текста и читаемости документа.",
+            "required": [
+                "status",
+                "issues",
+                "readability_score",
+                "main_language",
+                "language_confidence"
+            ],
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "allow",
+                        "deny"
+                    ],
+                    "description": "Общее состояние читаемости."
+                },
+                "image_description": {
+                    "type": "string",
+                    "description": "Описание распознаного изображения",
+                    "enum": [
+                        "img_description"
+                    ],
+                    "default": ""
+                },
+                "issues": {
+                    "type": "array",
+                    "description": "Проблемы, обнаруженные при OCR распознавании",
+                    "items": {
+                        "type": "string",
+                        "description": "Тип проблемы (например, 'низкое_качество_скана', 'отсутствует_текст', 'язык не русский', 'водяные_знаки')"
+                    }
+                },
+                "readability_score": {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                    "description": "Оценка читаемости уже очищенного текста документа от 0 (нечитаемо) до 1 (отлично читается)"
+                },
+                "main_language": {
+                    "type": "string",
+                    "description": "Основной язык документа в формате ISO 639-1 (например, 'ru', 'en', 'de')"
+                },
+                "language_confidence": {
+                    "type": "number",
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                    "description": "Уверенность в определении языка (0.0-1.0)"
+                }
+            }
+        },
+        "raw_data": {
+            "type": "object",
+            "description": "Извлечённые структурированные данные из документа.",
+            "required": [
+                "document_name",
+                "contract_number",
+                "dates",
+                "amounts",
+                "organizations",
+                "law_references"
+            ],
+            "properties": {
+                "document_name": {
+                    "type": "string",
+                    "description": "Наименование документа (как написано)"
+                },
+                "contract_number": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Номер контракта"
+                },
+                "dates": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": [
+                            "value",
+                            "context"
+                        ],
+                        "properties": {
+                            "value": {
+                                "type": "string",
+                                "description": "Дата в формате ГГГГ-ММ-ДД или как указана в документе."
+                            },
+                            "context": {
+                                "type": "string",
+                                "description": "Контекст упоминания даты: 'Дата извещения', 'Дата контракта' и т.п."
+                            }
+                        }
+                    },
+                    "default": [],
+                    "description": "Список всех найденных дат с контекстом."
+                },
+                "amounts": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": [
+                            "value",
+                            "currency",
+                            "context"
+                        ],
+                        "properties": {
+                            "value": {
+                                "type": "number",
+                                "description": "Числовое значение суммы (без пробелов и символов, кроме точки)."
+                            },
+                            "currency": {
+                                "type": "string",
+                                "description": "Валюта: RUB, USD, EUR и т.д."
+                            },
+                            "context": {
+                                "type": "string",
+                                "description": "Контекст упоминания суммы: 'НМЦК', 'Цена контракта', 'Оплата по счёту'."
+                            }
+                        }
+                    },
+                    "default": [],
+                    "description": "Финансовые значения с указанием страницы и контекста."
+                },
+                "nmck_method": {
+                    "type": "object",
+                    "description": "Метод обоснования НМЦК.",
+                    "required": [
+                        "method",
+                        "assessment"
+                    ],
+                    "properties": {
+                        "method": {
+                            "type": "string",
+                            "description": "Наименование метода обоснования НМЦК: 'среднерыночный', 'индексный', 'затратный' и т.п."
+                        },
+                        "assessment": {
+                            "type": "string",
+                            "description": "Оценка корректности формул и входных параметров, соответствующих данному методу обоснования НМЦК."
+                        }
+                    }
+                },
+                "organizations": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": [
+                            "role",
+                            "name"
+                        ],
+                        "properties": {
+                            "role": {
+                                "type": "string",
+                                "enum": [
+                                    "заказчик",
+                                    "поставщик",
+                                    "участник"
+                                ],
+                                "description": "Роль юрлица в закупке."
+                            },
+                            "name": {
+                                "type": "string",
+                                "description": "Полное наименование организации."
+                            },
+                            "inn": {
+                                "type": "string",
+                                "default": "",
+                                "description": "ИНН организации (если указан)."
+                            },
+                            "kpp": {
+                                "type": "string",
+                                "default": "",
+                                "description": "КПП (для российских юрлиц)."
+                            },
+                            "ogrn": {
+                                "type": "string",
+                                "default": "",
+                                "description": "ОГРН."
+                            },
+                            "address": {
+                                "type": "string",
+                                "default": "",
+                                "description": "Юридический или фактический адрес."
+                            }
+                        }
+                    },
+                    "default": [],
+                    "description": "Список организаций, участвующих в документе."
+                },
+                "law_references": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "description": "Упоминания законов: '44-ФЗ', '223-ФЗ', 'ПП РФ №123'."
+                },
+                "procurement_subject": {
+                    "type": "object",
+                    "default": {},
+                    "description": "Детальное описание предмета закупки.",
+                    "properties": {
+                        "description": {
+                            "type": "string",
+                            "default": "",
+                            "description": "Полное описание предмета закупки."
+                        },
+                        "items": {
+                            "type": "array",
+                            "description": "Список товаров, работ или услуг.",
+                            "default": [],
+                            "items": {
+                                "type": "object",
+                                "required": [
+                                    "name"
+                                ],
+                                "properties": {
+                                    "name": {
+                                        "type": "string",
+                                        "description": "Наименование товара/работы/услуги."
+                                    },
+                                    "quantity": {
+                                        "type": "number",
+                                        "default": "",
+                                        "description": "Количество."
+                                    },
+                                    "unit": {
+                                        "type": "string",
+                                        "default": "",
+                                        "description": "Единица измерения."
+                                    },
+                                    "specifications": {
+                                        "type": "string",
+                                        "default": "",
+                                        "description": "Технические характеристики."
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "planned_timeline": {
+                    "type": "object",
+                    "default": {},
+                    "description": "Информация о сроках выполнения работ/поставки.",
+                    "properties": {
+                        "start_date": {
+                            "type": "string",
+                            "default": "",
+                            "description": "Дата начала в формате ГГГГ-ММ-ДД."
+                        },
+                        "end_date": {
+                            "type": "string",
+                            "default": "",
+                            "description": "Дата окончания в формате ГГГГ-ММ-ДД."
+                        },
+                        "total_duration": {
+                            "type": "string",
+                            "default": "",
+                            "description": "Общая продолжительность (например, '30 календарных дней')."
+                        },
+                        "milestones": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "required": [
+                                    "stage",
+                                    "deadline"
+                                ],
+                                "properties": {
+                                    "stage": {
+                                        "type": "string",
+                                        "description": "Название этапа."
+                                    },
+                                    "deadline": {
+                                        "type": "string",
+                                        "description": "Срок выполнения этапа."
+                                    }
+                                }
+                            },
+                            "default": [],
+                            "description": "Этапы выполнения работ (если есть)."
+                        }
+                    }
+                },
+                "reporting_documentation": {
+                    "type": "object",
+                    "default": {},
+                    "description": "Требования к составу отчетной документации.",
+                    "properties": {
+                        "required_reports": {
+                            "type": "array",
+                            "required": [
+                                "document_name",
+                                "frequency",
+                                "deadline",
+                                "format"
+                            ],
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "document_name": {
+                                        "type": "string",
+                                        "description": "Наименование отчета."
+                                    },
+                                    "frequency": {
+                                        "type": "string",
+                                        "default": "",
+                                        "description": "Периодичность предоставления."
+                                    },
+                                    "deadline": {
+                                        "type": "string",
+                                        "default": "",
+                                        "description": "Срок предоставления."
+                                    },
+                                    "format": {
+                                        "type": "string",
+                                        "default": "",
+                                        "description": "Требуемый формат."
+                                    }
+                                }
+                            },
+                            "default": [],
+                            "description": "Список требуемых отчетных документов."
+                        }
+                    }
+                },
+                "execution_location": {
+                    "type": "object",
+                    "description": "Место выполнения работ, услуг или поставки товара.",
+                    "properties": {
+                        "address": {
+                            "type": "string",
+                            "default": "",
+                            "description": "Полный адрес (индекс, город, улица, дом)."
+                        },
+                        "special_conditions": {
+                            "type": "string",
+                            "default": "",
+                            "description": "Особые условия доставки/выполнения."
+                        }
+                    }
+                },
+                "other_data": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "description": "Другие важные данные для этого типа документа"
+                }
+            }
+        }
+    }
+}

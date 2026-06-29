@@ -1,7 +1,8 @@
 import asyncio
 import requests
 import json
-import httpx
+from configs.http_client_manager import HTTPClientManager
+import aiohttp
 import logging
 from typing import Dict, Any
 
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 class ExternalAPIService:
     """Сервис для отправки данных во внешнее API (исходная версия)"""
     
-    def __init__(self, environment: str = None):
+    def __init__(self, http_manager: HTTPClientManager, environment: str = None):
         """
         Инициализация сервиса с указанием среды
         
@@ -25,6 +26,7 @@ class ExternalAPIService:
         self.config = Config.get_external_api_config(environment)
         self.url = self.config["url"]
         self.headers = self.config["headers"]
+        self.http_manager = http_manager
 
         key = self.headers.get("X-API-Key", "")
         logger.info(f"X-API-Key: '{key[:4]}...' (len={len(key)})")
@@ -62,26 +64,29 @@ class ExternalAPIService:
         logger.debug(f" Payload: {json.dumps(payload, ensure_ascii=False, indent=2)}")
         
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.post(
+            session = self.http_manager.get_session()
+            async with session.post(
+            # async with httpx.AsyncClient(timeout=300) as client:
+                # response = await client.post(
                     self.url,
                     headers=self.headers,
                     json=payload
-                )
+                ) as response:
+                response_data = await response.json()
 
-            logger.info(f"Ответ получен: статус {response.status_code}")
+            logger.info(f"Ответ получен: статус {response.status}")
             logger.debug(f"Заголовки ответа: {dict(response.headers)}")
 
             content_type = response.headers.get('content-type', '').lower()
 
             # Успешный статус без JSON — допустимо
-            if response.status_code == 200 and 'application/json' not in content_type:
+            if response.status == 200 and 'application/json' not in content_type:
                 logger.warning("⚠️ API вернуло успешный статус, но не в формате JSON")
                 return {"status": "success", "message": "Данные успешно обновлены"}
 
             # Ошибка формата
             if 'application/json' not in content_type:
-                error_msg = f"API вернуло не-JSON ответ. Content-Type={content_type}, Статус={response.status_code}"
+                error_msg = f"API вернуло не-JSON ответ. Content-Type={content_type}, Статус={response.status}"
                 logger.error(f"❌ {error_msg}")
                 raise Exception(error_msg)
 
@@ -89,30 +94,30 @@ class ExternalAPIService:
             try:
                 response_data = response.json()
             except json.JSONDecodeError as e:
-                if response.status_code == 200:
+                if response.status == 200:
                     logger.warning(f"⚠️ Не удалось распарсить JSON, но статус 200: {e}")
                     return {"status": "success", "message": "Данные успешно обновлены"}
-                raise Exception(f"Ошибка парсинга JSON: {e}. Ответ: {response.text}")
+                raise Exception(f"Ошибка парсинга JSON: {e}. Ответ: {await response.text()}")
 
             # Обработка HTTP-ошибок
-            if response.status_code not in (200, 201):
+            if response.status not in (200, 201):
                 error_detail = (
                     response_data.get('error') or
                     response_data.get('message') or
                     response_data.get('errors', {}).get('data', ['Неизвестная ошибка'])[0] or
-                    f"HTTP {response.status_code}"
+                    f"HTTP {response.status}"
                 )
-                error_msg = f"Ошибка API ({response.status_code}): {error_detail}"
+                error_msg = f"Ошибка API ({response.status}): {error_detail}"
                 logger.error(f"❌ {error_msg}")
                 raise Exception(error_msg)
 
-            logger.info("Данные успешно отправлены!")
+            logger.info("🎉 Данные успешно отправлены!")
             return response_data
 
-        except httpx.RequestError as e:
+        except aiohttp.ClientError as e:
             logger.error(f"Ошибка сети: {str(e)}")
             raise Exception(f"Сетевая ошибка: {str(e)}")
 
         except Exception as e:
             logger.error(f"Критическая ошибка при отправке данных: {str(e)}", exc_info=True)
-            raise
+            raise 

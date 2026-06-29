@@ -1,0 +1,76 @@
+{
+    "type": "object",
+    "description": "Детальный анализ каждого типа документов в комплекте. Каждый элемент массива соответствует одному типу документов.",
+    "required": [
+        "type_compliance",
+        "readability",
+        "completeness"
+    ],
+    "properties": {
+        "type_compliance": {
+            "type": "object",
+            "required": [
+                "status",
+                "description"
+            ],
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "allow",
+                        "deny"
+                    ],
+                    "description": "Статус соответствия типа документов ожидаемому."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Вывод о соответствии типа документов."
+                }
+            }
+        },
+        "readability": {
+            "type": "object",
+            "description": "Оценка качества текста и читаемости документов данного типа.",
+            "required": [
+                "status",
+                "description"
+            ],
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "allow",
+                        "deny"
+                    ],
+                    "description": "Общее состояние читаемости."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Вывод о читаемости документов данного типа, включая выявленные проблемы с текстом."
+                }
+            }
+        },
+        "completeness": {
+            "type": "object",
+            "description": "Оценка полноты данных в документах данного типа и их соответствия требованиям экспертизы.",
+            "required": [
+                "status",
+                "description"
+            ],
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "allow",
+                        "deny"
+                    ],
+                    "description": "Итоговый статус документов данного типа. 'allow' - документы соответствуют требованиям, 'deny' - документы имеют критические недостатки."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Вывод о полноте данных для этого типа документов и соответствии их параметрам экспертизы."
+                }
+            }
+        }
+    }
+}

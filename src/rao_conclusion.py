@@ -5,7 +5,8 @@ import os
 from datetime import date
 
 from configs.config import Config
-from configs.logger import setup_logging, get_logger
+from configs.http_client_manager import HTTPClientManager
+from configs.logger import get_logger
 from conclusion.conclusion_pipeline import RaoConclusionPipeline
 
 
@@ -14,8 +15,10 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
 
+# Настройка логирования
+logger = get_logger(__name__)
 
-async def rao_conclusion(expertise_id, x_api_database, send_to_external = False):
+async def rao_conclusion(expertise_id, x_api_database, http_manager: HTTPClientManager, send_to_external = False):
     """
     Запускает пайплайн оценки экспертов для заданной экспертизы.
 
@@ -31,15 +34,12 @@ async def rao_conclusion(expertise_id, x_api_database, send_to_external = False)
                                    готовый к использованию или выводу.
                                    В случае ошибки — исключение не подавляется.
     """
-    # Настройка логирования
-    setup_logging()
-    logger = get_logger(__name__)
     
     try:
         logger.info("Starting rao_conclusion pipeline...")
         
         # Создание пайплайна
-        pipeline = RaoConclusionPipeline(expertise_id, x_api_database)        
+        pipeline = RaoConclusionPipeline(http_manager, expertise_id, x_api_database)        
         logger.info(f"Processing expertise_id: {expertise_id}, DB: {x_api_database}")
         
         # Запуск пайплайна
