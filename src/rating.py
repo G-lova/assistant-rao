@@ -17,11 +17,7 @@ sys.path.insert(0, project_root)
 # Настройка логирования
 logger = get_logger(__name__)
 
-<<<<<<< HEAD
-async def rating(start_date, end_date, x_api_database):
-=======
 async def rating(start_date, end_date, x_api_database, http_manager: HTTPClientManager):
->>>>>>> develop
     """
     Запускает пайплайн оценки экспертов для заданной экспертизы.
 
@@ -56,8 +52,6 @@ async def rating(start_date, end_date, x_api_database, http_manager: HTTPClientM
         # Вывод результатов
         print(ratings)
         
-<<<<<<< HEAD
-=======
         # # Сохранение результатов
         # output_dir = os.path.join(project_root, "data", "outputs")
         # os.makedirs(output_dir, exist_ok=True)
@@ -68,7 +62,6 @@ async def rating(start_date, end_date, x_api_database, http_manager: HTTPClientM
         
         # logger.info(f"Results saved to: {output_file}")
         
->>>>>>> develop
         return ratings
         
     except Exception as e:
@@ -79,8 +72,4 @@ if __name__ == "__main__":
 
     start_date = input('Дата начала интервала:')
     end_date = input('Дата окончания интервала:')
-<<<<<<< HEAD
-    asyncio.run(rating(start_date, end_date, "prod"))
-=======
     asyncio.run(rating(start_date, end_date, "dev", http_manager))
->>>>>>> develop

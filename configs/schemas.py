@@ -89,11 +89,6 @@ class ExpertsScoringRequest(BaseModel):
     details: bool = False
     
 
-class ExpertsScoringRequest(BaseModel):
-    expertise_id: int
-    details: bool = False
-    
-
 class RAOConclusionRequest(BaseModel):
     expertise_id: int
     send_to_external: bool = False
@@ -104,7 +99,7 @@ class ViolationsReportRequest(BaseModel):
     filters: Dict[str, Any] = {}
     data: Dict[str, Any]
     charts: List = []
-
+    
 
 class EISParseRequest(BaseModel):
     request_method: str

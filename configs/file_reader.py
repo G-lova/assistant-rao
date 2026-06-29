@@ -6,15 +6,11 @@ import shutil
 import subprocess
 import tempfile
 
-import chardet
 import pandas as pd
 from configs.rate_limiter import TokenBucket
 import rarfile
-import requests
-import textract
 import zipfile
 from bs4 import BeautifulSoup
-from typing import Dict, List, Any
 from defusedxml import ElementTree as ET
 from docx import Document
 from pathlib import Path

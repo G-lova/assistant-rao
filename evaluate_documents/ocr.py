@@ -159,10 +159,10 @@ class OCRProcessor:
         return paths
 
 
-    async def _retry_ocr_with_fallback(image_path: str, original_filename: str):
+    async def _retry_ocr_with_fallback(self, image_path: str, original_filename: str):
 
-        image_paths = split_image_into_chunks(image_path, original_filename)
-        ocr_results = await asyncio.gather(*(ocr_image_with_qwen_vl(path, original_filename) for path in image_paths), return_exceptions=True)
+        image_paths = self.split_image_into_chunks(image_path, original_filename)
+        ocr_results = await asyncio.gather(*(self.ocr_image_with_qwen_vl(path, original_filename) for path in image_paths), return_exceptions=True)
         successful_results = [r for r in ocr_results if not isinstance(r, Exception)]
 
         return "\n".join(successful_results)

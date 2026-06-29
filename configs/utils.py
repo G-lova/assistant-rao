@@ -15,13 +15,6 @@ from configs.config import Config
 from configs.logger import get_logger
 
 
-# Глобальный энкодер (инициализируется один раз при старте модуля)
-try:
-    _ENCODER = tiktoken.get_encoding("cl100k_base")  # GPT-3.5/4, Qwen, большинство OpenAI-совместимых
-except Exception:
-    _ENCODER = tiktoken.get_encoding("p50k_base")   # Fallback
-
-
 config = Config.get_model_config()
 logger = get_logger(__name__)
 
