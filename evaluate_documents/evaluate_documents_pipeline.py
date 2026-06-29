@@ -6,7 +6,7 @@ import datetime
 
 from configs.config import Config
 from configs.data_fetcher import DataFetcher
-from configs.file_reader import read_file
+from configs.file_reader import FileReader
 from configs.http_client_manager import HTTPClientManager
 from configs.llm_client import get_llm
 from configs.logger import get_logger
@@ -57,7 +57,7 @@ class TasksPipeline:
         #     else:
         #         raise
     
-        
+        self.file_reader = FileReader(client, model)
         self.type_data_extractor = TypeDataExtractor(client, model)
         self.completeness_checker = CompletenessChecker(client, model)
         self.consistency_checker = ConsistencyChecker(client, model)
@@ -94,9 +94,10 @@ class TasksPipeline:
             tasks = []
             for file_info in parse_result.get("files", [parse_result]):
                 logger.info(f'file_info: {file_info}')
-                file_path = file_info.get("file_path")
-                filename = file_info.get("filename", f"doc_from_link_{file_info.get('original_url')}")
-                tasks.append(self.process_parse_result(file_path, filename, link))
+                if parse_result.get("status") == "success":
+                    file_path = file_info.get("file_path")
+                    filename = file_info.get("filename", f"doc_from_link_{file_info.get('original_url')}")
+                    tasks.append(self.process_parse_result(file_path, filename, link))
             async with self.llm_semaphore:
                 results = await asyncio.gather(*tasks, return_exceptions=True)
             
@@ -124,8 +125,8 @@ class TasksPipeline:
 
                 result = {                     
                     "type_compliance": {
-                        "status": "allow" if (parse_result.get("status") == "success" and "zakupki.gov.ru" in link.media_links) else "deny",
-                        "detected_type": link.doc_code,
+                        "status": "allow" if parse_result.get("status") == "success" else "deny",
+                        "detected_type": "linkDocs",
                         "issues": [parse_result.get("error")]
                     },
                     "readability": {
@@ -188,7 +189,7 @@ class TasksPipeline:
         """
         
         """
-        extracted_text = await read_file(file_path, filename)
+        extracted_text = await self.file_reader.read_file(file_path, filename)
         if not extracted_text or "[Нет читаемого текста]" in extracted_text:
             raise ValueError("Не удалось извлечь текст")
 
@@ -308,27 +309,20 @@ class TasksPipeline:
             # формирование итоговых данных для подачи в финальный запрос
             data_for_final_evaluation["missed_documents"] = self.df.loc[self.df['missed_docs'] == 1, 'doc_code'].map(DOCUMENT_TYPE_MAPPING).dropna().unique().tolist()
             data_for_final_evaluation["documents"] = []
-
-
-            # === Очистка старых данных ===
-            try:
-                await delete_procurement_data(self.df['id'].iloc[0])
-                logger.info(f"Запись в БД удалена {self.df['id'].iloc[0]}")
-            except:
-                logger.info(f"Запись в БД не существует {self.df['id'].iloc[0]}")
-
             # ====== Оценка полноты и соответствия данных в документе ======
             completeness_tasks = []
             for row in self.df[self.df['documents_results'].map(bool)].itertuples():
                 data_for_completeness = {
                     **data_for_final_evaluation, 
                     "doc_code": row.doc_code, 
-                    "doc_type": DOCUMENT_TYPE_MAPPING.get(row.doc_code, "Неизвестный документ"),
+                    "doc_type": 'Ссылка на ЕИС' if row.doc_code == 'linkDocs' else DOCUMENT_TYPE_MAPPING.get(row.doc_code, "Неизвестный документ"),
                     "documents": row.documents_results
                 }
                 completeness_tasks.append(self.completeness_checker.check_doc_completeness(self.consistency_checker.remove_empty(data_for_completeness), row.doc_code))
 
-            completeness_results = await asyncio.gather(*completeness_tasks, return_exceptions=True)
+            async with self.llm_semaphore:
+                completeness_results = await asyncio.gather(*completeness_tasks, return_exceptions=True)
+                
             for completeness, row in zip(completeness_results, self.df[self.df['documents_results'].map(bool)].itertuples()):
                 if isinstance(completeness, Exception):
                     logger.error(f"Ошибка при оценке полноты документов типа {row.doc_code}")
@@ -345,6 +339,15 @@ class TasksPipeline:
 
             # сортировка документов внутри data_for_final_evaluation["documents"] по приоритету (обязательные документы и ссылка на ЕИС в приоритете)
             data_for_final_evaluation["documents"].sort(key=lambda x: (x["required"] != "Обязательный", x["doc_code"] != "linkDocs"))
+
+
+            # === Очистка старых данных ===
+            try:
+                await delete_procurement_data(self.df['id'].iloc[0])
+                logger.info(f"Запись в БД удалена {self.df['id'].iloc[0]}")
+            except:
+                logger.info(f"Запись в БД не существует {self.df['id'].iloc[0]}")
+
                 
             
             # сохранение данных в БД

@@ -9,6 +9,7 @@ import json
 import zipfile
 
 from contextlib import asynccontextmanager
+from configs.llm_client import get_llm
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body, Header, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -16,10 +17,12 @@ from typing import List, Optional, Dict
 from celery.result import AsyncResult
 
 from configs.config import Config
-from configs.schemas import EISParseRequest, EvaluateRequest, ExpertsScoringRequest, RAOConclusionRequest
+from configs.schemas import EISParseRequest, EvaluateRequest, ExpertsScoringRequest, RAOConclusionRequest, ViolationsReportRequest
+from configs.eis_parsing import EISParser
 from configs.utils import APIKeyMiddleware
 from configs.working_with_db import get_contract_info_from_db
 from configs.logger import setup_logging, get_logger
+from src.law_detector import LawDetector
 from src.rao_conclusion import rao_conclusion
 from src.rating import rating
 from src.scoring import scoring
@@ -27,6 +30,7 @@ from tasks import evaluate_documents_task
 
 # main.py
 from configs.http_client_manager import HTTPClientManager
+from src.violations_reporter import ViolationsReporter
 
 # Глобальный экземпляр (настраивается под вашу нагрузку)
 http_manager = HTTPClientManager(timeout=120.0, limit=50)
@@ -108,23 +112,25 @@ async def get_task_status(task_id: str):
 @app.post("/get-contract-info")
 async def api_get_contract_info(request_body: Dict[str, str] = Body(...)):
     """
-    Получает информацию о контракте для заданного идентификатора закупки.
-    Принимает в теле запроса идентификатор закупки, извлекает из базы данных информацию о контракте и возвращает ее.
-    В случае ошибок возвращает соответствующий HTTP статус и сообщение.
+    Обработчик API-запроса для получения ключевых реквизитов контракта по идентификатору закупки.
+
+    Извлекает из базы данных номер, сумму и дату контракта на основе данных, ранее сохранённых
+    в поле `contract_draft` таблицы `raw_document_data`. Возвращает информацию в виде JSON.
+    Используется внешними сервисами для быстрого доступа к основным параметрам контракта.
 
     Args:
-        request_body (Dict[str, str]): Тело запроса в формате JSON с полем:
-            - procurement_id (str): Идентификатор закупки, для которой необходимо получить информацию о контракте
+        request_body (Dict[str, str], optional): Тело запроса в формате JSON с обязательным полем `procurement_id`.
+            Пример: {"procurement_id": "12345"}.
 
-    Raises:        
-        HTTPException: 400 - если отсутствует procurement_id
-        HTTPException: 500 - при ошибке получения информации о контракте
+    Raises:
+        HTTPException: Если поле `procurement_id` отсутствует в запросе — возвращает ошибку 400.
 
     Returns:
-        Dict[str, str]: Словарь с информацией о контракте, содержащий поля:
-            - contract_number (str): Номер контракта
-            - amount (str): Сумма контракта
-            - date (str): Дата заключения контракта
+        dict: Словарь с реквизитами контракта:
+            - contract_number (str): Номер контракта или "0", если не найден.
+            - amount (str): Сумма контракта в виде строки или "0", если не найдена.
+            - date (str): Дата контракта в текстовом формате или "0", если не найдена.
+            При возникновении внутренней ошибки возвращается тот же словарь со значениями "0".
     """
     procurement_id = request_body.get("procurement_id")
     logger.info(f"Получение данных контракта для экспертизы {procurement_id}")
@@ -205,7 +211,7 @@ async def get_experts_rating(
         HTTPException: 500 - при ошибке получения рейтинга экспертов
 
     Returns:
-        List[Dict]: Список словарей с рейтингами экспертов, полученными из бизнес-логики. Каждый словарь может содержать информацию об эксперте и его рейтинге.
+        dict: Словарь, где ключ — идентификатор эксперта, значение — рейтинг.
     """
     try:
         start_date = request_body.get("start_date")
@@ -252,25 +258,23 @@ async def get_rao_conclusion(
     x_api_database: str = Header(default="dev", alias="X-API-Database")
     ):
     '''
-    Получает сводный отчет эксперта РАО для заданной экспертизы.
-    Принимает идентификатор экспертизы, запускает ML-пайплайн для генерации сводного отчета эксперта РАО и возвращает результат.
-    В случае ошибок возвращает соответствующий HTTP статус и сообщение.
-
+    Эндпоинт для получения сводного отчета эксперта РАО по результатам экспертизы.
+    Принимает идентификатор экспертизы и флаг отправки отчета во внешний сервис.
+    Инициализирует пайплайн генерации заключения и возвращает результат.
     Args:
-        request (RAOConclusionRequest): Тело запроса с обязательным полем:
-            - expertise_id (int): Идентификатор экспертизы
-            - send_to_external (bool, optional): Флаг, указывающий, отправлять ли результат во внешнюю систему (по умолчанию False)
-        x_api_database (str): Заголовок с указанием среды базы данных ('dev', 'prod', 'stage')
-
-    Raises:
-        HTTPException: 400 - если отсутствует expertise_id
-        HTTPException: 500 - при ошибке генерации сводного отчета эксперта РАО
-
+        request (RAOConclusionRequest): Тело запроса, содержащее:
+            - expertise_id (int): Идентификатор экспертизы для анализа.
+            - send_to_external (bool): Флаг, указывающий, нужно ли отправлять отчет во внешний сервис.
+        x_api_database (str): Заголовок с указанием среды базы данных ('dev', 'prod', 'stage').
     Returns:
-        dict: Сводный отчет эксперта РАО, сгенерированный ML-пайплайном, содержащий ключевые выводы и рекомендации по экспертизе. 
-            Структура отчета может включать различные разделы, такие как анализ документов, выявленные риски, рекомендации по улучшению и т.д., в зависимости от логики пайплайна. 
-            Если send_to_external установлен в True, результат также будет отправлен во внешнюю систему, и в ответе может быть указано подтверждение отправки.
-
+        Dict[str, Any]: Словарь с результатами анализа, содержащий:
+            - status (str): Статус выполнения ('success' или 'error').
+            - results (List[DocumentContentResponse]): Список детальных результатов анализа каждого документа.
+            - errors (List[str]): Список сообщений об ошибках, произошедших при обработке отдельных файлов (если есть).
+    Raises:
+        HTTPException:
+            - 400: Если поле 'expertise_id' в запросе отсутствует.
+            - 500: Если произошла внутренняя ошибка при генерации отчета.
     '''
     try:
         expertise_id = request.expertise_id
@@ -287,3 +291,199 @@ async def get_rao_conclusion(
     except Exception as e:
         logger.error(f"Ошибка при создании сводного отчета эксперта РАО: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Ошибка при создании сводного отчета эксперта РАО: {str(e)}")
+
+@app.post("/get-violations-report")
+async def get_violations_report(request: ViolationsReportRequest):
+    '''
+    Эндпоинт для формирования аналитического отчета о нарушениях на основе переданных данных.
+    
+    Принимает на вход метрику, фильтры, сырые данные и список доступных типов графиков.
+    Инициализирует LLM-клиент и передает управление в пайплайн генерации отчета.
+    
+    Args:
+        request (ViolationsReportRequest): Тело запроса, содержащее:
+            - metric (str): Название анализируемой метрики.
+            - filters (Dict[str, Any]): Словарь с примененными фильтрами.
+            - data (Any): Сырые данные для анализа (словарь, список или JSON-строка).
+            - charts (List[str]): Список доступных типов графиков для выбора LLM.
+            
+    Returns:
+        Dict[str, Any]: Словарь с результатами анализа, содержащий:
+            - status (str): Статус выполнения ('success' или 'error').
+            - raw_text (str): Сгенерированный аналитический текст.
+            - chart_type (str): Рекомендуемый тип графика.
+            - chart_title (str): Заголовок для рекомендуемого графика.
+            
+    Raises:
+        HTTPException: 
+            - 400: Если поле 'data' в запросе пустое или отсутствует.
+            - 500: Если произошла внутренняя ошибка при генерации отчета.
+    '''
+    try:
+        metric = request.metric
+        filters = request.filters
+        data = request.data
+        charts = request.charts
+        
+        if not data:
+            raise HTTPException(status_code=400, detail="Поле 'data' обязательно")
+        
+        llm_client, llm_model = get_llm()
+        
+        # Запускаем пайплайн
+        reporter = ViolationsReporter(llm_client, llm_model)
+        report = await reporter.analize_data_from_content(metric, filters, data, charts)
+
+        return report
+        
+    except Exception as e:
+        logger.error(f"Ошибка при создании аналитического отчета: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при создании аналитического отчета: {str(e)}")
+
+
+@app.post("/parse-eis")
+async def parse_eis(request: EISParseRequest):
+    request_method = request.request_method
+    subsystem_type = request.subsystem_type
+    reg_number = request.reg_number
+    org_region = request.org_region
+    fz = request.fz
+    document_type = request.document_type
+    nsi_code = request.nsi_code
+    nsi_kind = request.nsi_kind
+    exact_date = request.exact_date
+    procurement_id = request.procurement_id
+
+    if not request_method:
+        raise HTTPException(status_code=400, detail="Поле 'request_method' обязательно")    
+    if request_method == "getDocsByReestrNumberRequest":
+        if not reg_number:
+            raise HTTPException(status_code=400, detail="Поле 'reg_number' обязательно")    
+    elif request_method == "getDocsByOrgRegionRequest":
+        if not org_region:
+            raise HTTPException(status_code=400, detail="Поле 'org_region' обязательно")
+        if not exact_date:
+            raise HTTPException(status_code=400, detail="Поле 'exact_date' обязательно")
+    elif request_method == "getNsiRequest":
+        pass
+    else:
+        raise HTTPException(status_code=400, detail="Неверный метод запроса 'request_method'")
+    
+    cloud_parser = EISParser(http_manager)
+    result = await cloud_parser._parse_eis_soap_ip(request_method, subsystem_type, reg_number, org_region, fz, document_type, nsi_code, nsi_kind, exact_date, procurement_id)
+
+    
+    # === Обработка ошибок от парсера ===
+    if result.get("status") == "error":
+        # Создаём ZIP с файлом ошибки для единообразия формата
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            error_metadata = {
+                "error": result.get("error"),
+                "request_method": request_method,
+                "timestamp": datetime.datetime.utcnow().isoformat(),
+                "eis_response": result.get("eis_response")  # Если есть
+            }
+            zip_file.writestr("ERROR.json", json.dumps(error_metadata, ensure_ascii=False, indent=2))
+        
+        zip_buffer.seek(0)
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="eis_error_{request_method}.zip"',
+                "X-Response-Status": "error"  # Заголовок для быстрой проверки
+            },
+            status_code=status.HTTP_200_OK  # 200, т.к. это валидный ответ с ошибкой внутри
+        )
+    
+    # === Успешный ответ: создаём ZIP с файлами + metadata ===
+    existing_names = set()
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        
+        # 1. Добавляем файлы из результата
+        for file_info in result.get("files", []):
+            content = None
+            
+            # Получаем контент: из base64 или с диска
+            if "content_base64" in file_info and file_info["content_base64"]:
+                content = base64.b64decode(file_info["content_base64"])
+            elif "file_path" in file_info and file_info["file_path"]:
+                if os.path.exists(file_info["file_path"]):
+                    with open(file_info["file_path"], 'rb') as f:
+                        content = f.read()
+                    # 🧹 Опционально: удаляем временный файл
+                    # os.unlink(file_info["file_path"])
+            
+            if content is not None:
+                # zip_file.writestr(file_info["filename"], content)
+                # logger.info(f"Добавлен файл в архив: {file_info['filename']}")
+                if file_info["status"] == "success":
+                    unique_name = cloud_parser._make_unique_filename(file_info["filename"], existing_names)
+                    # zip_file.write(file_info["file_path"], arcname=unique_name)
+                    zip_file.writestr(unique_name, content)
+                    logger.info(f"Добавлен файл в архив: {unique_name}")
+                    # Не забудьте удалить временный файл:
+                    os.unlink(file_info["file_path"])
+        
+        # 2. Добавляем metadata.json с response_content и информацией о запросе
+        metadata = {
+            "status": "success",
+            "request": {
+                "method": request_method,
+                "reg_number": reg_number,
+                "org_region": org_region,
+                "document_type": document_type,
+                "procurement_id": procurement_id
+            },
+            "result": {
+                "file_count": result.get("file_count", 0),
+                "archive_count": result.get("archive_count", 1),
+                "source": result.get("source")
+            },
+            "eis_response": result.get("eis_response"),  # Полное parsed SOAP response
+            "timestamp": datetime.datetime.utcnow().isoformat()
+        }
+        zip_file.writestr("metadata.json", json.dumps(metadata, ensure_ascii=False, indent=2))
+    
+    zip_buffer.seek(0)
+    
+    # === Возвращаем StreamingResponse ===
+    filename_safe = re.sub(r'[<>:"/\\|?*]', '_', reg_number or request_method)
+    
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="eis_files_{filename_safe}.zip"',
+            "X-Response-Status": "success",
+            "X-File-Count": str(result.get("file_count", 0))
+        }
+    )
+
+
+@app.post("/get-law")
+async def get_law(
+    request_body: Dict[str, int] = Body(...)
+):
+    """
+
+    """
+    try:
+        expertise_id = request_body.get("expertise_id")
+        
+        if not expertise_id:
+            raise HTTPException(status_code=400, detail="Поле 'expertise_id' обязательно")
+        
+        # Запускаем скоринг пайплайн
+
+        law_detector = LawDetector()
+        result = await law_detector.get_law(expertise_id)
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Ошибка при определении закона: {str(e)}", exc_info=True)
+        return {"expertise_id": expertise_id, "law": 0}

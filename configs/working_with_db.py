@@ -14,28 +14,48 @@ from configs.config import Config
 
 logger = logging.getLogger(__name__)
 
-_db_pool = None
-
-async def get_db_pool():
-    global _db_pool
-    if _db_pool is None:
-        _db_pool = await asyncpg.create_pool(
-            host=Config.DB_HOST,
-            port=int(Config.DB_PORT),
-            database=Config.DB_NAME,
-            user=Config.DB_USER,
-            password=Config.DB_PASSWORD,
-            min_size=2,
-            max_size=10,
-            max_inactive_connection_lifetime=300,
-        )
-    return _db_pool
 
 @asynccontextmanager
 async def get_async_db_connection():
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
-        yield conn
+    """Создаёт временный пул для каждой операции"""
+    pool = await asyncpg.create_pool(
+        host=Config.DB_HOST,
+        port=int(Config.DB_PORT),
+        database=Config.DB_NAME,
+        user=Config.DB_USER,
+        password=Config.DB_PASSWORD,
+        min_size=1,
+        max_size=4,
+        max_inactive_connection_lifetime=300,
+    )
+    try:
+        async with pool.acquire() as conn:
+            yield conn
+    finally:
+        await pool.close()
+
+# _db_pool = None
+
+# async def get_db_pool():
+#     global _db_pool
+#     if _db_pool is None:
+#         _db_pool = await asyncpg.create_pool(
+#             host=Config.DB_HOST,
+#             port=int(Config.DB_PORT),
+#             database=Config.DB_NAME,
+#             user=Config.DB_USER,
+#             password=Config.DB_PASSWORD,
+#             min_size=2,
+#             max_size=10,
+#             max_inactive_connection_lifetime=300,
+#         )
+#     return _db_pool
+
+# @asynccontextmanager
+# async def get_async_db_connection():
+#     pool = await get_db_pool()
+#     async with pool.acquire() as conn:
+#         yield conn
 
 DOCUMENT_CODE_TO_COLUMN = {
         "docAcceptInafPostavFiles": "impossible_alternative_doc",
@@ -132,7 +152,6 @@ async def get_async_summary_report_from_db(procurement_id: str):
     """
     Асинхронно извлекает summary_report из БД по procurement_id.
     """
-    conn = None
     try:
         procurement_id_int = int(procurement_id)
         async with get_async_db_connection() as conn:
@@ -171,21 +190,23 @@ async def get_contract_info_from_db(procurement_id: str) -> Dict[str, str]:
         if not data:
             return {"contract_number": "0", "amount": "0", "date": "0"}
         data = json.loads(data)
+        logger.info(data)
         
         # logger.info(f'data.get("documents", [])={data.get("documents", [])}')
         # Извлечение данных из сводного отчета
         for item in data.get('documents', []):
             raw_data = item.get('raw_data', {})
-            if ('контракт' in raw_data.get('document_name', '').lower()) or ('договор' in raw_data.get('document_name', '').lower()):
-                contract_info = {
-                    'contract_number': str(raw_data.get('contract_number', '0'))
-                }
-                amounts = raw_data.get('amounts', [])
-                dates = raw_data.get('dates', [])
-                contract_info['amount'] = str(amounts[0].get('value', '0'))
-                contract_info['date'] = str(dates[0].get('value', '0'))
-                
-                return contract_info
+            for r in raw_data:
+                if ('контракт' in r.get('document_name', '').lower()) or ('договор' in r.get('document_name', '').lower()):
+                    contract_info = {
+                        'contract_number': str(r.get('contract_number', '0'))
+                    }
+                    amounts = r.get('amounts', [])
+                    dates = r.get('dates', [])
+                    contract_info['amount'] = str(amounts[0].get('value', '0'))
+                    contract_info['date'] = str(dates[0].get('value', '0'))
+                    
+                    return contract_info
         logger.warning(f"Данные контракта не найдены для procurement_id={procurement_id}")    
         return {"contract_number": "0", "amount": "0", "date": "0"}
 

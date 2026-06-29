@@ -3,7 +3,7 @@ import json
 from json_repair import repair_json
 from typing import Any, Dict
 from configs.logger import get_logger
-from configs.utils import extract_json_objects
+from configs.utils import split_large_text
 
 
 
@@ -35,14 +35,17 @@ class ConclusionConsoladator:
         logger.info(f"Формирование сводного заключения эксперта РАО для экспертизы: {expertise_id}")
 
         try:
-            with open("prompts/rao_conclusion_prompt.txt") as f:
-                rao_conclusion_prompt = f.read().replace('"object"', f'"{expertise_object}"')
+            prompt = "prompts/rao_conclusion_prompt_6.txt" if (expertise_object in (5,6)) else "prompts/rao_conclusion_prompt_7.txt"
+            with open(prompt) as f:
+                rao_conclusion_prompt = f.read()
 
-            schema = "schemas/rao_conclusion6_schema.json" if expertise_object in (5,6) else "schemas/rao_conclusion7_schema.json"
+            schema = "schemas/rao_conclusion6_schema.json" if (expertise_object in (5,6)) else "schemas/rao_conclusion7_schema.json"
             with open(schema) as f:
                 RAO_CONCLUSION_SCHEMA = f.read()
 
             logger.info(f"Content: {content}")
+
+            content_chunks = split_large_text(text=content, max_chunk_size=12000)
 
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -53,7 +56,7 @@ class ConclusionConsoladator:
                     },
                     {
                         "role": "user",
-                        "content": f"""Сформируй сводное заключение, основываясь на данных, извлеченных из документов, и заключениях экспертов:\n\n{content}"""
+                        "content": f"""Сформируй сводное заключение, основываясь на данных, извлеченных из документов, и заключениях экспертов:\n\n{content_chunks[0]}"""
                     }
                 ],
                 max_tokens=2000,

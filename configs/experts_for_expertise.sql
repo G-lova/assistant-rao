@@ -709,7 +709,7 @@ SELECT
 		ELSE 1
 	END AS distance_rate,
 	ROUND((0.2 * criterion1 + 0.1 * criterion2 + 0.1 * criterion3 + 0.4 * criterion4 + 0.2 * criterion5), 4) AS criterion_rating,
-	ROUND(COALESCE((0.2 * criterion1 + 0.1 * criterion2 + 0.1 * criterion3 + 0.4 * criterion4 + 0.2 * criterion5), 0.8), 4) AS criterion_rating_for_model,
+	ROUND(COALESCE((0.2 * criterion1 + 0.1 * criterion2 + 0.1 * criterion3 + 0.4 * criterion4 + 0.2 * criterion5), 1), 4) AS criterion_rating_for_model,
 	CASE WHEN benefitExpertisesCount = 0 THEN 0 ELSE 1 END AS is_newbie,
 	CAST((declines_rate + personal_block + education_rate + experience_rate 
 	+ degreeExperience_rate	+ academicTitleExperience_rate + pubMon_rate 

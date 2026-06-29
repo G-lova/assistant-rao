@@ -229,7 +229,7 @@ class CloudStorageParser:
                 soap_url, 
                 data=xml_data, 
                 headers=headers, 
-                # timeout=aiohttp.ClientTimeout(total=60)
+                timeout=aiohttp.ClientTimeout(total=60)
             ) as response:
                 response_content = await response.text()
                 logger.info(f"SOAP ответ: статус {response.status}")
@@ -961,6 +961,7 @@ class CloudStorageParser:
             results = []
             for file_info in files:
                 direct_url = file_info["url"]
+                fallback_url = "/".join(direct_url.split("/")[:-1])
                 safe_name = file_info["filename"]
                 ext = os.path.splitext(safe_name)[1] or ".bin"
                 
@@ -971,7 +972,8 @@ class CloudStorageParser:
                     source="mail_cloud",
                     resource_id=safe_name,
                     file_extension=ext,
-                    original_filename=safe_name
+                    original_filename=safe_name,
+                    fallback_formats=[(fallback_url, ext)]
                 )
                 results.append(result)
 
@@ -1074,8 +1076,8 @@ class CloudStorageParser:
                 full_path = f"{current_path}/{filename}" if current_path else filename
                 safe_name = re.sub(r'[<>:"/\\|?*]', '_', full_path)
                 # safe_name = quote(safe_name, safe='')
-                # direct_url = f"{base_url}/{weblink}{f'/{current_path}' if current_path else ''}/{filename}"
-                direct_url = f"{base_url}/{weblink}{f'/{current_path}' if current_path else ''}"
+                direct_url = f"{base_url}/{weblink}{f'/{current_path}' if current_path else ''}/{filename}"
+                # direct_url = f"{base_url}/{weblink}{f'/{current_path}' if current_path else ''}"
                 files.append({"url": direct_url, "filename": safe_name})
                 logger.debug(f"Добавлен файл: {safe_name}")
         return files
@@ -1574,8 +1576,8 @@ class CloudStorageParser:
             # Пробуем разные параметры, которые могут содержать реестровый номер
             reestr_number = (
                 query_params.get("regNumber", [None])[0] or
-                query_params.get("reestrNumber", [None])[0] or
-                query_params.get("noticeInfoId", [None])[0]
+                query_params.get("reestrNumber", [None])[0] 
+                # or query_params.get("noticeInfoId", [None])[0]
             )
 
             if reestr_number:
@@ -1664,7 +1666,7 @@ class CloudStorageParser:
                 self.eis_soap_url,
                 data=soap_body,
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=160)
+                timeout=aiohttp.ClientTimeout(total=60)
             ) as response:
                 if response.status != 200:
                     error_text = await response.text()

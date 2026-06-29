@@ -34,10 +34,14 @@ class HTTPClientManager:
         if self.session is None or self.session.closed:
             # ✅ Создаём connector внутри async-контекста
             self._connector = aiohttp.TCPConnector(**self._connector_params)
+
             self.session = aiohttp.ClientSession(
                 timeout=self._timeout,
                 connector=self._connector,
                 trust_env=True,
+                # параметры для парсинга mail.ru
+                max_field_size = 16384,
+                max_line_size = 16384
             )
             logger.info("✅ HTTPClientManager initialized")
 

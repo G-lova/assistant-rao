@@ -18,6 +18,11 @@
         "conclusion": {
             "type": "object",
             "description": "Извлечённые структурированные данные для сводного заключения.",
+            "required": [
+                "field1_1",
+                "field6_1_2",
+                "field6_1_3"
+            ],
             "properties": {
                 "field1_1": {
                     "type": "string",

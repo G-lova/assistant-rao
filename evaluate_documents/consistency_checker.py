@@ -89,6 +89,8 @@ class ConsistencyChecker:
         logger.info(f"Финальный анализ документов")
 
         cleaned_content = self.remove_empty(content)
+        if "documents" not in cleaned_content:
+            cleaned_content["documents"] = []
         logger.info(f"cleaned_content: {cleaned_content}")
 
         # Перед запросом к LLM            
@@ -125,7 +127,7 @@ class ConsistencyChecker:
         # Парсим JSON
         try:
             result = json.loads(raw_response)
-            logger.info("Удалось распарсить JSON.")
+            logger.info(f"Удалось распарсить JSON: {result}")
             return self.prepare_docs_info_for_final_insertion(result, cleaned_content)
         
         except json.JSONDecodeError as e:
@@ -143,7 +145,7 @@ class ConsistencyChecker:
                     }
                     return self.prepare_docs_info_for_final_insertion(fallback, cleaned_content)
                 
-                logger.info("Удалось распарсить JSON из извлечённого фрагмента вручную.")
+                logger.info(f"Удалось распарсить JSON из извлечённого фрагмента вручную: {result}")
                 return self.prepare_docs_info_for_final_insertion(result, cleaned_content)
             
             except json.JSONDecodeError:

@@ -47,6 +47,7 @@ DOCUMENT_TYPE_MAPPING = {
 }
 
 ALLOWED_DOC_TYPES = list(DOCUMENT_TYPE_MAPPING.keys())
+ALLOWED_DOC_TYPES.append('linkDocs')
 
 
 class TypeDataExtractor:
@@ -224,7 +225,7 @@ class TypeDataExtractor:
                         {"role": "system",
                             "content": prompt},
                         {"role": "user", "content": f"""
-                            Определи тип этого документа. Соответствует ли он {doc_type if doc_type in DOCUMENT_TYPE_MAPPING.keys() else "docDopMaterialsFiles"}: ({DOCUMENT_TYPE_MAPPING.get(doc_type, "Дополнительные материалы")})? 
+                            Определи тип этого документа. Соответствует ли он {doc_type if doc_type in ALLOWED_DOC_TYPES else "docDopMaterialsFiles"}: ({'Ссылка на ЕИС' if doc_type == 'linkDocs' else DOCUMENT_TYPE_MAPPING.get(doc_type, "Дополнительные материалы")})? 
                             Проанализируй текст, оцени его читаемость, извлеки данные:\n\n{content}
                         """}
                     ],
@@ -353,7 +354,7 @@ class TypeDataExtractor:
         type_compliance = chunk_results[0].get("type_compliance", {
             "status": "deny",
             "detected_type": "unknown",
-            "issues": [f"Ожидался {DOCUMENT_TYPE_MAPPING.get(doc_type, 'Дополнительные материалы')}, но в документе 'Неизвестный документ'"]
+            "issues": [f"Ожидался {'Ссылка на ЕИС' if doc_type == 'linkDocs' else DOCUMENT_TYPE_MAPPING.get(doc_type, 'Дополнительные материалы')}, но в документе 'Неизвестный документ'"]
         })
     
         # 🔧 Нормализация: если пришла строка вместо объекта — конвертируем
@@ -363,7 +364,7 @@ class TypeDataExtractor:
                 "status": "allow" if (type_compliance in ALLOWED_DOC_TYPES) and (type_compliance == doc_type) else "deny",
                 "detected_type": type_compliance if type_compliance in ALLOWED_DOC_TYPES else "unknown",
                 "issues": [] if (type_compliance in ALLOWED_DOC_TYPES) and (type_compliance == doc_type) else [
-                    f"Ожидался {DOCUMENT_TYPE_MAPPING.get(doc_type, 'Дополнительные материалы')}, но в документе {DOCUMENT_TYPE_MAPPING.get(type_compliance, 'Неизвестный документ')}"
+                    f"Ожидался {'Ссылка на ЕИС' if doc_type == 'linkDocs' else DOCUMENT_TYPE_MAPPING.get(doc_type, 'Дополнительные материалы')}, но в документе {'Ссылка на ЕИС' if doc_type == 'linkDocs' else DOCUMENT_TYPE_MAPPING.get(type_compliance, 'Неизвестный документ')}"
                 ]
             }
         elif not isinstance(type_compliance, dict):
@@ -371,7 +372,7 @@ class TypeDataExtractor:
             type_compliance = {
                 "status": "deny",
                 "detected_type": "unknown",
-                "issues": [f"Ожидался {DOCUMENT_TYPE_MAPPING.get(doc_type, 'Дополнительные материалы')}, но в документе 'Неизвестный документ'"]
+                "issues": [f"Ожидался {'Ссылка на ЕИС' if doc_type == 'linkDocs' else DOCUMENT_TYPE_MAPPING.get(doc_type, 'Дополнительные материалы')}, но в документе 'Неизвестный документ'"]
             }
 
         if type_compliance:
@@ -392,7 +393,7 @@ class TypeDataExtractor:
             elif (doc_type == 'linkDocs') and (doc_code != 'unknown'):
                 merged['type_compliance'] = {
                     "status": "allow",
-                    "detected_type": doc_code if doc_code in DOCUMENT_TYPE_MAPPING.keys() else "docDopMaterialsFiles",
+                    "detected_type": doc_code if doc_code in ALLOWED_DOC_TYPES else "docDopMaterialsFiles",
                     "issues": []
                 }
             else:
