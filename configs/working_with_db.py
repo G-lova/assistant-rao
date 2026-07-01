@@ -106,8 +106,8 @@ async def save_raw_data(procurement_id: int, document_code: str, analysis: List)
 
     Args:
         procurement_id (int): Уникальный идентификатор закупки.
-        document_type (str): Тип документа (например, 'contract', 'act'), используется для определения целевого столбца.
-        full_analysis (Dict[str, Any]): Словарь с полным результатом анализа документа, включая извлечённые данные и метаинформацию.
+        document_code (str): Тип документа (например, 'contract', 'act'), используется для определения целевого столбца.
+        analysis (Dict[str, Any]): Словарь с полным результатом анализа документа, включая извлечённые данные и метаинформацию.
 
     Raises:
         Исключения логируются, транзакция откатывается при ошибке.
@@ -115,6 +115,11 @@ async def save_raw_data(procurement_id: int, document_code: str, analysis: List)
     procurement_id = int(procurement_id)
     try:
         async with get_async_db_connection() as conn:
+            # Захватываем advisory lock по procurement_id
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext($1::text))",
+                str(procurement_id)
+            )
 
             column_name = DOCUMENT_CODE_TO_COLUMN.get(document_code, "unknown")
             if not column_name:
