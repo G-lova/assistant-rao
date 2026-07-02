@@ -33,7 +33,6 @@ requests==2.32.4
 scikit-learn
 tiktoken
 textract==1.6.5
-tiktoken
 tqdm>=4.66.0
 uvicorn==0.22.0
 watchfiles
