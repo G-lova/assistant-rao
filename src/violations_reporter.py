@@ -43,6 +43,25 @@ class ViolationsReporter:
 
         self.semaphore = asyncio.Semaphore(5)
         self.rate_limiter = TokenBucket(rate=1.5)  # 1.5 запроса в секунду
+
+        self.code_dict = {
+            '"mon_affiliation"': '"Принадлежность МОН"',
+            '"podved"': '"Принадлежность МОН"',
+            '"org_type"': '"Тип организации"',
+            '"orgType"': '"Тип организации"',
+            '"review_organization"': '"Организация"',
+            '"object"': '"Область экспертизы"',
+            '"type"': '"Законодательная база"',
+            '"selection_method"': '"Способ определения поставщика / тип контракта"',
+            '"checkType2"': '"Способ определения поставщика / тип контракта"',
+            '"interval_dynamics"': '"Интервал динамики"',
+            '"violation_type"': '"Тип нарушения"',
+            '"violation_subtype"': '"Подтип (суть) нарушения"',
+            '"support"': '"% экспертиз, в которых наблюдается зависимость между нарушениями"',
+            '"confidence"': '"Вероятность появления нарушения B при наличии нарушения A"',
+            '"lift"': '"Частота встречи двух нарушений совместно относительно случайного совпадения"',
+            '"coocurrence"': '"Совстречаемость"'
+        }
             
 
     async def analize_data_from_content(self, metric: str, filters: Dict[str, Any], data: Dict[str, Any], charts: List) -> Dict[str, Any]:
@@ -68,6 +87,15 @@ class ViolationsReporter:
             - При ошибках в отдельных чанках, метод не прерывается, а логирует ошибку 
               и передает сырые данные этого чанка на финальный этап.
         """
+        # замена кодов на человекочитаемые названия для llm
+        filters_json_str = json.dumps(filters, ensure_ascii=False)
+        data_json_str = json.dumps(data, ensure_ascii=False)
+        for old_key, new_key in self.code_dict.items():
+            filters_json_str = filters_json_str.replace(old_key, new_key)
+            data_json_str = data_json_str.replace(old_key, new_key)
+        filters = json.loads(filters_json_str)
+        data = json.loads(data_json_str)
+
         data_in = {
             "metric": metric,
             "filters": filters,
@@ -177,7 +205,7 @@ class ViolationsReporter:
         """
         system_prompt = """
             Выяви ключевые проблемы и тенденции, опираясь на представленные данные.
-            Сформируй аналитический текст для раздела, описывая **только** статистически значимые закономерности.
+            Сформируй читабельный и структурированный аналитический текст для раздела, описывая **только** статистически значимые закономерности.
             Формулируй человекопонятным языком.
             Используй цифры из статистики.
             Если agg_group указаны, ссылайся в контексте на 'Рисунок' графика (без нумерации и описания причины выбора типа графика). 
