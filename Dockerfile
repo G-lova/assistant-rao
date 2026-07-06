@@ -16,6 +16,7 @@ RUN apt-get update && \
         poppler-utils \
         zlib1g-dev \
         wget \
+        unzip \
         tar \
         gcc \
         make \
@@ -31,6 +32,26 @@ RUN apt-get update && \
 RUN wget https://www.rarlab.com/rar/unrar_5.2.5-0.1_amd64.deb && \
     dpkg -i unrar_5.2.5-0.1_amd64.deb && \
     rm unrar_5.2.5-0.1_amd64.deb
+
+# Установка сертификатов Минцифры
+RUN mkdir -p /tmp/mincifry && \
+    \
+    wget --no-check-certificate \
+      -O /tmp/root.zip \
+      https://gu-st.ru/content/lending/linux_russian_trusted_root_ca_pem.zip && \
+    unzip -o /tmp/root.zip -d /tmp/mincifry && \
+    \
+    wget --no-check-certificate \
+      -O /tmp/sub.zip \
+      https://gu-st.ru/content/lending/russian_trusted_sub_ca_pem.zip && \
+    unzip -o /tmp/sub.zip -d /tmp/mincifry && \
+    \
+    find /tmp/mincifry -type f \( -name "*.pem" -o -name "*.crt" \) | while read f; do \
+        cp "$f" "/usr/local/share/ca-certificates/$(basename "${f%.*}").crt"; \
+    done && \
+    \
+    update-ca-certificates && \
+    rm -rf /tmp/mincifry /tmp/root.zip /tmp/sub.zip
 
 # Set the working directory in the container
 WORKDIR /app
