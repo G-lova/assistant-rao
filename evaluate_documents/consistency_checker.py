@@ -94,7 +94,7 @@ class ConsistencyChecker:
         logger.info(f"cleaned_content: {cleaned_content}")
 
         # Перед запросом к LLM            
-        cleaned_content_chunks = split_large_text(json.dumps(cleaned_content, ensure_ascii=False) if not isinstance(cleaned_content, str) else cleaned_content, max_chunk_size=15000)
+        cleaned_content_chunks = split_large_text(json.dumps(cleaned_content, ensure_ascii=False) if not isinstance(cleaned_content, str) else cleaned_content, max_chunk_size=14500)
 
         try:
             response = await self.client.chat.completions.create(
