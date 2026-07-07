@@ -1,0 +1,16 @@
+stages:
+  - deploy
+
+manual_docker_deploy:
+  stage: deploy
+  tags:
+    - lms-chatbot_native_runner
+  script:
+    - cd /prod/is_rao/assistant-rao
+    - git pull origin main
+    - docker compose build --no-cache
+    - docker compose down
+    - docker compose up -d
+  when: manual
+  only:
+    - master
