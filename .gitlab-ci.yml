@@ -7,7 +7,8 @@ manual_docker_deploy:
     - lms-chatbot_native_runner
   script:
     - cd /prod/is_rao/assistant-rao
-    - git pull origin master
+    # передаем токен авторизации прямо в URL
+    - git pull https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.prostoy.ru/ai/assistant-rao.git master
     - docker compose build --no-cache
     - docker compose down
     - docker compose up -d
