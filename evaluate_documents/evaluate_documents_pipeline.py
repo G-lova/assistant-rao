@@ -351,12 +351,7 @@ class TasksPipeline:
                 
             
             # сохранение данных в БД
-            await asyncio.gather(
-                *(save_raw_data(procurement_id=self.df.id.iloc[0], 
-                                document_code=item["doc_code"], 
-                                analysis=item["completeness"]) 
-                for item in data_for_final_evaluation["documents"])
-            )
+            await save_raw_data(procurement_id=self.df.id.iloc[0], analysis=data_for_final_evaluation["documents"]) 
                         
             # ЭТАП 3: Оценка согласованности и эвристик и формирование финального отчета
             # logger.info(f"type: {type(data_for_final_evaluation)}, data_for_final_evaluation: {data_for_final_evaluation}")

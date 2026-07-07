@@ -82,7 +82,3 @@ CREATE TABLE clean_document_conclusions (
 -- Индексы для производительности
 CREATE INDEX idx_raw_procurement_id ON raw_document_data (procurement_id);
 CREATE INDEX idx_clean_procurement_id ON clean_document_conclusions (procurement_id);
-    summary_report JSONB,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
