@@ -16,6 +16,7 @@ pillow
 psycopg2-binary==2.9.9
 pydantic==1.10.8
 scipy==1.11.4
+py7zr>=0.21.0
 pyod==2.0.5
 PyPDF2==3.0.1
 python-dateutil
@@ -33,7 +34,6 @@ requests==2.32.4
 scikit-learn
 tiktoken
 textract==1.6.5
-tiktoken
 tqdm>=4.66.0
 uvicorn==0.22.0
 watchfiles

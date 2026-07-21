@@ -1,15 +1,19 @@
 import asyncio
+import bz2
+import gzip
+import lzma
+import tarfile
 import aiofiles
 import os
+import pandas as pd
+import py7zr
+import rarfile
 import re
 import shutil
 import subprocess
 import tempfile
-
-import pandas as pd
-from configs.rate_limiter import TokenBucket
-import rarfile
 import zipfile
+
 from bs4 import BeautifulSoup
 from defusedxml import ElementTree as ET
 from docx import Document
@@ -18,6 +22,7 @@ from pptx import Presentation
 from pdf2image import convert_from_path
 
 from configs.logger import get_logger
+from configs.rate_limiter import TokenBucket
 from evaluate_documents.ocr import OCRProcessor
 
 
@@ -491,69 +496,117 @@ class FileReader:
         except Exception as e:
             logger.error(f"Ошибка обработки DOCX: {str(e)}")
             raise ValueError(f"Ошибка обработки DOCX: {str(e)}")
+        
+
+    async def extract_archive(self, archive_path: str, ext: str, output_dir: str):
+        """
+        Извлекает архив любого поддерживаемого типа.
+        """
+
+        def _extract():
+
+            if ext == ".zip":
+                with zipfile.ZipFile(archive_path) as archive:
+                    archive.extractall(output_dir)
+
+            elif ext == ".rar":
+                with rarfile.RarFile(archive_path) as archive:
+                    archive.extractall(output_dir)
+
+            elif ext == ".7z":
+                with py7zr.SevenZipFile(archive_path, "r") as archive:
+                    archive.extractall(output_dir)
+
+            elif ext in [
+                ".tar",
+                ".tar.gz",
+                ".tgz",
+                ".tar.bz2",
+                ".tbz2",
+                ".tar.xz",
+                ".txz",
+            ]:
+                with tarfile.open(archive_path, "r:*") as archive:
+                    archive.extractall(output_dir)
+
+            elif ext == ".gz":
+                filename = os.path.basename(archive_path[:-3])
+
+                out_file = os.path.join(output_dir, filename)
+
+                with gzip.open(archive_path, "rb") as fin:
+                    with open(out_file, "wb") as fout:
+                        shutil.copyfileobj(fin, fout)
+
+            elif ext == ".bz2":
+
+                filename = os.path.basename(archive_path[:-4])
+
+                out_file = os.path.join(output_dir, filename)
+
+                with bz2.open(archive_path, "rb") as fin:
+                    with open(out_file, "wb") as fout:
+                        shutil.copyfileobj(fin, fout)
+
+            elif ext == ".xz":
+
+                filename = os.path.basename(archive_path[:-3])
+
+                out_file = os.path.join(output_dir, filename)
+
+                with lzma.open(archive_path, "rb") as fin:
+                    with open(out_file, "wb") as fout:
+                        shutil.copyfileobj(fin, fout)
+
+            else:
+                raise ValueError(f"Архив {ext} не поддерживается")
+
+        await asyncio.to_thread(_extract)
 
 
     async def process_archive(self, file_path: str, ext: str) -> str:
         """
-        Извлекает и обрабатывает файлы из архива (.zip или .rar), читая их содержимое.
-
-        Функция последовательно:
-        - распаковывает каждый файл из архива во временную директорию;
-        - определяет его тип и извлекает текст с помощью `read_file`;
-        - добавляет содержимое с заголовком имени файла;
-        - удаляет временный файл после обработки.
-
-        Поддерживает вложенные папки в архиве. Каталоги пропускаются.
-
-        Args:
-            file_path (str): Путь к архивному файлу (.zip или .rar).
-
-        Returns:
-            str: Объединённый текст всех обработанных файлов в формате:
-                === имя_файла ===
-                [содержимое]
-                В случае ошибки возвращает сообщение об ошибке с именем архива.
+        Извлекает любой архив и читает все вложенные документы.
         """
-        async def process_single_file(filename, data):
-            extracted_path = os.path.join(tempfile.gettempdir(), filename)
-            os.makedirs(os.path.dirname(extracted_path), exist_ok=True)
 
+        async def process_single_file(file_path, relative_name):
             try:
-                await asyncio.to_thread(write_file, extracted_path, data)
-                text = await self.read_file(extracted_path, original_filename=filename)
-                return f"=== {filename} ===\n{text}"
+                text = await self.read_file(
+                    file_path,
+                    original_filename=relative_name
+                )
+                return f"=== {relative_name} ===\n{text}"
+
             except Exception as e:
-                return f"=== {filename} ===\n[Ошибка чтения: {e}]"
-            finally:
-                if os.path.exists(extracted_path):
-                    os.unlink(extracted_path)
+                return f"=== {relative_name} ===\n[Ошибка чтения: {e}]"
 
-        def write_file(path, data):
-            with open(path, 'wb') as f:
-                f.write(data)
+        with tempfile.TemporaryDirectory() as tmpdir:
 
-        tasks = []
+            await self.extract_archive(file_path, ext, tmpdir)
 
-        if ext == '.zip':
-            with zipfile.ZipFile(file_path, 'r') as archive:
-                for info in archive.infolist():
-                    if info.is_dir():
-                        continue
-                    data = archive.read(info)
-                    tasks.append(process_single_file(info.filename, data))
+            tasks = []
 
-        elif ext == '.rar':
-            with rarfile.RarFile(file_path) as archive:
-                for info in archive.infolist():
-                    if info.isdir():
-                        continue
-                    data = archive.read(info)
-                    tasks.append(process_single_file(info.filename, data))
+            for root, _, files in os.walk(tmpdir):
 
-        results = await asyncio.gather(*tasks)
+                for filename in files:
+
+                    full_path = os.path.join(root, filename)
+
+                    relative_name = os.path.relpath(
+                        full_path,
+                        tmpdir
+                    )
+
+                    tasks.append(
+                        process_single_file(
+                            full_path,
+                            relative_name
+                        )
+                    )
+
+            results = await asyncio.gather(*tasks)
 
         return "\n\n".join(results)
-        # return results
 
 
     async def read_html(self, html_path: str) -> str:
@@ -657,6 +710,23 @@ class FileReader:
         return await asyncio.to_thread(_parse_xml)
 
 
+    def get_extension(self, filename: str) -> str:
+        filename = filename.lower()
+
+        for ext in (
+            ".tar.gz",
+            ".tar.bz2",
+            ".tar.xz",
+            ".tgz",
+            ".tbz2",
+            ".txz",
+        ):
+            if filename.endswith(ext):
+                return ext
+
+        return os.path.splitext(filename)[1]
+
+
     async def read_file(self, file_path: str, original_filename: str = None) -> str:
         """
         Читает файл и извлекает текстовое содержимое с улучшенной обработкой бинарных файлов
@@ -673,10 +743,7 @@ class FileReader:
             str: Извлечённый текст или сообщение о типе файла, если формат не поддерживается.
                 Для неподдерживаемых бинарных форматов возвращается строка вида "Бинарный файл ...".
         """
-        # filename_to_check = original_filename or os.path.basename(file_path)
-        # _, ext = os.path.splitext(filename_to_check)
-        # ext = ext.lower()
-        ext = os.path.splitext(original_filename)[1].lower()
+        ext = self.get_extension(original_filename)
         logger.info(f"Чтение файла: {original_filename} (расширение: {ext})")
 
         try:
@@ -719,7 +786,7 @@ class FileReader:
                 text = await self.read_doc_file(file_path, ext, original_filename)
                 logger.info(f"Извлечён текст из DOC(X): {original_filename}, длина: {len(text)}")
                 return text
-            elif ext in [".zip", ".rar"]:
+            elif ext in [".zip", ".rar", ".7z", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".gz", ".bz2", ".xz"]:
                 text = await self.process_archive(file_path, ext)
                 logger.info(f"Извлечён текст из архива: {original_filename}, длина: {len(text)}")
                 return text
@@ -829,7 +896,23 @@ class FileReader:
                 return '.txt'
             if header.startswith(b'\xFF\xFE') or header.startswith(b'\xFE\xFF'):  # UTF-16 BOM
                 return '.txt'
-
+            # gzip
+            if header.startswith(b"\x1f\x8b"):
+                return ".gz"
+            # bzip2
+            if header.startswith(b"BZh"):
+                return ".bz2"
+            # xz
+            if header.startswith(b"\xfd7zXZ\x00"):
+                return ".xz"
+            # tar
+            try:
+                with open(file_path, "rb") as f:
+                    f.seek(257)
+                    if f.read(5) == b"ustar":
+                        return ".tar"
+            except Exception:
+                pass
             # Пробуем определить как текстовый файл
             try:
                 async with aiofiles.open(file_path, 'r', encoding='utf-8') as f:

@@ -50,7 +50,8 @@ class OCRProcessor:
         async with aiofiles.open(image_path, "rb") as image_file:
             base64_image = base64.b64encode(await image_file.read()).decode('utf-8')
 
-        logger.info(f"OCR обработка {original_filename}")
+        image_name = image_path.split("/")[-1]
+        logger.info(f"OCR обработка {original_filename}/{image_name}")
 
         try:
             response = await self.client.chat.completions.create(
@@ -84,11 +85,11 @@ class OCRProcessor:
             #     )   
 
             raw_response = response.choices[0].message.content.strip()
-            logger.info(f'OCR response для {original_filename}: {raw_response}')
+            logger.info(f'OCR response для {original_filename}/{image_name}: {raw_response}')
             return raw_response
         
         except asyncio.TimeoutError:
-            logger.error(f"Таймаут при OCR: {original_filename}")
+            logger.error(f"Таймаут при OCR: {original_filename}/{image_name}")
             return '{"status": "error", "error": "Таймаут при анализе изображения"}'
         
         # except openai.BadRequestError as e:
@@ -99,7 +100,7 @@ class OCRProcessor:
         #     raise
         
         except Exception as e:
-            logger.error(f"OCR ошибка при обработке {original_filename}: {e}")
+            logger.error(f"OCR ошибка при обработке {original_filename}/{image_name}: {e}")
             # Возвращаем JSON с ошибкой для сохранения структуры
             return """
                 {

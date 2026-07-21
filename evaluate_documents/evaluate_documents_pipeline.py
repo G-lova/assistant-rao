@@ -290,7 +290,7 @@ class TasksPipeline:
                     for res in result:
                         if isinstance(res, str):
                             res = json.loads(res)
-                        detected_type = res.get('type_compliance', {}).get("detected_type", "unknown")
+                        detected_type = res.get('type_compliance') if isinstance(res.get('type_compliance'), str) else res.get('type_compliance', {}).get("detected_type", "unknown")
                         # заполнение столбца данными о предоставленных документах 
                         # if link.doc_code == 'linkDocs':
                         #     self.df.loc[self.df['doc_code'] == 'linkDocs', 'provided_docs'] = 1
