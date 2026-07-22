@@ -386,7 +386,20 @@ WITH expertise_info AS (
             )
 			THEN 1
 		END), 0) AS expert_declines,
-		COALESCE(SUM(CASE WHEN e.status IN (2) THEN 1 END), 0) AS expert_requests,
+		(
+            SELECT COUNT(*)
+            FROM expertises e1
+            WHERE u.id MEMBER OF(e1.experts)
+        )
+        +
+        (
+            SELECT COUNT(*)
+            FROM expertise_experts ee1
+            JOIN expertises e1
+                ON e1.id = ee1.expertise_id
+            WHERE ee1.expert_id = u.id
+              AND e1.status = 2 AND ee1.status = 0
+        ) AS expert_requests,
 		ROUND(AVG(CASE 
 			WHEN ee.updated_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
 			THEN ee.`range`
