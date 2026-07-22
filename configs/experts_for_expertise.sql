@@ -386,10 +386,7 @@ WITH expertise_info AS (
             )
 			THEN 1
 		END), 0) AS expert_declines,
-		COALESCE(SUM(CASE WHEN e.dateStatus2 >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
-			AND u.id MEMBER OF(e.experts) 
-			THEN 1
-		END), 0) AS expert_requests,
+		COALESCE(SUM(CASE WHEN e.status IN (2) THEN 1 END), 0) AS expert_requests,
 		ROUND(AVG(CASE 
 			WHEN ee.updated_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
 			THEN ee.`range`
