@@ -2,11 +2,11 @@ WITH experts AS (
 	SELECT 
 		u.id AS expert_id,
 		COUNT(CASE 
-				WHEN ee.updated_at BETWEEN ? AND ?
+				WHEN ee.group_formed_at BETWEEN ? AND ?
 				THEN 1 
 			END) AS countTotalExpertises,
 		SUM(CASE 
-				WHEN ee.updated_at BETWEEN ? AND ?
+				WHEN ee.uploadExpertDate BETWEEN ? AND ?
 				THEN COALESCE(ee.accept, 0)
 			END) AS countAcceptedExpertises,
 		COALESCE(SUM(CASE 
@@ -24,7 +24,7 @@ WITH experts AS (
 			ELSE NULL 
 		END) * 100, 1) AS criterion4,
 		ROUND(AVG(CASE 
-			WHEN ee.updated_at BETWEEN ? AND ?
+			WHEN ee.uploadExpertDate BETWEEN ? AND ?
 			THEN CASE 
 				WHEN e.object IN (1,7) AND ee.accept = 1
 				THEN CASE
