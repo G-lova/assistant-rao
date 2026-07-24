@@ -396,9 +396,9 @@ WITH expertise_info AS (
             SELECT COUNT(*)
             FROM expertise_experts ee1
             JOIN expertises e1
-                ON e1.id = ee1.expertise_id
+            ON e1.id = ee1.expertise_id
             WHERE ee1.expert_id = u.id
-              AND e1.status = 2 AND ee1.status = 0
+            AND e1.status = 2 AND ee1.group_formed_at IS NULL AND ee1.deleted_at IS NULL
         ) AS expert_requests,
 		ROUND(AVG(CASE 
 			WHEN ee.updated_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
@@ -418,7 +418,7 @@ WITH expertise_info AS (
 			END
 			ELSE NULL
 		END), 3) AS criterion5,
-        SUM(CASE WHEN e.status IN (3) OR e.dateStatus3 >= DATE_SUB(NOW(), INTERVAL 7 DAY) THEN 1 ELSE 0 END) AS currentWeekWorkload 
+        SUM(CASE WHEN e.status IN (3) OR ee.group_formed_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) THEN 1 ELSE 0 END) AS currentWeekWorkload 
 	FROM users u 
 	LEFT JOIN expertise_experts ee 
 	ON u.id = ee.expert_id 
