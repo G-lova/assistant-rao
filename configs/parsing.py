@@ -1753,6 +1753,31 @@ class CloudStorageParser:
                     if not xml_files:
                         return result
 
+
+                    def select_latest_xml_versions(files):
+                        """
+                        Возвращает список только последних версий XML.
+                        """
+
+                        latest = {}
+
+                        for fileinfo in files:
+                            logger.info(f'filename: {fileinfo["filename"]}')
+
+                            m = fileinfo["filename"].split('_')
+
+                            key = f'{m[0]}_{m[1]}'
+
+                            version = 0 if m[2] == 'null' else int(m[2])
+
+                            if key not in latest or version > latest[key][0]:
+                                latest[key] = (version, fileinfo)
+
+                        return [item[1] for item in latest.values()]
+
+                    # Отбор актуальных версий xml-файлов
+                    actual_xml_files = select_latest_xml_versions(xml_files)
+
                     # Ограничитель параллелизма (настраивается)
                     semaphore = asyncio.Semaphore(10)
                     
@@ -1770,19 +1795,19 @@ class CloudStorageParser:
                                 content = await asyncio.to_thread(xmltodict.parse, extracted_text)
                                 attachment_urls = await asyncio.to_thread(self.extract_urls_from_dict, content)
                                 
-                                logger.info(f"Найдено ссылок в {file_info['file_path']}: {len(attachment_urls)}")
+                                logger.info(f"Найдено ссылок в {file_info['filename']}: {len(attachment_urls)}")
 
                                 return attachment_urls
                                 
                             except Exception as e:
-                                logger.error(f"Ошибка обработки {file_info.get('file_path')}: {e}", exc_info=True)
+                                logger.error(f"Ошибка обработки {file_info.get('filename')}: {e}", exc_info=True)
                                 return []
                             
                     
                     # Запускаем обработку всех XML параллельно
                     async with self.semaphore:
                         attachment_urls = await asyncio.gather(
-                            *(process_xml_file(f) for f in xml_files),
+                            *(process_xml_file(f) for f in actual_xml_files),
                             return_exceptions=True
                         )
                     # оставляем уникальные ссылки
