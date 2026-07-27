@@ -1766,7 +1766,7 @@ class CloudStorageParser:
 
                             m = fileinfo["filename"].split('_')
 
-                            key = f'{m[0]}_{m[1]}'
+                            key = fileinfo["filename"] if m[2] == 'null' else f'{m[0]}_{m[1]}'
 
                             version = 0 if m[2] == 'null' else int(m[2])
 
