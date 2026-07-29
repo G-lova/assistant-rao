@@ -1,13 +1,13 @@
 import asyncio
 import json
-from configs.rate_limiter import TokenBucket
-from configs.retry_utils import LLM_RETRY_CONFIG, async_retry
+import re
 from json_repair import repair_json
 from string import Template
-
-from configs.logger import get_logger
 from typing import Any, Dict, List
 
+from configs.logger import get_logger
+from configs.rate_limiter import TokenBucket
+from configs.retry_utils import LLM_RETRY_CONFIG, async_retry
 from configs.utils import extract_json_objects
 
 
@@ -48,6 +48,29 @@ DOCUMENT_TYPE_MAPPING = {
 
 ALLOWED_DOC_TYPES = list(DOCUMENT_TYPE_MAPPING.keys())
 ALLOWED_DOC_TYPES.append('linkDocs')
+
+
+DOCUMENT_TYPE_KEYWORDS = {
+    "docContractPostTovarFiles": ["контракт на поставку", "договор поставки", "поставка товара"],
+    "docContractDoWorkFiles": ["контракт на выполнение работ", "договор подряда", "оказание услуг", "выполнение работ"],
+    "docProjContractFiles": ["проект контракта", "проект договора"],
+    "docObosnNMCKFiles": ["обоснование нмцк", "обоснование н(м)цк", "обоснование начальной", "обоснование максимальной цены"],
+    "docOpusObjectZacupFiles": ["описание объекта закупки", "техническое задание", "тз"],
+    "docIzvejenieFiles": ["извещение", "извещение о проведении", "уведомление о размещении"],
+    "docCargoTaxFiles": ["товарная накладная", "накладная торг-12", "торг-12"],
+    "docPriemTovSchetFiles": ["документ о приемке", "акт приемки", "универсальный передаточный документ", "упд"],
+    "docDocPriemActSdachFiles": ["акт сдачи-приемки", "акт выполненных работ", "акт оказанных услуг"],
+    "docAssetSelOrgFiles": ["положение о закупках"],
+    "docPorViewOcenkFiles": ["порядок рассмотрения и оценки"],
+    "docTrebContentRequestFiles": ["требования к содержанию заявки", "инструкция по заполнению заявки"],
+    "docTechDocFiles": ["паспорт изделия", "паспорт товара", "техническая документация", "руководство по эксплуатации"],
+    "docMaterialValidNMCKFiles": ["коммерческое предложение", "анализ рынка", "ценовая информация"],
+    "docDopConsentContractFiles": ["дополнительное соглашение"],
+    "docValidGarantFiles": ["гарантийное письмо", "гарантийные обязательства"],
+    "docCertValidFiles": ["сертификат соответствия", "декларация соответствия"],
+    "docPhotoCargoFiles": ["фото товара"],
+    "docPhotoFinishWorkFiles": ["фото выполненных работ", "фото результата работ"]
+}
 
 
 class TypeDataExtractor:
@@ -151,7 +174,7 @@ class TypeDataExtractor:
         try:
             logger.info(f"Объединение извлеченных данных по чанкам для {document_name}")
             final_result = self.merge_chunk_results(successful_results, doc_type, expertise_object)
-            logger.info(f"Объединение извлеченных данных по чанкам для {document_name} прошло успешно")
+            logger.info(f"Объединение извлеченных данных по чанкам для {document_name} прошло успешно: {final_result}")
 
             # logger.info(f"Оптимизация объединенных данных для {document_name}")
             # detected_type = final_result.get("type_compliance", {}).get("detected_type", doc_type)
@@ -308,10 +331,6 @@ class TypeDataExtractor:
             Dict[str, Any]: Единый словарь в том же формате, но с агрегированными данными
                             по всем чанкам.
         """
-        if len(chunk_results) == 1:
-            return chunk_results[0]
-        
-        
         # Базовый шаблон итоговой структуры
         merged = {
             "type_compliance": {
@@ -362,7 +381,7 @@ class TypeDataExtractor:
             logger.warning(f"Нормализация type_compliance: строка '{type_compliance}' → объект")
             type_compliance = {
                 "status": "allow" if (type_compliance in ALLOWED_DOC_TYPES) and (type_compliance == doc_type) else "deny",
-                "detected_type": type_compliance if type_compliance in ALLOWED_DOC_TYPES else "unknown",
+                "detected_type": type_compliance if type_compliance in ALLOWED_DOC_TYPES else self.detect_document_type_by_name(chunk_results[0].get("raw_data", {}).get("document_name", "")),
                 "issues": [] if (type_compliance in ALLOWED_DOC_TYPES) and (type_compliance == doc_type) else [
                     f"Ожидался {'Ссылка на ЕИС' if doc_type == 'linkDocs' else DOCUMENT_TYPE_MAPPING.get(doc_type, 'Дополнительные материалы')}, но в документе {'Ссылка на ЕИС' if doc_type == 'linkDocs' else DOCUMENT_TYPE_MAPPING.get(type_compliance, 'Неизвестный документ')}"
                 ]
@@ -393,7 +412,7 @@ class TypeDataExtractor:
             elif (doc_type == 'linkDocs') and (doc_code != 'unknown'):
                 merged['type_compliance'] = {
                     "status": "allow",
-                    "detected_type": doc_code if doc_code in ALLOWED_DOC_TYPES else "docDopMaterialsFiles",
+                    "detected_type": doc_code if doc_code in ALLOWED_DOC_TYPES else self.detect_document_type_by_name(chunk_results[0].get("raw_data", {}).get("document_name", "")),
                     "issues": []
                 }
             else:
@@ -515,3 +534,29 @@ class TypeDataExtractor:
             merged["raw_data"]["document_name"] = "Проект контракта"
 
         return merged
+
+
+    def detect_document_type_by_name(self, document_name: str) -> str:
+        """
+        Определяет тип документа по его названию.
+        Возвращает код из DOCUMENT_TYPE_MAPPING.
+        """
+        if not document_name:
+            return "unknown"
+
+        name = document_name.lower()
+        name = re.sub(r"\s+", " ", name)
+
+        # сначала ищем более длинные совпадения
+        candidates = []
+
+        for doc_type, keywords in DOCUMENT_TYPE_KEYWORDS.items():
+            for keyword in keywords:
+                if keyword in name:
+                    candidates.append((len(keyword), doc_type))
+
+        if candidates:
+            candidates.sort(reverse=True)
+            return candidates[0][1]
+
+        return "docDopMaterialsFiles"
