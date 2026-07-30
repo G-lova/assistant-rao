@@ -2,7 +2,7 @@ WITH experts AS (
 	SELECT 
 		u.id AS expert_id,
 		COUNT(CASE 
-				WHEN ee.group_formed_at BETWEEN ? AND ?
+				WHEN ee.group_formed_at <= ? AND deadline_at >= ?
 				THEN 1 
 			END) AS countTotalExpertises,
 		SUM(CASE 

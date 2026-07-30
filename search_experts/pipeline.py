@@ -483,7 +483,7 @@ class RatingPipeline:
         sql_query = await self.load_sql_query(sql_file_path)
         
         # Получение данных с рассчитанными рейтингами
-        df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[start_date, end_date] * 6)
+        df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[end_date, start_date] + [start_date, end_date] * 5)
         
         # Преобразование данных в словарь
         ratings = await asyncio.to_thread(self.to_rating_dict, df)
