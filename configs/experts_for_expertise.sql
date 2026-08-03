@@ -373,11 +373,21 @@ WITH expertise_info AS (
 		END), 0) AS secondUpload_lastYear,
 		COALESCE(SUM(CASE WHEN ee.deleted_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
 			AND ee.uploadExpertDate IS NULL 
-			AND u.id MEMBER OF(e.declineExperts) 
+			AND (u.id MEMBER OF(e.declineExperts) 
+			OR JSON_CONTAINS_PATH(
+				e.declineExperts,
+				'one',
+				CONCAT('$."', u.id, '"')
+			))
 			THEN 1
 		END), 0) AS overdues,
     	COALESCE(SUM(CASE WHEN e.dateStatus2 >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
-			AND u.id MEMBER OF(e.declineExperts) 
+			AND (u.id MEMBER OF(e.declineExperts) 
+			OR JSON_CONTAINS_PATH(
+				e.declineExperts,
+				'one',
+				CONCAT('$."', u.id, '"')
+			))
             AND NOT EXISTS (
                 SELECT 1 
                 FROM expertise_experts ee
@@ -708,7 +718,12 @@ experts_with_coords AS (
 	AND ((ewc.expertise_examination = 1 AND ewc.expertise_examination = u.expert_examination) 
 		OR ewc.expertise_examination IS NULL 
 		OR ewc.expertise_examination != 1) 	
-	AND NOT (u.expert_id MEMBER OF(ewc.declineExperts))
+	AND NOT ((u.expert_id MEMBER OF(ewc.declineExperts))
+		OR JSON_CONTAINS_PATH(
+			ewc.declineExperts,
+			'one',
+			CONCAT('$."', u.expert_id, '"')
+		))
 	AND NOT (u.expert_id MEMBER OF(ewc.requestExperts))
 )
 SELECT 
