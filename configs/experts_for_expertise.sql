@@ -444,6 +444,12 @@ WITH expertise_info AS (
 	AND u.deleted_at IS NULL 
 	AND u.inn != '' AND CAST(SUBSTRING(u.inn, 1, 2) AS UNSIGNED) != 0 AND LOWER(u.name) NOT LIKE '%тест%' AND LOWER(u.name) NOT LIKE '%test%' 
 	AND COALESCE(u.workExpertise, (SELECT value FROM settings WHERE `key` IN ('max_applications_per_expert'))) > 0
+	AND NOT EXISTS (
+		SELECT 1 
+		FROM expertise_experts ee
+		WHERE ee.expertise_id = e.id 
+		AND ee.expert_id = u.id
+	)
 	GROUP BY u.id
 ), 
 experts_with_coords AS (
