@@ -449,6 +449,8 @@ WITH expertise_info AS (
 		FROM expertise_experts ee
 		WHERE ee.expertise_id = e.id 
 		AND ee.expert_id = u.id
+		AND ee.group_formed_at IS NOT NULL
+		AND ee.deleted_at IS NULL
 	)
 	GROUP BY u.id
 ), 
