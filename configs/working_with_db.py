@@ -212,9 +212,9 @@ async def get_contract_info_from_db(procurement_id: str) -> Dict[str, str]:
                     contract_info = {
                         'contract_number': str(r.get('contract_number', '0'))
                     }
-                    amounts = r.get('amounts', [])
+                    finances = r.get('finances', [])
                     dates = r.get('dates', [])
-                    contract_info['amount'] = str(amounts[0].get('value', '0'))
+                    contract_info['amount'] = str(finances[0].get('value', '0'))
                     contract_info['date'] = str(dates[0].get('value', '0'))
                     
                     return contract_info

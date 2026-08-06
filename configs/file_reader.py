@@ -1,9 +1,11 @@
+import uuid
+
+import aiofiles
 import asyncio
 import bz2
 import gzip
+import json
 import lzma
-import tarfile
-import aiofiles
 import os
 import pandas as pd
 import py7zr
@@ -11,6 +13,7 @@ import rarfile
 import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import zipfile
 
@@ -53,6 +56,60 @@ class FileReader:
             return await f.read()
 
 
+    async def convert_to_pdf(self, file_path: str, ext: str, original_filename: str) -> str:
+        """
+        Конвертирует DOC/DOCX в PDF и передает PDF на дальнейшее чтение.
+
+        При ошибке конвертации возвращается к обычному способу чтения
+        исходного документа.
+        """
+        profile_dir = f"/tmp/lo_profile_{uuid.uuid4().hex}"
+        
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmpdir_path = Path(tmpdir)
+
+                logger.info(f"Конвертация {original_filename} в PDF...")
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    [
+                        "soffice",
+                        "--headless",
+                        "--norestore",
+                        "--nofirststartwizard",
+                        f"-env:UserInstallation=file://{profile_dir}",
+                        "--convert-to", "pdf:writer_pdf_Export",
+                        "--outdir", str(tmpdir_path),
+                        file_path
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=60  # Таймаут 60 секунд на конвертацию
+                )
+                
+                # LibreOffice сохраняет PDF с тем же именем, что и исходный файл
+                pdf_path = tmpdir_path / f"{Path(file_path).stem}.pdf"
+                if not pdf_path.exists():
+                    raise FileNotFoundError(f"LibreOffice не создал PDF. STDERR: {result.stderr}")
+
+                logger.info(f"Файл {original_filename} успешно конвертирован в PDF: {pdf_path}")
+                return await self.read_pdf_file(str(pdf_path), original_filename)
+
+        # except subprocess.CalledProcessError as e:
+        #     logger.error(
+        #         f"Ошибка конвертации {ext.upper()} → PDF для {original_filename}. "
+        #         f"Exit code: {e.returncode}. STDERR: {e.stderr}"
+        #     )
+        #     logger.info(f"Пробуем обычный способ чтения {ext.upper()} файла: {original_filename}")
+        #     return await self.read_doc_file(file_path, ext, original_filename)
+            
+        except Exception as e:
+            logger.error(f"Ошибка конвертации {ext.upper()} → PDF для {original_filename}: {e}", exc_info=True)
+            logger.info(f"Пробуем обычный способ чтения {ext.upper()} файла: {original_filename}")
+            return await self.read_doc_file(file_path, ext, original_filename)
+
+
     async def read_doc_file(self, file_path: str, ext: str, original_filename:str) -> str:
         """
         Читает файл формата .doc или .docx и извлекает из него текстовое содержимое.
@@ -80,7 +137,7 @@ class FileReader:
                 raise ValueError("Файл пустой")
             if ext == '.docx':
                 return await self.extract_text_and_images_from_docx(file_path, original_filename, ocr_func=self.ocr_processor.ocr_image_with_qwen_vl)
-            elif ext == '.doc':
+            elif ext in {'.doc', '.odt', '.rtf'}:
                 with tempfile.TemporaryDirectory() as tmpdir:
                     tmpdir = Path(tmpdir)
 
@@ -108,36 +165,37 @@ class FileReader:
                             )
 
                     except Exception as e:
-                        logger.warning(f"LibreOffice не сработал: {e}. Пробуем antiword...")
+                        logger.warning(f"LibreOffice не сработал для {original_filename}: {e}. Пробуем antiword...")
                         
-                        try:
-                            # Пробуем antiword
-                            text = await asyncio.to_thread(
-                                subprocess.run,
-                                ["antiword", file_path],
-                                capture_output=True,
-                                text=True
-                            ).stdout.strip()
-
-                            if text:
-                                return text
-                            else:
-                                raise ValueError("antiword не вернул текст")
-
-                        except Exception as e:
-                            logger.warning(f"antiword не сработал: {e}. Пробуем catdoc...")
-
-                            # Используем catdoc
+                        if ext == '.doc':
                             try:
-                                result = await asyncio.to_thread(
+                                # Пробуем antiword
+                                text = await asyncio.to_thread(
                                     subprocess.run,
-                                    ["catdoc", file_path],
+                                    ["antiword", file_path],
                                     capture_output=True,
                                     text=True
-                                )
-                                return result.stdout.strip()
-                            except Exception as e2:
-                                raise ValueError(f"Ошибка чтения DOC: {e2}")
+                                ).stdout.strip()
+
+                                if text:
+                                    return text
+                                else:
+                                    raise ValueError("antiword не вернул текст")
+
+                            except Exception as e:
+                                logger.warning(f"antiword не сработал: {e}. Пробуем catdoc...")
+
+                                # Используем catdoc
+                                try:
+                                    result = await asyncio.to_thread(
+                                        subprocess.run,
+                                        ["catdoc", file_path],
+                                        capture_output=True,
+                                        text=True
+                                    )
+                                    return result.stdout.strip()
+                                except Exception as e2:
+                                    raise ValueError(f"Ошибка чтения DOC: {e2}")
                 
             else:
                 raise ValueError("Неподдерживаемый формат файла")
@@ -168,8 +226,6 @@ class FileReader:
                 if hasattr(shape, "text"):
                     text_content.append(shape.text)
         return "\n".join(text_content)
-
-
 
 
 
@@ -228,32 +284,9 @@ class FileReader:
                     if isinstance(res, Exception):
                         results.append(f"Страница {i+1} (OCR): [Ошибка: {res}]")
                     else:
-                        results.append(res)
+                        results.append(f'Page {i+1}:\n{res}')
 
-            result = "\n".join(results)
-
-        # ocr_texts = []
-
-        # try:
-        #     # Конвертируем PDF в список изображений
-        #     with tempfile.TemporaryDirectory() as temp_dir:
-        #         images = await asyncio.to_thread(
-        #             convert_from_path,
-        #             file_path,
-        #             dpi=140,
-        #             output_folder=temp_dir
-        #         )
-        #         for i, image in enumerate(images):
-        #             img_path = os.path.join(temp_dir, f"page_{i}.jpg")
-        #             image.save(img_path, "JPEG")
-
-        #             # OCR через Qwen-VL
-        #             ocr_text = await ocr_image_with_qwen_vl(img_path, original_filename)
-
-        #             # Добавляем с пометкой страницы
-        #             ocr_texts.append(f"Страница {i+1} (OCR): {ocr_text}")
-
-        #     result = "\n".join(ocr_texts)
+            result = "\n\n".join(results)
             return result.strip() if result.strip() else "[Нет читаемого текста]"
 
         except Exception as e:
@@ -782,8 +815,8 @@ class FileReader:
                 text = await self.read_pptx_file(file_path)
                 logger.info(f"Извлечён текст из PPTX: {original_filename}, длина: {len(text)}")
                 return text
-            elif ext in [".doc", ".docx"]:
-                text = await self.read_doc_file(file_path, ext, original_filename)
+            elif ext in [".doc", ".docx", '.odt', '.rtf']:
+                text = await self.convert_to_pdf(file_path, ext, original_filename)
                 logger.info(f"Извлечён текст из DOC(X): {original_filename}, длина: {len(text)}")
                 return text
             elif ext in [".zip", ".rar", ".7z", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".gz", ".bz2", ".xz"]:

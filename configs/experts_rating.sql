@@ -19,7 +19,7 @@ WITH experts AS (
 			THEN 1
 		END), 0) AS overdues,
 		ROUND(AVG(CASE 
-			WHEN ee.updated_at BETWEEN ? AND ?
+			WHEN ee.uploadExpertDate BETWEEN ? AND ?
 			THEN ee.`range`
 			ELSE NULL 
 		END) * 100, 1) AS criterion4,

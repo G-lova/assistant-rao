@@ -108,6 +108,7 @@ class TasksPipeline:
                     logger.error(f'Ошибка при обработке документа {file_info.get("filename", file_info.get("original_url"))}: {result}')
                     continue
                 if result != None:
+                    result['raw_data']['filename'] = file_info.get("filename")
                     result['raw_data']['url'] = file_info.get("original_url")
                     successful_results.append(result)
 
@@ -118,6 +119,7 @@ class TasksPipeline:
                 eis_data = {
                     "document_name": "Ссылка на ЕИС",
                     "eis_procurement_number": str(eis_procurement_number) if eis_procurement_number else None,
+                    "filename": link.media_links,
                     "url": link.media_links,
                     "eis_status": "available" if parse_result.get("status") == "success" else "unavailable",
                     "eis_error": eis_error,
@@ -148,6 +150,7 @@ class TasksPipeline:
                 logger.error(f"Ошибка обработки ЕИС-ссылки {link.media_links}: {e}")
                 eis_data = {
                     "document_name": "Ссылка на ЕИС",
+                    "filename": link.media_links,
                     "url": link.media_links,
                     "eis_status": "error",
                     "eis_error": str(e),
