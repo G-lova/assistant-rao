@@ -360,11 +360,11 @@ WITH expertise_info AS (
 		END AS desiredWeekWorkload,
 		COUNT(CASE WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE status IN (4,5)) THEN 1 END) AS countExpertise,
 		COUNT(CASE 
-				WHEN ee.updated_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
+				WHEN ee.group_formed_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
 				THEN 1 
 			END) AS countTotalExpertises_lastYear,
 		COUNT(CASE 
-				WHEN ee.updated_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
+				WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
 				THEN COALESCE(ee.accept, 0)
 			END) AS countAcceptedExpertises_lastYear,
 		COALESCE(SUM(CASE 
@@ -411,12 +411,12 @@ WITH expertise_info AS (
             AND e1.status = 2 AND ee1.group_formed_at IS NULL AND ee1.deleted_at IS NULL
         ) AS expert_requests,
 		ROUND(AVG(CASE 
-			WHEN ee.updated_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
+			WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
 			THEN ee.`range`
 			ELSE NULL 
 		END), 3) AS criterion4,
 		ROUND(AVG(CASE 
-			WHEN ee.updated_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
+			WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
 			THEN CASE 
 				WHEN e.object IN (1,7) AND ee.accept = 1
 				THEN CASE
@@ -446,11 +446,11 @@ WITH expertise_info AS (
 	AND COALESCE(u.workExpertise, (SELECT value FROM settings WHERE `key` IN ('max_applications_per_expert'))) > 0
 	AND NOT EXISTS (
 		SELECT 1 
-		FROM expertise_experts ee
-		WHERE ee.expertise_id = e.id 
-		AND ee.expert_id = u.id
-		AND ee.group_formed_at IS NOT NULL
-		AND ee.deleted_at IS NULL
+		FROM expertise_experts ee1
+		WHERE ee1.expertise_id = ?
+		AND ee1.expert_id = u.id
+		AND ee1.group_formed_at IS NOT NULL
+		AND ee1.deleted_at IS NULL
 	)
 	GROUP BY u.id
 ), 

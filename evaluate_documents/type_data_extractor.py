@@ -104,7 +104,7 @@ class TypeDataExtractor:
         self.model = model
 
 
-        self.semaphore = asyncio.Semaphore(5)
+        self.semaphore = asyncio.Semaphore(3)
         self.rate_limiter = TokenBucket(rate=1.5)  # 1.5 запроса в секунду
 
         with open("prompts/type_data_extractor_prompt.txt") as f:

@@ -279,7 +279,7 @@ class ScoringPipeline:
             sql_query = await self.load_sql_query(sql_file_path)
             
             # Получение данных
-            df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[expertise_id])
+            df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[expertise_id] * 2)
         
             if df.empty or df['expert_id'].isna().all() or (df['expert_id'].astype(str) == 'None').all():
                 raise Exception("Доступных экспертов нет")
