@@ -1281,6 +1281,29 @@ class CloudStorageParser:
         path = unquote(parsed.path.rstrip("/"))
         filename = os.path.basename(path)
 
+        # === ОБРАБОТКА view.html ===
+        # Если это динамическая страница ЕИС (view.html), пытаемся сформировать уникальное имя на основе любого ID-параметра в query string.
+        if filename == "view.html" and query_params:
+
+            # Ищем ЛЮБОЙ параметр, оканчивающийся на "Id"
+            for key, values in query_params.items():
+                if key.endswith("Id") and values:
+                    value = values[0]
+                    # Убираем "Id" из ключа для красивого имени:
+                    # contractInfoId -> contractInfo
+                    clean_key = key[:-2] if len(key) > 2 else key
+                    return f"printForm_{clean_key}_{value}.html"
+            
+            # Если ничего не нашли — берём первый непустой параметр с числовым значением
+            for key, values in query_params.items():
+                if values and (values[0].isdigit() or values[0].replace('.', '', 1).isdigit()):
+                    print(f"printForm_{key}_{values[0]}.html")
+            
+            # Если совсем ничего не нашли — берём первый непустой параметр
+            for key, values in query_params.items():
+                if values and values[0]:
+                    return f"printForm_{key}_{values[0]}.html"
+
         return filename or ""
 
 
@@ -1765,8 +1788,47 @@ class CloudStorageParser:
 
                     def select_latest_xml_versions(files):
                         """
-                        Возвращает список только последних версий XML.
+                        Для документов из VERSIONED_DOCUMENT_TYPES:
+                            оставляет только XML с максимальной версией.
+
+                        Для остальных типов:
+                            оставляет все XML без изменений.
+
+                        Например:
+                            epNotificationEOK2020_..._1_....xml
+                            epNotificationEOK2020_..._2_....xml
+
+                        -> останется только версия 2.
+
+                        А:
+                            epClarificationDoc_..._null_GUID1.xml
+                            epClarificationDoc_..._null_GUID2.xml
+
+                        -> останутся оба файла.
                         """
+                        VERSIONED_DOCUMENT_TYPES = {
+                            "epNotificationEZK2020",
+                            "epNotificationEF2020",
+                            "epNotificationEZT2020",
+                            "epNotificationEOK2020",
+                            "fcsNotificationEP",
+                            "fcsNotification111",
+                            "pprf615NotificationPO",
+                            "pprf615NotificationEF",
+                            "purchaseNotice",
+                            "purchaseNoticeOK",
+                            "purchaseNoticeOA",
+                            "purchaseNoticeAE",
+                            "purchaseNoticeAE94FZ",
+                            "purchaseNoticeAESMBO",
+                            "purchaseNoticeZK",
+                            "purchaseNoticeZKESMBO",
+                            "purchaseNoticeZPESMBO",
+                            "purchaseNoticeEP",
+                            "contract",
+                            "pprf615Contract",
+                            "contractCutted",
+                        }
 
                         latest = {}
 
@@ -1775,7 +1837,7 @@ class CloudStorageParser:
 
                             m = fileinfo["filename"].split('_')
 
-                            key = fileinfo["filename"] if m[2] == 'null' else f'{m[0]}_{m[1]}'
+                            key = fileinfo["filename"] if ((m[2] == 'null') or (m[0] not in VERSIONED_DOCUMENT_TYPES)) else f'{m[0]}_{m[1]}'
 
                             version = 0 if m[2] == 'null' else int(m[2])
 

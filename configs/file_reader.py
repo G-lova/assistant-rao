@@ -833,7 +833,7 @@ class FileReader:
                 logger.info(f"Извлечён текст из XML: {original_filename}, длина: {len(text)}")
                 return text
             elif ext in [".sig"]:
-                return "Файл электронной подписи. Содержит крипто данные."
+                return "Документ заверен электронной подписью."
             # elif ext in [".sig", ".xml"]:
             #     return []
             elif ext in [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff"]:
