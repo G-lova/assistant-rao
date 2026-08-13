@@ -1267,12 +1267,21 @@ class CloudStorageParser:
             str: Имя файла или пустая строка, если не найдено.
         """
         from urllib.parse import urlparse, parse_qs
+
         parsed = urlparse(url)
+
+        # Сначала filename из query-параметра
         query_params = parse_qs(parsed.query)
-        filenames = query_params.get('filename', [])
-        if filenames:
-            return filenames[0]
-        return ""
+        filename = query_params.get("filename", [None])[0]
+
+        if filename:
+            return unquote(filename)
+
+        # Затем последняя часть path
+        path = unquote(parsed.path.rstrip("/"))
+        filename = os.path.basename(path)
+
+        return filename or ""
 
 
     async def _parse_eis(self, url: str, procurement_id: str = None) -> Dict:
