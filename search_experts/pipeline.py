@@ -279,7 +279,7 @@ class ScoringPipeline:
             sql_query = await self.load_sql_query(sql_file_path)
             
             # Получение данных
-            df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[expertise_id] * 2)
+            df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[expertise_id] * 4)
         
             if df.empty or df['expert_id'].isna().all() or (df['expert_id'].astype(str) == 'None').all():
                 raise Exception("Доступных экспертов нет")
@@ -338,7 +338,7 @@ class ScoringPipeline:
         df = self.sort_experts(df, "scoring")
 
         # Ограничение новичков для приглашения
-        max_newbies = int(df['max_experts_per_invite'].iloc[0]) // 2
+        max_newbies = int(df['max_newbies_per_invite'].iloc[0])
         max_experts_per_invite = []
         newbies_count = 0
 

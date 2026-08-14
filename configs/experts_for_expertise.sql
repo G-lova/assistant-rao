@@ -70,7 +70,26 @@ WITH expertise_info AS (
 		END AS expertise_region_id,
 		e.declineExperts,
 		e.requestExperts,
-		(SELECT value FROM settings WHERE `key` IN ('max_experts_per_invite')) AS max_experts_per_invite
+		(SELECT value FROM settings WHERE `key` IN ('max_experts_per_invite') LIMIT 1) AS max_experts_per_invite,
+		GREATEST(
+			(SELECT value FROM settings WHERE `key` IN ('max_newbies_per_invite') LIMIT 1)
+			-
+			(
+				(
+					SELECT COUNT(*)
+					FROM users u1
+					LEFT JOIN expertises e1 ON u1.id MEMBER OF(e1.experts)
+					WHERE e1.id = ? AND u1.benefitExpertisesCount > 0
+				)
+				+
+				(
+					SELECT COUNT(*)
+					FROM expertise_experts ee 
+					LEFT JOIN users u ON u.id = ee.expert_id
+					WHERE ee.expertise_id = ? 
+					AND u.benefitExpertisesCount > 0 
+				)
+			), 0) AS max_newbies_per_invite
 	FROM expertises e
 	JOIN users u
 	ON e.user_id = u.id
