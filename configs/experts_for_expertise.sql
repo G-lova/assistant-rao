@@ -280,7 +280,41 @@ WITH expertise_info AS (
 			WHEN 89 THEN 32.6169
 		END AS expertise_lat	
 	FROM expertise_info
-), experts AS (
+), recent_declines AS (
+    SELECT 
+        CAST(jt.expert_id AS UNSIGNED) AS expert_id,
+        STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(e.declineExperts, CONCAT('$."', jt.expert_id, '"'))), '%Y-%m-%d %H:%i:%s') AS decline_date,
+        e.id AS expertise_id
+    FROM expertises e,
+    JSON_TABLE(
+        JSON_KEYS(e.declineExperts),
+        '$[*]' COLUMNS (
+            expert_id VARCHAR(50) PATH '$'
+        )
+    ) AS jt
+    WHERE e.declineExperts IS NOT NULL 
+      AND JSON_LENGTH(e.declineExperts) > 0
+      AND STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(e.declineExperts, CONCAT('$."', jt.expert_id, '"'))), '%Y-%m-%d %H:%i:%s') >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+),
+expert_decline_counts AS (
+    SELECT 
+        expert_id,
+        COUNT(*) AS decline_count,
+        MAX(decline_date) AS last_decline_date
+    FROM recent_declines rd
+    WHERE NOT EXISTS (
+        SELECT 1 FROM expertise_experts ee 
+        WHERE ee.expertise_id = rd.expertise_id 
+          AND ee.expert_id = rd.expert_id
+    )
+    GROUP BY expert_id
+    HAVING COUNT(*) >= 2
+),
+blocked_experts AS (
+	SELECT expert_id
+    FROM expert_decline_counts
+    WHERE DATEDIFF(CURDATE(), DATE(last_decline_date)) < 3
+),experts AS (
 	SELECT 
 		u.id AS expert_id,
 		u.name AS expert_name,
@@ -470,6 +504,7 @@ WITH expertise_info AS (
 		AND ee1.expert_id = u.id
 		AND ee1.deleted_at IS NULL
 	)
+    AND u.id NOT IN (SELECT expert_id FROM blocked_experts)
 	GROUP BY u.id
 ), 
 experts_with_coords AS (
