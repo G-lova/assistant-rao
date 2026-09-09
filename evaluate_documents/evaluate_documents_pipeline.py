@@ -15,7 +15,9 @@ from configs.working_with_db import save_raw_data, save_summary_report, delete_p
 from evaluate_documents.completeness_checker import CompletenessChecker
 from evaluate_documents.consistency_checker import ConsistencyChecker
 from configs.parsing import CloudStorageParser
+from evaluate_documents.send_subject_service import SendSubjectService
 from evaluate_documents.type_data_extractor import DOCUMENT_TYPE_MAPPING, TypeDataExtractor
+from src.subject_detector import SubjectDetector
 
 
 logger = get_logger(__name__)
@@ -23,12 +25,16 @@ logger = get_logger(__name__)
 
 class TasksPipeline:
     """
-    
+    Класс для обработки документов экспертизы, включая чтение файлов, определение типа документа, оценку полноты и согласованности, а также отправку данных во внешний API.
     """
 
     def __init__(self, http_manager: HTTPClientManager, expertise_id: int, environment: str = None):
         """
-        
+        Инициализация TasksPipeline с указанием среды и ID экспертизы
+        Args:
+            http_manager (HTTPClientManager): Менеджер HTTP-клиентов
+            expertise_id (int): ID экспертизы
+            environment (str): Окружение ('dev', 'stage', 'prod')
         """
 
         # Загрузка конфигурации
@@ -85,7 +91,7 @@ class TasksPipeline:
 
     async def process_link(self, link):
         """
-        
+        Обрабатывает ссылку на облачное хранилище.
         """
         try:
             parse_result = await self.cloud_parser.parse_cloud_storage_link(link.media_links, link.id)
@@ -361,6 +367,19 @@ class TasksPipeline:
             # logger.info(f"type: {type(data_for_final_evaluation)}, data_for_final_evaluation: {data_for_final_evaluation}")
             final_evaluation_result = await self.consistency_checker.check_consistency(data_for_final_evaluation)
             await save_summary_report(procurement_id=self.df['id'].iloc[0], summary_data=final_evaluation_result)
+
+            # заполнение поля subjectContract в БД
+            if pd.isna(self.df["subjectContract"][0]):
+                subject_detector = SubjectDetector(self.http_manager, self.x_api_database)
+                content_chunks = split_large_text(text=json.dumps(final_evaluation_result, ensure_ascii=False, default=str ), max_chunk_size=12000)
+                subject_result = await subject_detector.get_subject(int(self.df.id.iloc[0]), content_chunks[0])
+                logger.info(f"Предмет контракта: {subject_result}")
+
+                if subject_result.get("status") not in ["success", "allow"]:
+                    logger.warning("Данные не отправлены")
+
+                send_subject_service = SendSubjectService(self.http_manager, self.x_api_database)
+                await send_subject_service.send_subject(int(self.df.id.iloc[0]), subject_result.get("subject", None), True)
 
             return final_evaluation_result
             

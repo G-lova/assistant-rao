@@ -9,7 +9,6 @@ import json
 import zipfile
 
 from contextlib import asynccontextmanager
-from configs.llm_client import get_llm
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body, Header, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -17,20 +16,21 @@ from typing import List, Optional, Dict
 from celery.result import AsyncResult
 
 from configs.config import Config
-from configs.schemas import EISParseRequest, EvaluateRequest, ExpertsScoringRequest, RAOConclusionRequest, ViolationsReportRequest
 from configs.eis_parsing import EISParser
-from configs.utils import APIKeyMiddleware
-from configs.working_with_db import get_contract_info_from_db
+from configs.http_client_manager import HTTPClientManager
+from configs.llm_client import get_llm
 from configs.logger import setup_logging, get_logger
+from configs.schemas import EISParseRequest, EvaluateRequest, ExpertsScoringRequest, RAOConclusionRequest, ViolationsReportRequest
+from configs.utils import APIKeyMiddleware, split_large_text
+from configs.working_with_db import get_async_summary_report_from_db, get_contract_info_from_db
+from evaluate_documents.send_subject_service import SendSubjectService
 from src.law_detector import LawDetector
 from src.rao_conclusion import rao_conclusion
 from src.rating import rating
 from src.scoring import scoring
-from tasks import evaluate_documents_task
-
-# main.py
-from configs.http_client_manager import HTTPClientManager
+from src.subject_detector import SubjectDetector
 from src.violations_reporter import ViolationsReporter
+from tasks import evaluate_documents_task
 
 # Глобальный экземпляр (настраивается под вашу нагрузку)
 http_manager = HTTPClientManager(timeout=120.0, limit=50)
@@ -487,3 +487,60 @@ async def get_law(
     except Exception as e:
         logger.error(f"Ошибка при определении закона: {str(e)}", exc_info=True)
         return {"expertise_id": expertise_id, "law": 0}
+
+
+@app.post("/get-subject")
+async def get_subject(
+    request: RAOConclusionRequest,
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
+    ):
+    """
+    """
+    try:
+        expertise_id = request.expertise_id
+        send_to_external = request.send_to_external
+        
+        if not expertise_id:
+            raise HTTPException(status_code=400, detail="Поле 'expertise_id' обязательно")
+            
+        subject_detector = SubjectDetector(http_manager, x_api_database)
+        send_subject_service = SendSubjectService(http_manager, x_api_database)
+
+        # Получение данных о загруженных документах
+        summary_report = await get_async_summary_report_from_db(expertise_id)
+
+        if not summary_report:
+            logger.warning("Отсутствуют извлеченные данные. Пробуем достать предмет контракта из поля `typeDopDetal.ai_doc_answer")
+            subject = await subject_detector.get_subject_from_typeDopDetal(expertise_id)
+            logger.info(f"result: {subject}")
+
+            await send_subject_service.send_subject(expertise_id, subject.get("subject", None), send_to_external)
+            
+            return subject
+
+        content_chunks = split_large_text(text=summary_report, max_chunk_size=12000)
+        content = content_chunks[0]
+        logger.info(f"Content: {content}")
+        
+        result = await subject_detector.get_subject(expertise_id, content)
+        logger.info(f"result: {result}")
+
+        if result.get("status") not in ["success", "allow"]:
+            logger.warning("Отсутствуют извлеченные данные. Пробуем достать предмет контракта из поля `typeDopDetal.ai_doc_answer")
+            subject = await subject_detector.get_subject_from_typeDopDetal(expertise_id)
+            logger.info(f"result: {subject}")
+
+            await send_subject_service.send_subject(expertise_id, subject.get("subject", None), send_to_external)
+            
+            return subject
+
+        await send_subject_service.send_subject(expertise_id, result.get("subject", None), send_to_external)
+
+        return result
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.error(f"Ошибка при определении предмета контракта: {str(e)}", exc_info=True)
+        return {"status": "error", "expertise_id": expertise_id, "subject": None, "error": "Ошибка при определении предмета контракта"}
