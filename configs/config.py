@@ -23,6 +23,20 @@ class DatabaseConfig:
 
 
 @dataclass
+class UpdateExpertiseDBConfig:
+    """Конфигурация сервиса обновления экспертизы в базе данных"""
+    url: str
+    api_key: str
+    
+    @property
+    def headers(self):
+        return {
+            "X-API-Key": self.api_key,
+            "Content-Type": "application/json"
+        }
+
+
+@dataclass
 class EmbeddingConfig:
     """Конфигурация сервиса эмбеддингов"""
     api_url: str
@@ -77,6 +91,13 @@ class Config:
     EXTERNAL_API_URL_PROD = os.getenv("EXTERNAL_API_URL_PROD")
     EXTERNAL_API_URL_NEURO = os.getenv("EXTERNAL_API_URL_NEURO")
     EXTERNAL_API_KEY = os.getenv("EXTERNAL_API_KEY")
+    
+    UPDATE_API_URL_DEV = os.getenv("UPDATE_API_URL_DEV")
+    UPDATE_API_URL_STAGE = os.getenv("UPDATE_API_URL_STAGE")
+    UPDATE_API_URL_PROD = os.getenv("UPDATE_API_URL_PROD")
+    UPDATE_API_URL_NEURO = os.getenv("UPDATE_API_URL_NEURO")
+    UPDATE_API_KEY = os.getenv("UPDATE_API_KEY")
+
     # Security
     API_KEY = os.getenv("API_KEY")
     API_KEY_HASH = os.getenv("API_KEY_HASH")
@@ -223,6 +244,7 @@ class Config:
             "debug": cls.DEBUG,
             "log_level": cls.LOG_LEVEL
         }
+    
     @classmethod
     def get_external_api_config(cls, environment: str = None) -> dict:
         """
@@ -256,3 +278,27 @@ class Config:
                 "X-API-Key": cls.EXTERNAL_API_KEY
             }
         }
+    
+    @classmethod
+    def get_update_db_config(cls, environment: str = None) -> UpdateExpertiseDBConfig:
+        """
+        Возвращает конфигурацию базы данных для scoring pipeline.
+        
+        Args:
+            environment: Окружение ('dev', 'stage', 'prod'). 
+                        Если None, используется APP_ENV
+        """
+        env = environment or cls.APP_ENV
+        env = env.lower()
+        api_key = cls.UPDATE_API_KEY
+        
+        if env in ['prod', 'production']:
+            url = cls.UPDATE_API_URL_PROD
+        elif env in ['stage', 'staging']:
+            url = cls.UPDATE_API_URL_STAGE
+        elif env in ['neuro_assistant_database', 'neuro']:
+            url = cls.UPDATE_API_URL_NEURO
+        else:
+            url = cls.UPDATE_URL_DEV
+        
+        return UpdateExpertiseDBConfig(url=url, api_key=api_key)
