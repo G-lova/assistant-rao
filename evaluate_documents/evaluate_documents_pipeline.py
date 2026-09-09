@@ -41,6 +41,7 @@ class TasksPipeline:
         client, model = get_llm()
         self.config = Config()
         self.http_manager = http_manager
+        self.x_api_database = environment
         
         # Инициализация компонентов с конфигурацией
         db_config = self.config.get_database_config(environment)
