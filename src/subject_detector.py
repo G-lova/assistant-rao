@@ -126,9 +126,13 @@ class SubjectDetector:
         """
 
         df_ai_answer = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[expertise_id])
-        ai_doc_answer = json.loads(df_ai_answer.iloc[0]["ai_doc_answer"])
+        ai_doc_answer = df_ai_answer.iloc[0]["ai_doc_answer"]
+
         if not ai_doc_answer:
             return {"status": "error", "expertise_id": expertise_id, "subject": None, "error": "Отсутствуют извлеченные данные"}
+
+        if not isinstance(ai_doc_answer, str):
+            ai_doc_answer = json.loads(ai_doc_answer)
 
         result = await self.get_subject(expertise_id, ai_doc_answer)
 
