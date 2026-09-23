@@ -49,6 +49,10 @@ class CloudStorageParser:
             'cloud.mail.ru': self._parse_mail_cloud,
             'files.mail.ru': self._parse_mail_cloud,
             'zakupki.gov.ru': self._parse_eis_soap_from_web,
+            'develop.rao0123.1t.ws': self.download_media,
+            'stage.rao0123.1t.ws': self.download_media,
+            'expert.rusacademedu.ru': self.download_media,
+            'otchet.almira.cc': self.download_media,
         }
         
         # Получаем токен ЕИС из переменных окружения
@@ -1978,7 +1982,7 @@ class CloudStorageParser:
                 
                 # Читаем контент
                 content = await resp.read()
-                
+
                 # Определяем имя файла
                 if original_filename:
                     filename = self._sanitize_filename(original_filename)
@@ -2020,3 +2024,79 @@ class CloudStorageParser:
         except Exception as e:
             logger.warning(f"Ошибка скачивания файла {url}: {str(e)}")
             return {"status": "error", "error": f"Ошибка скачивания: {str(e)}"}
+
+
+    async def download_inner(self, url: str, procurement_id: str):
+        if "api/media/" in url:
+            return await self.download_media(url, procurement_id)
+        else:
+            return await self._download_http_file(url=url, procurement_id=procurement_id, source="inner", handle_rate_limit=True)
+        
+
+    @async_retry(EIS_RETRY_CONFIG)
+    async def download_media(
+        self,
+        url: str,
+        procurement_id: str,
+    ):
+        api_url = "/".join((url.split("/"))[:-1])
+        filename = self._extract_filename_from_url(url)
+
+        headers = {
+            "X-API-Key": os.getenv("SYSTEM_API_KEY"),
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                api_url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=120),
+            ) as response:
+
+                if response.status == 429:
+                    retry_after = response.headers.get('Retry-After')
+                    retry_after_sec = int(retry_after) if retry_after else None
+                    raise EISRateLimitError(
+                        f"Rate limit exceeded: {api_url}",
+                        retry_after=retry_after_sec
+                    )
+
+                if response.status != 200:
+                    try:
+                        data = await response.json()
+                        error = data.get("error", "Неизвестная ошибка")
+                    except Exception:
+                        error = await response.text()
+
+                    raise RuntimeError(
+                        f"Ошибка скачивания media {api_url}: "
+                        f"{response.status}: {error}"
+                    )
+                
+                with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+                    async for chunk in response.content.iter_chunked(8192):
+                        tmp_file.write(chunk)
+                    tmp_path = tmp_file.name
+
+                    # filename = self._extract_filename_from_headers(response.headers, url)
+                                
+                    # Определяем расширение по Content-Type
+                    # content_type = resp.headers.get('content-type', '')
+                    file_ext = get_file_extension(content_type=response.headers.get('Content-Type', ''))
+                    if not file_ext or file_ext == '.bin':
+                        file_ext = get_file_extension(url)
+
+                    # Безопасное имя файла
+                    safe_name = re.sub(r'[<>:"/\\|?*]', '_', filename)
+                    if not safe_name.endswith(file_ext):
+                        safe_name += file_ext
+                
+                return {
+                    "status": "success",
+                    "filename": filename,
+                    "file_path": tmp_path,
+                    "source": "inner_media", 
+                    "original_url": api_url.replace("api/", ""),
+                    "procurement_id": procurement_id,
+                    "file_extension": file_ext
+                }

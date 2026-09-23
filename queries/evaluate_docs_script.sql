@@ -14,8 +14,8 @@ SELECT
     END as expertise_object,
     e.type,
     CASE e.type
-        WHEN 4 THEN 'Федеральный закон "О контрактной системе в сфере закупок товаров, работ, услуг для обеспечения государственных и муниципальных нужд" от 05.04.2013 N 44-ФЗ'
-        WHEN 5 THEN 'Федеральный закон "О закупках товаров, работ, услуг отдельными видами юридических лиц" от 18.07.2011 N 223-ФЗ'
+        WHEN 4 THEN '44-ФЗ'
+        WHEN 5 THEN '223-ФЗ'
         ELSE ''
     END AS law_reference,
     e.checkType2,
@@ -215,10 +215,10 @@ LEFT JOIN JSON_TABLE(
         '$[*]' COLUMNS (c VARCHAR(255) PATH '$')
      ) AS empty_comment
      ON empty_comment.c = doc_codes.d
-LEFT JOIN (SELECT model_id, collection_name, JSON_ARRAYAGG(CONCAT(?, id, '/', file_name)) AS file_path
+LEFT JOIN (SELECT model_id, collection_name, CASE WHEN disk LIKE 'media' THEN JSON_ARRAYAGG(CONCAT(?, id, '/', file_name)) ELSE JSON_ARRAYAGG(CONCAT(?, id, '/', file_name)) END AS file_path
            FROM media
      	   WHERE model_type LIKE '%Expertise'
-           GROUP BY model_id, collection_name) m
+           GROUP BY model_id, collection_name, disk) m
      ON m.collection_name = `doc_codes`.d
      AND m.model_id =e.id
 WHERE e.id = ?;

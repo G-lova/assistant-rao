@@ -7,7 +7,7 @@ from json_repair import repair_json
 from configs.logger import get_logger
 from typing import Any, Dict
 
-from configs.utils import extract_json_objects
+from configs.utils import split_large_text
 
 
 logger = get_logger(__name__)
@@ -79,6 +79,9 @@ class CompletenessChecker:
         # Ждём «разрешения» от глобального лимитера ПЕРЕД запросом
         await self.rate_limiter.acquire()
 
+        # Перед запросом к LLM            
+        content_chunks = split_large_text(json.dumps(content, ensure_ascii=False) if not isinstance(content, str) else content, max_chunk_size=14000)
+
         try:
             response = await self.client.chat.completions.create(
             model=self.model,
@@ -89,7 +92,7 @@ class CompletenessChecker:
                 },
                 {
                     "role": "user",
-                    "content": f"""Проанализируй данные, извлеченные из документов:\n\n{content}"""
+                    "content": f"""Проанализируй данные, извлеченные из документов:\n\n{content_chunks[0]}"""
                 }
             ],
             max_tokens=500,
@@ -98,7 +101,8 @@ class CompletenessChecker:
         )
         except asyncio.TimeoutError:
             logger.error(f"Таймаут при анализе {document_code}")
-            content = json.loads(content)
+            if isinstance(content, str):
+                content = json.loads(content)
             fallback = {
                 "type_compliance": {
                     "status": "allow" if any(item.get('status') == "allow" for item in content.get("type_compliance", {})) else "deny",
