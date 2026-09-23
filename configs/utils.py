@@ -1,3 +1,4 @@
+import aiofiles
 import magic
 import os
 import pandas as pd
@@ -129,6 +130,48 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
                 status_code=500,
                 content={"detail": "Internal server error during authentication"}
             )
+
+
+def load_sql_query(file_name: str) -> str:
+    """
+    Загружает и нормализует SQL-запрос из файла.
+
+    Читает содержимое SQL-файла из предопределённой директории и удаляет лишние пробелы и переносы,
+    возвращая запрос в виде одной строки для корректной передачи в HTTP-запрос.
+
+    Args:
+        file_name (str): Имя файла с SQL-запросом (например, "get_experts.sql").
+
+    Returns:
+        str: SQL-запрос в виде одной строки без лишних пробельных символов.
+    """
+    sql_queries_path = Config().get_paths_config().sql_queries
+    file_path = f"{sql_queries_path}{file_name}"
+    with open(file_path, encoding="utf-8") as f:
+        sql_query = f.read()
+    return " ".join(sql_query.split())
+
+    
+
+async def load_sql_query_async(file_name: str) -> str:
+    """
+    Загружает и нормализует SQL-запрос из файла.
+
+    Читает содержимое SQL-файла из предопределённой директории и удаляет лишние пробелы и переносы,
+    возвращая запрос в виде одной строки для корректной передачи в HTTP-запрос.
+
+    Args:
+        file_name (str): Имя файла с SQL-запросом (например, "get_experts.sql").
+
+    Returns:
+        str: SQL-запрос в виде одной строки без лишних пробельных символов.
+    """
+    sql_queries_path = Config().get_paths_config().sql_queries
+    file_path = f"{sql_queries_path}{file_name}"
+    async with aiofiles.open(file_path, encoding="utf-8") as f:
+        sql_query = await f.read()
+    return " ".join(sql_query.split())
+
 
 def get_file_extension(
     filename: Optional[str] = None,

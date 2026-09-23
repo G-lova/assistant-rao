@@ -314,7 +314,7 @@ blocked_experts AS (
 	SELECT expert_id
     FROM expert_decline_counts
     WHERE DATEDIFF(CURDATE(), DATE(last_decline_date)) < 3
-),experts AS (
+), experts AS (
 	SELECT 
 		u.id AS expert_id,
 		u.name AS expert_name,
@@ -411,6 +411,19 @@ blocked_experts AS (
 			THEN 1
 			ELSE COALESCE(u.workExpertise, (SELECT value FROM settings WHERE `key` IN ('max_applications_per_expert')))
 		END AS desiredWeekWorkload,
+        COALESCE(
+            (
+                SELECT JSON_ARRAYAGG(
+                    CASE 
+                        WHEN ecp.expert_one_id = u.id THEN ecp.expert_two_id 
+                        ELSE ecp.expert_one_id 
+                    END
+                )
+                FROM expert_constraint_pairs ecp
+                WHERE ecp.expert_one_id = u.id OR ecp.expert_two_id = u.id
+            ), 
+            CAST('[]' AS JSON)
+        ) AS constraint_experts,
 		COUNT(CASE WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE status IN (4,5)) THEN 1 END) AS countExpertise,
 		COUNT(CASE 
 				WHEN ee.group_formed_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 

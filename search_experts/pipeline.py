@@ -8,6 +8,7 @@ from configs.http_client_manager import HTTPClientManager
 from configs.logger import get_logger
 from configs.config import Config
 from configs.data_fetcher import DataFetcher
+from configs.utils import load_sql_query_async
 from search_experts.text_processor import TextProcessor
 from search_experts.embedding_client import EmbeddingClient
 from search_experts.conflict_detector import ConflictDetector
@@ -85,25 +86,6 @@ class ScoringPipeline:
         return True
     
 
-    async def load_sql_query(self, file_name: str) -> str:
-        """
-        Загружает и нормализует SQL-запрос из файла.
-
-        Читает содержимое SQL-файла из предопределённой директории и удаляет лишние пробелы и переносы,
-        возвращая запрос в виде одной строки для корректной передачи в HTTP-запрос.
-
-        Args:
-            file_name (str): Имя файла с SQL-запросом (например, "get_experts.sql").
-
-        Returns:
-            str: SQL-запрос в виде одной строки без лишних пробельных символов.
-        """
-        file_path = f"{self.sql_queries_path}{file_name}"
-        async with aiofiles.open(file_path, encoding="utf-8") as f:
-            sql_query = await f.read()
-        return " ".join(sql_query.split())
-    
-
     def preprocess_data(self, df):
         """
         Очищает текстовые поля в датафрейме от лишних символов и нормализует их.
@@ -154,8 +136,9 @@ class ScoringPipeline:
         if exclude_ids:
             conflict_ids |= exclude_ids
 
-        logger.info(f"Обнаружен конфликт интересов у экспертов: {conflict_ids}")
-        df = df[~df["expert_id"].isin(conflict_ids)]
+        if conflict_ids:
+            logger.info(f"Обнаружен конфликт интересов у экспертов: {conflict_ids}")
+            df = df[~df["expert_id"].isin(conflict_ids)]
 
         return df
     
@@ -276,7 +259,7 @@ class ScoringPipeline:
         """
         try:
             # Загрузка SQL запроса
-            sql_query = await self.load_sql_query(sql_file_path)
+            sql_query = await load_sql_query_async(sql_file_path)
             
             # Получение данных
             df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[expertise_id] * 4)
@@ -358,6 +341,46 @@ class ScoringPipeline:
         # df_rest = self.sort_experts(df_rest, "similarity_embeddings")
 
         df = pd.concat([df[df['expert_id'].isin(max_experts_per_invite)], df_rest])
+    
+        # Фильтрация экспертов с учётом constraint_experts
+        # Идём по списку сверху вниз: если у эксперта есть constraint_experts,
+        # то эти эксперты удаляются из итогового списка
+        excluded_experts = set()
+        filtered_indices = []
+        
+        for idx, row in df.iterrows():
+            expert_id = row['expert_id']
+            
+            # Пропускаем эксперта, если он уже был исключён
+            if expert_id in excluded_experts:
+                continue
+            
+            filtered_indices.append(idx)
+            
+            # Получаем constraint_experts и добавляем их в список исключённых
+            constraint_experts = row.get('constraint_experts', None)
+            if constraint_experts is not None and not pd.isna(constraint_experts):
+                # Обрабатываем разные форматы: JSON-строка, список, numpy array
+                if isinstance(constraint_experts, str):
+                    import json
+                    try:
+                        constraint_list = json.loads(constraint_experts)
+                    except:
+                        constraint_list = []
+                elif hasattr(constraint_experts, 'tolist'):
+                    constraint_list = constraint_experts.tolist()
+                else:
+                    constraint_list = list(constraint_experts)
+                
+                # Добавляем все constraint_experts в множество исключённых
+                for constraint_id in constraint_list:
+                    excluded_experts.add(int(constraint_id))
+
+        if excluded_experts:
+            logger.info(f"Обнаружены constraint_experts: {sorted(list(excluded_experts))}")
+        
+        # Применяем фильтрацию к датафрейму
+        df = df.loc[filtered_indices]
         
         # Формирование списка экспертов для вывода
         if details:
@@ -412,25 +435,6 @@ class RatingPipeline:
         
         self.data_fetcher = DataFetcher(db_config.url, db_config.headers, http_manager)        
         self.sql_queries_path = paths_config.sql_queries
-    
-
-    async def load_sql_query(self, file_name: str):
-        """
-        Загружает и нормализует SQL-запрос из файла.
-
-        Читает содержимое SQL-файла из предопределённой директории и удаляет лишние пробелы и переносы,
-        возвращая запрос в виде одной строки для корректной передачи в HTTP-запрос.
-
-        Args:
-            file_name (str): Имя файла с SQL-запросом (например, "get_experts.sql").
-
-        Returns:
-            str: SQL-запрос в виде одной строки без лишних пробельных символов.
-        """
-        file_path = f"{self.sql_queries_path}{file_name}"
-        async with aiofiles.open(file_path, encoding="utf-8") as f:
-            sql_query = await f.read()
-        return " ".join(sql_query.split())
 
     @staticmethod
     def to_rating_dict(data: list):
@@ -480,7 +484,7 @@ class RatingPipeline:
             dict: Словарь с рейтингами экспертов в формате {expert_id: rating}.
         """
         # Загрузка SQL запроса
-        sql_query = await self.load_sql_query(sql_file_path)
+        sql_query = await load_sql_query_async(sql_file_path)
         
         # Получение данных с рассчитанными рейтингами
         df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[end_date, start_date] + [start_date, end_date] * 5)

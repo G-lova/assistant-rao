@@ -10,7 +10,7 @@ from configs.file_reader import FileReader
 from configs.http_client_manager import HTTPClientManager
 from configs.llm_client import get_llm
 from configs.logger import get_logger
-from configs.utils import split_large_text
+from configs.utils import load_sql_query, split_large_text
 from configs.working_with_db import save_raw_data, save_summary_report, delete_procurement_data
 from evaluate_documents.completeness_checker import CompletenessChecker
 from evaluate_documents.consistency_checker import ConsistencyChecker
@@ -48,13 +48,14 @@ class TasksPipeline:
         paths_config = self.config.get_paths_config()
         
         self.file_storage = db_config.storage_path
+        self.media_storage = db_config.media_path
         self.data_fetcher = DataFetcher(db_config.url, db_config.headers, self.http_manager)        
         self.sql_queries_path = paths_config.sql_queries
 
         # try:
         # Загрузка SQL запроса и получение данных
-        sql_query = self.load_sql_query("evaluate_docs_script.sql")        
-        self.df = self.data_fetcher.fetch_expertise_data(sql_query, bindings=[self.file_storage, expertise_id])
+        sql_query = load_sql_query("evaluate_docs_script.sql")        
+        self.df = self.data_fetcher.fetch_expertise_data(sql_query, bindings=[self.media_storage, self.file_storage, expertise_id])
 
         #     return df
         
@@ -70,24 +71,6 @@ class TasksPipeline:
         self.consistency_checker = ConsistencyChecker(client, model)
         self.cloud_parser = CloudStorageParser(self.http_manager, self.df['object'].iloc[0])
         self.llm_semaphore = asyncio.Semaphore(3)
-
-    def load_sql_query(self, file_name: str) -> str:
-        """
-        Загружает и нормализует SQL-запрос из файла.
-
-        Читает содержимое SQL-файла из предопределённой директории и удаляет лишние пробелы и переносы,
-        возвращая запрос в виде одной строки для корректной передачи в HTTP-запрос.
-
-        Args:
-            file_name (str): Имя файла с SQL-запросом (например, "get_experts.sql").
-
-        Returns:
-            str: SQL-запрос в виде одной строки без лишних пробельных символов.
-        """
-        file_path = f"{self.sql_queries_path}{file_name}"
-        with open(file_path, encoding="utf-8") as f:
-            sql_query = f.read()
-        return " ".join(sql_query.split())
 
 
     async def process_link(self, link):
