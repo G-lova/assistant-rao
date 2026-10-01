@@ -20,10 +20,11 @@ from configs.eis_parsing import EISParser
 from configs.http_client_manager import HTTPClientManager
 from configs.llm_client import get_llm
 from configs.logger import setup_logging, get_logger
-from configs.schemas import EISParseRequest, EvaluateRequest, ExpertsScoringRequest, RAOConclusionRequest, ViolationsReportRequest
+from configs.schemas import EISParseRequest, EvaluateRequest, ExpertsScoringRequest, FileEntity, RAOConclusionRequest, ViolationsReportRequest
 from configs.utils import APIKeyMiddleware, split_large_text
 from configs.working_with_db import get_async_summary_report_from_db, get_contract_info_from_db
 from evaluate_documents.send_subject_service import SendSubjectService
+from risk_monitoring.file_processor import FileProcessor
 from src.law_detector import LawDetector
 from src.rao_conclusion import rao_conclusion
 from src.rating import rating
@@ -544,3 +545,60 @@ async def get_subject(
     except Exception as e:
         logger.error(f"Ошибка при определении предмета контракта: {str(e)}", exc_info=True)
         return {"status": "error", "expertise_id": expertise_id, "subject": None, "error": "Ошибка при определении предмета контракта"}
+    
+
+@app.post("/get-ai-analysis/file")
+async def get_file_analysis(
+    request: FileEntity,
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
+):
+    '''
+    '''
+    try:
+        id = request.id
+        context = request.context
+        send_to_external = request.send_to_external
+
+        logger.info(f"Получен запрос на анализ документа: {id}")
+        
+        if not id:
+            raise HTTPException(status_code=400, detail=f"Поле 'id' обязательно")
+
+        config = Config().get_database_config(x_api_database)
+        data_fetcher = DataFetcher(config.url, config.headers, http_manager)
+
+        query = """
+            SELECT 
+                id, 
+                CASE WHEN path IS NOT NULL THEN CONCAT(?, path) ELSE source_url END AS url, 
+                CASE WHEN file_name LIKE CONCAT('%.', file_type) THEN file_name ELSE CONCAT(file_name, '.', file_type) END AS file_name, 
+                xml_source_type,
+                owner_number
+            FROM risk_monitoring_files
+            WHERE id = ?
+        """
+        try:
+            file_info = await data_fetcher.fetch_async_expertise_data(sql_query=query, bindings=[config.storage_path, id])
+            if file_info.empty:
+                return {}
+
+        except Exception as e:
+            logger.error(f"Ошибка загрузки даннных из БД: {str(e)}", exc_info=True)
+        
+        # Запускаем пайплайн
+        file_processor = FileProcessor(http_manager, x_api_database)
+        results = await file_processor.process_document(
+            id=id, 
+            url=file_info["url"].iloc[0], 
+            contract_id=file_info["owner_number"].iloc[0], 
+            source=file_info["xml_source_type"].iloc[0], 
+            filename=file_info["file_name"].iloc[0], 
+            context=context,
+            send_to_external=send_to_external
+        )
+
+        return results
+        
+    except Exception as e:
+        logger.error(f"Ошибка при анализе документа: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при анализе документа: {str(e)}")
