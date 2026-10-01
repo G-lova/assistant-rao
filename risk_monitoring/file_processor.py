@@ -216,6 +216,8 @@ class FileProcessor:
             )
             
             embeddings = []
+            doc_embedding = []
+            similar_ids = []
             for res in results:
                 if isinstance(res, Exception):
                     logger.warning(f"Не удалось получить эмбеддинг для чанка в {filename}: {res}")
@@ -237,11 +239,25 @@ class FileProcessor:
 
             else:
                 logger.warning(f"Не удалось получить эмбеддинг для документа {filename}")
-                doc_embedding = []
-                similar_ids = []
 
 
             # === 7. Анализ документа на риски
+            risks_weights = {
+                "fin": 0.2,
+                "doc": 0.2,
+                "proc": 0.2,
+                "ctr": 0.2,
+                "ai": 0.2
+            }
+
+            risk_types = {
+                "fin": [],
+                "doc": [],
+                "proc": [],
+                "ctr": [],
+                "ai": []
+            }
+
             analyse_content = {
                 "doc_data": self.consistency_checker.remove_empty(extracted_data),
                 "context": self.consistency_checker.remove_empty(context)
@@ -259,20 +275,6 @@ class FileProcessor:
                 file_risks["risks"] = risks_filtered
 
                 # === 8. Расчет интегрального риска
-                risks_weights = {
-                    "fin": 0.2,
-                    "doc": 0.2,
-                    "proc": 0.2,
-                    "ctr": 0.2,
-                    "ai": 0.2
-                }
-                risk_types = {
-                    "fin": [],
-                    "doc": [],
-                    "proc": [],
-                    "ctr": [],
-                    "ai": []
-                }
                 
                 for r in file_risks.get("risks"):
                     rule_type = r.get("rule_id").split("-")[0].lower()
@@ -281,31 +283,31 @@ class FileProcessor:
                         if rule_type in k:
                             risk_types[k].append(level)
 
-                total_doc_risk = round(sum([(np.mean(v) if v else 0) * risks_weights.get(k) for k, v in risk_types.items()]), 4)
+            total_doc_risk = round(sum([(np.mean(v) if v else 0) * risks_weights.get(k) for k, v in risk_types.items()]), 4)
 
 
-                # === 9. Сборка итогового анализа 
-                ai_analysis = {
-                    "status": "completed",
-                    "doc_type": type_info,
-                    **self.consistency_checker.remove_empty(extracted_data),
-                    "embeddings": doc_embedding,
-                    "similar_doc_ids": similar_ids,
-                    **file_risks,
-                    "total_doc_risk": total_doc_risk if total_doc_risk else 0,
-                    "model": self.config.get_m_model_config().model,
-                    "analyzed_at": datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
-                }
-                logger.info(f"Результат полного анализа документа {filename}: {ai_analysis}")
+            # === 9. Сборка итогового анализа 
+            ai_analysis = {
+                "status": "completed",
+                "doc_type": type_info,
+                **self.consistency_checker.remove_empty(extracted_data),
+                "embeddings": doc_embedding,
+                "similar_doc_ids": similar_ids,
+                **file_risks,
+                "total_doc_risk": total_doc_risk if total_doc_risk else 0,
+                "model": self.config.get_m_model_config().model,
+                "analyzed_at": datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+            }
+            logger.info(f"Результат полного анализа документа {filename}: {ai_analysis}")
 
 
-                # === 10. Запись ИИ-анализа в БД
-                await self.send_ai_analysis_service.send_to_db(
-                    table_name="risk_monitoring_files",
-                    id=id,
-                    ai_analysis=ai_analysis,
-                    send_to_external=send_to_external
-                )
+            # === 10. Запись ИИ-анализа в БД
+            await self.send_ai_analysis_service.send_to_db(
+                table_name="risk_monitoring_files",
+                id=id,
+                ai_analysis=ai_analysis,
+                send_to_external=send_to_external
+            )
 
             return ai_analysis
 
