@@ -17,6 +17,7 @@ from typing import List, Optional, Dict
 from celery.result import AsyncResult
 
 from configs.config import Config
+from configs.data_fetcher import DataFetcher
 from configs.eis_parsing import EISParser
 from configs.http_client_manager import HTTPClientManager
 from configs.llm_client import get_llm
