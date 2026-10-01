@@ -1,0 +1,101 @@
+{
+    "type": "object",
+    "description": "Детальный анализ документа.",
+    "required": [
+        "resume",
+        "risks"
+    ],
+    "properties": {
+        "resume": {
+            "type": "string",
+            "description": "Общее описание анализа документа"
+        },
+        "confidence": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": "Уверенность модели в резюме"
+        },
+        "risks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "rule_id",
+                    "title",
+                    "description",
+                    "confidence",
+                    "evidence",
+                    "verification_needed"
+                ],
+                "properties": {
+                    "rule_id": {
+                        "type": "string",
+                        "enum": "DOC_RISKS_KEYS",
+                        "description": "Код обнаруженного риска."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Название обнаруженного риска."
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Описание обнаруженного риска с указанием причин обнаружения."
+                    },
+                    "level": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                        "description": "Уровень обнаруженного риска от 0 до 1"
+                    },
+                    "law": {
+                        "type": "string",
+                        "description": "Нормативное основание."
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                        "description": "Уверенность модели в наличии данного риска"
+                    },
+                    "evidence": {
+                        "type": "array",
+                        "required": [
+                            "fragment"
+                        ],
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "fragment":  {
+                                    "type": "string",
+                                    "description": "Посимвольный фрагмент документа (до 300 символов), содержащий извлеченное значение."
+                                },
+                                "section": {
+                                    "type": [
+                                        "string",
+                                        "null"
+                                    ],
+                                    "description": "Название раздела, пункт"
+                                },
+                                "page": {
+                                    "type": [
+                                        "integer",
+                                        "null"
+                                    ],
+                                    "description": "Номер страницы."
+                                }
+                            }
+                        }
+                    },
+                    "verification_needed": {
+                        "type": "array",
+                        "description": "Список действий эксперта для подтверждения или опровержения обнаруженного риска",
+                        "items": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

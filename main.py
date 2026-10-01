@@ -17,11 +17,15 @@ from typing import List, Optional, Dict
 from celery.result import AsyncResult
 
 from configs.config import Config
-from configs.schemas import EISParseRequest, EvaluateRequest, ExpertsScoringRequest, RAOConclusionRequest, ViolationsReportRequest
 from configs.eis_parsing import EISParser
-from configs.utils import APIKeyMiddleware
-from configs.working_with_db import get_contract_info_from_db
+from configs.http_client_manager import HTTPClientManager
+from configs.llm_client import get_llm
 from configs.logger import setup_logging, get_logger
+from configs.schemas import EISParseRequest, EvaluateRequest, ExpertsScoringRequest, FileEntity, RAOConclusionRequest, ViolationsReportRequest
+from configs.utils import APIKeyMiddleware, split_large_text
+from configs.working_with_db import get_async_summary_report_from_db, get_contract_info_from_db
+from evaluate_documents.send_subject_service import SendSubjectService
+from risk_monitoring.file_processor import FileProcessor
 from src.law_detector import LawDetector
 from src.rao_conclusion import rao_conclusion
 from src.rating import rating
@@ -487,3 +491,117 @@ async def get_law(
     except Exception as e:
         logger.error(f"Ошибка при определении закона: {str(e)}", exc_info=True)
         return {"expertise_id": expertise_id, "law": 0}
+
+
+@app.post("/get-subject")
+async def get_subject(
+    request: RAOConclusionRequest,
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
+    ):
+    """
+    """
+    try:
+        expertise_id = request.expertise_id
+        send_to_external = request.send_to_external
+        
+        if not expertise_id:
+            raise HTTPException(status_code=400, detail="Поле 'expertise_id' обязательно")
+            
+        subject_detector = SubjectDetector(http_manager, x_api_database)
+        send_subject_service = SendSubjectService(http_manager, x_api_database)
+
+        # Получение данных о загруженных документах
+        summary_report = await get_async_summary_report_from_db(expertise_id)
+
+        if not summary_report:
+            logger.warning("Отсутствуют извлеченные данные. Пробуем достать предмет контракта из поля `typeDopDetal.ai_doc_answer")
+            subject = await subject_detector.get_subject_from_typeDopDetal(expertise_id)
+            logger.info(f"result: {subject}")
+
+            await send_subject_service.send_subject(expertise_id, subject.get("subject", None), send_to_external)
+            
+            return subject
+
+        content_chunks = split_large_text(text=summary_report, max_chunk_size=12000)
+        content = content_chunks[0]
+        logger.info(f"Content: {content}")
+        
+        result = await subject_detector.get_subject(expertise_id, content)
+        logger.info(f"result: {result}")
+
+        if result.get("status") not in ["success", "allow"]:
+            logger.warning("Отсутствуют извлеченные данные. Пробуем достать предмет контракта из поля `typeDopDetal.ai_doc_answer")
+            subject = await subject_detector.get_subject_from_typeDopDetal(expertise_id)
+            logger.info(f"result: {subject}")
+
+            await send_subject_service.send_subject(expertise_id, subject.get("subject", None), send_to_external)
+            
+            return subject
+
+        await send_subject_service.send_subject(expertise_id, result.get("subject", None), send_to_external)
+
+        return result
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.error(f"Ошибка при определении предмета контракта: {str(e)}", exc_info=True)
+        return {"status": "error", "expertise_id": expertise_id, "subject": None, "error": "Ошибка при определении предмета контракта"}
+    
+
+@app.post("/get-ai-analysis/file")
+async def get_file_analysis(
+    request: FileEntity,
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
+):
+    '''
+    '''
+    try:
+        id = request.id
+        context = request.context
+        send_to_external = request.send_to_external
+
+        logger.info(f"Получен запрос на анализ документа: {id}")
+        
+        if not id:
+            raise HTTPException(status_code=400, detail=f"Поле 'id' обязательно")
+
+        config = Config().get_database_config(x_api_database)
+        data_fetcher = DataFetcher(config.url, config.headers, http_manager)
+
+        query = """
+            SELECT 
+                id, 
+                CASE WHEN path IS NOT NULL THEN CONCAT(?, path) ELSE source_url END AS url, 
+                CASE WHEN file_name LIKE CONCAT('%.', file_type) THEN file_name ELSE CONCAT(file_name, '.', file_type) END AS file_name, 
+                xml_source_type,
+                owner_number
+            FROM risk_monitoring_files
+            WHERE id = ?
+        """
+        try:
+            file_info = await data_fetcher.fetch_async_expertise_data(sql_query=query, bindings=[config.storage_path, id])
+            if file_info.empty:
+                return {}
+
+        except Exception as e:
+            logger.error(f"Ошибка загрузки даннных из БД: {str(e)}", exc_info=True)
+        
+        # Запускаем пайплайн
+        file_processor = FileProcessor(http_manager, x_api_database)
+        results = await file_processor.process_document(
+            id=id, 
+            url=file_info["url"].iloc[0], 
+            contract_id=file_info["owner_number"].iloc[0], 
+            source=file_info["xml_source_type"].iloc[0], 
+            filename=file_info["file_name"].iloc[0], 
+            context=context,
+            send_to_external=send_to_external
+        )
+
+        return results
+        
+    except Exception as e:
+        logger.error(f"Ошибка при анализе документа: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка при анализе документа: {str(e)}")

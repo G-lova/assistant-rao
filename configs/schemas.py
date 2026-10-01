@@ -112,3 +112,9 @@ class EISParseRequest(BaseModel):
     nsi_kind: str = "all"
     exact_date: str = ""
     procurement_id: str = None
+
+
+class FileEntity(BaseModel):
+    id: int
+    context: str = None
+    send_to_external: bool = False
