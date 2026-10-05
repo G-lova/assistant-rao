@@ -95,7 +95,7 @@ DOCUMENT_CODE_TO_COLUMN = {
 
 
 @async_retry(DATABASE_RETRY_CONFIG)
-async def save_raw_data(procurement_id: int, document_code: str, analysis: List):
+async def save_raw_data(procurement_id: int, analysis: Dict[str, Any]):
     """
     Сохраняет полный анализ документа в таблицу сырых данных.
 
@@ -109,52 +109,51 @@ async def save_raw_data(procurement_id: int, document_code: str, analysis: List)
         document_code (str): Тип документа (например, 'contract', 'act'), используется для определения целевого столбца.
         analysis (Dict[str, Any]): Словарь с полным результатом анализа документа, включая извлечённые данные и метаинформацию.
 
-    Параллельные вызовы для одной закупки (asyncio.gather по типам документов)
-    выполняются в явной транзакции под pg_advisory_xact_lock, поэтому строки
-    обновляются строго по очереди и взаимных блокировок (deadlock) не возникает.
-
     Raises:
         Исключения логируются, транзакция откатывается при ошибке.
     """
     procurement_id = int(procurement_id)
     try:
         async with get_async_db_connection() as conn:
-            # Явная транзакция: advisory xact lock держится до COMMIT и реально
-            # сериализует параллельные сохранения одной закупки (иначе deadlock)
-            async with conn.transaction():
-                # Захватываем advisory lock по procurement_id
-                await conn.execute(
-                    "SELECT pg_advisory_xact_lock(hashtext($1::text))",
-                    str(procurement_id)
+            
+            updates = {}
+            codes = []
+
+            for item in analysis:
+                column = DOCUMENT_CODE_TO_COLUMN.get(item["doc_code"])
+                if column is None:
+                    continue
+
+                codes.append(item["doc_code"])
+
+                updates[column] = json.dumps(
+                    item,
+                    ensure_ascii=False,
+                    indent=2
                 )
 
-                column_name = DOCUMENT_CODE_TO_COLUMN.get(document_code, "unknown")
-                if not column_name:
-                    raise ValueError(f"Неизвестный тип документа: {document_code}")
+            set_parts = []
+            values = []
 
-                # Преобразуем данные в JSON
-                json_data = json.dumps(analysis, ensure_ascii=False, indent=2)
-        
-                # Проверяем существование записи по procurement_id
-                check_result = await conn.fetchrow(
-                    "SELECT id FROM raw_document_data WHERE procurement_id = $1",
-                    procurement_id
-                )
+            for i, (column, value) in enumerate(updates.items(), start=1):
+                set_parts.append(f'"{column}" = ${i}')
+                values.append(value)
 
-                if check_result:
-                    # UPDATE: обновляем только целевой столбец
-                    await conn.execute(
-                        f'UPDATE raw_document_data SET "{column_name}" = $1, updated_at = NOW() WHERE procurement_id = $2',
-                        json_data, procurement_id
-                    )
-                else:
-                    # INSERT: создаём новую запись с одним заполненным полем
-                    await conn.execute(
-                        f'INSERT INTO raw_document_data (procurement_id, "{column_name}") VALUES ($1, $2)',
-                        procurement_id, json_data
-                    )
+            # updated_at
+            set_parts.append("updated_at = NOW()")
 
-                logger.info(f"Сохранено в raw_document_data: {document_code} для procurement_id={procurement_id}")
+            sql = f"""
+                UPDATE raw_document_data
+                SET {", ".join(set_parts)}
+                WHERE procurement_id = ${len(values)+1}
+            """
+
+            values.append(procurement_id)
+
+            await conn.execute(sql, *values)
+
+            for code in codes:
+                logger.info(f"Сохранено в raw_document_data: {code} для procurement_id={procurement_id}")
 
     except Exception as e:
         logger.error(f"Ошибка при сохранении raw_data: {str(e)}", exc_info=True)
@@ -213,9 +212,9 @@ async def get_contract_info_from_db(procurement_id: str) -> Dict[str, str]:
                     contract_info = {
                         'contract_number': str(r.get('contract_number', '0'))
                     }
-                    amounts = r.get('amounts', [])
+                    finances = r.get('finances', [])
                     dates = r.get('dates', [])
-                    contract_info['amount'] = str(amounts[0].get('value', '0'))
+                    contract_info['amount'] = str(finances[0].get('value', '0'))
                     contract_info['date'] = str(dates[0].get('value', '0'))
                     
                     return contract_info
