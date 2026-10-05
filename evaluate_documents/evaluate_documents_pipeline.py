@@ -17,7 +17,7 @@ from evaluate_documents.consistency_checker import ConsistencyChecker
 from configs.parsing import CloudStorageParser
 from evaluate_documents.type_data_extractor import DOCUMENT_TYPE_MAPPING, TypeDataExtractor
 from knowledge_store import hooks as ks_hooks
-from evaluate_documents.package_view import completeness_input, files_view, with_source
+from evaluate_documents.package_view import completeness_input
 
 
 logger = get_logger(__name__)
@@ -94,8 +94,8 @@ class TasksPipeline:
                     logger.error(f'Ошибка при обработке документа {file_info.get("filename", file_info.get("original_url"))}: {result}')
                     continue
                 if result != None:
-                    # имя файла и ссылка попадают в итоговый ответ по каждому документу
-                    with_source(result, file_info.get("filename"), file_info.get("original_url") or link.media_links)
+                    result['raw_data']['filename'] = file_info.get("filename")
+                    result['raw_data']['url'] = file_info.get("original_url")
                     successful_results.append(result)
 
             if link.doc_code == 'linkDocs':  
@@ -105,7 +105,8 @@ class TasksPipeline:
                 eis_data = {
                     "document_name": "Ссылка на ЕИС",
                     "eis_procurement_number": str(eis_procurement_number) if eis_procurement_number else None,
-                    "eis_link": link.media_links,
+                    "filename": link.media_links,
+                    "url": link.media_links,
                     "eis_status": "available" if parse_result.get("status") == "success" else "unavailable",
                     "eis_error": eis_error,
                     "checked_at": datetime.datetime.utcnow().isoformat()
@@ -124,7 +125,7 @@ class TasksPipeline:
                     "raw_data": eis_data
                 }
 
-                successful_results.append(with_source(result, None, link.media_links))
+                successful_results.append(result)
 
             return successful_results
 
@@ -135,7 +136,8 @@ class TasksPipeline:
                 logger.error(f"Ошибка обработки ЕИС-ссылки {link.media_links}: {e}")
                 eis_data = {
                     "document_name": "Ссылка на ЕИС",
-                    "eis_link": link.media_links,
+                    "filename": link.media_links,
+                    "url": link.media_links,
                     "eis_status": "error",
                     "eis_error": str(e),
                     "checked_at": datetime.datetime.utcnow().isoformat()
@@ -170,7 +172,7 @@ class TasksPipeline:
                     "raw_data": {}
                 }
             
-            return with_source(fallback, None, link.media_links)
+            return fallback
 
 
     async def process_parse_result(self, file_path, filename, link):
@@ -331,7 +333,6 @@ class TasksPipeline:
                     "doc_type": 'Ссылка на ЕИС' if row.doc_code == "linkDocs" else DOCUMENT_TYPE_MAPPING.get(row.doc_code, "Неизвестный документ"),
                     "required": 'Обязательный' if row.required_docs == 1 else 'Необязательный',
                     "empty_comment": row.empty_comment,
-                    "files": files_view(row.documents_results),
                     **completeness
                 })
 
