@@ -109,45 +109,52 @@ async def save_raw_data(procurement_id: int, document_code: str, analysis: List)
         document_code (str): Тип документа (например, 'contract', 'act'), используется для определения целевого столбца.
         analysis (Dict[str, Any]): Словарь с полным результатом анализа документа, включая извлечённые данные и метаинформацию.
 
+    Параллельные вызовы для одной закупки (asyncio.gather по типам документов)
+    выполняются в явной транзакции под pg_advisory_xact_lock, поэтому строки
+    обновляются строго по очереди и взаимных блокировок (deadlock) не возникает.
+
     Raises:
         Исключения логируются, транзакция откатывается при ошибке.
     """
     procurement_id = int(procurement_id)
     try:
         async with get_async_db_connection() as conn:
-            # Захватываем advisory lock по procurement_id
-            await conn.execute(
-                "SELECT pg_advisory_xact_lock(hashtext($1::text))",
-                str(procurement_id)
-            )
+            # Явная транзакция: advisory xact lock держится до COMMIT и реально
+            # сериализует параллельные сохранения одной закупки (иначе deadlock)
+            async with conn.transaction():
+                # Захватываем advisory lock по procurement_id
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext($1::text))",
+                    str(procurement_id)
+                )
 
-            column_name = DOCUMENT_CODE_TO_COLUMN.get(document_code, "unknown")
-            if not column_name:
-                raise ValueError(f"Неизвестный тип документа: {document_code}")
+                column_name = DOCUMENT_CODE_TO_COLUMN.get(document_code, "unknown")
+                if not column_name:
+                    raise ValueError(f"Неизвестный тип документа: {document_code}")
 
-            # Преобразуем данные в JSON
-            json_data = json.dumps(analysis, ensure_ascii=False, indent=2)
+                # Преобразуем данные в JSON
+                json_data = json.dumps(analysis, ensure_ascii=False, indent=2)
         
-            # Проверяем существование записи по procurement_id
-            check_result = await conn.fetchrow(
-                "SELECT id FROM raw_document_data WHERE procurement_id = $1",
-                procurement_id
-            )
-
-            if check_result:
-                # UPDATE: обновляем только целевой столбец
-                await conn.execute(
-                    f'UPDATE raw_document_data SET "{column_name}" = $1, updated_at = NOW() WHERE procurement_id = $2',
-                    json_data, procurement_id
-                )
-            else:
-                # INSERT: создаём новую запись с одним заполненным полем
-                await conn.execute(
-                    f'INSERT INTO raw_document_data (procurement_id, "{column_name}") VALUES ($1, $2)',
-                    procurement_id, json_data
+                # Проверяем существование записи по procurement_id
+                check_result = await conn.fetchrow(
+                    "SELECT id FROM raw_document_data WHERE procurement_id = $1",
+                    procurement_id
                 )
 
-            logger.info(f"Сохранено в raw_document_data: {document_code} для procurement_id={procurement_id}")
+                if check_result:
+                    # UPDATE: обновляем только целевой столбец
+                    await conn.execute(
+                        f'UPDATE raw_document_data SET "{column_name}" = $1, updated_at = NOW() WHERE procurement_id = $2',
+                        json_data, procurement_id
+                    )
+                else:
+                    # INSERT: создаём новую запись с одним заполненным полем
+                    await conn.execute(
+                        f'INSERT INTO raw_document_data (procurement_id, "{column_name}") VALUES ($1, $2)',
+                        procurement_id, json_data
+                    )
+
+                logger.info(f"Сохранено в raw_document_data: {document_code} для procurement_id={procurement_id}")
 
     except Exception as e:
         logger.error(f"Ошибка при сохранении raw_data: {str(e)}", exc_info=True)
