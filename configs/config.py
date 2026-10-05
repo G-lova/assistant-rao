@@ -129,6 +129,11 @@ class Config:
     DB_USER = os.getenv("DB_USER")
     DB_PASSWORD = os.getenv("DB_PASSWORD")
     
+    # Knowledge store («РАО Эксперт»): запись результатов /evaluate-documents в pe_* таблицы
+    KNOWLEDGE_STORE_ENABLED = os.getenv("KNOWLEDGE_STORE_ENABLED", "false").lower() == "true"
+    # Срок хранения полных текстов, чанков и эмбеддингов (дней) — политика утверждена 05.10.2026
+    PE_TEXT_RETENTION_DAYS = int(os.getenv("PE_TEXT_RETENTION_DAYS", "365"))
+
     # Paths
     SQL_QUERIES_PATH = os.getenv("SQL_QUERIES_PATH", "queries/")
     OUTPUT_PATH = os.getenv("OUTPUT_PATH", "data/outputs/")

@@ -27,6 +27,7 @@ from configs.utils import APIKeyMiddleware, split_large_text
 from configs.working_with_db import get_async_summary_report_from_db, get_contract_info_from_db
 from evaluate_documents.send_subject_service import SendSubjectService
 from risk_monitoring.file_processor import FileProcessor
+from src.subject_detector import SubjectDetector
 from src.law_detector import LawDetector
 from src.rao_conclusion import rao_conclusion
 from src.rating import rating
