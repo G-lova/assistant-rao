@@ -1271,12 +1271,44 @@ class CloudStorageParser:
             str: Имя файла или пустая строка, если не найдено.
         """
         from urllib.parse import urlparse, parse_qs
+
         parsed = urlparse(url)
+
+        # Сначала filename из query-параметра
         query_params = parse_qs(parsed.query)
-        filenames = query_params.get('filename', [])
-        if filenames:
-            return filenames[0]
-        return ""
+        filename = query_params.get("filename", [None])[0]
+
+        if filename:
+            return unquote(filename)
+
+        # Затем последняя часть path
+        path = unquote(parsed.path.rstrip("/"))
+        filename = os.path.basename(path)
+
+        # === ОБРАБОТКА view.html ===
+        # Если это динамическая страница ЕИС (view.html), пытаемся сформировать уникальное имя на основе любого ID-параметра в query string.
+        if filename == "view.html" and query_params:
+
+            # Ищем ЛЮБОЙ параметр, оканчивающийся на "Id"
+            for key, values in query_params.items():
+                if key.endswith("Id") and values:
+                    value = values[0]
+                    # Убираем "Id" из ключа для красивого имени:
+                    # contractInfoId -> contractInfo
+                    clean_key = key[:-2] if len(key) > 2 else key
+                    return f"printForm_{clean_key}_{value}.html"
+            
+            # Если ничего не нашли — берём первый непустой параметр с числовым значением
+            for key, values in query_params.items():
+                if values and (values[0].isdigit() or values[0].replace('.', '', 1).isdigit()):
+                    print(f"printForm_{key}_{values[0]}.html")
+            
+            # Если совсем ничего не нашли — берём первый непустой параметр
+            for key, values in query_params.items():
+                if values and values[0]:
+                    return f"printForm_{key}_{values[0]}.html"
+
+        return filename or ""
 
 
     async def _parse_eis(self, url: str, procurement_id: str = None) -> Dict:
@@ -1757,6 +1789,70 @@ class CloudStorageParser:
                     if not xml_files:
                         return result
 
+
+                    def select_latest_xml_versions(files):
+                        """
+                        Для документов из VERSIONED_DOCUMENT_TYPES:
+                            оставляет только XML с максимальной версией.
+
+                        Для остальных типов:
+                            оставляет все XML без изменений.
+
+                        Например:
+                            epNotificationEOK2020_..._1_....xml
+                            epNotificationEOK2020_..._2_....xml
+
+                        -> останется только версия 2.
+
+                        А:
+                            epClarificationDoc_..._null_GUID1.xml
+                            epClarificationDoc_..._null_GUID2.xml
+
+                        -> останутся оба файла.
+                        """
+                        VERSIONED_DOCUMENT_TYPES = {
+                            "epNotificationEZK2020",
+                            "epNotificationEF2020",
+                            "epNotificationEZT2020",
+                            "epNotificationEOK2020",
+                            "fcsNotificationEP",
+                            "fcsNotification111",
+                            "pprf615NotificationPO",
+                            "pprf615NotificationEF",
+                            "purchaseNotice",
+                            "purchaseNoticeOK",
+                            "purchaseNoticeOA",
+                            "purchaseNoticeAE",
+                            "purchaseNoticeAE94FZ",
+                            "purchaseNoticeAESMBO",
+                            "purchaseNoticeZK",
+                            "purchaseNoticeZKESMBO",
+                            "purchaseNoticeZPESMBO",
+                            "purchaseNoticeEP",
+                            "contract",
+                            "pprf615Contract",
+                            "contractCutted",
+                        }
+
+                        latest = {}
+
+                        for fileinfo in files:
+                            logger.info(f'filename: {fileinfo["filename"]}')
+
+                            m = fileinfo["filename"].split('_')
+
+                            key = fileinfo["filename"] if ((m[2] == 'null') or (m[0] not in VERSIONED_DOCUMENT_TYPES)) else f'{m[0]}_{m[1]}'
+
+                            version = 0 if m[2] == 'null' else int(m[2])
+
+                            if key not in latest or version > latest[key][0]:
+                                latest[key] = (version, fileinfo)
+
+                        return [item[1] for item in latest.values()]
+
+                    # Отбор актуальных версий xml-файлов
+                    actual_xml_files = select_latest_xml_versions(xml_files)
+
                     # Ограничитель параллелизма (настраивается)
                     semaphore = asyncio.Semaphore(10)
                     
@@ -1774,19 +1870,19 @@ class CloudStorageParser:
                                 content = await asyncio.to_thread(xmltodict.parse, extracted_text)
                                 attachment_urls = await asyncio.to_thread(self.extract_urls_from_dict, content)
                                 
-                                logger.info(f"Найдено ссылок в {file_info['file_path']}: {len(attachment_urls)}")
+                                logger.info(f"Найдено ссылок в {file_info['filename']}: {len(attachment_urls)}")
 
                                 return attachment_urls
                                 
                             except Exception as e:
-                                logger.error(f"Ошибка обработки {file_info.get('file_path')}: {e}", exc_info=True)
+                                logger.error(f"Ошибка обработки {file_info.get('filename')}: {e}", exc_info=True)
                                 return []
                             
                     
                     # Запускаем обработку всех XML параллельно
                     async with self.semaphore:
                         attachment_urls = await asyncio.gather(
-                            *(process_xml_file(f) for f in xml_files),
+                            *(process_xml_file(f) for f in actual_xml_files),
                             return_exceptions=True
                         )
                     # оставляем уникальные ссылки
