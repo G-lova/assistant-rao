@@ -387,7 +387,8 @@ LIMIT $3
 
 SQL_SET_FORM_CODE = "UPDATE pe_procurements SET form_code = $2, updated_at = NOW() WHERE expertise_id = $1"
 
-SQL_PROCUREMENT = "SELECT law, method, object_code, check_type2, form_code FROM pe_procurements WHERE expertise_id = $1"
+SQL_PROCUREMENT = ("SELECT law, method, object_code, check_type2, form_code, nmck, advance, funding, passport "
+                    "FROM pe_procurements WHERE expertise_id = $1")
 
 SQL_EXPERTISES_WITH_TEXTS = """
 SELECT DISTINCT expertise_id FROM pe_documents WHERE text_full IS NOT NULL ORDER BY expertise_id
@@ -429,3 +430,58 @@ async def list_expertises_with_texts(conn) -> List[int]:
         list[int]: ID экспертиз по возрастанию.
     """
     return [int(r["expertise_id"]) for r in await conn.fetch(SQL_EXPERTISES_WITH_TEXTS)]
+
+
+SQL_DOCUMENTS_BRIEF = """
+SELECT id, doc_code, filename, text_full, text_purged_at, (text_full IS NOT NULL) AS has_text
+FROM pe_documents WHERE expertise_id = $1 ORDER BY id
+"""
+SQL_INSERT_SUMMARY = """
+INSERT INTO pe_summary_opinions (expertise_id, form_code, data, trace, status)
+VALUES ($1, $2, $3::jsonb, $4::jsonb, $5) RETURNING id
+"""
+SQL_TOUCH_EXPIRY = """
+UPDATE pe_documents SET expires_at = NOW() + make_interval(days => $2)
+WHERE expertise_id = $1 AND text_purged_at IS NULL AND NOT legal_hold
+"""
+
+
+async def get_documents_brief(conn, expertise_id: int) -> list:
+    """Читает документы экспертизы для сводного ЭЗ (с полным текстом, если он ещё не очищен).
+
+    Args:
+        conn: Соединение ``asyncpg``.
+        expertise_id: ID экспертизы.
+
+    Returns:
+        list: Записи ``id, doc_code, filename, text_full, text_purged_at, has_text``.
+    """
+    return list(await conn.fetch(SQL_DOCUMENTS_BRIEF, int(expertise_id)))
+
+
+async def insert_summary(conn, expertise_id: int, form_code: str, data: dict, trace: dict, status: str) -> int:
+    """Сохраняет сводное ЭЗ в ``pe_summary_opinions``.
+
+    Args:
+        conn: Соединение ``asyncpg``.
+        expertise_id: ID экспертизы.
+        form_code: Код формы.
+        data: JSON ровно с ключами формы.
+        trace: Доказательства и пояснения по полям (отдельно от ``data``).
+        status: ``draft`` (все поля решены) или ``needs_review`` (есть поля для эксперта).
+
+    Returns:
+        int: ``pe_summary_opinions.id``.
+    """
+    return int(await conn.fetchval(SQL_INSERT_SUMMARY, int(expertise_id), form_code, to_json(data), to_json(trace), status))
+
+
+async def touch_expiry(conn, expertise_id: int, days: int) -> None:
+    """Продлевает срок хранения текстов экспертизы (политика 2а.1: при повторной генерации).
+
+    Args:
+        conn: Соединение ``asyncpg``.
+        expertise_id: ID экспертизы.
+        days: Срок хранения в днях от текущего момента.
+    """
+    await conn.execute(SQL_TOUCH_EXPIRY, int(expertise_id), int(days))

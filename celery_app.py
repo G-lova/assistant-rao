@@ -64,6 +64,7 @@ celery_app.conf.update(
             }
         },
         'index_documents_task': {'queue': 'evaluation'},
+        'generate_summary_opinion_task': {'queue': 'evaluation'},
         'purge_expired_texts_task': {'queue': 'evaluation'},
         'main.get_experts_task': {
             'queue': 'scoring',

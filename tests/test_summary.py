@@ -1,0 +1,292 @@
+"""Тесты сводного ЭЗ (этап 5): сборка data/trace, валидатор, блоки III–IV, отправка черновика."""
+import asyncio
+import json
+import os
+import re
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from knowledge_store import export, facts, repository as repo, summary
+from tests.pg_psql import PsqlConn
+
+PG = os.getenv("PE_TEST_PG")
+MIGRATIONS = Path(__file__).resolve().parent.parent / "migrations"
+
+
+def field(key, kind, label="", ordinal=0):
+    """Поле формы для тестов."""
+    return {"field_key": key, "value_kind": kind, "label": label or key, "ordinal": ordinal}
+
+
+FIELDS = [
+    field("field1_1", "number"), field("field1_2", "number"),
+    field("field2_1_1", "presence", "1.1. Наличие наименования"),
+    field("field2_1_2", "presence", "1.2. Наличие адреса"),
+    field("field2_2_4", "section"),
+    field("field2_2_4_1", "compliance", "2.2.4.1. Соответствие сроков"),
+    field("field2_2_4_2", "compliance", "2.2.4.2. Соответствие цены"),
+    field("field2_2_4_text", "text"),
+    field("field3", "text"), field("field4", "text"), field("rao_comment", "text"),
+]
+
+
+def fact(key, value, verified=True, quote=None, source="fact_extractor", doc=1, comment=None):
+    """Строка pe_facts для тестов."""
+    return {"fact_key": key, "value": {"value": value, "verified": verified, "comment": comment},
+            "document_id": doc, "page": 2, "quote": quote, "confidence": 0.8, "source": source}
+
+
+DOCS = {1: {"filename": "n.docx", "doc_code": "docIzvejenieFiles", "text": "Срок оплаты: 30 дней. Адрес: Москва"}}
+
+
+class AssembleTests(unittest.TestCase):
+    """assemble / validate без БД и LLM."""
+
+    def test_keys_exactly_form_and_unproven_left_null(self):
+        """data содержит ровно ключи формы; значения без доказательства не ставятся."""
+        rows = [
+            fact("field2_1_1", 1, source="eis_xml", quote="fullName = Вуз"),         # XML — доказано
+            fact("field2_1_2", 1, quote="Адрес: Москва"),                          # цитата есть в тексте
+            fact("field2_2_4_1", 1, quote="цитаты нет в документе"),                # цитата выдумана
+            fact("field2_2_4_2", 0, comment="цена не указана"),                     # «0» без цитаты допустим
+        ]
+        data, trace = summary.assemble(FIELDS, rows, DOCS, {"nmck": 1500000, "advance": None})
+        self.assertEqual(set(data), {f["field_key"] for f in FIELDS})
+        self.assertEqual((data["field2_1_1"], data["field2_1_2"]), (1, 1))
+        self.assertIsNone(data["field2_2_4_1"])
+        self.assertEqual(trace["field2_2_4_1"]["status"], "unverified")
+        self.assertEqual(data["field2_2_4_2"], 0)
+        self.assertEqual(data["field2_2_4"], 0)                      # итог подраздела: есть «0»
+        self.assertEqual(data["field2_2_4_text"], "цена не указана")   # пояснение к отрицательному результату
+        self.assertEqual(data["field1_1"], 1500000.0)                  # из паспорта
+        self.assertIsNone(data["field1_2"])
+        self.assertEqual(summary.validate(data, FIELDS), [])
+
+    def test_unverified_and_one_without_quote_rejected(self):
+        """Ответ «1» без цитаты и непроверенный факт не попадают в data; факты хранятся в trace."""
+        rows = [fact("field2_1_1", 1, quote=None), fact("field2_1_2", 1, verified=False, quote="Адрес: Москва")]
+        data, trace = summary.assemble(FIELDS, rows, DOCS)
+        self.assertIsNone(data["field2_1_1"])
+        self.assertIsNone(data["field2_1_2"])
+        self.assertEqual(trace["field2_1_1"]["status"], "unverified")
+
+    def test_section_rules(self):
+        """Итог подраздела: все решены → 1; есть нерешённый без «0» → None."""
+        self.assertEqual(summary.section_result([1, 2]), 1)
+        self.assertIsNone(summary.section_result([1, None]))
+        self.assertEqual(summary.section_result([None, 0]), 0)
+        self.assertIsNone(summary.section_result([]))
+
+    def test_validate_catches_foreign_and_bad_values(self):
+        """Валидатор находит чужой ключ, недопустимое значение и пропавший ключ."""
+        data = {f["field_key"]: None for f in FIELDS}
+        data["foreign"] = 1
+        data["field2_1_1"] = 5
+        del data["field4"]
+        problems = summary.validate(data, FIELDS)
+        self.assertTrue(any("foreign" in p for p in problems))
+        self.assertTrue(any("field2_1_1" in p for p in problems))
+        self.assertTrue(any("field4" in p for p in problems))
+
+    def test_normalize_result(self):
+        """Значения 1/0/2 приходят и числом, и строкой."""
+        self.assertEqual([summary.normalize_result(v) for v in (1, "0", "2", True, "x", 7, None)],
+                         [1, 0, 2, 1, None, None, None])
+
+
+class BlocksTests(unittest.TestCase):
+    """Блоки III–IV."""
+
+    def setUp(self):
+        """Данные с одним замечанием."""
+        rows = [fact("field2_1_1", 1, source="eis_xml"), fact("field2_2_4_1", 0, comment="срок не указан")]
+        self.data, self.trace = summary.assemble(FIELDS, rows, DOCS)
+
+    def test_llm_sees_only_verified_remarks(self):
+        """LLM получает только замечания (значение 0) и счётчики; нерешённые критерии не передаются."""
+        seen = []
+
+        async def llm(messages, schema):
+            """Запоминает вход и отвечает текстом."""
+            seen.append(messages[1]["content"])
+            return json.dumps({"text": "Выявлено замечание по срокам."})
+
+        stats = asyncio.run(summary.write_blocks(FIELDS, self.data, self.trace, llm))
+        self.assertEqual(stats, {"checked": 2, "remarks": 1})
+        self.assertEqual(self.data["field3"], "Выявлено замечание по срокам.")
+        self.assertEqual(self.trace["field3"]["method"], "llm")
+        self.assertIn("срок не указан", seen[0])
+        self.assertNotIn("field2_1_2", seen[0])
+
+    def test_no_remarks_means_no_llm_call(self):
+        """Без замечаний LLM не вызывается, ставится шаблон."""
+        rows = [fact("field2_1_1", 1, source="eis_xml")]
+        data, trace = summary.assemble(FIELDS, rows, DOCS)
+
+        async def llm(messages, schema):
+            """Не должна вызываться."""
+            raise AssertionError("LLM не нужна")
+
+        asyncio.run(summary.write_blocks(FIELDS, data, trace, llm))
+        self.assertIn("не выявлено", data["field3"])
+        self.assertEqual(trace["field4"]["method"], "template")
+
+    def test_llm_failure_falls_back_to_template(self):
+        """Сбой модели и мусорный ответ заменяются шаблоном с числом замечаний."""
+        async def broken(messages, schema):
+            """Возвращает не-JSON."""
+            return "не json"
+
+        asyncio.run(summary.write_blocks(FIELDS, self.data, self.trace, broken))
+        self.assertEqual(self.trace["field4"]["method"], "template")
+        self.assertIn("замечаний: 1", self.data["field4"])
+
+
+class FakeResponse:
+    """Ответ aiohttp для проверки отправки."""
+
+    def __init__(self, status, body):
+        self.status, self._body = status, body
+
+    async def json(self, content_type=None):
+        """Тело ответа."""
+        return self._body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class FakeSession:
+    """Сессия, запоминающая запрос."""
+
+    def __init__(self, status=200, body=None):
+        self.calls, self.status, self.body = [], status, body or {}
+
+    def post(self, url, headers=None, json=None):
+        """Фиксирует вызов и возвращает ответ."""
+        self.calls.append((url, headers, json))
+        return FakeResponse(self.status, self.body)
+
+
+class FakeManager:
+    """HTTPClientManager-заглушка."""
+
+    def __init__(self, session):
+        self.session = session
+
+    def get_session(self):
+        """Возвращает сессию."""
+        return self.session
+
+
+class ExportTests(unittest.TestCase):
+    """Отправка черновика через Config.get_external_api_config."""
+
+    def test_uses_external_api_config_and_payload(self):
+        """URL и заголовки из get_external_api_config; тело {id, data}."""
+        session = FakeSession()
+        cfg = {"url": "https://x/api/expertise/set-hint-for-rao-expert", "headers": {"X-API-Key": "k"}}
+        with mock.patch.object(export.Config, "get_external_api_config", return_value=cfg) as m:
+            res = asyncio.run(export.send_draft(FakeManager(session), 5, {"field3": "т"}, "stage"))
+        m.assert_called_once_with("stage")
+        self.assertEqual(res, {"ok": True, "status": 200})
+        self.assertEqual(session.calls[0], (cfg["url"], cfg["headers"], {"id": 5, "data": {"field3": "т"}}))
+
+    def test_http_error_and_exception_are_returned_not_raised(self):
+        """Ошибка HTTP и сбой сети возвращаются в результате (заключение не теряется), ключ в ответ не попадает."""
+        cfg = {"url": "https://x", "headers": {"X-API-Key": "secret"}}
+        with mock.patch.object(export.Config, "get_external_api_config", return_value=cfg):
+            res = asyncio.run(export.send_draft(FakeManager(FakeSession(422, {"message": "bad"})), 5, {}))
+            self.assertEqual(res, {"ok": False, "status": 422, "error": "bad"})
+
+            class Broken:
+                """Менеджер без сессии."""
+
+                def get_session(self):
+                    raise ConnectionError("down")
+
+            res = asyncio.run(export.send_draft(Broken(), 5, {}))
+        self.assertEqual(res, {"ok": False, "error": "ConnectionError"})
+        self.assertNotIn("secret", json.dumps(res))
+
+
+@unittest.skipUnless(PG, "нужен PE_TEST_PG=host:port")
+class SummaryDbTests(unittest.TestCase):
+    """precheck и generate_summary на настоящем Postgres."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Создаёт схему pe_* (миграции 001 и 002, vector → real[])."""
+        host, port = PG.split(":")
+        cls.conn = PsqlConn(host, int(port))
+        sql = (MIGRATIONS / "001_knowledge_store.sql").read_text(encoding="utf-8")
+        sql = re.sub(r"CREATE EXTENSION[^\n]*\n", "", sql)
+        sql = re.sub(r"[^\n]*USING hnsw[^\n]*\n", "", sql).replace("vector(1024)", "real[]")
+        cls.conn._run("DROP TABLE IF EXISTS pe_summary_opinions, pe_facts, pe_chunks, pe_documents, pe_form_fields, pe_procurements CASCADE;")
+        cls.conn._run(sql)
+        cls.conn._run((MIGRATIONS / "002_form_fields_derived.sql").read_text(encoding="utf-8"))
+
+    def run_async(self, coro):
+        """Запускает корутину."""
+        return asyncio.run(coro)
+
+    def test_409_cases_and_generation(self):
+        """Нет данных / очищенные тексты → 409; неподдерживаемая форма → 422; сборка сохраняет data и trace."""
+        form = "44fz_competition_obj6"
+        c = self.conn
+        c._run(f"DELETE FROM pe_form_fields WHERE form_code = '{form}'")
+        for key, n, label, kind in [("k_name", 1, "1.1. Наличие наименования", "presence"),
+                                    ("k_cmp", 2, "2.1.1. Соответствие наименований", "compliance"),
+                                    ("field3", 3, "Вывод", "text")]:
+            c._run(f"INSERT INTO pe_form_fields (form_code, field_key, ordinal, label, value_kind) "
+                   f"VALUES ('{form}', '{key}', {n}, '{label}', '{kind}')")
+        # 1) документов нет
+        with self.assertRaises(summary.NoDataError):
+            self.run_async(summary.precheck(c, 8101))
+        # 2) тексты очищены
+        c._run("INSERT INTO pe_procurements (expertise_id, law, method, object_code, check_type2) VALUES (8101, '44-ФЗ', 'Конкурс', 6, 1)")
+        c._run("INSERT INTO pe_documents (expertise_id, doc_code, filename, sha256, text_full, text_purged_at) "
+               "VALUES (8101, 'docIzvejenieFiles', 'n.docx', 'h1', NULL, NOW())")
+        with self.assertRaises(summary.TextPurgedError):
+            self.run_async(summary.precheck(c, 8101))
+        # 3) тексты есть, форма не поддерживается (223-ФЗ)
+        c._run("UPDATE pe_documents SET text_full = 'Адрес: Москва', text_purged_at = NULL WHERE expertise_id = 8101")
+        c._run("UPDATE pe_procurements SET law = '223-ФЗ' WHERE expertise_id = 8101")
+        with self.assertRaises(summary.UnsupportedFormError) as ctx:
+            self.run_async(summary.precheck(c, 8101))
+        self.assertEqual(ctx.exception.http_status, 422)
+        c._run("UPDATE pe_procurements SET law = '44-ФЗ' WHERE expertise_id = 8101")
+        # 4) фактов нет и построить нечем
+        with self.assertRaises(summary.NoFactsError):
+            self.run_async(summary.generate_summary(c, 8101, None))
+        # 5) факты строятся колбэком, сборка сохраняет data и trace
+        doc_id = c._run("SELECT id FROM pe_documents WHERE expertise_id = 8101").strip()
+
+        async def build_facts():
+            """Колбэк вставляет два факта."""
+            c._run(f"INSERT INTO pe_facts (expertise_id, fact_key, value, document_id, page, quote, confidence, source) VALUES "
+                   f"(8101, 'k_name', '{{\"value\": 1, \"verified\": true, \"comment\": null}}', {doc_id}, 1, 'Адрес: Москва', 0.8, 'fact_extractor'), "
+                   f"(8101, 'k_cmp', '{{\"value\": 0, \"verified\": true, \"comment\": \"не совпадает\"}}', {doc_id}, 1, NULL, 0.8, 'fact_extractor')")
+
+        async def llm(messages, schema):
+            """Ответ модели для блока."""
+            return json.dumps({"text": "Вывод по замечанию."})
+
+        res = self.run_async(summary.generate_summary(c, 8101, llm, build_facts))
+        self.assertEqual(res["form_code"], form)
+        self.assertEqual(res["status"], "draft")
+        self.assertEqual(res["data"], {"k_name": 1, "k_cmp": 0, "field3": "Вывод по замечанию."})
+        self.assertEqual(c._run("SELECT status FROM pe_summary_opinions WHERE expertise_id = 8101"), "draft")
+        stored = json.loads(c._run("SELECT data FROM pe_summary_opinions WHERE expertise_id = 8101"))
+        self.assertEqual(set(stored), {"k_name", "k_cmp", "field3"})
+        trace = json.loads(c._run("SELECT trace FROM pe_summary_opinions WHERE expertise_id = 8101"))
+        self.assertEqual(trace["k_name"]["quote"], "Адрес: Москва")
+        c._run(f"DELETE FROM pe_form_fields WHERE form_code = '{form}'")
+
+
+if __name__ == "__main__":
+    unittest.main()
