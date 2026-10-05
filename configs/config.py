@@ -109,6 +109,14 @@ class Config:
     EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY")
     BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))
     
+
+    # Knowledge store («РАО Эксперт»): запись результатов /evaluate-documents в pe_* таблицы
+    KNOWLEDGE_STORE_ENABLED = os.getenv("KNOWLEDGE_STORE_ENABLED", "false").lower() == "true"
+    # Срок хранения полных текстов, чанков и эмбеддингов (дней) — политика утверждена 05.10.2026
+    PE_TEXT_RETENTION_DAYS = int(os.getenv("PE_TEXT_RETENTION_DAYS", "365"))
+    # Размерность эмбеддинга (Qwen3-Embedding-0.6B -> 1024); подставляется в миграцию vector(N)
+    PE_EMBEDDING_DIM = int(os.getenv("PE_EMBEDDING_DIM", "1024"))
+
     # Paths
     SQL_QUERIES_PATH = os.getenv("SQL_QUERIES_PATH", "data/queries/")
     OUTPUT_PATH = os.getenv("OUTPUT_PATH", "data/outputs/")
