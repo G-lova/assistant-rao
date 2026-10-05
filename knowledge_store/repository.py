@@ -28,7 +28,8 @@ RETURNING id
 
 SQL_SET_EXTRACTION = """
 UPDATE pe_documents
-SET detected_type = $2, readability = $3::jsonb, extraction = $4::jsonb
+SET detected_type = $2, readability = $3::jsonb,
+    extraction = COALESCE(extraction, '{}'::jsonb) || $4::jsonb
 WHERE id = $1
 """
 
@@ -289,3 +290,142 @@ async def get_form_fields(conn, form_code: str) -> list:
         list: Записи ``pe_form_fields`` (``field_key``, ``label``, ``value_kind`` …).
     """
     return list(await conn.fetch(SQL_FORM_FIELDS, form_code))
+
+
+SQL_MERGE_EXTRACTION = """
+UPDATE pe_documents
+SET extraction = COALESCE(extraction, '{}'::jsonb) || $2::jsonb
+WHERE id = $1
+"""
+
+SQL_EIS_DOCUMENTS = """
+SELECT id, filename, extraction -> 'eis_notice' AS eis_notice
+FROM pe_documents
+WHERE expertise_id = $1 AND extraction ? 'eis_notice'
+"""
+
+SQL_DELETE_FACTS_BY_SOURCE = "DELETE FROM pe_facts WHERE expertise_id = $1 AND source = $2"
+
+SQL_INSERT_FACT = """
+INSERT INTO pe_facts (expertise_id, fact_key, value, document_id, page, quote, confidence, source)
+VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8)
+"""
+
+SQL_GET_FACTS = """
+SELECT fact_key, value, document_id, page, quote, confidence, source
+FROM pe_facts WHERE expertise_id = $1 ORDER BY id
+"""
+
+
+async def merge_document_extraction(conn, document_id: int, patch: dict) -> None:
+    """Дописывает ключи в ``pe_documents.extraction`` (JSONB-слияние, существующие ключи сохраняются).
+
+    Args:
+        conn: Соединение ``asyncpg``.
+        document_id: ``pe_documents.id``.
+        patch: Словарь с добавляемыми/обновляемыми верхнеуровневыми ключами.
+    """
+    await conn.execute(SQL_MERGE_EXTRACTION, int(document_id), to_json(patch))
+
+
+async def get_eis_notices(conn, expertise_id: int) -> list:
+    """Возвращает документы экспертизы с результатом разбора XML извещения ЕИС.
+
+    Args:
+        conn: Соединение ``asyncpg``.
+        expertise_id: ID экспертизы.
+
+    Returns:
+        list: Записи ``id``, ``filename``, ``eis_notice`` (JSON ``{"version", "criteria"}``).
+    """
+    return list(await conn.fetch(SQL_EIS_DOCUMENTS, int(expertise_id)))
+
+
+async def replace_facts(conn, expertise_id: int, source: str, facts: Sequence[dict]) -> int:
+    """Заменяет факты экспертизы одного источника (``eis_xml`` / ``fact_extractor``).
+
+    Повторный запуск идемпотентен: факты других источников не затрагиваются.
+    Цитата обрезается до 500 символов. Вызывать внутри транзакции.
+
+    Args:
+        conn: Соединение ``asyncpg``.
+        expertise_id: ID экспертизы.
+        source: Источник фактов.
+        facts: Словари с ключами ``fact_key``, ``value``, ``document_id``, ``page``, ``quote``, ``confidence``.
+
+    Returns:
+        int: Количество записанных фактов.
+    """
+    await conn.execute(SQL_DELETE_FACTS_BY_SOURCE, int(expertise_id), source)
+    for fact in facts:
+        await conn.execute(
+            SQL_INSERT_FACT, int(expertise_id), fact["fact_key"], to_json(fact.get("value")),
+            fact.get("document_id"), fact.get("page"), (fact.get("quote") or "")[:500] or None,
+            fact.get("confidence"), source)
+    return len(facts)
+
+
+async def get_facts(conn, expertise_id: int) -> list:
+    """Читает все факты экспертизы.
+
+    Args:
+        conn: Соединение ``asyncpg``.
+        expertise_id: ID экспертизы.
+
+    Returns:
+        list: Записи ``pe_facts``.
+    """
+    return list(await conn.fetch(SQL_GET_FACTS, int(expertise_id)))
+
+SQL_SEARCH_CHUNKS = """
+SELECT c.id AS chunk_id, c.document_id, c.page_from, c.text, d.filename, d.doc_code
+FROM pe_chunks c JOIN pe_documents d ON d.id = c.document_id
+WHERE c.expertise_id = $1 AND c.embedding IS NOT NULL
+ORDER BY c.embedding <=> $2::vector
+LIMIT $3
+"""
+
+SQL_SET_FORM_CODE = "UPDATE pe_procurements SET form_code = $2, updated_at = NOW() WHERE expertise_id = $1"
+
+SQL_PROCUREMENT = "SELECT law, method, object_code, check_type2, form_code FROM pe_procurements WHERE expertise_id = $1"
+
+SQL_EXPERTISES_WITH_TEXTS = """
+SELECT DISTINCT expertise_id FROM pe_documents WHERE text_full IS NOT NULL ORDER BY expertise_id
+"""
+
+
+async def set_form_code(conn, expertise_id: int, form_code: Optional[str]) -> None:
+    """Записывает код формы заключения в паспорт закупки.
+
+    Args:
+        conn: Соединение ``asyncpg``.
+        expertise_id: ID экспертизы.
+        form_code: Код формы (``None`` — форма не поддерживается).
+    """
+    await conn.execute(SQL_SET_FORM_CODE, int(expertise_id), form_code)
+
+
+async def get_procurement(conn, expertise_id: int) -> Optional[dict]:
+    """Читает паспорт закупки (``law``, ``method``, ``object_code``, ``check_type2``, ``form_code``).
+
+    Args:
+        conn: Соединение ``asyncpg``.
+        expertise_id: ID экспертизы.
+
+    Returns:
+        Optional[dict]: Строка паспорта или ``None``.
+    """
+    rows = await conn.fetch(SQL_PROCUREMENT, int(expertise_id))
+    return dict(rows[0]) if rows else None
+
+
+async def list_expertises_with_texts(conn) -> List[int]:
+    """Возвращает ID экспертиз, для которых сохранены полные тексты (кандидаты для backfill).
+
+    Args:
+        conn: Соединение ``asyncpg``.
+
+    Returns:
+        list[int]: ID экспертиз по возрастанию.
+    """
+    return [int(r["expertise_id"]) for r in await conn.fetch(SQL_EXPERTISES_WITH_TEXTS)]

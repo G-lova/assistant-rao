@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from configs.config import Config
 from configs.logger import get_logger
-from knowledge_store import repository as repo
+from knowledge_store import eis_notice, repository as repo
 from knowledge_store.pages import split_pages
 from knowledge_store.safe import is_enabled, safe_call_async
 
@@ -59,9 +59,36 @@ async def _on_document_text(expertise_id: int, doc_code: Optional[str], filename
     """Реализация :func:`on_document_text` (без защиты)."""
     pages = split_pages(text)
     sha = repo.file_sha256(file_path)
+    eis_patch = _eis_notice_patch(file_path, filename)
     async with _db() as conn:
-        return await repo.upsert_document(conn, expertise_id, doc_code, filename, url, sha, text,
-                                          len(pages), Config.PE_TEXT_RETENTION_DAYS)
+        doc_id = await repo.upsert_document(conn, expertise_id, doc_code, filename, url, sha, text,
+                                            len(pages), Config.PE_TEXT_RETENTION_DAYS)
+        if eis_patch:
+            await repo.merge_document_extraction(conn, doc_id, {"eis_notice": eis_patch})
+        return doc_id
+
+
+def _eis_notice_patch(file_path: str, filename: str) -> Optional[dict]:
+    """Разбирает XML извещения ЕИС и возвращает результат правил раздела 1.
+
+    Работает только для ``.xml`` с корнем ``epNotification*``; для остальных файлов (и при любой
+    ошибке разбора) возвращает ``None`` — загрузка документа от этого не зависит.
+
+    Args:
+        file_path: Локальный путь к файлу.
+        filename: Исходное имя файла.
+
+    Returns:
+        Optional[dict]: ``{"version", "criteria"}`` или ``None``.
+    """
+    if not (filename or file_path or "").lower().endswith(".xml"):
+        return None
+    try:
+        with open(file_path, "rb") as fh:
+            notice = eis_notice.Notice.from_xml(fh.read())
+        return eis_notice.findings_to_json(notice, eis_notice.evaluate_all(notice))
+    except Exception:  # не извещение или битый XML — просто не извлекаем структурные факты
+        return None
 
 
 async def on_document_text(expertise_id: int, doc_code: Optional[str], filename: str, url: Optional[str],
