@@ -465,8 +465,8 @@ def create_summary_report(
                 all_dates.append(date_info)
         
         # Собираем суммы
-        if "finances" in raw_data:
-            for amount_info in raw_data["finances"]:
+        if "amounts" in raw_data:
+            for amount_info in raw_data["amounts"]:
                 amount_info["source_document"] = doc_name
                 amount_info["document_code"] = doc_result.get("document_code", "unknown")
                 all_amounts.append(amount_info)

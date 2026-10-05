@@ -70,26 +70,7 @@ WITH expertise_info AS (
 		END AS expertise_region_id,
 		e.declineExperts,
 		e.requestExperts,
-		(SELECT value FROM settings WHERE `key` IN ('max_experts_per_invite') LIMIT 1) AS max_experts_per_invite,
-		GREATEST(
-			(SELECT value FROM settings WHERE `key` IN ('max_newbies_per_invite') LIMIT 1)
-			-
-			(
-				(
-					SELECT COUNT(*)
-					FROM users u1
-					LEFT JOIN expertises e1 ON u1.id MEMBER OF(e1.experts)
-					WHERE e1.id = ? AND u1.benefitExpertisesCount > 0
-				)
-				+
-				(
-					SELECT COUNT(*)
-					FROM expertise_experts ee 
-					LEFT JOIN users u ON u.id = ee.expert_id
-					WHERE ee.expertise_id = ? 
-					AND u.benefitExpertisesCount > 0 
-				)
-			), 0) AS max_newbies_per_invite
+		(SELECT value FROM settings WHERE `key` IN ('max_experts_per_invite')) AS max_experts_per_invite
 	FROM expertises e
 	JOIN users u
 	ON e.user_id = u.id
@@ -426,11 +407,11 @@ blocked_experts AS (
         ) AS constraint_experts,
 		COUNT(CASE WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE status IN (4,5)) THEN 1 END) AS countExpertise,
 		COUNT(CASE 
-				WHEN ee.group_formed_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
+				WHEN ee.updated_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
 				THEN 1 
 			END) AS countTotalExpertises_lastYear,
 		COUNT(CASE 
-				WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
+				WHEN ee.updated_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
 				THEN COALESCE(ee.accept, 0)
 			END) AS countAcceptedExpertises_lastYear,
 		COALESCE(SUM(CASE 
@@ -439,21 +420,11 @@ blocked_experts AS (
 		END), 0) AS secondUpload_lastYear,
 		COALESCE(SUM(CASE WHEN ee.deleted_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
 			AND ee.uploadExpertDate IS NULL 
-			AND (u.id MEMBER OF(e.declineExperts) 
-			OR JSON_CONTAINS_PATH(
-				e.declineExperts,
-				'one',
-				CONCAT('$."', u.id, '"')
-			))
+			AND u.id MEMBER OF(e.declineExperts) 
 			THEN 1
 		END), 0) AS overdues,
     	COALESCE(SUM(CASE WHEN e.dateStatus2 >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
-			AND (u.id MEMBER OF(e.declineExperts) 
-			OR JSON_CONTAINS_PATH(
-				e.declineExperts,
-				'one',
-				CONCAT('$."', u.id, '"')
-			))
+			AND u.id MEMBER OF(e.declineExperts) 
             AND NOT EXISTS (
                 SELECT 1 
                 FROM expertise_experts ee
@@ -462,27 +433,17 @@ blocked_experts AS (
             )
 			THEN 1
 		END), 0) AS expert_declines,
-		(
-            SELECT COUNT(*)
-            FROM expertises e1
-            WHERE u.id MEMBER OF(e1.experts)
-        )
-        +
-        (
-            SELECT COUNT(*)
-            FROM expertise_experts ee1
-            JOIN expertises e1
-            ON e1.id = ee1.expertise_id
-            WHERE ee1.expert_id = u.id
-            AND e1.status = 2 AND ee1.group_formed_at IS NULL AND ee1.deleted_at IS NULL
-        ) AS expert_requests,
+		COALESCE(SUM(CASE WHEN e.dateStatus2 >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
+			AND u.id MEMBER OF(e.experts) 
+			THEN 1
+		END), 0) AS expert_requests,
 		ROUND(AVG(CASE 
-			WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
+			WHEN ee.updated_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
 			THEN ee.`range`
 			ELSE NULL 
 		END), 3) AS criterion4,
 		ROUND(AVG(CASE 
-			WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
+			WHEN ee.updated_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
 			THEN CASE 
 				WHEN e.object IN (1,7) AND ee.accept = 1
 				THEN CASE
@@ -494,7 +455,7 @@ blocked_experts AS (
 			END
 			ELSE NULL
 		END), 3) AS criterion5,
-        SUM(CASE WHEN e.status IN (3) OR ee.group_formed_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) THEN 1 ELSE 0 END) AS currentWeekWorkload 
+        SUM(CASE WHEN e.status IN (3) OR e.dateStatus3 >= DATE_SUB(NOW(), INTERVAL 7 DAY) THEN 1 ELSE 0 END) AS currentWeekWorkload 
 	FROM users u 
 	LEFT JOIN expertise_experts ee 
 	ON u.id = ee.expert_id 
@@ -510,14 +471,6 @@ blocked_experts AS (
 	AND u.deleted_at IS NULL 
 	AND u.inn != '' AND CAST(SUBSTRING(u.inn, 1, 2) AS UNSIGNED) != 0 AND LOWER(u.name) NOT LIKE '%тест%' AND LOWER(u.name) NOT LIKE '%test%' 
 	AND COALESCE(u.workExpertise, (SELECT value FROM settings WHERE `key` IN ('max_applications_per_expert'))) > 0
-	AND NOT EXISTS (
-		SELECT 1 
-		FROM expertise_experts ee1
-		WHERE ee1.expertise_id = ?
-		AND ee1.expert_id = u.id
-		AND ee1.deleted_at IS NULL
-	)
-    AND u.id NOT IN (SELECT expert_id FROM blocked_experts)
 	GROUP BY u.id
 ), 
 experts_with_coords AS (
@@ -792,12 +745,7 @@ experts_with_coords AS (
 	AND ((ewc.expertise_examination = 1 AND ewc.expertise_examination = u.expert_examination) 
 		OR ewc.expertise_examination IS NULL 
 		OR ewc.expertise_examination != 1) 	
-	AND NOT ((u.expert_id MEMBER OF(ewc.declineExperts))
-		OR JSON_CONTAINS_PATH(
-			ewc.declineExperts,
-			'one',
-			CONCAT('$."', u.expert_id, '"')
-		))
+	AND NOT (u.expert_id MEMBER OF(ewc.declineExperts))
 	AND NOT (u.expert_id MEMBER OF(ewc.requestExperts))
 )
 SELECT 

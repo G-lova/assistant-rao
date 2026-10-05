@@ -1271,44 +1271,12 @@ class CloudStorageParser:
             str: Имя файла или пустая строка, если не найдено.
         """
         from urllib.parse import urlparse, parse_qs
-
         parsed = urlparse(url)
-
-        # Сначала filename из query-параметра
         query_params = parse_qs(parsed.query)
-        filename = query_params.get("filename", [None])[0]
-
-        if filename:
-            return unquote(filename)
-
-        # Затем последняя часть path
-        path = unquote(parsed.path.rstrip("/"))
-        filename = os.path.basename(path)
-
-        # === ОБРАБОТКА view.html ===
-        # Если это динамическая страница ЕИС (view.html), пытаемся сформировать уникальное имя на основе любого ID-параметра в query string.
-        if filename == "view.html" and query_params:
-
-            # Ищем ЛЮБОЙ параметр, оканчивающийся на "Id"
-            for key, values in query_params.items():
-                if key.endswith("Id") and values:
-                    value = values[0]
-                    # Убираем "Id" из ключа для красивого имени:
-                    # contractInfoId -> contractInfo
-                    clean_key = key[:-2] if len(key) > 2 else key
-                    return f"printForm_{clean_key}_{value}.html"
-            
-            # Если ничего не нашли — берём первый непустой параметр с числовым значением
-            for key, values in query_params.items():
-                if values and (values[0].isdigit() or values[0].replace('.', '', 1).isdigit()):
-                    print(f"printForm_{key}_{values[0]}.html")
-            
-            # Если совсем ничего не нашли — берём первый непустой параметр
-            for key, values in query_params.items():
-                if values and values[0]:
-                    return f"printForm_{key}_{values[0]}.html"
-
-        return filename or ""
+        filenames = query_params.get('filename', [])
+        if filenames:
+            return filenames[0]
+        return ""
 
 
     async def _parse_eis(self, url: str, procurement_id: str = None) -> Dict:
@@ -1789,70 +1757,6 @@ class CloudStorageParser:
                     if not xml_files:
                         return result
 
-
-                    def select_latest_xml_versions(files):
-                        """
-                        Для документов из VERSIONED_DOCUMENT_TYPES:
-                            оставляет только XML с максимальной версией.
-
-                        Для остальных типов:
-                            оставляет все XML без изменений.
-
-                        Например:
-                            epNotificationEOK2020_..._1_....xml
-                            epNotificationEOK2020_..._2_....xml
-
-                        -> останется только версия 2.
-
-                        А:
-                            epClarificationDoc_..._null_GUID1.xml
-                            epClarificationDoc_..._null_GUID2.xml
-
-                        -> останутся оба файла.
-                        """
-                        VERSIONED_DOCUMENT_TYPES = {
-                            "epNotificationEZK2020",
-                            "epNotificationEF2020",
-                            "epNotificationEZT2020",
-                            "epNotificationEOK2020",
-                            "fcsNotificationEP",
-                            "fcsNotification111",
-                            "pprf615NotificationPO",
-                            "pprf615NotificationEF",
-                            "purchaseNotice",
-                            "purchaseNoticeOK",
-                            "purchaseNoticeOA",
-                            "purchaseNoticeAE",
-                            "purchaseNoticeAE94FZ",
-                            "purchaseNoticeAESMBO",
-                            "purchaseNoticeZK",
-                            "purchaseNoticeZKESMBO",
-                            "purchaseNoticeZPESMBO",
-                            "purchaseNoticeEP",
-                            "contract",
-                            "pprf615Contract",
-                            "contractCutted",
-                        }
-
-                        latest = {}
-
-                        for fileinfo in files:
-                            logger.info(f'filename: {fileinfo["filename"]}')
-
-                            m = fileinfo["filename"].split('_')
-
-                            key = fileinfo["filename"] if ((m[2] == 'null') or (m[0] not in VERSIONED_DOCUMENT_TYPES)) else f'{m[0]}_{m[1]}'
-
-                            version = 0 if m[2] == 'null' else int(m[2])
-
-                            if key not in latest or version > latest[key][0]:
-                                latest[key] = (version, fileinfo)
-
-                        return [item[1] for item in latest.values()]
-
-                    # Отбор актуальных версий xml-файлов
-                    actual_xml_files = select_latest_xml_versions(xml_files)
-
                     # Ограничитель параллелизма (настраивается)
                     semaphore = asyncio.Semaphore(10)
                     
@@ -1870,19 +1774,19 @@ class CloudStorageParser:
                                 content = await asyncio.to_thread(xmltodict.parse, extracted_text)
                                 attachment_urls = await asyncio.to_thread(self.extract_urls_from_dict, content)
                                 
-                                logger.info(f"Найдено ссылок в {file_info['filename']}: {len(attachment_urls)}")
+                                logger.info(f"Найдено ссылок в {file_info['file_path']}: {len(attachment_urls)}")
 
                                 return attachment_urls
                                 
                             except Exception as e:
-                                logger.error(f"Ошибка обработки {file_info.get('filename')}: {e}", exc_info=True)
+                                logger.error(f"Ошибка обработки {file_info.get('file_path')}: {e}", exc_info=True)
                                 return []
                             
                     
                     # Запускаем обработку всех XML параллельно
                     async with self.semaphore:
                         attachment_urls = await asyncio.gather(
-                            *(process_xml_file(f) for f in actual_xml_files),
+                            *(process_xml_file(f) for f in xml_files),
                             return_exceptions=True
                         )
                     # оставляем уникальные ссылки
@@ -2129,40 +2033,14 @@ class CloudStorageParser:
             return await self._download_http_file(url=url, procurement_id=procurement_id, source="inner", handle_rate_limit=True)
         
 
-    @staticmethod
-    def _split_media_url(url: str) -> Tuple[str, str]:
-        """Разбирает ссылку на файл во внутреннем хранилище (``…/api/media/<id>[/<имя файла>]``).
-
-        Поддерживаются обе формы: ``https://host/api/media/25739`` (без имени файла) и
-        ``https://host/api/media/25739/document.pdf``; имя файла также может быть в параметре
-        ``?filename=``. Прежняя логика отрезала последний сегмент пути всегда, поэтому у ссылки
-        без имени файла терялся числовой идентификатор и запрос уходил на ``…/api/media``.
-
-        Args:
-            url: Исходная ссылка на файл.
-
-        Returns:
-            Tuple[str, str]: ``(api_url, filename)``: адрес для скачивания ``…/api/media/<id>`` и имя
-            файла (пустая строка, если в ссылке его нет).
-        """
-        parsed = urlparse(url)
-        match = re.match(r"^(.*?/api/media/[^/?#]+)(?:/([^?#]+))?", parsed.path)
-        if not match:
-            return url, ""
-        base = f"{parsed.scheme}://{parsed.netloc}{match.group(1)}"
-        filename = unquote(match.group(2).split("/")[-1]) if match.group(2) else ""
-        if not filename:
-            filename = (parse_qs(parsed.query).get("filename") or [""])[0]
-        return base, unquote(filename)
-
-
     @async_retry(EIS_RETRY_CONFIG)
     async def download_media(
         self,
         url: str,
         procurement_id: str,
     ):
-        api_url, filename = self._split_media_url(url)
+        api_url = "/".join((url.split("/"))[:-1])
+        filename = self._extract_filename_from_url(url)
 
         headers = {
             "X-API-Key": os.getenv("SYSTEM_API_KEY"),
@@ -2200,10 +2078,8 @@ class CloudStorageParser:
                         tmp_file.write(chunk)
                     tmp_path = tmp_file.name
 
-                    # Ссылка без имени файла (.../api/media/25739): берём имя из Content-Disposition
-                    if not filename:
-                        filename = self._extract_filename_from_headers(response.headers, "") or f"media_{api_url.rstrip('/').split('/')[-1]}"
-
+                    # filename = self._extract_filename_from_headers(response.headers, url)
+                                
                     # Определяем расширение по Content-Type
                     # content_type = resp.headers.get('content-type', '')
                     file_ext = get_file_extension(content_type=response.headers.get('Content-Type', ''))
@@ -2217,7 +2093,7 @@ class CloudStorageParser:
                 
                 return {
                     "status": "success",
-                    "filename": safe_name,
+                    "filename": filename,
                     "file_path": tmp_path,
                     "source": "inner_media", 
                     "original_url": api_url.replace("api/", ""),
