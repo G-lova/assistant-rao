@@ -52,7 +52,7 @@ async def apply_all() -> list:
     """
     import asyncpg  # локальный импорт: вспомогательные функции модуля тестируются без asyncpg
 
-    dim = int(os.getenv("PE_EMBEDDING_DIM", "1024"))
+    dim = 1024  # значение для необязательного плейсхолдера {{EMBEDDING_DIM}} (в 001 размерность задана прямо)
     conn = await asyncpg.connect(
         host=os.getenv("DB_HOST"), port=int(os.getenv("DB_PORT", "5432")),
         database=os.getenv("DB_NAME"), user=os.getenv("DB_USER"), password=os.getenv("DB_PASSWORD"),

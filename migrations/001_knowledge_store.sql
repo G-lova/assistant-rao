@@ -1,5 +1,6 @@
 -- 001: хранилище знаний «РАО Эксперт» (только НОВЫЕ таблицы pe_*; raw_document_data не затрагивается).
--- Плейсхолдер {{EMBEDDING_DIM}} подставляется scripts/apply_migrations.py (по умолчанию 1024).
+-- Файл можно выполнять напрямую через psql. Размерность эмбеддинга 1024 (Qwen3-Embedding-0.6B);
+-- для другой модели измените vector(1024) ниже ДО первого применения.
 -- Откат: DROP TABLE pe_summary_opinions, pe_facts, pe_chunks, pe_documents, pe_form_fields, pe_procurements CASCADE;
 
 CREATE EXTENSION IF NOT EXISTS vector;
@@ -51,7 +52,7 @@ CREATE TABLE IF NOT EXISTS pe_chunks (
     page_from    INTEGER,
     page_to      INTEGER,
     text         TEXT NOT NULL,
-    embedding    vector({{EMBEDDING_DIM}}),
+    embedding    vector(1024),
     UNIQUE (document_id, idx)
 );
 CREATE INDEX IF NOT EXISTS ix_pe_chunks_expertise ON pe_chunks (expertise_id);
