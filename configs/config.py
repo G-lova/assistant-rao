@@ -13,11 +13,41 @@ class DatabaseConfig:
     url: str
     api_key: str
     storage_path: str
+    media_path: str
     
     @property
     def headers(self):
         return {
             "X-API-Key": self.api_key,
+            "Content-Type": "application/json"
+        }
+
+
+@dataclass
+class UpdateExpertiseDBConfig:
+    """Конфигурация сервиса обновления экспертизы в базе данных"""
+    url: str
+    api_key: str
+    
+    @property
+    def headers(self):
+        return {
+            "X-API-Key": self.api_key,
+            "Content-Type": "application/json"
+        }
+
+
+@dataclass
+class UpdateAIDBConfig:
+    """Конфигурация сервиса обновления экспертизы в базе данных"""
+    url: str
+    bearer_key: str
+    
+    @property
+    def headers(self):
+        return {
+            "Authorization": f"Bearer {self.bearer_key}",
+            "Accept": "application/json",
             "Content-Type": "application/json"
         }
 
@@ -62,39 +92,35 @@ class Config:
     Содержит настройки модели, API и безопасности, загружаемые из переменных окружения.
     Предоставляет метод для получения конфигурации генерации модели.
     """
-    # Model settings
-    TEMPERATURE = float(os.getenv("MODEL_TEMPERATURE", 0.7))
-    MAX_NEW_TOKENS = int(os.getenv("MODEL_MAX_TOKENS", 4096))
-    
-    # API settings
-    URL = os.getenv("API_URL")
-    MODEL_API_URL = os.getenv("MODEL_API_URL")
-    MODEL_NAME = os.getenv("MODEL_NAME")
-    MODEL_API_KEY = os.getenv("MODEL_API_KEY")
-    
-    EXTERNAL_API_URL_DEV = os.getenv("EXTERNAL_API_URL_DEV")
-    EXTERNAL_API_URL_STAGE = os.getenv("EXTERNAL_API_URL_STAGE")
-    EXTERNAL_API_URL_PROD = os.getenv("EXTERNAL_API_URL_PROD")
-    EXTERNAL_API_URL_NEURO = os.getenv("EXTERNAL_API_URL_NEURO")
-    EXTERNAL_API_KEY = os.getenv("EXTERNAL_API_KEY")
     # Security
     API_KEY = os.getenv("API_KEY")
     API_KEY_HASH = os.getenv("API_KEY_HASH")
 
+    # SYSTEM API
+    SYSTEM_URL_DEV = os.getenv("SYSTEM_URL_DEV")
+    SYSTEM_URL_STAGE = os.getenv("SYSTEM_URL_STAGE")
+    SYSTEM_URL_PROD = os.getenv("SYSTEM_URL_PROD")
+    SYSTEM_URL_NEURO = os.getenv("SYSTEM_URL_NEURO")
+    SYSTEM_API_KEY = os.getenv("SYSTEM_API_KEY")
+    SYSTEM_BEARER_KEY = os.getenv("SYSTEM_BEARER_KEY")
+    
+    # LLM API settings
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+    MODEL_API_URL = os.getenv("MODEL_API_URL")
+    MODEL_NAME = os.getenv("MODEL_NAME")
+    
+    TEMPERATURE = float(os.getenv("MODEL_TEMPERATURE", 0.7))
+    MAX_NEW_TOKENS = int(os.getenv("MODEL_MAX_TOKENS", 4096))
+
     # Model qwen-vl
     M_MODEL_API_URL = os.getenv("M_MODEL_API_URL")
     M_MODEL_NAME = os.getenv("M_MODEL_NAME")
-    M_MODEL_API_KEY = os.getenv("M_MODEL_API_KEY")
     
-    # MySQL
-    MYSQL_URL_PROD = os.getenv("MYSQL_URL_PROD")
-    MYSQL_API_KEY_PROD = os.getenv("MYSQL_API_KEY_PROD")
-    MYSQL_URL_STAGE = os.getenv("MYSQL_URL_STAGE")
-    MYSQL_API_KEY_STAGE = os.getenv("MYSQL_API_KEY_STAGE")
-    MYSQL_URL_DEV = os.getenv("MYSQL_URL_DEV")
-    MYSQL_API_KEY_DEV = os.getenv("MYSQL_API_KEY_DEV")
-    MYSQL_URL_NEURO = os.getenv("MYSQL_URL_NEURO")
-    MYSQL_API_KEY_NEURO = os.getenv("MYSQL_API_KEY_NEURO")
+    # Qwen/Qwen3-Embedding-0.6B
+    EMBEDDING_URL = os.getenv("EMBEDDING_URL")
+    EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
+    BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))
 
     # Postgres
     DB_HOST = os.getenv("DB_HOST")
@@ -103,26 +129,15 @@ class Config:
     DB_USER = os.getenv("DB_USER")
     DB_PASSWORD = os.getenv("DB_PASSWORD")
     
-    # Qwen/Qwen3-Embedding-0.6B
-    EMBEDDING_URL = os.getenv("EMBEDDING_URL")
-    EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
-    EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY")
-    BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))
-    
-
     # Knowledge store («РАО Эксперт»): запись результатов /evaluate-documents в pe_* таблицы
     KNOWLEDGE_STORE_ENABLED = os.getenv("KNOWLEDGE_STORE_ENABLED", "false").lower() == "true"
     # Срок хранения полных текстов, чанков и эмбеддингов (дней) — политика утверждена 05.10.2026
     PE_TEXT_RETENTION_DAYS = int(os.getenv("PE_TEXT_RETENTION_DAYS", "365"))
 
     # Paths
-    SQL_QUERIES_PATH = os.getenv("SQL_QUERIES_PATH", "data/queries/")
+    SQL_QUERIES_PATH = os.getenv("SQL_QUERIES_PATH", "queries/")
     OUTPUT_PATH = os.getenv("OUTPUT_PATH", "data/outputs/")
     LOG_PATH = os.getenv("LOG_PATH", "logs/")
-    STORAGE_PATH_DEV = os.getenv("STORAGE_PATH_DEV", "https://develop.rao0123.1t.ws/storage/")
-    STORAGE_PATH_STAGE = os.getenv("STORAGE_PATH_STAGE", "https://stage.rao0123.1t.ws/storage/")
-    STORAGE_PATH_PROD = os.getenv("STORAGE_PATH_PROD", "https://expert.rusacademedu.ru/storage/")
-    STORAGE_PATH_NEURO = os.getenv("STORAGE_PATH_NEURO", "https://otchet.almira.cc/storage/")
     
     # Application
     APP_ENV = os.getenv("APP_ENV", "development")
@@ -134,6 +149,7 @@ class Config:
     RETRY_MAX_ATTEMPTS = int(os.getenv("RETRY_MAX_ATTEMPTS", "3"))
     RETRY_DELAY = float(os.getenv("RETRY_DELAY", "1.0"))
     RETRY_BACKOFF = float(os.getenv("RETRY_BACKOFF", "2.0"))
+
 
     @classmethod
     def get_retry_config(cls) -> RetryConfig:
@@ -161,7 +177,7 @@ class Config:
         """
         return MModelConfig(
             api_url=cls.M_MODEL_API_URL,
-            api_key=cls.M_MODEL_API_KEY,
+            api_key=cls.OPENAI_API_KEY,
             model = cls.M_MODEL_NAME
         )
     
@@ -176,25 +192,21 @@ class Config:
         """
         env = environment or cls.APP_ENV
         env = env.lower()
+        api_key = cls.SYSTEM_API_KEY
         
         if env in ['prod', 'production']:
-            url = cls.MYSQL_URL_PROD
-            api_key = cls.MYSQL_API_KEY_PROD
-            storage_path = cls.STORAGE_PATH_PROD
+            url = f"{cls.SYSTEM_URL_PROD}/api/database/query"
         elif env in ['stage', 'staging']:
-            url = cls.MYSQL_URL_STAGE
-            api_key = cls.MYSQL_API_KEY_STAGE
-            storage_path = cls.STORAGE_PATH_STAGE
+            url = f"{cls.SYSTEM_URL_STAGE}/api/database/query"
         elif env in ['neuro_assistant_database', 'neuro']:
-            url = cls.MYSQL_URL_NEURO
-            api_key = cls.MYSQL_API_KEY_NEURO
-            storage_path = cls.STORAGE_PATH_NEURO
+            url = f"{cls.SYSTEM_URL_NEURO}/api/database/query"
         else:
-            url = cls.MYSQL_URL_DEV
-            api_key = cls.MYSQL_API_KEY_DEV
-            storage_path = cls.STORAGE_PATH_DEV
+            url = f"{cls.SYSTEM_URL_DEV}/api/database/query"
+
+        storage_path = f"{url.replace('/api/database/query', '')}/storage/"
+        media_path = f"{url.replace('/database/query', '')}/media/"
         
-        return DatabaseConfig(url=url, api_key=api_key, storage_path=storage_path)
+        return DatabaseConfig(url=url, api_key=api_key, storage_path=storage_path, media_path=media_path)
     
     @classmethod
     def get_embedding_config(cls) -> EmbeddingConfig:
@@ -203,7 +215,7 @@ class Config:
         """
         return EmbeddingConfig(
             api_url=cls.EMBEDDING_URL,
-            api_key=cls.EMBEDDING_API_KEY,
+            api_key=cls.OPENAI_API_KEY,
             model = cls.EMBEDDING_MODEL,
             batch_size=cls.BATCH_SIZE
         )
@@ -229,6 +241,7 @@ class Config:
             "debug": cls.DEBUG,
             "log_level": cls.LOG_LEVEL
         }
+    
     @classmethod
     def get_external_api_config(cls, environment: str = None) -> dict:
         """
@@ -245,13 +258,13 @@ class Config:
         
         # Выбираем URL в зависимости от среды
         if env in ['prod', 'production']:
-            url = cls.EXTERNAL_API_URL_PROD
+            url = f"{cls.SYSTEM_URL_PROD}/api/expertise/set-hint-for-rao-expert"
         elif env in ['stage', 'staging']:
-            url = cls.EXTERNAL_API_URL_STAGE
+            url = f"{cls.SYSTEM_URL_STAGE}/api/expertise/set-hint-for-rao-expert"
         elif env in ['neuro_assistant_database', 'neuro']:
-            url = cls.EXTERNAL_API_URL_NEURO
+            url = f"{cls.SYSTEM_URL_NEURO}/api/expertise/set-hint-for-rao-expert"
         else:  # dev, development или любое другое
-            url = cls.EXTERNAL_API_URL_DEV
+            url = f"{cls.SYSTEM_URL_DEV}/api/expertise/set-hint-for-rao-expert"
         
         
         return {
@@ -259,6 +272,54 @@ class Config:
             "headers": {
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                "X-API-Key": cls.EXTERNAL_API_KEY
+                "X-API-Key": cls.SYSTEM_API_KEY
             }
         }
+    
+    @classmethod
+    def get_update_db_config(cls, environment: str = None) -> UpdateExpertiseDBConfig:
+        """
+        Возвращает конфигурацию базы данных для scoring pipeline.
+        
+        Args:
+            environment: Окружение ('dev', 'stage', 'prod'). 
+                        Если None, используется APP_ENV
+        """
+        env = environment or cls.APP_ENV
+        env = env.lower()
+        api_key = cls.SYSTEM_API_KEY
+        
+        if env in ['prod', 'production']:
+            url = f"{cls.SYSTEM_URL_PROD}/api/data/update"
+        elif env in ['stage', 'staging']:
+            url = f"{cls.SYSTEM_URL_STAGE}/api/data/update"
+        elif env in ['neuro_assistant_database', 'neuro']:
+            url = f"{cls.SYSTEM_URL_NEURO}/api/data/update"
+        else:
+            url = f"{cls.SYSTEM_URL_DEV}/api/data/update"
+        
+        return UpdateExpertiseDBConfig(url=url, api_key=api_key)
+    
+    @classmethod
+    def get_update_ai_db_config(cls, environment: str = None) -> UpdateAIDBConfig:
+        """
+        Возвращает конфигурацию базы данных для scoring pipeline.
+        
+        Args:
+            environment: Окружение ('dev', 'stage', 'prod'). 
+                        Если None, используется APP_ENV
+        """
+        env = environment or cls.APP_ENV
+        env = env.lower()
+        bearer_key = cls.SYSTEM_BEARER_KEY
+        
+        if env in ['prod', 'production']:
+            url = f"{cls.SYSTEM_URL_PROD}/api/risk-monitoring/ai-analysis"
+        elif env in ['stage', 'staging']:
+            url = f"{cls.SYSTEM_URL_STAGE}/api/risk-monitoring/ai-analysis"
+        elif env in ['neuro_assistant_database', 'neuro']:
+            url = f"{cls.SYSTEM_URL_NEURO}/api/risk-monitoring/ai-analysis"
+        else:
+            url = f"{cls.SYSTEM_URL_DEV}/api/risk-monitoring/ai-analysis"
+        
+        return UpdateAIDBConfig(url=url, bearer_key=bearer_key)
