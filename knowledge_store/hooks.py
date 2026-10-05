@@ -141,7 +141,7 @@ async def _on_run_finished(expertise_id: int) -> None:
 
 
 async def on_run_finished(expertise_id: int) -> None:
-    """Конец прогона: запускает фоновую индексацию (чанки + эмбеддинги) отдельной задачей Celery.
+    """Конец прогона: запускает фоновую задачу Celery: индексация (чанки + эмбеддинги), затем построение фактов.
 
     Args:
         expertise_id: ID экспертизы.

@@ -19,6 +19,7 @@ from evaluate_documents.send_subject_service import SendSubjectService
 from evaluate_documents.type_data_extractor import DOCUMENT_TYPE_MAPPING, TypeDataExtractor
 from src.subject_detector import SubjectDetector
 from knowledge_store import hooks as ks_hooks
+from evaluate_documents.package_view import completeness_input
 
 
 logger = get_logger(__name__)
@@ -316,12 +317,12 @@ class TasksPipeline:
             # ====== Оценка полноты и соответствия данных в документе ======
             completeness_tasks = []
             for row in self.df[self.df['documents_results'].map(bool)].itertuples():
-                data_for_completeness = {
-                    **data_for_final_evaluation, 
-                    "doc_code": row.doc_code, 
-                    "doc_type": 'Ссылка на ЕИС' if row.doc_code == 'linkDocs' else DOCUMENT_TYPE_MAPPING.get(row.doc_code, "Неизвестный документ"),
-                    "documents": row.documents_results
-                }
+                # Полнота оценивается только по документам этого типа: отсутствие других типов на неё не влияет
+                data_for_completeness = completeness_input(
+                    data_for_final_evaluation,
+                    row.doc_code,
+                    'Ссылка на ЕИС' if row.doc_code == 'linkDocs' else DOCUMENT_TYPE_MAPPING.get(row.doc_code, "Неизвестный документ"),
+                    row.documents_results)
                 completeness_tasks.append(self.completeness_checker.check_doc_completeness(self.consistency_checker.remove_empty(data_for_completeness), row.doc_code))
 
             async with self.llm_semaphore:

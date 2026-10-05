@@ -15,7 +15,7 @@ from unittest import mock
 
 import numpy as np
 
-from knowledge_store import eis_notice, facts, hooks, repository as repo
+from knowledge_store import eis_notice, facts, hooks, repository as repo, runner
 from tests.pg_psql import PsqlConn
 
 PG = os.getenv("PE_TEST_PG")
@@ -331,6 +331,110 @@ class FactsDbTests(unittest.TestCase):
             self.assertIsNone(hooks._eis_notice_patch(f.name, "x.xml"))
         finally:
             os.unlink(f.name)
+
+
+class RunnerFlagTests(unittest.TestCase):
+    """Факты после индексации: флаги и защита от сбоев (без БД)."""
+
+    def test_flags(self):
+        """Факты включаются только при KNOWLEDGE_STORE_ENABLED и PE_FACTS_ENABLED одновременно."""
+        for store, flag, expected in (("true", "true", True), ("true", "false", False), ("false", "true", False)):
+            with mock.patch.dict(os.environ, {"KNOWLEDGE_STORE_ENABLED": store, "PE_FACTS_ENABLED": flag}):
+                self.assertEqual(runner.facts_enabled(), expected)
+
+    def test_disabled_only_indexes(self):
+        """При выключенных фактах выполняется только индексация, LLM не вызывается."""
+        async def fake_index(expertise_id, embedder, **kw):
+            """Индексация-заглушка."""
+            return {"documents": 1, "chunks": 2, "failed": 0}
+
+        with mock.patch.dict(os.environ, {"KNOWLEDGE_STORE_ENABLED": "true", "PE_FACTS_ENABLED": "false"}), \
+                mock.patch.object(runner.indexer, "build_embedder", lambda mgr: object()), \
+                mock.patch.object(runner.indexer, "index_expertise", fake_index), \
+                mock.patch.object(runner, "build_facts", side_effect=AssertionError("не должно вызываться")):
+            res = asyncio.run(runner.index_and_build_facts(1, object()))
+        self.assertEqual(res["index"]["chunks"], 2)
+        self.assertIn("skipped", res["facts"])
+
+    def test_facts_error_and_timeout_keep_index_result(self):
+        """Ошибка и таймаут построения фактов попадают в результат, индексация сохраняется."""
+        async def fake_index(expertise_id, embedder, **kw):
+            """Индексация-заглушка."""
+            return {"documents": 1, "chunks": 2, "failed": 0}
+
+        async def slow(*args):
+            """Имитирует зависший этап."""
+            await asyncio.sleep(5)
+
+        async def boom(*args):
+            """Имитирует ошибку этапа."""
+            raise RuntimeError("сбой")
+
+        env = {"KNOWLEDGE_STORE_ENABLED": "true", "PE_FACTS_ENABLED": "true"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(runner.Config, "PE_FACTS_TIMEOUT_SEC", 0.2), \
+                mock.patch.object(runner.indexer, "build_embedder", lambda mgr: object()), \
+                mock.patch.object(runner.indexer, "index_expertise", fake_index):
+            for func, name in ((slow, "TimeoutError"), (boom, "RuntimeError")):
+                with mock.patch.object(runner, "build_facts", func):
+                    res = asyncio.run(runner.index_and_build_facts(1, object(), object(), "m"))
+                self.assertEqual(res["index"]["documents"], 1)
+                self.assertEqual(res["facts"], {"error": name})
+
+
+@unittest.skipUnless(PG, "нужен PE_TEST_PG=host:port")
+class RunnerDbTests(unittest.TestCase):
+    """build_facts после индексации на настоящем Postgres."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Создаёт схему pe_* (миграции 001 и 002, vector → real[])."""
+        host, port = PG.split(":")
+        cls.conn = PsqlConn(host, int(port))
+        sql = (MIGRATIONS / "001_knowledge_store.sql").read_text(encoding="utf-8")
+        sql = re.sub(r"CREATE EXTENSION[^\n]*\n", "", sql)
+        sql = re.sub(r"[^\n]*USING hnsw[^\n]*\n", "", sql).replace("vector(1024)", "real[]")
+        cls.conn._run("DROP TABLE IF EXISTS pe_summary_opinions, pe_facts, pe_chunks, pe_documents, pe_form_fields, pe_procurements CASCADE;")
+        cls.conn._run(sql)
+        cls.conn._run((MIGRATIONS / "002_form_fields_derived.sql").read_text(encoding="utf-8"))
+
+    def test_build_facts_end_to_end(self):
+        """Форма по паспорту, факты XML + LLM, повтор идемпотентен; без паспорта и с неподдерживаемой формой — skipped."""
+        @__import__("contextlib").asynccontextmanager
+        async def fake_db():
+            """Подставляет тестовое соединение вместо боевого."""
+            yield self.conn
+
+        form = "44fz_competition_obj6"
+        self.conn._run(f"DELETE FROM pe_form_fields WHERE form_code = '{form}'")
+        for key, n, label, kind in [("k_name", 1, "1.1. Наличие информации о наименовании Заказчика", "presence"),
+                                    ("k_cmp", 2, "2.1.1. Соответствие наименований", "compliance")]:
+            self.conn._run(f"INSERT INTO pe_form_fields (form_code, field_key, ordinal, label, value_kind) "
+                           f"VALUES ('{form}', '{key}', {n}, '{label}', '{kind}')")
+        self.conn._run("INSERT INTO pe_procurements (expertise_id, law, method, object_code, check_type2) "
+                       "VALUES (7301, '44-ФЗ', 'Конкурс', 6, 1)")
+        self.conn._run("INSERT INTO pe_documents (expertise_id, doc_code, filename, sha256, text_full, extraction) VALUES "
+                       "(7301, 'docIzvejenieFiles', 'n.xml', 'x2', 't', "
+                       "'{\"eis_notice\": {\"version\": 1, \"criteria\": {\"1.1\": {\"value\": 1, \"evidence\": \"fullName = Вуз\"}}}}')")
+
+        async def fake_search(conn, expertise_id, vector, k):
+            """Один фрагмент без нужной цитаты для критерия."""
+            return [facts.Fragment(1, 1, 2, "Предмет контракта: услуги связи", "opisanie.docx")]
+
+        async def fake_llm(messages, schema):
+            """Модель отвечает «0» без цитаты."""
+            return json.dumps({"value": 0, "fragment": 0, "quote": "", "comment": "в описании нет наименований"})
+
+        with mock.patch.object(runner, "_db", fake_db), \
+                mock.patch.object(facts, "make_llm_call", lambda client, model: fake_llm), \
+                mock.patch.object(facts, "search_fragments", fake_search):
+            res = asyncio.run(runner.build_facts(7301, FakeEmbedder(), object(), "model"))
+            self.assertEqual(res["form"], form)
+            self.assertEqual(self.conn._run("SELECT form_code FROM pe_procurements WHERE expertise_id=7301"), form)
+            self.assertEqual(self.conn._run("SELECT count(*) FROM pe_facts WHERE expertise_id=7301"), "2")
+            asyncio.run(runner.build_facts(7301, FakeEmbedder(), object(), "model"))
+            self.assertEqual(self.conn._run("SELECT count(*) FROM pe_facts WHERE expertise_id=7301"), "2")
+            self.assertIn("skipped", asyncio.run(runner.build_facts(7999, FakeEmbedder(), object(), "model")))
+        self.conn._run(f"DELETE FROM pe_form_fields WHERE form_code = '{form}'")
 
 
 if __name__ == "__main__":

@@ -133,6 +133,10 @@ class Config:
     KNOWLEDGE_STORE_ENABLED = os.getenv("KNOWLEDGE_STORE_ENABLED", "false").lower() == "true"
     # Срок хранения полных текстов, чанков и эмбеддингов (дней) — политика утверждена 05.10.2026
     PE_TEXT_RETENTION_DAYS = int(os.getenv("PE_TEXT_RETENTION_DAYS", "365"))
+    # Построение фактов сразу после индексации (задача index_documents_task); нужен KNOWLEDGE_STORE_ENABLED
+    PE_FACTS_ENABLED = os.getenv("PE_FACTS_ENABLED", "false").lower() == "true"
+    # Максимум времени на построение фактов (запросы к LLM), секунд; при превышении этап прерывается
+    PE_FACTS_TIMEOUT_SEC = int(os.getenv("PE_FACTS_TIMEOUT_SEC", "900"))
 
     # Paths
     SQL_QUERIES_PATH = os.getenv("SQL_QUERIES_PATH", "queries/")

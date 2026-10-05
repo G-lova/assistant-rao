@@ -48,27 +48,33 @@ def evaluate_documents_task(self, expertise_id: int, environment: str):
 
 @celery_app.task(bind=True, name="index_documents_task")
 def index_documents_task(self, expertise_id: int):
-    """Фоновая индексация документов экспертизы: чанки и эмбеддинги в ``pe_chunks``.
+    """Фоновая индексация документов экспертизы и сразу за ней построение фактов.
 
     Запускается из :func:`knowledge_store.hooks.on_run_finished` после завершения
-    ``/evaluate-documents``; при выключенном ``KNOWLEDGE_STORE_ENABLED`` ничего не делает.
+    ``/evaluate-documents``. Факты (при ``PE_FACTS_ENABLED=true``) строятся сразу после индексации,
+    так как следом обязательно запрашивается экспертное заключение. При выключенном
+    ``KNOWLEDGE_STORE_ENABLED`` ничего не делает.
 
     Args:
         expertise_id: ID экспертизы.
 
     Returns:
-        dict: Статистика индексации (документы/чанки/ошибки) либо ``{"skipped": True}``.
+        dict: ``{"index": ..., "facts": ...}`` либо ``{"skipped": True}``.
     """
-    from knowledge_store.indexer import build_embedder, index_expertise
+    from knowledge_store.runner import facts_enabled, index_and_build_facts
     from knowledge_store.safe import is_enabled
 
     if not is_enabled():
         return {"skipped": True}
 
     async def run():
-        """Создаёт HTTP-менеджер внутри event loop задачи и запускает индексацию."""
+        """Создаёт HTTP-менеджер и LLM-клиент внутри event loop задачи и запускает индексацию и факты."""
+        client, model = (None, None)
+        if facts_enabled():
+            from configs.llm_client import get_llm
+            client, model = get_llm()
         async with HTTPClientManager(timeout=120.0) as mgr:
-            return await index_expertise(int(expertise_id), build_embedder(mgr))
+            return await index_and_build_facts(int(expertise_id), mgr, client, model)
 
     return run_async(run())
 
