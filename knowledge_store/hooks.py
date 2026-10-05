@@ -3,6 +3,7 @@
 Каждая функция сама проверяет флаг ``KNOWLEDGE_STORE_ENABLED`` и никогда не бросает исключений,
 поэтому в пайплайне достаточно ``await``-вызова без try/except.
 """
+import asyncio
 from typing import Any, Optional
 
 from configs.config import Config
@@ -147,3 +148,98 @@ async def on_run_finished(expertise_id: int) -> None:
         expertise_id: ID экспертизы.
     """
     await safe_call_async(_on_run_finished, expertise_id)
+
+
+def facts_enabled() -> bool:
+    """Включён ли этап фактов внутри ``/evaluate-documents``.
+
+    Returns:
+        bool: ``True``, если включены и хранилище знаний, и ``PE_FACTS_ENABLED``.
+    """
+    import os
+    flag = os.getenv("PE_FACTS_ENABLED", str(Config.PE_FACTS_ENABLED)).lower() == "true"
+    return flag and is_enabled()
+
+
+async def _build_facts(expertise_id: int, http_manager: Any, llm_client: Any, llm_model: str) -> Optional[dict]:
+    """Реализация :func:`build_facts` (без защиты): индексация → определение формы → факты → дайджест."""
+    from knowledge_store import facts, forms, indexer, package_findings
+
+    embedder = indexer.build_embedder(http_manager)
+    index_stats = await indexer.index_expertise(int(expertise_id), embedder)
+    async with _db() as conn:
+        passport = await repo.get_procurement(conn, expertise_id)
+        if not passport:
+            return None
+        code = forms.get_form_code(passport["law"], passport["check_type2"], passport["object_code"],
+                                   available=await repo.list_form_codes(conn))
+        await repo.set_form_code(conn, expertise_id, code)
+        if not code:
+            logger.info(f"knowledge_store: форма заключения для экспертизы {expertise_id} не поддерживается — факты пропущены")
+            return None
+        extractor = facts.FactExtractor(facts.make_llm_call(llm_client, llm_model), embedder)
+        run_stats = await facts.extract_facts(conn, expertise_id, code, extractor)
+        rows = await repo.get_facts(conn, expertise_id)
+        fields = [dict(r) for r in await repo.get_form_fields(conn, code)]
+    digest = package_findings.build_digest([dict(r) for r in rows], fields, code)
+    digest["run"] = {**run_stats, "index": index_stats}
+    logger.info(f"knowledge_store: факты экспертизы {expertise_id}: {digest['stats']}, запуск: {digest['run']}")
+    return digest
+
+
+async def _build_facts_with_timeout(expertise_id: int, http_manager: Any, llm_client: Any, llm_model: str) -> Optional[dict]:
+    """Запускает :func:`_build_facts` с ограничением по времени ``PE_FACTS_TIMEOUT_SEC``."""
+    return await asyncio.wait_for(_build_facts(expertise_id, http_manager, llm_client, llm_model),
+                                  timeout=Config.PE_FACTS_TIMEOUT_SEC)
+
+
+async def build_facts(expertise_id: int, http_manager: Any, llm_client: Any, llm_model: str) -> Optional[dict]:
+    """Строит факты экспертизы по сохранённым текстам и возвращает дайджест для выводов о комплекте.
+
+    Вызывается в ``/evaluate-documents`` после обработки всех документов и до финальной проверки
+    согласованности. Требует ``KNOWLEDGE_STORE_ENABLED=true`` и ``PE_FACTS_ENABLED=true``; при любой
+    ошибке или превышении времени возвращает ``None``, и пайплайн работает как раньше.
+
+    Args:
+        expertise_id: ID экспертизы.
+        http_manager: Общий ``HTTPClientManager`` (для сервиса эмбеддингов).
+        llm_client: OpenAI-совместимый клиент LLM.
+        llm_model: Название модели.
+
+    Returns:
+        Optional[dict]: Дайджест (:func:`knowledge_store.package_findings.build_digest`) или ``None``.
+    """
+    if not facts_enabled():
+        return None
+    return await safe_call_async(_build_facts_with_timeout, expertise_id, http_manager, llm_client, llm_model, default=None)
+
+
+def attach_facts_to_input(data_for_final_evaluation: dict, digest: Optional[dict]) -> None:
+    """Добавляет компактный дайджест фактов во вход финальной проверки согласованности.
+
+    Args:
+        data_for_final_evaluation: Словарь, который пайплайн передаёт в ``ConsistencyChecker``.
+        digest: Результат :func:`build_facts` (``None`` — ничего не делать).
+    """
+    if digest:
+        from knowledge_store import package_findings
+        # ключ ставится первым: ConsistencyChecker передаёт модели только начало JSON (первый фрагмент)
+        rest = dict(data_for_final_evaluation)
+        data_for_final_evaluation.clear()
+        data_for_final_evaluation["facts"] = package_findings.compact_for_llm(digest)
+        data_for_final_evaluation.update(rest)
+
+
+def attach_facts_summary(result: Any, digest: Optional[dict]) -> Any:
+    """Добавляет в итоговый ответ ``/evaluate-documents`` блок ``facts_summary`` (существующие ключи не меняются).
+
+    Args:
+        result: Итоговый ответ пайплайна.
+        digest: Результат :func:`build_facts` (``None`` — ответ остаётся прежним).
+
+    Returns:
+        Any: Тот же ``result`` (с дополнительным ключом, если это словарь и дайджест есть).
+    """
+    if digest and isinstance(result, dict):
+        result["facts_summary"] = {k: digest[k] for k in ("form", "stats", "missing", "unverified")}
+    return result

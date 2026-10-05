@@ -345,7 +345,7 @@ async def replace_facts(conn, expertise_id: int, source: str, facts: Sequence[di
     """Заменяет факты экспертизы одного источника (``eis_xml`` / ``fact_extractor``).
 
     Повторный запуск идемпотентен: факты других источников не затрагиваются.
-    Цитата обрезается до 500 символов. Вызывать внутри транзакции.
+    Цитата обрезается до 500 символов. Выполняется в собственной транзакции.
 
     Args:
         conn: Соединение ``asyncpg``.
@@ -356,12 +356,13 @@ async def replace_facts(conn, expertise_id: int, source: str, facts: Sequence[di
     Returns:
         int: Количество записанных фактов.
     """
-    await conn.execute(SQL_DELETE_FACTS_BY_SOURCE, int(expertise_id), source)
-    for fact in facts:
-        await conn.execute(
-            SQL_INSERT_FACT, int(expertise_id), fact["fact_key"], to_json(fact.get("value")),
-            fact.get("document_id"), fact.get("page"), (fact.get("quote") or "")[:500] or None,
-            fact.get("confidence"), source)
+    async with conn.transaction():  # удаление и вставка атомарны (вложенный вызов — savepoint)
+        await conn.execute(SQL_DELETE_FACTS_BY_SOURCE, int(expertise_id), source)
+        for fact in facts:
+            await conn.execute(
+                SQL_INSERT_FACT, int(expertise_id), fact["fact_key"], to_json(fact.get("value")),
+                fact.get("document_id"), fact.get("page"), (fact.get("quote") or "")[:500] or None,
+                fact.get("confidence"), source)
     return len(facts)
 
 

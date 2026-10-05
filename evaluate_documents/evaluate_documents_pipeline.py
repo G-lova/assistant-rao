@@ -59,6 +59,7 @@ class TasksPipeline:
         #     else:
         #         raise
     
+        self.llm_client, self.llm_model = client, model  # нужны хранилищу знаний (этап фактов)
         self.file_reader = FileReader(client, model)
         self.type_data_extractor = TypeDataExtractor(client, model)
         self.completeness_checker = CompletenessChecker(client, model)
@@ -334,6 +335,12 @@ class TasksPipeline:
             data_for_final_evaluation["documents"].sort(key=lambda x: (x["required"] != "Обязательный", x["doc_code"] != "linkDocs"))
 
 
+            # Хранилище знаний: факты по критериям формы (XML ЕИС + RAG/LLM) — основа выводов о комплекте.
+            # При выключенных KNOWLEDGE_STORE_ENABLED/PE_FACTS_ENABLED возвращает None, и поведение прежнее.
+            ks_facts = await ks_hooks.build_facts(
+                int(self.df['id'].iloc[0]), self.http_manager, self.llm_client, self.llm_model)
+            ks_hooks.attach_facts_to_input(data_for_final_evaluation, ks_facts)
+
             # === Очистка старых данных ===
             try:
                 await delete_procurement_data(self.df['id'].iloc[0])
@@ -354,6 +361,7 @@ class TasksPipeline:
             # ЭТАП 3: Оценка согласованности и эвристик и формирование финального отчета
             # logger.info(f"type: {type(data_for_final_evaluation)}, data_for_final_evaluation: {data_for_final_evaluation}")
             final_evaluation_result = await self.consistency_checker.check_consistency(data_for_final_evaluation)
+            ks_hooks.attach_facts_summary(final_evaluation_result, ks_facts)
             await save_summary_report(procurement_id=self.df['id'].iloc[0], summary_data=final_evaluation_result)
 
             # Хранилище знаний: фоновая индексация текстов (при выключенном флаге — no-op)

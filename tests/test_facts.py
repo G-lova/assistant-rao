@@ -15,7 +15,7 @@ from unittest import mock
 
 import numpy as np
 
-from knowledge_store import eis_notice, facts, hooks, repository as repo
+from knowledge_store import eis_notice, facts, hooks, indexer, package_findings, repository as repo
 from tests.pg_psql import PsqlConn
 
 PG = os.getenv("PE_TEST_PG")
@@ -225,6 +225,119 @@ class ExtractorTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
 
+FIELDS = [
+    {"field_key": "k1", "label": "1.1. Наличие информации о наименовании Заказчика", "value_kind": "presence"},
+    {"field_key": "k2", "label": "1.38.  Наличие информации о банковском   сопровождении", "value_kind": "presence"},
+    {"field_key": "k3", "label": "2.1.1. Соответствие наименований", "value_kind": "compliance"},
+    {"field_key": "k4", "label": "2.1.2. Соответствие характеристик", "value_kind": "compliance"},
+]
+
+
+def fact(key, value, verified=True, source="fact_extractor", quote=None, comment=None):
+    """Собирает запись pe_facts для тестов дайджеста."""
+    return {"fact_key": key, "value": {"value": value, "verified": verified, "comment": comment},
+            "quote": quote, "page": 3, "source": source}
+
+
+class DigestTests(unittest.TestCase):
+    """Дайджест фактов и его сжатие для LLM."""
+
+    def test_stats_and_missing(self):
+        """Счётчики по значениям, источникам и подтверждению; «0» попадает в missing с доказательством."""
+        digest = package_findings.build_digest([
+            fact("k1", 1, source="eis_xml", quote="fullName = Университет"),
+            fact("k2", 0, verified=False, comment="сведений нет"),
+            fact("k3", 0, quote="Наименование: сервер"),
+            fact("k4", 2),
+            fact("unknown_key", 1),                       # нет в форме — игнорируется
+        ], FIELDS, "44fz_competition_obj6")
+        st = digest["stats"]
+        self.assertEqual((st["checked"], st["present"], st["missing"], st["not_provided"]), (4, 1, 2, 1))
+        self.assertEqual((st["from_xml"], st["from_llm"], st["verified"]), (1, 3, 3))
+        self.assertEqual([m["field_key"] for m in digest["missing"]], ["k2", "k3"])
+        self.assertEqual(digest["missing"][0]["verdict"], "отсутствует")
+        self.assertEqual(digest["missing"][1]["verdict"], "не соответствует")
+        self.assertEqual(digest["missing"][0]["criterion"], "1.38. Наличие информации о банковском сопровождении")
+        self.assertEqual([u["field_key"] for u in digest["unverified"]], ["k2"])
+
+    def test_json_string_values_and_garbage(self):
+        """Значение из БД может прийти строкой JSON; мусор пропускается без исключений."""
+        rows = [{"fact_key": "k1", "value": json.dumps({"value": 0, "verified": True}), "quote": None, "source": "eis_xml"},
+                {"fact_key": "k2", "value": "не json", "quote": None, "source": "eis_xml"},
+                {"fact_key": "k3", "value": {"value": 9}, "quote": None, "source": "eis_xml"}]
+        digest = package_findings.build_digest(rows, FIELDS, "f")
+        self.assertEqual(digest["stats"]["checked"], 1)
+        self.assertEqual(digest["stats"]["missing"], 1)
+
+    def test_compact_for_llm_limits(self):
+        """Для промпта берётся не больше limit критериев, цитаты обрезаются."""
+        many = [dict(field_key=f"k{i}", label=f"1.{i}. Наличие информации {'x' * 300}", value_kind="presence") for i in range(40)]
+        digest = package_findings.build_digest([fact(f"k{i}", 0, quote="q" * 400) for i in range(40)], many, "f")
+        compact = package_findings.compact_for_llm(digest, limit=5)
+        self.assertEqual(len(compact["missing"]), 5)
+        self.assertEqual(compact["missing_count"], 40)
+        self.assertLessEqual(len(compact["missing"][0]["criterion"]), 160)
+        self.assertLessEqual(len(compact["missing"][0]["evidence"]), 120)
+
+
+class AttachTests(unittest.TestCase):
+    """Присоединение дайджеста к входу и ответу пайплайна."""
+
+    DIGEST = package_findings.build_digest([fact("k1", 0)], FIELDS, "f")
+
+    def test_facts_go_first_and_none_is_noop(self):
+        """Ключ facts ставится первым (ConsistencyChecker читает только начало); без дайджеста вход не меняется."""
+        data = {"missed_documents": [], "documents": [{"a": 1}]}
+        hooks.attach_facts_to_input(data, None)
+        self.assertEqual(list(data), ["missed_documents", "documents"])
+        hooks.attach_facts_to_input(data, self.DIGEST)
+        self.assertEqual(list(data), ["facts", "missed_documents", "documents"])
+        self.assertEqual(data["facts"]["missing_count"], 1)
+
+    def test_summary_is_additive(self):
+        """facts_summary добавляется к ответу, прежние ключи не затрагиваются; не-словарь и None безопасны."""
+        result = {"overall_status": "allow", "overall_summary": "ok", "documents": []}
+        hooks.attach_facts_summary(result, None)
+        self.assertEqual(set(result), {"overall_status", "overall_summary", "documents"})
+        hooks.attach_facts_summary(result, self.DIGEST)
+        self.assertEqual(result["overall_status"], "allow")
+        self.assertEqual(set(result["facts_summary"]), {"form", "stats", "missing", "unverified"})
+        self.assertEqual(hooks.attach_facts_summary("строка", self.DIGEST), "строка")
+
+
+class FlagsTests(unittest.TestCase):
+    """Флаги и защита этапа фактов."""
+
+    def test_both_flags_required(self):
+        """Факты включаются только при KNOWLEDGE_STORE_ENABLED и PE_FACTS_ENABLED одновременно."""
+        for store, facts_flag, expected in (("true", "true", True), ("true", "false", False), ("false", "true", False)):
+            with mock.patch.dict(os.environ, {"KNOWLEDGE_STORE_ENABLED": store, "PE_FACTS_ENABLED": facts_flag}):
+                self.assertEqual(hooks.facts_enabled(), expected)
+
+    def test_disabled_does_not_touch_anything(self):
+        """При выключенном флаге build_facts возвращает None и не вызывает ни индексацию, ни LLM."""
+        with mock.patch.dict(os.environ, {"KNOWLEDGE_STORE_ENABLED": "true", "PE_FACTS_ENABLED": "false"}), \
+                mock.patch.object(hooks, "_build_facts", side_effect=AssertionError("не должно вызываться")):
+            self.assertIsNone(asyncio.run(hooks.build_facts(1, None, None, "m")))
+
+    def test_timeout_and_errors_return_none(self):
+        """Превышение времени и исключение внутри этапа не ломают пайплайн: результат None."""
+        async def slow(*args):
+            """Имитирует зависший этап."""
+            await asyncio.sleep(5)
+
+        async def boom(*args):
+            """Имитирует ошибку этапа."""
+            raise RuntimeError("сбой")
+
+        env = {"KNOWLEDGE_STORE_ENABLED": "true", "PE_FACTS_ENABLED": "true"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(hooks.Config, "PE_FACTS_TIMEOUT_SEC", 0.2):
+            with mock.patch.object(hooks, "_build_facts", slow):
+                self.assertIsNone(asyncio.run(hooks.build_facts(1, None, None, "m")))
+            with mock.patch.object(hooks, "_build_facts", boom):
+                self.assertIsNone(asyncio.run(hooks.build_facts(1, None, None, "m")))
+
+
 @unittest.skipUnless(PG, "нужен PE_TEST_PG=host:port")
 class FactsDbTests(unittest.TestCase):
     """extract_facts и хук разбора XML на настоящем Postgres."""
@@ -321,6 +434,56 @@ class FactsDbTests(unittest.TestCase):
         self.assertIn("не поддерживается", asyncio.run(backfill_facts.process(self.conn, 7102, None)))
         self.assertIn("нет паспорта", asyncio.run(backfill_facts.process(self.conn, 7999, None)))
         self.conn._run("DELETE FROM pe_form_fields WHERE form_code = '44fz_competition_obj6' AND field_key = 'bf_key'")
+
+    def test_build_facts_end_to_end(self):
+        """build_facts: форма по паспорту, факты XML + LLM, дайджест с отсутствующими критериями; повтор идемпотентен."""
+        @__import__("contextlib").asynccontextmanager
+        async def fake_db():
+            """Подставляет тестовое соединение вместо боевого."""
+            yield self.conn
+
+        form = "44fz_competition_obj6"
+        self.conn._run(f"DELETE FROM pe_form_fields WHERE form_code = '{form}'")
+        for key, n, label, kind in [("k_name", 1, "1.1. Наличие информации о наименовании Заказчика", "presence"),
+                                    ("k_cmp", 2, "2.1.1. Соответствие наименований", "compliance")]:
+            self.conn._run(f"INSERT INTO pe_form_fields (form_code, field_key, ordinal, label, value_kind) "
+                           f"VALUES ('{form}', '{key}', {n}, '{label}', '{kind}')")
+        self.conn._run("INSERT INTO pe_procurements (expertise_id, law, method, object_code, check_type2) "
+                       "VALUES (7201, '44-ФЗ', 'Конкурс', 6, 1)")
+        self.conn._run("INSERT INTO pe_documents (expertise_id, doc_code, filename, sha256, text_full, extraction) VALUES "
+                       "(7201, 'docIzvejenieFiles', 'n.xml', 'x1', 't', "
+                       "'{\"eis_notice\": {\"version\": 1, \"criteria\": {\"1.1\": {\"value\": 1, \"evidence\": \"fullName = Вуз\"}}}}')")
+
+        async def fake_index(expertise_id, embedder, **kw):
+            """Индексацию в тесте не выполняем (pgvector недоступен)."""
+            return {"documents": 0, "chunks": 0, "failed": 0}
+
+        async def fake_search(conn, expertise_id, vector, k):
+            """Один фрагмент без нужной цитаты для критерия."""
+            return [facts.Fragment(1, 1, 2, "Предмет контракта: услуги связи", "opisanie.docx")]
+
+        async def fake_llm(messages, schema):
+            """Модель отвечает «0» без цитаты."""
+            return json.dumps({"value": 0, "fragment": 0, "quote": "", "comment": "в описании нет наименований"})
+
+        env = {"KNOWLEDGE_STORE_ENABLED": "true", "PE_FACTS_ENABLED": "true"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(hooks, "_db", fake_db), \
+                mock.patch.object(indexer, "index_expertise", fake_index), \
+                mock.patch.object(indexer, "build_embedder", lambda mgr: FakeEmbedder()), \
+                mock.patch.object(facts, "make_llm_call", lambda client, model: fake_llm), \
+                mock.patch.object(facts, "search_fragments", fake_search):
+            digest = asyncio.run(hooks.build_facts(7201, object(), object(), "model"))
+            self.assertEqual(digest["form"], form)
+            self.assertEqual((digest["stats"]["checked"], digest["stats"]["present"], digest["stats"]["missing"]), (2, 1, 1))
+            self.assertEqual([m["field_key"] for m in digest["missing"]], ["k_cmp"])
+            self.assertEqual(digest["missing"][0]["comment"], "в описании нет наименований")
+            self.assertEqual(self.q("SELECT form_code FROM pe_procurements WHERE expertise_id=7201"), form)
+            again = asyncio.run(hooks.build_facts(7201, object(), object(), "model"))
+            self.assertEqual(again["stats"], digest["stats"])
+            self.assertEqual(self.q("SELECT count(*) FROM pe_facts WHERE expertise_id=7201"), "2")
+            # экспертиза без паспорта и неподдерживаемая форма → None
+            self.assertIsNone(asyncio.run(hooks.build_facts(7999, object(), object(), "model")))
+        self.conn._run(f"DELETE FROM pe_form_fields WHERE form_code = '{form}'")
 
     def test_non_xml_file_is_ignored(self):
         """Для не-XML файла (и битого XML) разбор извещения возвращает None."""
