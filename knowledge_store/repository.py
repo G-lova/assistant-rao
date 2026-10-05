@@ -227,3 +227,65 @@ async def purge_expired(conn) -> int:
         int: Число очищенных документов.
     """
     return int(await conn.fetchval(SQL_PURGE_EXPIRED) or 0)
+
+
+SQL_DELETE_FORM_FIELDS = "DELETE FROM pe_form_fields WHERE form_code = $1"
+
+SQL_INSERT_FORM_FIELD = """
+INSERT INTO pe_form_fields (form_code, field_key, ordinal, label, section, value_kind, criterion_id, check_level, derived)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+"""
+
+SQL_LIST_FORM_CODES = "SELECT DISTINCT form_code FROM pe_form_fields ORDER BY form_code"
+
+SQL_FORM_FIELDS = (
+    "SELECT field_key, ordinal, label, section, value_kind, criterion_id, check_level, derived "
+    "FROM pe_form_fields WHERE form_code = $1 ORDER BY ordinal"
+)
+
+
+async def replace_form_fields(conn, form_code: str, fields: Sequence[Any]) -> int:
+    """Полностью заменяет поля одной формы в справочнике ``pe_form_fields``.
+
+    Операция идемпотентна: повторный импорт того же Excel даёт тот же результат.
+    Вызывающий код должен выполнять её внутри транзакции.
+
+    Args:
+        conn: Соединение ``asyncpg``.
+        form_code: Код формы (``44fz_competition_obj6``).
+        fields: Объекты :class:`knowledge_store.forms.FormField`.
+
+    Returns:
+        int: Количество записанных полей.
+    """
+    await conn.execute(SQL_DELETE_FORM_FIELDS, form_code)
+    await conn.executemany(SQL_INSERT_FORM_FIELD, [
+        (f.form_code, f.field_key, f.ordinal, f.label, f.section, f.value_kind, None, f.check_level, bool(f.derived))
+        for f in fields
+    ])
+    return len(fields)
+
+
+async def list_form_codes(conn) -> List[str]:
+    """Возвращает коды форм, загруженных в справочник.
+
+    Args:
+        conn: Соединение ``asyncpg``.
+
+    Returns:
+        list[str]: Отсортированные коды форм.
+    """
+    return [r["form_code"] for r in await conn.fetch(SQL_LIST_FORM_CODES)]
+
+
+async def get_form_fields(conn, form_code: str) -> list:
+    """Читает поля формы из справочника в порядке вывода.
+
+    Args:
+        conn: Соединение ``asyncpg``.
+        form_code: Код формы.
+
+    Returns:
+        list: Записи ``pe_form_fields`` (``field_key``, ``label``, ``value_kind`` …).
+    """
+    return list(await conn.fetch(SQL_FORM_FIELDS, form_code))
