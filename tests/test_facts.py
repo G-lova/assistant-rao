@@ -294,16 +294,6 @@ class AttachTests(unittest.TestCase):
         self.assertEqual(list(data), ["facts", "missed_documents", "documents"])
         self.assertEqual(data["facts"]["missing_count"], 1)
 
-    def test_summary_is_additive(self):
-        """facts_summary добавляется к ответу, прежние ключи не затрагиваются; не-словарь и None безопасны."""
-        result = {"overall_status": "allow", "overall_summary": "ok", "documents": []}
-        hooks.attach_facts_summary(result, None)
-        self.assertEqual(set(result), {"overall_status", "overall_summary", "documents"})
-        hooks.attach_facts_summary(result, self.DIGEST)
-        self.assertEqual(result["overall_status"], "allow")
-        self.assertEqual(set(result["facts_summary"]), {"form", "stats", "missing", "unverified"})
-        self.assertEqual(hooks.attach_facts_summary("строка", self.DIGEST), "строка")
-
 
 class FlagsTests(unittest.TestCase):
     """Флаги и защита этапа фактов."""

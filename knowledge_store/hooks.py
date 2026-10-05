@@ -228,18 +228,3 @@ def attach_facts_to_input(data_for_final_evaluation: dict, digest: Optional[dict
         data_for_final_evaluation.clear()
         data_for_final_evaluation["facts"] = package_findings.compact_for_llm(digest)
         data_for_final_evaluation.update(rest)
-
-
-def attach_facts_summary(result: Any, digest: Optional[dict]) -> Any:
-    """Добавляет в итоговый ответ ``/evaluate-documents`` блок ``facts_summary`` (существующие ключи не меняются).
-
-    Args:
-        result: Итоговый ответ пайплайна.
-        digest: Результат :func:`build_facts` (``None`` — ответ остаётся прежним).
-
-    Returns:
-        Any: Тот же ``result`` (с дополнительным ключом, если это словарь и дайджест есть).
-    """
-    if digest and isinstance(result, dict):
-        result["facts_summary"] = {k: digest[k] for k in ("form", "stats", "missing", "unverified")}
-    return result

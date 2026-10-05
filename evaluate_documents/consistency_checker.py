@@ -271,6 +271,9 @@ class ConsistencyChecker:
                     }
                     doc_description['status'] = 'deny'
             
+            # файлы данного типа: имя и ссылка на каждый
+            doc_description['files'] = item.get('files', [])
+
             # извлеченные данные
             doc_description['raw_data'] = item.get('raw_data', [])
 

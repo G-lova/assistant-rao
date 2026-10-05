@@ -17,6 +17,7 @@ from evaluate_documents.consistency_checker import ConsistencyChecker
 from configs.parsing import CloudStorageParser
 from evaluate_documents.type_data_extractor import DOCUMENT_TYPE_MAPPING, TypeDataExtractor
 from knowledge_store import hooks as ks_hooks
+from evaluate_documents.package_view import completeness_input, files_view, with_source
 
 
 logger = get_logger(__name__)
@@ -93,6 +94,8 @@ class TasksPipeline:
                     logger.error(f'Ошибка при обработке документа {file_info.get("filename", file_info.get("original_url"))}: {result}')
                     continue
                 if result != None:
+                    # имя файла и ссылка попадают в итоговый ответ по каждому документу
+                    with_source(result, file_info.get("filename"), file_info.get("original_url") or link.media_links)
                     successful_results.append(result)
 
             if link.doc_code == 'linkDocs':  
@@ -121,7 +124,7 @@ class TasksPipeline:
                     "raw_data": eis_data
                 }
 
-                successful_results.append(result)
+                successful_results.append(with_source(result, None, link.media_links))
 
             return successful_results
 
@@ -167,7 +170,7 @@ class TasksPipeline:
                     "raw_data": {}
                 }
             
-            return fallback
+            return with_source(fallback, None, link.media_links)
 
 
     async def process_parse_result(self, file_path, filename, link):
@@ -306,12 +309,12 @@ class TasksPipeline:
             # ====== Оценка полноты и соответствия данных в документе ======
             completeness_tasks = []
             for row in self.df[self.df['documents_results'].map(bool)].itertuples():
-                data_for_completeness = {
-                    **data_for_final_evaluation, 
-                    "doc_code": row.doc_code, 
-                    "doc_type": 'Ссылка на ЕИС' if row.doc_code == 'linkDocs' else DOCUMENT_TYPE_MAPPING.get(row.doc_code, "Неизвестный документ"),
-                    "documents": row.documents_results
-                }
+                # Полнота оценивается только по документам этого типа: отсутствие других типов на неё не влияет
+                data_for_completeness = completeness_input(
+                    data_for_final_evaluation,
+                    row.doc_code,
+                    'Ссылка на ЕИС' if row.doc_code == 'linkDocs' else DOCUMENT_TYPE_MAPPING.get(row.doc_code, "Неизвестный документ"),
+                    row.documents_results)
                 completeness_tasks.append(self.completeness_checker.check_doc_completeness(self.consistency_checker.remove_empty(data_for_completeness), row.doc_code))
 
             async with self.llm_semaphore:
@@ -328,6 +331,7 @@ class TasksPipeline:
                     "doc_type": 'Ссылка на ЕИС' if row.doc_code == "linkDocs" else DOCUMENT_TYPE_MAPPING.get(row.doc_code, "Неизвестный документ"),
                     "required": 'Обязательный' if row.required_docs == 1 else 'Необязательный',
                     "empty_comment": row.empty_comment,
+                    "files": files_view(row.documents_results),
                     **completeness
                 })
 
@@ -361,7 +365,6 @@ class TasksPipeline:
             # ЭТАП 3: Оценка согласованности и эвристик и формирование финального отчета
             # logger.info(f"type: {type(data_for_final_evaluation)}, data_for_final_evaluation: {data_for_final_evaluation}")
             final_evaluation_result = await self.consistency_checker.check_consistency(data_for_final_evaluation)
-            ks_hooks.attach_facts_summary(final_evaluation_result, ks_facts)
             await save_summary_report(procurement_id=self.df['id'].iloc[0], summary_data=final_evaluation_result)
 
             # Хранилище знаний: фоновая индексация текстов (при выключенном флаге — no-op)
