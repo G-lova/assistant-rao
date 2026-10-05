@@ -44,3 +44,46 @@ def evaluate_documents_task(self, expertise_id: int, environment: str):
         
     return run_async(async_retry(CLOUD_PARSING_RETRY_CONFIG)(run_with_manager)())
     # return asyncio.run(run_with_manager)
+
+
+@celery_app.task(bind=True, name="index_documents_task")
+def index_documents_task(self, expertise_id: int):
+    """Фоновая индексация документов экспертизы: чанки и эмбеддинги в ``pe_chunks``.
+
+    Запускается из :func:`knowledge_store.hooks.on_run_finished` после завершения
+    ``/evaluate-documents``; при выключенном ``KNOWLEDGE_STORE_ENABLED`` ничего не делает.
+
+    Args:
+        expertise_id: ID экспертизы.
+
+    Returns:
+        dict: Статистика индексации (документы/чанки/ошибки) либо ``{"skipped": True}``.
+    """
+    from knowledge_store.indexer import build_embedder, index_expertise
+    from knowledge_store.safe import is_enabled
+
+    if not is_enabled():
+        return {"skipped": True}
+
+    async def run():
+        """Создаёт HTTP-менеджер внутри event loop задачи и запускает индексацию."""
+        async with HTTPClientManager(timeout=120.0) as mgr:
+            return await index_expertise(int(expertise_id), build_embedder(mgr))
+
+    return run_async(run())
+
+
+@celery_app.task(name="purge_expired_texts_task")
+def purge_expired_texts_task():
+    """Ночная очистка текстов и чанков с истёкшим сроком хранения (``PE_TEXT_RETENTION_DAYS``).
+
+    Returns:
+        dict: ``{"purged": N}`` либо ``{"skipped": True}``, если хранилище выключено.
+    """
+    from knowledge_store.indexer import purge_expired_texts
+    from knowledge_store.safe import is_enabled
+
+    if not is_enabled():
+        return {"skipped": True}
+    return {"purged": run_async(purge_expired_texts())}
+

@@ -373,6 +373,9 @@ class TasksPipeline:
             final_evaluation_result = await self.consistency_checker.check_consistency(data_for_final_evaluation)
             await save_summary_report(procurement_id=self.df['id'].iloc[0], summary_data=final_evaluation_result)
 
+            # Хранилище знаний: фоновая индексация текстов (при выключенном флаге — no-op)
+            await ks_hooks.on_run_finished(int(self.df['id'].iloc[0]))
+
             return final_evaluation_result
             
         except Exception as e:

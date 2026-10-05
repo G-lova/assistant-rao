@@ -14,7 +14,7 @@ from unittest import mock
 
 import pandas as pd
 
-from knowledge_store import hooks, repository as repo
+from knowledge_store import hooks, indexer, repository as repo
 from knowledge_store.pages import chunk_pages, split_pages
 from tests.pg_psql import PsqlConn
 
@@ -63,6 +63,14 @@ class RepositoryIntegrationTests(unittest.TestCase):
         sql = re.sub(r"[^\n]*USING hnsw[^\n]*\n", "", sql).replace("vector(1024)", "real[]")
         cls.conn._run("DROP TABLE IF EXISTS pe_summary_opinions, pe_facts, pe_chunks, pe_documents, pe_form_fields, pe_procurements CASCADE;")
         cls.conn._run(sql)
+        # в тестовой схеме embedding — real[]; литерал pgvector '[..]' переводим в '{..}'
+        cls._orig_insert = repo.SQL_INSERT_CHUNK
+        repo.SQL_INSERT_CHUNK = cls._orig_insert.replace("$7::vector", "translate($7, '[]', '{}')::real[]")
+
+    @classmethod
+    def tearDownClass(cls):
+        """Возвращает исходный SQL вставки чанков."""
+        repo.SQL_INSERT_CHUNK = cls._orig_insert
 
     def q(self, sql):
         """Выполняет произвольный SELECT и возвращает stdout."""
@@ -111,6 +119,89 @@ class RepositoryIntegrationTests(unittest.TestCase):
                     self.assertEqual(self.q("SELECT count(*) FROM pe_documents WHERE expertise_id=902"), "0")
         finally:
             os.unlink(f.name)
+
+
+class FakeEmbedder:
+    """Заглушка сервиса эмбеддингов; ``drop`` — сколько векторов «потерять» (как EmbeddingClient при сбое пакета)."""
+
+    def __init__(self, drop: int = 0):
+        """Запоминает, сколько последних векторов не возвращать."""
+        self.drop = drop
+
+    async def get_embeddings(self, texts):
+        """Возвращает по вектору длиной 1024 на каждый текст (кроме ``drop`` последних)."""
+        return [[0.001 * (i + 1)] * repo.EMBEDDING_DIM for i, _ in enumerate(texts)][:len(texts) - self.drop]
+
+
+class VectorTests(unittest.TestCase):
+    """Проверка литерала вектора."""
+
+    def test_vector_literal(self):
+        """Литерал имеет формат pgvector, неверная размерность отвергается."""
+        lit = repo.vector_literal([0.5] * repo.EMBEDDING_DIM)
+        self.assertTrue(lit.startswith("[0.5,") and lit.endswith("]"))
+        with self.assertRaises(ValueError):
+            repo.vector_literal([0.1, 0.2])
+
+
+@unittest.skipUnless(PG, "нужен PE_TEST_PG=host:port")
+class IndexingIntegrationTests(unittest.TestCase):
+    """Индексация чанков и очистка по сроку хранения на реальном Postgres."""
+
+    def setUp(self):
+        """Подготавливает схему (через RepositoryIntegrationTests) и подменяет соединение индексатора."""
+        RepositoryIntegrationTests.setUpClass()
+        self.conn = RepositoryIntegrationTests.conn
+
+        @asynccontextmanager
+        async def fake_db():
+            """Подставляет тестовое соединение вместо боевого пула."""
+            yield self.conn
+        self.patch = mock.patch.object(indexer, "_db", fake_db)
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+        self.addCleanup(RepositoryIntegrationTests.tearDownClass)
+
+    def q(self, sql):
+        """Выполняет SQL и возвращает stdout."""
+        return self.conn._run(sql)
+
+    def _doc(self, eid, sha, text):
+        """Создаёт документ с заданным текстом."""
+        return asyncio.run(repo.upsert_document(self.conn, eid, "docIzvejenieFiles", "f.docx", None, sha, text, 2, 365))
+
+    def test_index_and_idempotent(self):
+        """Чанки записываются с диапазоном страниц; повторный запуск ничего не делает."""
+        asyncio.run(repo.clear_expertise(self.conn, 910))
+        doc = self._doc(910, "s1", "Страница 1 (OCR): " + "а" * 1800 + "\nСтраница 2 (OCR): " + "б" * 1800)
+        st = asyncio.run(indexer.index_expertise(910, FakeEmbedder()))
+        self.assertEqual(st["failed"], 0)
+        self.assertGreaterEqual(st["chunks"], 3)
+        self.assertEqual(self.q("SELECT count(*) FROM pe_chunks WHERE document_id=%d" % doc), str(st["chunks"]))
+        self.assertEqual(self.q("SELECT min(page_from)||'-'||max(page_to) FROM pe_chunks WHERE document_id=%d" % doc), "1-2")
+        self.assertEqual(self.q("SELECT array_length(embedding,1) FROM pe_chunks WHERE document_id=%d LIMIT 1" % doc), "1024")
+        self.assertEqual(asyncio.run(indexer.index_expertise(910, FakeEmbedder()))["documents"], 0)
+
+    def test_partial_embeddings_not_saved(self):
+        """Если эмбеддингов вернулось меньше, чем чанков, документ не сохраняется (failed=1)."""
+        asyncio.run(repo.clear_expertise(self.conn, 911))
+        doc = self._doc(911, "s2", "Страница 1 (OCR): " + "в" * 3000)
+        st = asyncio.run(indexer.index_expertise(911, FakeEmbedder(drop=1)))
+        self.assertEqual((st["documents"], st["failed"]), (0, 1))
+        self.assertEqual(self.q("SELECT count(*) FROM pe_chunks WHERE document_id=%d" % doc), "0")
+
+    def test_purge_respects_expiry_and_legal_hold(self):
+        """Очистка убирает текст и чанки просроченных документов, но не трогает legal_hold и свежие."""
+        asyncio.run(repo.clear_expertise(self.conn, 912))
+        old, held, fresh = self._doc(912, "o", "старый"), self._doc(912, "h", "удержан"), self._doc(912, "f", "свежий")
+        asyncio.run(repo.replace_chunks(self.conn, old, 912, [type("C", (), dict(idx=0, page_from=1, page_to=1, text="t"))()], [[0.1] * 1024]))
+        self.q("UPDATE pe_documents SET expires_at = NOW() - interval '1 day' WHERE id IN (%d, %d)" % (old, held))
+        self.q("UPDATE pe_documents SET legal_hold = TRUE WHERE id = %d" % held)
+        self.assertGreaterEqual(asyncio.run(indexer.purge_expired_texts()), 1)
+        self.assertEqual(self.q("SELECT (text_full IS NULL)::text||'|'||(text_purged_at IS NOT NULL)::text FROM pe_documents WHERE id=%d" % old), "true|true")
+        self.assertEqual(self.q("SELECT count(*) FROM pe_chunks WHERE document_id=%d" % old), "0")
+        self.assertEqual(self.q("SELECT text_full FROM pe_documents WHERE id=%d" % held), "удержан")
+        self.assertEqual(self.q("SELECT text_full FROM pe_documents WHERE id=%d" % fresh), "свежий")
 
 
 if __name__ == "__main__":

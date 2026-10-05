@@ -6,7 +6,7 @@
 """
 import hashlib
 import json
-from typing import Any, Optional
+from typing import Any, List, Optional, Sequence
 
 SQL_UPSERT_PROCUREMENT = """
 INSERT INTO pe_procurements (expertise_id, law, method, object_code, check_type2, passport)
@@ -30,6 +30,33 @@ SQL_SET_EXTRACTION = """
 UPDATE pe_documents
 SET detected_type = $2, readability = $3::jsonb, extraction = $4::jsonb
 WHERE id = $1
+"""
+
+EMBEDDING_DIM = 1024  # должно совпадать с vector(1024) в миграции 001
+
+SQL_DOCS_FOR_INDEXING = """
+SELECT d.id, d.text_full FROM pe_documents d
+WHERE d.expertise_id = $1 AND d.text_full IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM pe_chunks c WHERE c.document_id = d.id)
+ORDER BY d.id
+"""
+
+SQL_DELETE_CHUNKS = "DELETE FROM pe_chunks WHERE document_id = $1"
+
+SQL_INSERT_CHUNK = """
+INSERT INTO pe_chunks (document_id, expertise_id, idx, page_from, page_to, text, embedding)
+VALUES ($1, $2, $3, $4, $5, $6, $7::vector)
+"""
+
+SQL_PURGE_EXPIRED = """
+WITH expired AS (
+    UPDATE pe_documents SET text_full = NULL, text_purged_at = NOW()
+    WHERE expires_at < NOW() AND NOT legal_hold AND text_purged_at IS NULL
+    RETURNING id
+), removed AS (
+    DELETE FROM pe_chunks WHERE document_id IN (SELECT id FROM expired)
+)
+SELECT count(*) FROM expired
 """
 
 SQL_CLEAR = [
@@ -131,3 +158,72 @@ async def clear_expertise(conn, expertise_id: int) -> None:
     """
     for sql in SQL_CLEAR:
         await conn.execute(sql, int(expertise_id))
+
+
+def vector_literal(vec: Sequence[float]) -> str:
+    """Формирует текстовый литерал pgvector ``[x1,x2,...]`` для параметра ``$n::vector``.
+
+    Args:
+        vec: Вектор эмбеддинга.
+
+    Returns:
+        str: Литерал вида ``[0.1,0.2]``.
+
+    Raises:
+        ValueError: Если длина вектора не равна ``EMBEDDING_DIM``.
+    """
+    if len(vec) != EMBEDDING_DIM:
+        raise ValueError(f"Размерность эмбеддинга {len(vec)} != {EMBEDDING_DIM}")
+    return "[" + ",".join(repr(float(x)) for x in vec) + "]"
+
+
+async def documents_for_indexing(conn, expertise_id: int) -> List[Any]:
+    """Возвращает документы экспертизы, у которых есть текст, но ещё нет чанков.
+
+    Args:
+        conn: Соединение ``asyncpg``.
+        expertise_id: ID экспертизы.
+
+    Returns:
+        list: Записи с полями ``id`` и ``text_full``.
+    """
+    return await conn.fetch(SQL_DOCS_FOR_INDEXING, int(expertise_id))
+
+
+async def replace_chunks(conn, document_id: int, expertise_id: int, chunks: Sequence[Any], vectors: Sequence[Sequence[float]]) -> int:
+    """Заменяет чанки документа новыми (вместе с эмбеддингами).
+
+    Args:
+        conn: Соединение ``asyncpg``.
+        document_id: ``pe_documents.id``.
+        expertise_id: ID экспертизы.
+        chunks: Объекты :class:`knowledge_store.pages.Chunk`.
+        vectors: Эмбеддинги, по одному на чанк (в том же порядке).
+
+    Returns:
+        int: Число записанных чанков.
+
+    Raises:
+        ValueError: Если число векторов не равно числу чанков или размерность неверна.
+    """
+    if len(chunks) != len(vectors):
+        raise ValueError(f"Чанков {len(chunks)}, эмбеддингов {len(vectors)}")
+    rows = [(int(document_id), int(expertise_id), c.idx, c.page_from, c.page_to, c.text, vector_literal(v))
+            for c, v in zip(chunks, vectors)]
+    await conn.execute(SQL_DELETE_CHUNKS, int(document_id))
+    await conn.executemany(SQL_INSERT_CHUNK, rows)
+    return len(rows)
+
+
+async def purge_expired(conn) -> int:
+    """Очищает тексты и чанки документов с истёкшим сроком хранения (политика 05.10.2026).
+
+    Документы с ``legal_hold`` не затрагиваются. Факты, цитаты и извлечённые данные остаются.
+
+    Args:
+        conn: Соединение ``asyncpg``.
+
+    Returns:
+        int: Число очищенных документов.
+    """
+    return int(await conn.fetchval(SQL_PURGE_EXPIRED) or 0)

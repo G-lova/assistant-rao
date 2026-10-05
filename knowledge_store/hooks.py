@@ -100,3 +100,23 @@ async def on_document_extracted(document_id: Optional[int], extracted: Any) -> N
     if document_id is None or not isinstance(extracted, dict) or not is_enabled():
         return
     await safe_call_async(_on_document_extracted, document_id, extracted)
+
+
+def _enqueue_indexing(expertise_id: int) -> None:
+    """Ставит в очередь Celery задачу индексации (ленивый импорт, чтобы не создавать циклов)."""
+    from celery_app import celery_app
+    celery_app.send_task("index_documents_task", args=[int(expertise_id)], queue="evaluation")
+
+
+async def _on_run_finished(expertise_id: int) -> None:
+    """Реализация :func:`on_run_finished` (без защиты)."""
+    _enqueue_indexing(expertise_id)
+
+
+async def on_run_finished(expertise_id: int) -> None:
+    """Конец прогона: запускает фоновую индексацию (чанки + эмбеддинги) отдельной задачей Celery.
+
+    Args:
+        expertise_id: ID экспертизы.
+    """
+    await safe_call_async(_on_run_finished, expertise_id)

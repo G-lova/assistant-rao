@@ -63,6 +63,8 @@ celery_app.conf.update(
                 'interval_max': 30,
             }
         },
+        'index_documents_task': {'queue': 'evaluation'},
+        'purge_expired_texts_task': {'queue': 'evaluation'},
         'main.get_experts_task': {
             'queue': 'scoring',
             'retry_policy': {
@@ -71,6 +73,13 @@ celery_app.conf.update(
                 'interval_step': 10,
                 'interval_max': 30,
             }
+        },
+    },
+    # Политика хранения текстов «РАО Эксперт»: ежедневная очистка в 03:30 по Москве
+    beat_schedule={
+        'purge-expired-texts': {
+            'task': 'purge_expired_texts_task',
+            'schedule': crontab(hour=3, minute=30),
         },
     },
 )

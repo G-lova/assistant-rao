@@ -3,7 +3,7 @@
 Подставляет параметры ``$n`` как безопасно экранированные литералы и выполняет SQL настоящим
 Postgres — этого достаточно, чтобы проверить синтаксис и семантику запросов репозитория.
 """
-import asyncio
+import json
 import re
 import subprocess
 from contextlib import asynccontextmanager
@@ -49,6 +49,16 @@ class PsqlConn:
         out = self._run(self._render(sql, params)).splitlines()
         val = out[0] if out else None
         return int(val) if val is not None and val.lstrip("-").isdigit() else val
+
+    async def executemany(self, sql: str, rows) -> None:
+        """Аналог ``asyncpg.Connection.executemany``: выполняет запрос для каждой строки параметров."""
+        for params in rows:
+            await self.execute(sql, *params)
+
+    async def fetch(self, sql: str, *params):
+        """Аналог ``asyncpg.Connection.fetch``: возвращает список словарей (через ``json_agg``)."""
+        wrapped = "SELECT COALESCE(json_agg(q), '[]'::json) FROM (" + self._render(sql, params) + ") q"
+        return json.loads(self._run(wrapped))
 
     @asynccontextmanager
     async def transaction(self):
