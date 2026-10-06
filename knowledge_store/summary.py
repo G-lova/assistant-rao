@@ -638,6 +638,33 @@ def _unique(items: Sequence[Any], key=lambda x: x) -> List[Any]:
     return out
 
 
+def clean_notice(value: Any) -> str:
+    """Суть замечаний к извещению без повтора вводной фразы и без оборванного хвоста «…» (модель дублирует «Информация… за исключением»)."""
+    text = _clip(value, 500)
+    text = re.sub(r"^\s*Информация,? представленная в извещении[^,]*?(?:№\s*\d+)?[^,]*,?\s*соответствует требованиям законодательства,?\s*(?:за исключением:?)?\s*",
+                  "", text, flags=re.I)
+    text = re.sub(r"\s*(?:\.{3}|…)\.?$", "", text).strip()
+    return text[:1].lower() + text[1:] if text and not text[:2].isupper() else text
+
+
+def clean_numbers(value: Any) -> str:
+    """Номера критериев из ответа модели: только полные номера вида ``2.2.7.1`` (обрезанные «1.3…» отбрасываются)."""
+    text = re.sub(r"[\d.]*(?:\.{3}|…).*$", "", str(value or ""))      # оборванный номер перед «…» тоже отбрасывается
+    nums = [n for n in re.findall(r"\d+(?:\.\d+)+", text)]
+    return ", ".join(nums[:8])
+
+
+def prompt_for(prompt: str, key: str) -> str:
+    """Промпт для одного блока: общая часть + раздел только этого блока (модель путала формат ``field3`` и ``field4``)."""
+    parts = re.split(r"(?m)^(?=# )", prompt)
+    own, other = ("«ВЫВОД»", "«ЗАКЛЮЧЕНИЕ»") if key == "field3" else ("«ЗАКЛЮЧЕНИЕ»", "«ВЫВОД»")
+    kept = [p for p in parts if not (p.startswith("# БЛОК") and other in p.split("\n", 1)[0])]
+    text = "".join(kept)
+    lines = [ln for ln in text.split("\n")
+             if not (ln.startswith("Для «") and ("(%s)" % key) not in ln)]
+    return "\n".join(lines) + f"\n\nВерни СТРОГО формат блока {key}: плоский JSON без обёртки."
+
+
 def render_block(key: str, parsed: dict, remarks: Sequence[dict], name: Optional[str], number: Optional[str],
                  procedure: Optional[str]) -> Optional[str]:
     """Собирает текст блока из структурированного ответа модели.
@@ -659,7 +686,7 @@ def render_block(key: str, parsed: dict, remarks: Sequence[dict], name: Optional
     """
     num = f" № {number}" if number else ""
     if key == "field3":
-        notice = _clip(parsed.get("notice"), 500)
+        notice = clean_notice(parsed.get("notice"))
         items = _unique([i for i in parsed.get("items") or [] if isinstance(i, dict) and i.get("text")],
                         key=lambda i: i["text"])[:12]
         notice_remarks = [r for r in remarks if (r.get("number") or "").startswith("1.")]
@@ -672,7 +699,7 @@ def render_block(key: str, parsed: dict, remarks: Sequence[dict], name: Optional
         head += f", за исключением: {notice.rstrip('.')}." if notice else "."
         if not items:
             return head
-        lines = [f"{_clip(i.get('numbers'), 60)}. {_clip(i['text'], 400)}".strip(". ") for i in items]
+        lines = [f"{clean_numbers(i.get('numbers'))}. {_clip(i['text'], 400)}".strip(". ") for i in items]
         return head + "\nВыявлены несоответствия и недостатки по критериям:\n" + "\n".join(lines)
     recs = _unique([_clip(r, 260).rstrip(".;") for r in parsed.get("recommendations") or [] if str(r).strip()])[:6]
     areas = _unique([a for a in parsed.get("areas") or [] if isinstance(a, dict) and a.get("summary")],
@@ -783,7 +810,7 @@ async def write_blocks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict
     remarks = collect_remarks(fields, data, trace)
     checked = sum(1 for f in fields if f["value_kind"] in RESULT_KINDS and data.get(f["field_key"]) is not None)
     stats = {"checked": checked, "remarks": len(remarks)}
-    prompt = PROMPT_PATH.read_text(encoding="utf-8")
+    full_prompt = PROMPT_PATH.read_text(encoding="utf-8")
     procedure = procedure_phrase(form_code)
     for key in ("field3", "field4"):
         if key not in data:
@@ -795,7 +822,7 @@ async def write_blocks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict
             payload = {"блок": BLOCK_TITLES[key], "объект закупки": data.get("name"), "номер закупки": data.get("code"),
                        "способ определения поставщика": procedure, "счётчики": stats, "замечания": compact,
                        "формат ответа": "плоский JSON с ключами " + ", ".join(BLOCK_SCHEMAS[key]["properties"]) + " (без обёртки)"}
-            messages = [{"role": "system", "content": prompt},
+            messages = [{"role": "system", "content": prompt_for(full_prompt, key)},
                         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
             for attempt in range(2):          # обрезанный/невалидный ответ — одна повторная попытка
                 try:

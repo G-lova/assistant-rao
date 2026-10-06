@@ -590,3 +590,23 @@ class WrappedAnswerTests(unittest.TestCase):
     def test_flat_untouched(self):
         """Плоский ответ не меняется."""
         self.assertEqual(summary.parse_block('{"areas": [], "note": "", "recommendations": []}')["note"], "")
+
+
+class BlockCleanTests(unittest.TestCase):
+    """Очистка ответа модели и промпт по блокам."""
+
+    def test_clean_notice(self):
+        """Дубль вводной фразы и хвост «…» убираются."""
+        text = summary.clean_notice("Информация, представленная в извещении № 1, соответствует требованиям законодательства, за исключением отсутствия адреса, о запрете…")
+        self.assertTrue(text.startswith("отсутствия адреса"))
+        self.assertFalse(text.endswith("…"))
+
+    def test_clean_numbers(self):
+        """Оборванный номер отбрасывается."""
+        self.assertEqual(summary.clean_numbers("1.4,1.6,1.3…"), "1.4, 1.6")
+
+    def test_prompt_for(self):
+        """В промпте блока нет раздела другого блока."""
+        p = summary.PROMPT_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("# БЛОК «ЗАКЛЮЧЕНИЕ»", summary.prompt_for(p, "field3"))
+        self.assertNotIn("# БЛОК «ВЫВОД»", summary.prompt_for(p, "field4"))
