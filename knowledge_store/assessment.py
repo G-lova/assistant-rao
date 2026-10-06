@@ -7,6 +7,12 @@
   и называет конкретные дефекты с дословными цитатами; ответ «0» ставится только при подтверждённой цитате,
   иначе — «1» как предложение модели (``proposed``).
 
+* ``field2_3_2``, ``_3``, ``_4``, ``_6``, ``_8`` — соответствие отдельным отраслям законодательства (образование, гражданское,
+  бюджетное, персональные данные, антимонопольное). Прямых формулировок «соответствует закону» в документах нет, поэтому
+  применяется презумпция соответствия с проверкой на типичные нарушения: по ключевым словам берутся фрагменты документов,
+  модель ищет конкретные нарушения из чек-листа; «0» — только при нарушении с подтверждённой цитатой, иначе «1» как
+  предложение модели (``proposed``). Заполняются только если поиск фактов не дал значения.
+
 Модуль не зависит от ``asyncpg`` и сети; модель вызывается через переданную функцию ``llm_call``.
 """
 import asyncio
@@ -26,6 +32,43 @@ STYLE_KEY = "field2_2_1_6"
 # Код выбора метода НМЦК в форме конкурса: основа слова → (код, название)
 NMCK_METHOD_CODES = {"рыночн": (1, "рыночный"), "нормативн": (2, "нормативный"), "затратн": (3, "затратный"),
                      "тарифн": (4, "тарифный"), "проектно-сметн": (5, "проектно-сметный")}
+
+# Презумпция соответствия: ключ → (чек-лист нарушений, шаблон ключевых слов для отбора фрагментов, формулировка для «1»)
+PRESUMPTION = {
+    "field2_3_3": ("гражданское законодательство РФ (ГК РФ): размер неустойки (пени) и штрафов, не соответствующий "
+                   "ст. 34 44-ФЗ и постановлению Правительства № 1042; ответственность только одной стороны; одностороннее "
+                   "расторжение контракта только заказчиком вне оснований закона; условия, противоречащие ГК РФ",
+                   r"неустойк|пени|штраф|расторжен|односторонн\w+ отказ|ответственност|гражданск\w+ кодекс",
+                   "требованиям гражданского законодательства Российской Федерации"),
+    "field2_3_4": ("бюджетное законодательство РФ (БК РФ): размер аванса и порядок его выплаты сверх допустимого, "
+                   "несоответствие вида расходов (КОСГУ, КБК) виду контракта, оплата за счёт не предусмотренных источников, "
+                   "условия расчётов, противоречащие БК РФ",
+                   r"аванс|казначейск|бюджетн|финансировани|вид\w* расход|лимит|порядок оплат|расчет\w* по контракт",
+                   "требованиям бюджетного законодательства Российской Федерации"),
+    "field2_3_6": ("персональные данные (152-ФЗ): требование предоставить персональные данные без согласия субъекта или "
+                   "без указания цели обработки; обязанность обрабатывать данные без правового основания; передача данных "
+                   "третьим лицам без оснований",
+                   r"персональн\w+ данн|152-ФЗ|согласие на обработк",
+                   "требованиям законодательства Российской Федерации о персональных данных"),
+    "field2_3_8": ("антимонопольное законодательство (135-ФЗ, ст. 17 и 25 44-ФЗ): требования, ограничивающие конкуренцию — "
+                   "завышенные или нерелевантные требования к опыту, лицензиям, членству, наличию собственных мощностей; "
+                   "указание товарного знака без «или эквивалент»; требования, под которые подходит один участник; "
+                   "необоснованно короткие сроки",
+                   r"аналогичн\w+ (?:опыт|работ|услуг)|опыт\w* (?:выполнени|оказани|поставк)|лицензи|членств|"
+                   r"товарн\w+ знак|торгов\w+ марк|эквивалент|ограничени\w+ конкуренц",
+                   "антимонопольному законодательству Российской Федерации"),
+}
+EDUCATION_KEY = "field2_3_2"
+EDUCATION_RE = r"образовательн|обучени|учебн|школ|вуз\b|университет|дошкольн|повышени\w+ квалификации|курсов\w+ подготовк|студент"
+FILL_IF_EMPTY = frozenset(PRESUMPTION) | {EDUCATION_KEY}   # ставятся, только если поиск фактов значения не дал
+VIOLATION_SCHEMA = {"type": "object", "properties": {"violations": {"type": "array", "maxItems": 2, "items": {
+    "type": "object", "properties": {"quote": {"type": "string", "maxLength": 300}, "issue": {"type": "string", "maxLength": 300}},
+    "required": ["quote", "issue"]}}}, "required": ["violations"], "additionalProperties": False}
+VIOLATION_PROMPT = ("Ты — эксперт по закупкам (44-ФЗ). Проверь фрагменты документации на НАРУШЕНИЯ из чек-листа: {checklist}. "
+                    "Нарушение — только явное и подтверждаемое текстом (конкретное условие, число или формулировка). "
+                    "Отсутствие информации нарушением не является. Для каждого нарушения приведи ДОСЛОВНУЮ цитату "
+                    "(до 300 символов) и одно предложение: в чём оно состоит и какому требованию противоречит. "
+                    "Нет нарушений — верни пустой список. Только JSON.")
 
 CHUNK = 6000          # размер части документа для одного запроса, символов
 MAX_DOCS = 6          # сколько документов просматривать
@@ -171,8 +214,60 @@ async def assess_style(documents: Dict[int, dict], llm_call: LlmCall, concurrenc
     return {"defects": unique, "checked_docs": len(docs), "checked_parts": len(jobs), "errors": errors}
 
 
+async def assess_presumption(key: str, documents: Dict[int, dict], llm_call: LlmCall) -> Optional[Tuple[int, dict]]:
+    """Презумпция соответствия для ``key`` (см. :data:`PRESUMPTION`): ищет нарушения из чек-листа в релевантных фрагментах.
+
+    Args:
+        key: Ключ критерия.
+        documents: Документы экспертизы с текстами.
+        llm_call: Функция вызова LLM.
+
+    Returns:
+        Optional[Tuple[int, dict]]: ``(0 или 1, запись trace)``; ``None``, если модель не ответила.
+    """
+    checklist, pattern, phrase = PRESUMPTION[key]
+    windows = keyword_windows(documents, pattern, radius=500, limit=6)
+    if not windows:
+        return 1, {"status": "proposed", "source": "llm_presumption", "quote": None,
+                   "comment": f"Положений, затрагивающих соответствие {phrase}, в документах не найдено; нарушений не выявлено.",
+                   "note": "презумпция соответствия: фрагментов по теме нет, требует проверки экспертом"}
+    try:
+        raw = await llm_call([{"role": "system", "content": VIOLATION_PROMPT.format(checklist=checklist)},
+                              {"role": "user", "content": "\n\n".join(f"[{i}] {w}" for i, w in enumerate(windows, 1))}],
+                             VIOLATION_SCHEMA)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"knowledge_store: проверка {key} не выполнена: {type(e).__name__}: {e}")
+        return None
+    parsed = _parse(raw)
+    if parsed is None:
+        return None
+    found = []
+    for item in parsed.get("violations") or []:
+        if isinstance(item, dict) and str(item.get("issue") or "").strip():
+            quote, filename = _quote_source(documents, item.get("quote"))
+            if quote:
+                found.append({"document": filename, "quote": quote, "issue": str(item["issue"]).strip()})
+    if found:
+        return 0, {"status": "proposed", "source": "llm_presumption", "document": found[0]["document"],
+                   "quote": found[0]["quote"], "defects": found,
+                   "comment": " ".join(f"В документе «{d['document']}»: {d['issue'].rstrip('.')}." for d in found)}
+    return 1, {"status": "proposed", "source": "llm_presumption", "quote": None,
+               "comment": f"Нарушений требований, относящихся к {phrase}, в проверенных фрагментах не выявлено.",
+               "note": "презумпция соответствия: нарушений с цитатой не найдено, требует проверки экспертом"}
+
+
+def education_applicable(documents: Dict[int, dict]) -> bool:
+    """Относится ли закупка к сфере образования (по объекту закупки в документах извещения)."""
+    for doc in sorted(documents.values(), key=lambda d: d.get("doc_code") != "docIzvejenieFiles")[:2]:
+        text = (doc.get("text") or "")
+        match = re.search(r"наименование объекта закупки[^\n]*\n?[^\n]{0,300}", text, re.I)
+        if match and re.search(EDUCATION_RE, match.group(0), re.I):
+            return True
+    return False
+
+
 async def compute_assessed(fields: Sequence[dict], documents: Dict[int, dict],
-                           llm_call: Optional[LlmCall]) -> Dict[str, Tuple[Any, dict]]:
+                           llm_call: Optional[LlmCall], skip: Sequence[str] = ()) -> Dict[str, Tuple[Any, dict]]:
     """Значения ``field2_2_2_0`` и ``field2_2_1_6`` (если они есть в форме) для передачи в :func:`summary.assemble`.
 
     Значения считаются до сборки, чтобы итоги подразделов и пояснения ``*_text`` учитывали их.
@@ -181,6 +276,7 @@ async def compute_assessed(fields: Sequence[dict], documents: Dict[int, dict],
         fields: Поля формы.
         documents: Документы экспертизы с текстами.
         llm_call: Функция вызова LLM или ``None``.
+        skip: Ключи, уже решённые поиском фактов (для :data:`FILL_IF_EMPTY` повторно не оцениваются).
 
     Returns:
         dict: ``ключ → (значение, запись trace)``; ключ отсутствует, если определить значение не удалось.
@@ -211,4 +307,15 @@ async def compute_assessed(fields: Sequence[dict], documents: Dict[int, dict],
                 preset[STYLE_KEY] = (1, entry)
             if result["errors"]:
                 entry["errors"] = result["errors"][:3]
+    if llm_call is not None:
+        todo = [k for k in PRESUMPTION if k in keys and k not in skip]
+        for key, res in zip(todo, await asyncio.gather(*(assess_presumption(k, documents, llm_call) for k in todo))):
+            if res:
+                preset[key] = res
+    if EDUCATION_KEY in keys and EDUCATION_KEY not in skip and not education_applicable(documents) and documents:
+        preset[EDUCATION_KEY] = (1, {
+            "status": "proposed", "source": "rule", "quote": None,
+            "comment": "Объект закупки не относится к сфере образования, требования Федерального закона от 29.12.2012 № 273-ФЗ "
+                       "к документации не предъявляются; нарушений не выявлено.",
+            "note": "по практике экспертов для неприменимого закона ставится «1»; требует проверки экспертом"})
     return preset

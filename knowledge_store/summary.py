@@ -307,7 +307,7 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
         trace[key] = entry
 
     for key, (value, entry) in (preset or {}).items():
-        if key in data:
+        if key in data and (key not in assessment.FILL_IF_EMPTY or data[key] is None):
             data[key], trace[key] = value, entry
 
     apply_nmck_method_rule(fields, documents, data, trace)
@@ -1044,7 +1044,8 @@ async def generate_summary(conn, expertise_id: int, llm_call: Optional[LlmCall],
                            "extraction": d.get("extraction")}
                  for d in ready["documents"]}
     fact_rows = [r for r in fact_rows if r["fact_key"] not in facts_mod.ASSESSED_KEYS]   # их оценивает модель по документам
-    preset = await assessment.compute_assessed(fields, documents, llm_call)
+    decided = {r["fact_key"] for r in fact_rows if normalize_result((_as_dict(r.get("value")) or {}).get("value")) is not None}
+    preset = await assessment.compute_assessed(fields, documents, llm_call, skip=decided)
     data, trace = assemble(fields, fact_rows, documents, ready["passport"], preset)
     await fill_funding_advance(fields, data, trace, documents, ready["passport"], llm_call)
     stats = await write_blocks(fields, data, trace, llm_call, code)

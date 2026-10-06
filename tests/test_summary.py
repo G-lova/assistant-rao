@@ -694,3 +694,56 @@ class AssessmentTests(unittest.IsolatedAsyncioTestCase):
         data, trace = summary.assemble(self.FIELDS, [], {}, None, {"field2_2_1_6": (0, {"status": "proposed"})})
         self.assertEqual(data["field2_2_1_6"], 0)
         self.assertEqual(data["field2_2_1"], 0)
+
+
+class PresumptionTests(unittest.IsolatedAsyncioTestCase):
+    """Презумпция соответствия для критериев 2.3.x."""
+
+    FIELDS = [{"field_key": k, "value_kind": "compliance", "label": k}
+              for k in ("field2_3_2", "field2_3_3", "field2_3_4", "field2_3_6", "field2_3_8")]
+    TEXT = ("Наименование объекта закупки\nОказание услуг по организации спортивных мероприятий\n"
+            "Размер неустойки (пени) устанавливается в размере 5 процентов от цены контракта за каждый день просрочки.")
+    DOCS = {1: {"filename": "k.docx", "doc_code": "docIzvejenieFiles", "text": TEXT}}
+
+    async def test_violation_with_quote_gives_zero(self):
+        """Нарушение с подтверждённой цитатой → 0; выдуманная цитата не считается."""
+        from knowledge_store import assessment
+
+        async def llm(messages, schema):
+            return json.dumps({"violations": [{"quote": "неустойки (пени) устанавливается в размере 5 процентов от цены контракта",
+                                               "issue": "Размер пени превышает установленный постановлением № 1042"},
+                                              {"quote": "нет такого текста", "issue": "Ложное"}]})
+        p = await assessment.compute_assessed(self.FIELDS, self.DOCS, llm)
+        value, entry = p["field2_3_3"]
+        self.assertEqual(value, 0)
+        self.assertEqual(len(entry["defects"]), 1)
+
+    async def test_no_violation_gives_proposed_one(self):
+        """Нарушений нет → 1 со статусом proposed."""
+        from knowledge_store import assessment
+
+        async def llm(messages, schema):
+            return json.dumps({"violations": []})
+        p = await assessment.compute_assessed(self.FIELDS, self.DOCS, llm)
+        self.assertEqual((p["field2_3_3"][0], p["field2_3_3"][1]["status"]), (1, "proposed"))
+        self.assertEqual(p["field2_3_6"][0], 1)          # положений о ПДн нет — презумпция
+
+    async def test_education_not_applicable(self):
+        """Объект не из сферы образования — 2.3.2 получает 1 с пояснением."""
+        from knowledge_store import assessment
+        p = await assessment.compute_assessed(self.FIELDS, self.DOCS, None)
+        self.assertEqual(p["field2_3_2"][0], 1)
+        self.assertNotIn("field2_3_3", p)                # без модели презумпция не ставится
+
+    async def test_skip_decided_and_fill_if_empty(self):
+        """Ключи, решённые поиском фактов, пропускаются; assemble не затирает уже решённое значение."""
+        from knowledge_store import assessment
+        async def llm(messages, schema):
+            return json.dumps({"violations": []})
+        p = await assessment.compute_assessed(self.FIELDS, self.DOCS, llm, skip=["field2_3_3", "field2_3_2"])
+        self.assertNotIn("field2_3_3", p)
+        self.assertNotIn("field2_3_2", p)
+        facts = [{"fact_key": "field2_3_4", "value": {"value": 0, "verified": False, "comment": "x"}, "document_id": None,
+                  "page": None, "quote": None, "source": "fact_extractor"}]
+        data, trace = summary.assemble(self.FIELDS, facts, {}, None, {"field2_3_4": (1, {"status": "proposed"})})
+        self.assertEqual(data["field2_3_4"], 0)
