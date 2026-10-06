@@ -551,3 +551,27 @@ class RenderBlockTests(unittest.TestCase):
         asyncio.run(summary.write_blocks(fields, data, trace, runaway, "44fz_competition_obj6"))
         self.assertEqual(trace["field4"]["method"], "template")
         self.assertIn("llm_error", trace["field4"])
+
+
+class DefragmentTests(unittest.TestCase):
+    """В заключении не должно быть слова «фрагмент»."""
+
+    def test_forms(self):
+        """Все падежи заменяются на «документ…», регистр сохраняется."""
+        self.assertEqual(summary.defragment("В предоставленных фрагментах отсутствует информация"), "В предоставленных документах отсутствует информация")
+        self.assertEqual(summary.defragment("Фрагменты не содержат сведений; ни один из фрагментов"), "Документы не содержат сведений; ни один из документов")
+        self.assertEqual(summary.defragment("на основании представленных фрагментов невозможно"), "на основании представленных документов невозможно")
+        self.assertEqual(summary.defragment("Фрагмент 3 и фрагмента"), "Документ 3 и документа")
+
+    def test_applied_everywhere(self):
+        """Очищаются комментарии критериев, тексты *_text и блоки III–IV."""
+        fields = [field("f", "presence", "1.4. Наличие почты"), field("f_text", "text", "1.4. Наличие почты"),
+                  field("field4", "text")]
+        rows = [fact("f", 0, verified=False, comment="В фрагментах отсутствует информация о почте.")]
+        data, trace = summary.assemble(fields, rows, DOCS)
+        self.assertNotIn("фрагмент", (data["f_text"] + trace["f"]["comment"]).lower())
+        asyncio.run(summary.write_blocks(fields, data, trace, None, "44fz_competition_obj6"))
+        self.assertNotIn("фрагмент", data["field4"].lower())
+        three = fact("f", 3, verified=False, comment="Фрагменты не по теме.")
+        _, trace = summary.assemble(fields, [three], DOCS)
+        self.assertNotIn("фрагмент", json.dumps(trace, ensure_ascii=False).lower())

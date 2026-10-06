@@ -193,6 +193,35 @@ def numbered(items: Sequence[str]) -> str:
     return "\n".join(f"{i}. {text}" for i, text in enumerate(items, 1))
 
 
+_FRAGMENT_FORMS = {"фрагмент": "документ", "фрагмента": "документа", "фрагменту": "документу", "фрагментом": "документом",
+                   "фрагменте": "документе", "фрагменты": "документы", "фрагментов": "документов",
+                   "фрагментам": "документам", "фрагментами": "документами", "фрагментах": "документах"}
+
+
+def defragment(text: Optional[str]) -> Optional[str]:
+    """Заменяет слово «фрагмент» (внутренний термин поиска) на «документ» в нужном падеже.
+
+    «В предоставленных фрагментах отсутствует…» → «В предоставленных документах отсутствует…»;
+    «Фрагменты не содержат…» → «Документы не содержат…». Регистр первой буквы сохраняется.
+
+    Args:
+        text: Любой текст заключения.
+
+    Returns:
+        Optional[str]: Текст без слова «фрагмент».
+    """
+    if not text:
+        return text
+
+    def repl(m: "re.Match") -> str:
+        """Подставляет форму слова «документ» с тем же регистром первой буквы."""
+        word = m.group(0)
+        new = _FRAGMENT_FORMS.get(word.lower(), "документ")
+        return new.capitalize() if word[:1].isupper() else new
+
+    return re.sub(r"(?i)\bфрагмент(?:ов|ами|ах|ам|ы|а|у|ом|е)?\b", repl, text)
+
+
 def clean_comment(comment: Optional[str], filename: Optional[str] = None) -> Optional[str]:
     """Убирает из пояснения модели ссылки на «фрагменты» (их нумерация эксперту ничего не говорит).
 
@@ -218,7 +247,7 @@ def clean_comment(comment: Optional[str], filename: Optional[str] = None) -> Opt
 
     text = re.sub(r"(?i)\b(в|из)\s+фрагмент(?:е|ах|ов|а)\s*\d+(?:\s*(?:,|и|-)\s*\d+)*", repl, comment)
     text = re.sub(r"(?i)\bфрагмент(?:е|ах|ов|а)?\s*\d+", "документ", text)
-    return text.strip()
+    return defragment(text).strip()
 
 
 def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[int, dict],
@@ -272,7 +301,7 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
         if fact["value_obj"].get("error"):
             entry["error"] = fact["value_obj"]["error"]
         if result is None and fact["value_obj"].get("value") == 3:
-            entry["note"] = "по найденным фрагментам определить нельзя — оставлено эксперту"
+            entry["note"] = "по представленным документам определить нельзя — оставлено эксперту"
         trace[key] = entry
 
     apply_nmck_method_rule(fields, documents, data, trace)
@@ -760,7 +789,7 @@ async def write_blocks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict
                 except Exception as e:  # noqa: BLE001 — блок не должен ронять сборку
                     llm_error = f"{type(e).__name__}: {e}"[:300]
                     logger.warning(f"knowledge_store: блок {key}, попытка {attempt + 1}: {llm_error}")
-        data[key] = text or fallback_block(key, remarks, stats, data.get("name"), data.get("code"), procedure)
+        data[key] = defragment(text or fallback_block(key, remarks, stats, data.get("name"), data.get("code"), procedure))
         trace[key] = {"status": "generated", "method": how, "based_on": [r["field_key"] for r in remarks]}
         if how == "template" and llm_error:
             trace[key]["llm_error"] = llm_error
