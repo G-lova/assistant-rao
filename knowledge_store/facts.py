@@ -6,8 +6,9 @@
    (результат :mod:`knowledge_store.eis_notice`, источник ``eis_xml``).
 2. Для остальных полей типов ``presence``/``compliance`` :class:`FactExtractor` находит в
    ``pe_chunks`` релевантные фрагменты (pgvector), спрашивает LLM (``guided_json``) и **проверяет
-   цитату**: она должна дословно присутствовать в одном из показанных фрагментов. Ответ «1» без
-   подтверждённой цитаты не принимается (источник ``fact_extractor``).
+   цитату**: она должна присутствовать в одном из показанных фрагментов. Ответ «1» без подтверждённой
+   цитаты сохраняется как неподтверждённый и попадает в заключение как предложение модели (источник
+   ``fact_extractor``); ответ «3» («определить нельзя») оставляет критерий эксперту.
 
 Тексты документов повторно не читаются и не распознаются — используются только сохранённые чанки.
 Клиенты LLM и эмбеддингов передаются снаружи, поэтому модуль тестируется без сети.
@@ -31,12 +32,13 @@ LLM_KINDS = ("presence", "compliance")
 ANSWER_SCHEMA = {
     "type": "object",
     "properties": {
-        "value": {"type": "integer", "enum": [0, 1, 2]},
+        # порядок свойств важен: модель сначала находит фрагмент и цитату, потом объясняет и лишь затем решает
         "fragment": {"type": "integer", "minimum": 0},
         "quote": {"type": "string", "maxLength": 500},
         "comment": {"type": "string", "maxLength": 600},
+        "value": {"type": "integer", "enum": [0, 1, 2, 3]},
     },
-    "required": ["value", "fragment", "quote", "comment"],
+    "required": ["fragment", "quote", "comment", "value"],
 }
 
 LlmCall = Callable[[List[dict], dict], Awaitable[str]]
@@ -163,19 +165,21 @@ def parse_answer(raw: str) -> Optional[dict]:
 def validate_answer(answer: Optional[dict], fragments: Sequence[Fragment]) -> Optional[dict]:
     """Проверяет ответ модели и превращает его в факт.
 
-    Значение должно быть 0/1/2. Цитата ищется в показанных фрагментах (сначала в указанном моделью,
+    Значение должно быть 0/1/2/3 (3 — «по найденным фрагментам определить нельзя»: критерий остаётся
+    эксперту). Цитата ищется в показанных фрагментах (сначала в указанном моделью,
     затем в остальных, с допуском на мелкие искажения — :func:`find_quote`). Признак ``verified``
     означает, что цитата подтверждена текстом. Ответ «1» без подтверждённой цитаты **не отбрасывается**,
-    а сохраняется как неподтверждённый (``verified=False``): в заключение он не попадёт, но эксперт увидит
-    предложение модели. Ответы «0» и «2» цитаты не требуют (отсутствие нечем процитировать).
+    а сохраняется как неподтверждённый (``verified=False``) вместе с исходной цитатой модели и документом
+    указанного ею фрагмента: в заключение он попадёт как предложение модели (``proposed``). Ответы «0» и «2»
+    цитаты не требуют (отсутствие нечем процитировать).
 
     Args:
         answer: Разобранный ответ модели.
         fragments: Показанные модели фрагменты.
 
     Returns:
-        Optional[dict]: ``{"value", "verified", "comment", "document_id", "page", "quote"}`` или ``None``,
-        если ответ невалиден (нет значения 0/1/2).
+        Optional[dict]: ``{"value", "verified", "comment", "document_id", "page", "quote", "model_quote",
+        "fragment"}`` или ``None``, если ответ невалиден (нет значения 0/1/2/3).
     """
     if not answer:
         return None
@@ -183,28 +187,29 @@ def validate_answer(answer: Optional[dict], fragments: Sequence[Fragment]) -> Op
         value = int(answer.get("value"))
     except (TypeError, ValueError):
         return None
-    if value not in (0, 1, 2):
+    if value not in (0, 1, 2, 3):
         return None
     quote = (answer.get("quote") or "").strip()
     comment = (answer.get("comment") or "").strip() or None
-    found, found_text = None, None
+    found, found_text, cited = None, None, None
+    try:
+        idx = int(answer.get("fragment") or 0)
+    except (TypeError, ValueError):
+        idx = 0
+    if 1 <= idx <= len(fragments):
+        cited = fragments[idx - 1]
     if quote:
-        order = []
-        try:
-            idx = int(answer.get("fragment") or 0)
-            if 1 <= idx <= len(fragments):
-                order.append(fragments[idx - 1])
-        except (TypeError, ValueError):
-            pass
-        order += [f for f in fragments if f not in order]
+        order = ([cited] if cited else []) + [f for f in fragments if f is not cited]
         for fragment in order:
             found_text = find_quote(quote, fragment.text)
             if found_text:
                 found = fragment
                 break
+    source = found or cited      # документ указанного моделью фрагмента, даже если цитату подтвердить не удалось
     return {"value": value, "verified": bool(found), "comment": comment,
-            "document_id": found.document_id if found else None,
-            "page": found.page if found else None, "quote": found_text[:500] if found else None}
+            "document_id": source.document_id if source else None,
+            "page": source.page if source else None, "quote": found_text[:500] if found else None,
+            "model_quote": quote[:500] or None, "fragment": idx or None}
 
 
 class FactExtractor:
@@ -223,7 +228,7 @@ class FactExtractor:
             top_k: Сколько фрагментов показывать модели (по умолчанию ``PE_FACTS_TOP_K``, 8).
             concurrency: Максимум одновременных запросов к LLM.
             system_prompt: Текст промпта; по умолчанию читается ``prompts/fact_extractor_prompt.txt``.
-            recheck_k: Если модель ответила «0» без цитаты, критерий проверяется повторно по такому числу
+            recheck_k: Если модель ответила «0» или «3» без цитаты, критерий проверяется повторно по такому числу
                 фрагментов (по умолчанию ``PE_FACTS_RECHECK_K``, 16; ``0`` — без повторной проверки):
                 «не нашли» среди первых фрагментов ещё не значит «отсутствует».
         """
@@ -255,7 +260,7 @@ class FactExtractor:
         if not fragments:
             return None
         fact = await self._ask(field, fragments)
-        if fact and fact["value"] == 0 and not fact["verified"] and self.recheck_k > len(fragments):
+        if fact and fact["value"] in (0, 3) and not fact["verified"] and self.recheck_k > len(fragments):
             wider = await self.search(conn, expertise_id, vectors[0], self.recheck_k)
             if len(wider) > len(fragments):
                 again = await self._ask(field, wider)
@@ -341,7 +346,8 @@ async def extract_facts(conn, expertise_id: int, form_code: str, extractor: Opti
     for res in results:
         if isinstance(res, dict):
             llm_facts.append({"fact_key": res["fact_key"],
-                              "value": {"value": res["value"], "verified": res["verified"], "comment": res["comment"]},
+                              "value": {"value": res["value"], "verified": res["verified"], "comment": res["comment"],
+                                        "model_quote": res.get("model_quote"), "fragment": res.get("fragment")},
                               "document_id": res["document_id"], "page": res["page"], "quote": res["quote"],
                               "confidence": 0.8 if res["verified"] else 0.3})
         else:

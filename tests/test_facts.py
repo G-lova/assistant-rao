@@ -153,6 +153,13 @@ class QuoteValidationTests(unittest.TestCase):
         for quote in ("", "несуществующий текст про совсем другое"):
             r = facts.validate_answer({"value": 1, "fragment": 1, "quote": quote, "comment": "x"}, self.FR)
             self.assertEqual((r["value"], r["verified"], r["quote"]), (1, False, None))
+            self.assertEqual((r["document_id"], r["fragment"], r["model_quote"]), (10, 1, quote or None))
+
+    def test_value_three_is_accepted(self):
+        """«3» («определить нельзя») — допустимый ответ."""
+        r = facts.validate_answer({"value": 3, "fragment": 0, "quote": "", "comment": "не по теме"}, self.FR)
+        self.assertEqual((r["value"], r["verified"]), (3, False))
+        self.assertEqual(facts.ANSWER_SCHEMA["properties"]["value"]["enum"], [0, 1, 2, 3])
 
     def test_fuzzy_quote_is_confirmed_and_returns_document_text(self):
         """Цитата с мелкими искажениями (перенос слова, опечатка OCR) подтверждается; возвращается текст документа."""
@@ -180,6 +187,7 @@ class QuoteValidationTests(unittest.TestCase):
     def test_garbage_answers(self):
         """Недопустимые значения и мусор не принимаются."""
         self.assertIsNone(facts.validate_answer({"value": 7, "quote": "x"}, self.FR))
+        self.assertIsNone(facts.validate_answer({"value": 4, "quote": "x"}, self.FR))
         self.assertIsNone(facts.validate_answer({"value": "abc"}, self.FR))
         self.assertIsNone(facts.validate_answer(None, self.FR))
         self.assertIsNone(facts.parse_answer("не json"))

@@ -101,8 +101,8 @@ def evidence_ok(fact: dict, doc_text: Optional[str]) -> bool:
 
     Факты из XML извещения (``eis_xml``) считаются доказанными структурой XML. Для остальных ответ «1»
     требует цитаты, которая дословно есть в тексте документа; для «0»/«2» цитата необязательна, но
-    если она указана, то тоже должна быть в тексте. Значение «0»/«2» без подтверждения ставится в
-    заключение как предложение модели (статус ``proposed`` в ``trace``) — см. :func:`assemble`.
+    если она указана, то тоже должна быть в тексте. Значение без подтверждения ставится в заключение как
+    предложение модели (статус ``proposed`` в ``trace``) — см. :func:`assemble`.
 
     Args:
         fact: Строка ``pe_facts`` (``dict``) с уже разобранным ``value``.
@@ -176,12 +176,14 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
             pass
         elif fact.get("source") == facts_mod.SOURCE_EIS or (result == 1 and proven):
             data[key], entry["status"] = result, "verified"
-        elif result in (0, 2):
-            # «отсутствует»/«не предусмотрено» нечем процитировать: ставим значение как предложение модели
-            data[key], entry["status"] = result, ("verified" if proven else "proposed")
         else:
-            # «1» без подтверждённой цитаты в заключение не попадает — эксперту остаётся предложение модели
-            entry["proposed_value"] = result
+            # значение без подтверждённой цитаты («отсутствует» нечем процитировать; «1» модель не смогла
+            # подтвердить) ставится как предложение модели: эксперт видит его в trace и проверяет
+            data[key], entry["status"] = result, ("verified" if proven else "proposed")
+            if not proven and fact["value_obj"].get("model_quote"):
+                entry["model_quote"] = fact["value_obj"]["model_quote"]
+        if result is None and fact["value_obj"].get("value") == 3:
+            entry["note"] = "по найденным фрагментам определить нельзя — оставлено эксперту"
         trace[key] = entry
 
     # итоги подразделов — из решённых дочерних критериев
@@ -299,6 +301,16 @@ def fill_general_info(fields: Sequence[dict], by_key: Dict[str, dict], documents
             if isinstance(item, dict) and re.search(r"нмцк|начальн", str(item.get("context") or ""), re.I):
                 put("field1_1", _number(item.get("value")), "proposed", doc.get("filename") or "extraction",
                     (item.get("evidence") or {}).get("fragment") if isinstance(item.get("evidence"), dict) else None)
+
+    # наименование и идентификационный код из текста печатной формы извещения (если XML нет)
+    for doc in notice_docs:
+        text = doc.get("text") or ""
+        match = re.search(r"Наименование объекта закупки[\s:|\-–—]*([^\n|]{5,300})", text, re.I)
+        if match:
+            put("name", match.group(1).strip(), "proposed", doc.get("filename") or "notice", match.group(0).strip())
+        match = re.search(r"(?<!\d)(\d{36})(?!\d)", text)
+        if match:
+            put("inn", match.group(1), "proposed", doc.get("filename") or "notice", match.group(1))
 
     # состав комплекта документации
     if "documents" in data and data["documents"] is None and docs:

@@ -59,18 +59,18 @@ class AssembleTests(unittest.TestCase):
     """assemble / validate без БД и LLM."""
 
     def test_keys_exactly_form_and_unproven_left_null(self):
-        """data содержит ровно ключи формы; значения без доказательства не ставятся."""
+        """data содержит ровно ключи формы; значения без доказательства ставятся как proposed."""
         rows = [
             fact("field2_1_1", 1, source="eis_xml", quote="fullName = Вуз"),         # XML — доказано
             fact("field2_1_2", 1, quote="Адрес: Москва"),                          # цитата есть в тексте
-            fact("field2_2_4_1", 1, quote="цитаты нет в документе"),                # цитата выдумана
+            fact("field2_2_4_1", 1, quote="цитаты нет в документе"),                # цитата выдумана → proposed
             fact("field2_2_4_2", 0, comment="цена не указана"),                     # «0» без цитаты допустим
         ]
         data, trace = summary.assemble(FIELDS, rows, DOCS, {"nmck": 1500000, "advance": None})
         self.assertEqual(set(data), {f["field_key"] for f in FIELDS})
         self.assertEqual((data["field2_1_1"], data["field2_1_2"]), (1, 1))
-        self.assertIsNone(data["field2_2_4_1"])
-        self.assertEqual(trace["field2_2_4_1"]["status"], "unverified")
+        self.assertEqual(data["field2_2_4_1"], 1)
+        self.assertEqual(trace["field2_2_4_1"]["status"], "proposed")
         self.assertEqual(data["field2_2_4_2"], 0)
         self.assertEqual(data["field2_2_4"], 0)                      # итог подраздела: есть «0»
         self.assertEqual(data["field2_2_4_text"], "цена не указана")   # пояснение к отрицательному результату
@@ -78,18 +78,22 @@ class AssembleTests(unittest.TestCase):
         self.assertIsNone(data["field1_2"])
         self.assertEqual(summary.validate(data, FIELDS), [])
 
-    def test_one_without_proof_not_set_but_zero_proposed(self):
-        """«1» без доказательства не попадает в data (предложение — в trace); «0» без цитаты ставится как proposed."""
-        rows = [fact("field2_1_1", 1, quote=None), fact("field2_1_2", 1, verified=False, quote="Адрес: Москва"),
+    def test_unproven_values_are_proposed_and_three_is_left_to_expert(self):
+        """«1»/«0»/«2» без доказательства ставятся как proposed (с исходной цитатой модели); «3» остаётся эксперту."""
+        rows = [fact("field2_1_1", 1, quote=None, verified=False), fact("field2_1_2", 1, verified=False, quote="Адрес: Москва"),
                 fact("field2_2_4_1", 0, verified=False, comment="сведений нет"),
                 fact("field2_2_4_2", 2, verified=False, comment="не предусмотрено")]
+        rows[0]["value"]["model_quote"] = "Срок оплаты"
         data, trace = summary.assemble(FIELDS, rows, DOCS)
-        self.assertIsNone(data["field2_1_1"])
-        self.assertIsNone(data["field2_1_2"])
-        self.assertEqual(trace["field2_1_1"]["status"], "unverified")
-        self.assertEqual(trace["field2_1_1"]["proposed_value"], 1)
+        self.assertEqual((data["field2_1_1"], data["field2_1_2"]), (1, 1))
+        self.assertEqual(trace["field2_1_1"]["status"], "proposed")
+        self.assertEqual(trace["field2_1_1"]["model_quote"], "Срок оплаты")
         self.assertEqual((data["field2_2_4_1"], data["field2_2_4_2"]), (0, 2))
         self.assertEqual((trace["field2_2_4_1"]["status"], trace["field2_2_4_2"]["status"]), ("proposed", "proposed"))
+        three = fact("field2_1_1", 3, verified=False, comment="не по теме")
+        data, trace = summary.assemble(FIELDS, [three], DOCS)
+        self.assertIsNone(data["field2_1_1"])
+        self.assertIn("note", trace["field2_1_1"])
 
     def test_general_info_from_xml_passport_and_documents(self):
         """name/inn/НМЦК/аванс — из фактов XML, состав комплекта — из документов; шифр и финансирование остаются эксперту."""
@@ -346,3 +350,17 @@ class SummaryDbTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoticeTextFallbackTests(unittest.TestCase):
+    """Наименование и идентификационный код из текста печатной формы извещения."""
+
+    def test_name_and_ikz_from_notice_text(self):
+        """Без XML и extraction наименование и ИКЗ берутся регулярками из текста извещения (proposed)."""
+        fields = [field("name", "meta"), field("inn", "meta")]
+        text = "Наименование объекта закупки: Услуги по организации отдыха\nИКЗ 262012345678901234567890123456789012"
+        docs = {1: {"filename": "n.html", "doc_code": "docIzvejenieFiles", "text": text}}
+        data, trace = summary.assemble(fields, [], docs)
+        self.assertEqual(data["name"], "Услуги по организации отдыха")
+        self.assertEqual(data["inn"], "262012345678901234567890123456789012")
+        self.assertEqual(trace["name"]["status"], "proposed")
