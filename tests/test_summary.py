@@ -540,6 +540,8 @@ class RenderBlockTests(unittest.TestCase):
         text = summary.render_block("field3", {"notice": "", "items": []},
                                     [{"number": "1.4", "criterion": "1.4. Наличие информации о почте", "comment": "x"}], None, "1", None)
         self.assertIn("за исключением: Наличие информации о почте", text)
+        mixed = [{"number": "1.4", "criterion": "1.4. Почта", "comment": "x"}, {"number": "2.2", "criterion": "2.2. НМЦК", "comment": "y"}]
+        self.assertIsNone(summary.render_block("field3", {"notice": "", "items": []}, mixed, None, "1", None))   # пропущен раздел 2
 
     def test_runaway_output_falls_back(self):
         """Бесконечный/обрезанный ответ модели → шаблон с причиной в trace."""

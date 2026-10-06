@@ -509,7 +509,7 @@ FIELD3_SCHEMA = {
     "type": "object",
     "properties": {
         "notice": {"type": "string", "maxLength": 500},
-        "items": {"type": "array", "maxItems": 12, "items": {
+        "items": {"type": "array", "minItems": 1, "maxItems": 12, "items": {
             "type": "object",
             "properties": {"numbers": {"type": "string", "maxLength": 60}, "text": {"type": "string", "maxLength": 400}},
             "required": ["numbers", "text"]}},
@@ -519,12 +519,12 @@ FIELD3_SCHEMA = {
 FIELD4_SCHEMA = {
     "type": "object",
     "properties": {
-        "areas": {"type": "array", "maxItems": 6, "items": {
+        "areas": {"type": "array", "minItems": 1, "maxItems": 6, "items": {
             "type": "object",
             "properties": {"area": {"type": "string", "maxLength": 80}, "summary": {"type": "string", "maxLength": 300}},
             "required": ["area", "summary"]}},
         "note": {"type": "string", "maxLength": 400},
-        "recommendations": {"type": "array", "maxItems": 6, "items": {"type": "string", "maxLength": 260}},
+        "recommendations": {"type": "array", "minItems": 1, "maxItems": 6, "items": {"type": "string", "minLength": 10, "maxLength": 260}},
     },
     "required": ["areas", "note", "recommendations"],
 }
@@ -647,7 +647,8 @@ def render_block(key: str, parsed: dict, remarks: Sequence[dict], name: Optional
         notice_remarks = [r for r in remarks if (r.get("number") or "").startswith("1.")]
         if notice_remarks and not notice:
             notice = "; ".join(_title(r["criterion"])[:90] for r in notice_remarks[:6])     # модель пропустила раздел 1
-        if remarks and not notice and not items:
+        other_remarks = [r for r in remarks if r not in notice_remarks]
+        if (remarks and not parsed.get("notice") and not items) or (other_remarks and not items):
             return None                              # пустой ответ при наличии замечаний — не принимаем
         head = f"Информация, представленная в извещении{num}, соответствует требованиям законодательства"
         head += f", за исключением: {notice.rstrip('.')}." if notice else "."
@@ -779,13 +780,14 @@ async def write_blocks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict
                         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
             for attempt in range(2):          # обрезанный/невалидный ответ — одна повторная попытка
                 try:
-                    parsed = parse_block(await llm_call(messages, BLOCK_SCHEMAS[key]))
+                    raw = await llm_call(messages, BLOCK_SCHEMAS[key])
+                    parsed = parse_block(raw)
                     candidate = ((parsed.get("text") or "").strip() if parsed.get("text")
                                  else render_block(key, parsed, remarks, data.get("name"), data.get("code"), procedure))
                     if candidate:
                         text, how = candidate, "llm"
                         break
-                    llm_error = "пустой ответ модели"
+                    llm_error = f"пустой ответ модели: {_clip(raw, 200)}"
                 except Exception as e:  # noqa: BLE001 — блок не должен ронять сборку
                     llm_error = f"{type(e).__name__}: {e}"[:300]
                     logger.warning(f"knowledge_store: блок {key}, попытка {attempt + 1}: {llm_error}")
