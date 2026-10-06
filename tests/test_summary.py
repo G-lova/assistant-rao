@@ -197,7 +197,7 @@ class BlocksTests(unittest.TestCase):
 
         asyncio.run(summary.write_blocks(FIELDS, self.data, self.trace, broken))
         self.assertEqual(self.trace["field4"]["method"], "template")
-        self.assertIn("требует доработки", self.data["field4"])
+        self.assertIn("за исключением указанных несоответствий", self.data["field4"])
 
 
 class FakeResponse:
@@ -392,7 +392,7 @@ class FallbackBlockTests(unittest.TestCase):
                    {"criterion": "2.2.7.2. Соответствие потенциальных поставщиков", "comment": "", "quote": ""}]
         text = summary.fallback_block("field4", remarks, {"checked": 60, "remarks": 2})
         self.assertNotIn("раздел", text.lower())
-        self.assertIn("требует доработки", text)
+        self.assertIn("Заказчику рекомендуется:", text)
 
 
 class ExpertStyleTextTests(unittest.TestCase):
@@ -402,13 +402,18 @@ class ExpertStyleTextTests(unittest.TestCase):
         """field3: «Выявлены несоответствия и недостатки по критериям:» и строки «номер. название. суть»."""
         remarks = [{"criterion": "1.14. Наличие информации о единице измерения", "comment": "Единица измерения не указана.", "quote": ""}]
         text = summary.fallback_block("field3", remarks, {"checked": 5, "remarks": 1})
-        self.assertTrue(text.startswith("Выявлены несоответствия и недостатки по критериям:"))
-        self.assertIn("1.14. Наличие информации о единице измерения. Единица измерения не указана.", text)
+        remarks[0]["number"] = "2.2.7.2"
+        remarks[0]["criterion"] = "2.2.7.2. Соответствие потенциальных поставщиков"
+        text = summary.fallback_block("field3", remarks, {"checked": 5, "remarks": 1}, number="0373100100526000035")
+        self.assertIn("Информация, представленная в извещении № 0373100100526000035, соответствует требованиям законодательства.", text)
+        self.assertIn("Выявлены несоответствия и недостатки по критериям:", text)
+        self.assertIn("2.2.7.2 «Соответствие потенциальных поставщиков». Единица измерения не указана.", text)
 
     def test_field4_without_remarks(self):
         """Без замечаний field4 — «целесообразно оформить документацию и осуществить закупку»."""
         text = summary.fallback_block("field4", [], {"checked": 5, "remarks": 0}, "услуги связи")
-        self.assertIn("на услуги связи целесообразно оформить документацию", text)
+        self.assertIn("на услуги связи соответствуют требованиям", text)
+        self.assertIn("целесообразно оформить документацию", text)
 
     def test_clean_comment_removes_fragment_refs(self):
         """«В фрагменте 6» заменяется ссылкой на документ."""
@@ -440,3 +445,24 @@ class NmckTextFieldTests(unittest.TestCase):
         self.assertEqual(data["m_norm"], 2)
         self.assertIsNone(data["m_norm_text"])
         self.assertEqual(summary.validate(data, fields), [])
+
+
+class Field4SampleTests(unittest.TestCase):
+    """field4 по образцу «Пример ЭЗ (конкурс)»: способ, номер, предмет, рекомендации; шифр = реестровый номер."""
+
+    def test_field4_like_sample(self):
+        """Заключение: «Извещение и документация о проведении открытого конкурса в электронной форме для закупки № … на … соответствуют …»."""
+        remarks = [{"number": "2.2", "criterion": "2.2. Соответствие обоснования НМЦК", "comment": "x", "quote": ""}]
+        text = summary.fallback_block("field4", remarks, {"checked": 9, "remarks": 1}, "оказание услуг",
+                                      "0373100100526000035", summary.procedure_phrase("44fz_competition_obj6"))
+        self.assertTrue(text.startswith("Извещение и документация о проведении открытого конкурса в электронной форме "
+                                        "для закупки № 0373100100526000035 на оказание услуг соответствуют требованиям законодательства, "
+                                        "за исключением указанных несоответствий и недостатков."))
+        self.assertIn("Заказчику рекомендуется:\n- устранить выявленное несоответствие по критерию 2.2.", text)
+
+    def test_code_is_registry_number(self):
+        """code берётся из реестрового номера в имени файла извещения."""
+        fields = [field("code", "meta")]
+        docs = {1: {"filename": "Печатная-форма-извещения-№-0301100027726000035-(версия-1).html", "doc_code": "docIzvejenieFiles", "text": "т"}}
+        data, trace = summary.assemble(fields, [], docs)
+        self.assertEqual(data["code"], "0301100027726000035")
