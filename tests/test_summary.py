@@ -73,7 +73,7 @@ class AssembleTests(unittest.TestCase):
         self.assertEqual(trace["field2_2_4_1"]["status"], "proposed")
         self.assertEqual(data["field2_2_4_2"], 0)
         self.assertEqual(data["field2_2_4"], 0)                      # итог подраздела: есть «0»
-        self.assertEqual(data["field2_2_4_text"], "цена не указана")   # пояснение к отрицательному результату
+        self.assertEqual(data["field2_2_4_text"], "1. 2.2 цена не указана")   # пояснение к отрицательному результату
         self.assertEqual(data["field1_1"], 1500000.0)                  # из паспорта
         self.assertIsNone(data["field1_2"])
         self.assertEqual(summary.validate(data, FIELDS), [])
@@ -186,7 +186,7 @@ class BlocksTests(unittest.TestCase):
             raise AssertionError("LLM не нужна")
 
         asyncio.run(summary.write_blocks(FIELDS, data, trace, llm))
-        self.assertIn("не выявлено", data["field3"])
+        self.assertIn("соответствует требованиям", data["field3"])
         self.assertEqual(trace["field4"]["method"], "template")
 
     def test_llm_failure_falls_back_to_template(self):
@@ -197,7 +197,7 @@ class BlocksTests(unittest.TestCase):
 
         asyncio.run(summary.write_blocks(FIELDS, self.data, self.trace, broken))
         self.assertEqual(self.trace["field4"]["method"], "template")
-        self.assertIn("замечаний: 1", self.data["field4"])
+        self.assertIn("требует доработки", self.data["field4"])
 
 
 class FakeResponse:
@@ -392,5 +392,37 @@ class FallbackBlockTests(unittest.TestCase):
                    {"criterion": "2.2.7.2. Соответствие потенциальных поставщиков", "comment": "", "quote": ""}]
         text = summary.fallback_block("field4", remarks, {"checked": 60, "remarks": 2})
         self.assertNotIn("раздел", text.lower())
-        self.assertIn("замечаний: 2", text)
-        self.assertIn("Наличие информации о единице измерения", text)
+        self.assertIn("требует доработки", text)
+
+
+class ExpertStyleTextTests(unittest.TestCase):
+    """Тексты в стиле экспертов: field3, блок 1, чистка ссылок на фрагменты."""
+
+    def test_field3_fallback_lists_criteria(self):
+        """field3: «Выявлены несоответствия и недостатки по критериям:» и строки «номер. название. суть»."""
+        remarks = [{"criterion": "1.14. Наличие информации о единице измерения", "comment": "Единица измерения не указана.", "quote": ""}]
+        text = summary.fallback_block("field3", remarks, {"checked": 5, "remarks": 1})
+        self.assertTrue(text.startswith("Выявлены несоответствия и недостатки по критериям:"))
+        self.assertIn("1.14. Наличие информации о единице измерения. Единица измерения не указана.", text)
+
+    def test_field4_without_remarks(self):
+        """Без замечаний field4 — «целесообразно оформить документацию и осуществить закупку»."""
+        text = summary.fallback_block("field4", [], {"checked": 5, "remarks": 0}, "услуги связи")
+        self.assertIn("на услуги связи целесообразно оформить документацию", text)
+
+    def test_clean_comment_removes_fragment_refs(self):
+        """«В фрагменте 6» заменяется ссылкой на документ."""
+        self.assertEqual(summary.clean_comment("В фрагменте 6 указано X", "p.docx"), "В документе «p.docx» указано X")
+        self.assertEqual(summary.clean_comment("Из фрагментов 1 и 3 видно", None), "Из документации видно")
+
+    def test_section_one_text(self):
+        """Текст блока 1: без замечаний — «соответствует», с замечаниями — нумерованный перечень с номерами критериев."""
+        fields = [field("field2_1_text", "text"),
+                  field("field2_1_1", "presence", "1.1. Наличие информации о заказчике"),
+                  field("field2_1_2", "presence", "1.2. Наличие информации о почте")]
+        data, _ = summary.assemble(fields, [fact("field2_1_1", 1, quote="Срок оплаты"), fact("field2_1_2", 1, quote="Адрес: Москва")], DOCS)
+        self.assertIn("соответствует требованиям", data["field2_1_text"])
+        rows = [fact("field2_1_1", 1, quote="Срок оплаты"), fact("field2_1_2", 0, comment="Почта не указана.")]
+        data, _ = summary.assemble(fields, rows, DOCS)
+        self.assertIn("необходимо обратить внимание", data["field2_1_text"])
+        self.assertIn("1. 1.2 Почта не указана.", data["field2_1_text"])

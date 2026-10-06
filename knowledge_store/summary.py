@@ -188,6 +188,39 @@ def section_result(children: Sequence[Optional[int]]) -> Optional[int]:
     return None
 
 
+def numbered(items: Sequence[str]) -> str:
+    """Нумерованный перечень («1. …»), как пишут эксперты в полях ``*_text``."""
+    return "\n".join(f"{i}. {text}" for i, text in enumerate(items, 1))
+
+
+def clean_comment(comment: Optional[str], filename: Optional[str] = None) -> Optional[str]:
+    """Убирает из пояснения модели ссылки на «фрагменты» (их нумерация эксперту ничего не говорит).
+
+    «В фрагменте 6 указано…» → «В документе «имя» указано…» (или «В документации указано…»).
+
+    Args:
+        comment: Пояснение модели.
+        filename: Имя документа факта.
+
+    Returns:
+        Optional[str]: Очищенный текст.
+    """
+    if not comment:
+        return comment
+    name = f"«{filename}»" if filename else ""
+
+    def repl(m: "re.Match") -> str:
+        """«В фрагменте N» → «В документе «имя»»; «из фрагмента N» → «из документа «имя»»."""
+        prep = m.group(1)
+        if prep.lower() == "в":
+            return f"{prep} {'документе ' + name if name else 'документации'}".strip()
+        return f"{prep} {'документа ' + name if name else 'документации'}".strip()
+
+    text = re.sub(r"(?i)\b(в|из)\s+фрагмент(?:е|ах|ов|а)\s*\d+(?:\s*(?:,|и|-)\s*\d+)*", repl, comment)
+    text = re.sub(r"(?i)\bфрагмент(?:е|ах|ов|а)?\s*\d+", "документ", text)
+    return text.strip()
+
+
 def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[int, dict],
              procurement: Optional[dict] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Собирает ``data`` и ``trace`` по полям формы (без LLM).
@@ -222,7 +255,8 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
             continue
         doc = documents.get(fact.get("document_id")) or {}
         entry = {"status": "unverified", "source": fact.get("source"), "document": doc.get("filename"),
-                 "page": fact.get("page"), "quote": fact.get("quote"), "comment": fact["comment"]}
+                 "page": fact.get("page"), "quote": fact.get("quote"),
+                 "comment": clean_comment(fact["comment"], doc.get("filename"))}
         result = fact["result"]
         proven = bool(fact["verified"]) and evidence_ok(fact, doc.get("text"))
         if result is None:
@@ -253,21 +287,39 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
         data[key] = section_result(children)
         trace[key] = {"status": "derived", "rule": "0 — есть несоответствие; 1 — все критерии решены; иначе эксперту"}
 
-    # комментарии `<ключ>_text`: пояснение модели к отрицательному результату
+    # комментарии `<ключ>_text` — в стиле экспертов: нумерованный перечень существа замечаний
+    labels = {f["field_key"]: f.get("label") or "" for f in fields}
+
+    def children(base: str) -> List[str]:
+        """Критерии-«листья» раздела/подраздела по префиксу ключа."""
+        return [k for k in data if kinds.get(k) in RESULT_KINDS and k.startswith(base + "_")
+                and k[len(base) + 1:len(base) + 2].isdigit()]
+
     for key in list(data):
-        if key.endswith("_text") and kinds.get(key) == forms.KIND_TEXT:
-            base = key[:-5]
+        if not (key.endswith("_text") and kinds.get(key) == forms.KIND_TEXT):
+            continue
+        base = key[:-5]
+        if base in kinds and kinds[base] in RESULT_KINDS:
             if data.get(base) != 0:
                 continue
             comment = trace.get(base, {}).get("comment")
-            if not comment and kinds.get(base) == forms.KIND_SECTION:
-                # итог подраздела: пояснения его критериев с отрицательным результатом
-                parts = [trace[k]["comment"] for k in data if k.startswith(base + "_") and k[len(base) + 1:len(base) + 2].isdigit()
-                         and data[k] == 0 and trace.get(k, {}).get("comment")]
-                comment = "; ".join(parts)
             if comment:
-                data[key] = comment
+                data[key] = numbered([comment])
                 trace[key] = {"status": "derived", "rule": f"пояснение к {base}"}
+            continue
+        kids = children(base)
+        if not kids:
+            continue
+        bad = [k for k in kids if data[k] == 0 and trace.get(k, {}).get("comment")]
+        if bad:
+            lines = [f"{eis_notice.criterion_number(labels.get(k, '')) or ''} {trace[k]['comment']}".strip() for k in bad]
+            head = ("По результатам экспертной оценки соответствия информации, представленной в извещении, "
+                    "необходимо обратить внимание на следующие пункты:\n") if base == "field2_1" else ""
+            data[key] = head + numbered(lines)
+            trace[key] = {"status": "derived", "rule": f"замечания критериев {base}_*"}
+        elif base == "field2_1" and all(data[k] is not None for k in kids):
+            data[key] = "Информация, представленная в извещении, соответствует требованиям действующего законодательства Российской Федерации."
+            trace[key] = {"status": "derived", "rule": "по критериям блока 1 замечаний нет"}
 
     fill_general_info(fields, by_key, documents, procurement or {}, data, trace)
     return data, trace
@@ -413,25 +465,41 @@ def collect_remarks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict[st
     return remarks
 
 
-def fallback_block(key: str, remarks: Sequence[dict], stats: Dict[str, int]) -> str:
-    """Детерминированный текст блока (если LLM недоступна или ответ не прошёл проверку).
+LAW_44FZ = ("Федерального закона от 05.04.2013 № 44-ФЗ «О контрактной системе в сфере закупок товаров, работ, услуг "
+            "для обеспечения государственных и муниципальных нужд»")
+
+
+def fallback_block(key: str, remarks: Sequence[dict], stats: Dict[str, int], name: Optional[str] = None) -> str:
+    """Детерминированный текст блока в формулировках, которые используют эксперты (если LLM недоступна).
+
+    * ``field3`` («Вывод») — «Выявлены несоответствия и недостатки по критериям:» и перечень «номер. название. суть»;
+      без замечаний — «Документация … соответствует требованиям действующего законодательства».
+    * ``field4`` («Заключение») — итоговая формула: «… требует доработки и не может являться основанием …» либо
+      «… целесообразно оформить документацию и осуществить закупку …». Сама самостоятельна, без ссылок на другие блоки.
 
     Args:
         key: ``field3`` или ``field4``.
         remarks: Проверенные замечания.
         stats: Счётчики (``checked``, ``remarks``).
+        name: Наименование объекта закупки (для ``field4``).
 
     Returns:
-        str: Текст блока. ``field4`` — самостоятельный вывод (итог и суть замечаний), без ссылок на другие блоки.
+        str: Текст блока.
     """
-    if not remarks:
-        return ("Замечаний по проверенным критериям не выявлено." if key == "field3"
-                else f"По результатам проверки ({stats['checked']} критериев) замечаний не выявлено.")
     if key == "field3":
-        return "\n".join(f"{i}. {r['criterion']}" for i, r in enumerate(remarks, 1))
-    items = "; ".join(re.sub(r"^\s*\d+(?:\.\d+)*\.?\s*", "", r["criterion"]).rstrip(" .") for r in remarks)
-    return (f"По результатам проверки ({stats['checked']} критериев) выявлено замечаний: {len(remarks)}. "
-            f"Выявлены несоответствия: {items}. Документация требует доработки.")
+        if not remarks:
+            return "Документация о проведении закупки соответствует требованиям действующего законодательства Российской Федерации."
+        lines = []
+        for r in remarks:
+            comment = (r.get("comment") or "").strip()
+            lines.append(f"{r['criterion'].rstrip(' .')}. {comment}".strip())
+        return "Выявлены несоответствия и недостатки по критериям:\n" + "\n".join(lines)
+    if not remarks:
+        subject = f" на {name}" if name else ""
+        return (f"На основании представленной документации о проведении закупки{subject} целесообразно оформить документацию "
+                f"и осуществить закупку в соответствии с требованиями {LAW_44FZ}.")
+    return ("Представленная документация о проведении закупки требует доработки и не может являться основанием для "
+            f"оформления документации и осуществления закупки в соответствии с требованиями {LAW_44FZ}.")
 
 
 async def write_blocks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict[str, Any],
@@ -459,7 +527,8 @@ async def write_blocks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict
             continue
         text, how = None, "template"
         if llm_call is not None and remarks:
-            payload = {"блок": BLOCK_TITLES[key], "счётчики": stats, "замечания": remarks}
+            payload = {"блок": BLOCK_TITLES[key], "объект закупки": data.get("name"), "счётчики": stats,
+                       "замечания": remarks}
             messages = [{"role": "system", "content": prompt},
                         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
             try:
@@ -469,7 +538,7 @@ async def write_blocks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict
                     text, how = candidate, "llm"
             except Exception as e:  # noqa: BLE001 — блок не должен ронять сборку
                 logger.warning(f"knowledge_store: блок {key} сформирован по шаблону: {type(e).__name__}")
-        data[key] = text or fallback_block(key, remarks, stats)
+        data[key] = text or fallback_block(key, remarks, stats, data.get("name"))
         trace[key] = {"status": "generated", "method": how, "based_on": [r["field_key"] for r in remarks]}
     return stats
 
