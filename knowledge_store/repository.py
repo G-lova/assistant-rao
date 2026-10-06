@@ -433,7 +433,7 @@ async def list_expertises_with_texts(conn) -> List[int]:
 
 
 SQL_DOCUMENTS_BRIEF = """
-SELECT id, doc_code, filename, text_full, text_purged_at, (text_full IS NOT NULL) AS has_text
+SELECT id, doc_code, filename, text_full, text_purged_at, extraction, (text_full IS NOT NULL) AS has_text
 FROM pe_documents WHERE expertise_id = $1 ORDER BY id
 """
 SQL_INSERT_SUMMARY = """
@@ -454,7 +454,7 @@ async def get_documents_brief(conn, expertise_id: int) -> list:
         expertise_id: ID экспертизы.
 
     Returns:
-        list: Записи ``id, doc_code, filename, text_full, text_purged_at, has_text``.
+        list: Записи ``id, doc_code, filename, text_full, text_purged_at, extraction, has_text``.
     """
     return list(await conn.fetch(SQL_DOCUMENTS_BRIEF, int(expertise_id)))
 

@@ -95,7 +95,8 @@ def purge_expired_texts_task():
 
 
 @celery_app.task(bind=True, name="generate_summary_opinion_task")
-def generate_summary_opinion_task(self, expertise_id: int, environment: str, send_draft: bool = False):
+def generate_summary_opinion_task(self, expertise_id: int, environment: str, send_draft: bool = False,
+                                  rebuild_facts: bool = False):
     """Генерирует сводное ЭЗ из хранилища знаний (факты → ``data`` по ключам формы, ``trace`` отдельно).
 
     Если фактов ещё нет и они включены (``PE_FACTS_ENABLED``), строит их по сохранённым текстам.
@@ -105,6 +106,7 @@ def generate_summary_opinion_task(self, expertise_id: int, environment: str, sen
         expertise_id: ID экспертизы.
         environment: Окружение (``X-API-Database``).
         send_draft: Отправлять ли черновик в основную БД.
+        rebuild_facts: Пересчитать факты по сохранённым текстам перед сборкой.
 
     Returns:
         dict: ``summary_id``, ``form_code``, ``status``, ``data``, ``trace``, ``stats``, ``problems``,
@@ -130,7 +132,7 @@ def generate_summary_opinion_task(self, expertise_id: int, environment: str, sen
 
             try:
                 async with get_async_db_connection() as conn:
-                    result = await summary.generate_summary(conn, int(expertise_id), llm_call, build_facts)
+                    result = await summary.generate_summary(conn, int(expertise_id), llm_call, build_facts, rebuild_facts)
             except summary.SummaryError as e:
                 return {"error": e.message, "http_status": e.http_status}
             if send_draft:

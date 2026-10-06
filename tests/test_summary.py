@@ -78,13 +78,51 @@ class AssembleTests(unittest.TestCase):
         self.assertIsNone(data["field1_2"])
         self.assertEqual(summary.validate(data, FIELDS), [])
 
-    def test_unverified_and_one_without_quote_rejected(self):
-        """Ответ «1» без цитаты и непроверенный факт не попадают в data; факты хранятся в trace."""
-        rows = [fact("field2_1_1", 1, quote=None), fact("field2_1_2", 1, verified=False, quote="Адрес: Москва")]
+    def test_one_without_proof_not_set_but_zero_proposed(self):
+        """«1» без доказательства не попадает в data (предложение — в trace); «0» без цитаты ставится как proposed."""
+        rows = [fact("field2_1_1", 1, quote=None), fact("field2_1_2", 1, verified=False, quote="Адрес: Москва"),
+                fact("field2_2_4_1", 0, verified=False, comment="сведений нет"),
+                fact("field2_2_4_2", 2, verified=False, comment="не предусмотрено")]
         data, trace = summary.assemble(FIELDS, rows, DOCS)
         self.assertIsNone(data["field2_1_1"])
         self.assertIsNone(data["field2_1_2"])
         self.assertEqual(trace["field2_1_1"]["status"], "unverified")
+        self.assertEqual(trace["field2_1_1"]["proposed_value"], 1)
+        self.assertEqual((data["field2_2_4_1"], data["field2_2_4_2"]), (0, 2))
+        self.assertEqual((trace["field2_2_4_1"]["status"], trace["field2_2_4_2"]["status"]), ("proposed", "proposed"))
+
+    def test_general_info_from_xml_passport_and_documents(self):
+        """name/inn/НМЦК/аванс — из фактов XML, состав комплекта — из документов; шифр и финансирование остаются эксперту."""
+        fields = [field("code", "meta"), field("name", "meta"), field("inn", "meta"), field("documents", "meta"),
+                  field("field1_1", "number"), field("field1_2", "number"), field("field1_3", "text"),
+                  field("field1_2_unit", "text"),
+                  field("f8", "presence", "1.8. Наличие информации об идентификационном коде закупки"),
+                  field("f11", "presence", "1.11. Наличие информации о наименовании объекта закупки"),
+                  field("f18", "presence", "1.18. Наличие информации о начальной (максимальной) цене"),
+                  field("f22", "presence", "1.22. Наличие информации о размере аванса")]
+        rows = [fact("f8", 1, source="eis_xml", quote="notificationInfo/contractConditionsInfo/IKZInfo/purchaseCode = 2325"),
+                fact("f11", 1, source="eis_xml", quote="commonInfo/purchaseObjectInfo = Услуги связи"),
+                fact("f18", 1, source="eis_xml", quote="notificationInfo/contractConditionsInfo/maxPriceInfo/maxPrice = 1500000.50"),
+                fact("f22", 1, source="eis_xml", quote="notificationInfo/contractConditionsInfo/advancePaymentSum/sumInPercents = 30")]
+        docs = {1: {"filename": "n.xml", "doc_code": "docIzvejenieFiles", "text": "т"},
+                2: {"filename": "o.docx", "doc_code": "docOpisanieFiles", "text": "т"}}
+        data, trace = summary.assemble(fields, rows, docs)
+        self.assertEqual((data["name"], data["inn"], data["field1_1"], data["field1_2"], data["field1_2_unit"]),
+                         ("Услуги связи", "2325", 1500000.5, 30.0, "%"))
+        self.assertIn("n.xml", data["documents"])
+        self.assertIn("o.docx", data["documents"])
+        self.assertIsNone(data["code"])
+        self.assertIsNone(data["field1_3"])
+
+    def test_general_info_fallback_to_extraction_is_proposed(self):
+        """Без XML предмет закупки и НМЦК берутся из данных извлечения документов и помечаются proposed."""
+        fields = [field("name", "meta"), field("field1_1", "number")]
+        extraction = {"raw_data": {"procurement_subject": {"description": "Оказание услуг связи"},
+                                   "finances": [{"value": "1 200 000,00", "context": "НМЦК", "evidence": {"fragment": "НМЦК 1 200 000,00"}}]}}
+        docs = {1: {"filename": "n.docx", "doc_code": "docIzvejenieFiles", "text": "т", "extraction": json.dumps(extraction)}}
+        data, trace = summary.assemble(fields, [], docs)
+        self.assertEqual((data["name"], data["field1_1"]), ("Оказание услуг связи", 1200000.0))
+        self.assertEqual((trace["name"]["status"], trace["field1_1"]["status"]), ("proposed", "proposed"))
 
     def test_section_rules(self):
         """Итог подраздела: все решены → 1; есть нерешённый без «0» → None."""

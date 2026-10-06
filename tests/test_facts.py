@@ -148,10 +148,23 @@ class QuoteValidationTests(unittest.TestCase):
         self.assertFalse(facts.quote_in_text("срок 30 дней", self.FR[1].text))
         self.assertFalse(facts.quote_in_text("", self.FR[1].text))
 
-    def test_value_one_requires_verified_quote(self):
-        """Ответ «1» без цитаты или с выдуманной цитатой отвергается."""
-        self.assertIsNone(facts.validate_answer({"value": 1, "fragment": 1, "quote": "", "comment": "x"}, self.FR))
-        self.assertIsNone(facts.validate_answer({"value": 1, "fragment": 1, "quote": "несуществующий текст", "comment": ""}, self.FR))
+    def test_value_one_without_quote_is_kept_unverified(self):
+        """Ответ «1» без цитаты или с выдуманной цитатой сохраняется как неподтверждённый (в заключение не попадёт)."""
+        for quote in ("", "несуществующий текст про совсем другое"):
+            r = facts.validate_answer({"value": 1, "fragment": 1, "quote": quote, "comment": "x"}, self.FR)
+            self.assertEqual((r["value"], r["verified"], r["quote"]), (1, False, None))
+
+    def test_fuzzy_quote_is_confirmed_and_returns_document_text(self):
+        """Цитата с мелкими искажениями (перенос слова, опечатка OCR) подтверждается; возвращается текст документа."""
+        text = "Начальная (максимальная) цена контракта состав-\nляет 1 500 000 рублей, в том числе НДС"
+        found = facts.find_quote("Начальная максимальная цена контракта составляет 1 500 000 рублей", text)
+        self.assertIsNotNone(found)
+        self.assertTrue(facts.quote_in_text(found, text))            # точная проверка по документу проходит
+        self.assertIsNone(facts.find_quote("Срок оплаты 30 дней после подписания акта", text))
+        r = facts.validate_answer({"value": 1, "fragment": 1,
+                                   "quote": "Начальная максимальная цена контракта составляет 1 500 000 рублей", "comment": ""},
+                                  [facts.Fragment(1, 5, 2, text)])
+        self.assertEqual((r["verified"], r["document_id"], r["page"]), (True, 5, 2))
 
     def test_quote_found_in_other_fragment(self):
         """Если модель ошиблась номером фрагмента, цитата ищется в остальных; страница берётся у найденного."""
@@ -216,6 +229,29 @@ class ExtractorTests(unittest.TestCase):
         self.assertIn("поставка серверов", user)
         self.assertIn("2.1.1. Соответствие наименований", user)
         self.assertEqual((fact["fact_key"], fact["value"], fact["verified"], fact["page"]), ("k", 1, True, 2))
+
+    def test_zero_without_quote_is_rechecked_with_wider_search(self):
+        """«0» без цитаты проверяется повторно по большему числу фрагментов; найденная цитата даёт «1»."""
+        calls = []
+
+        async def search(conn, expertise_id, vector, k):
+            """Первый поиск не находит нужного, расширенный — находит."""
+            calls.append(k)
+            frags = [facts.Fragment(1, 1, 1, "Общие положения")]
+            if k > 2:
+                frags.append(facts.Fragment(2, 1, 2, "Электронная почта: zakaz@vuz.ru"))
+            return frags
+
+        async def llm(messages, schema):
+            """Отвечает «1» с цитатой, если показан фрагмент с почтой, иначе «0»."""
+            if "zakaz@vuz.ru" in messages[-1]["content"]:
+                return json.dumps({"value": 1, "fragment": 2, "quote": "Электронная почта: zakaz@vuz.ru", "comment": "есть"})
+            return json.dumps({"value": 0, "fragment": 0, "quote": "", "comment": "нет"})
+
+        extractor = facts.FactExtractor(llm, FakeEmbedder(), search=search, top_k=2, recheck_k=5)
+        fact = asyncio.run(extractor.extract_field(None, 1, {"field_key": "k", "label": "1.4. Наличие информации об электронной почте", "value_kind": "presence"}))
+        self.assertEqual(calls, [2, 5])
+        self.assertEqual((fact["value"], fact["verified"], fact["page"]), (1, True, 2))
 
     def test_no_fragments_means_no_fact(self):
         """Если текстов нет (например, удалены по сроку хранения), LLM не вызывается."""

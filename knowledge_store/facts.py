@@ -14,7 +14,9 @@
 """
 import asyncio
 import json
+import os
 import re
+from difflib import SequenceMatcher
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
@@ -81,6 +83,45 @@ def quote_in_text(quote: str, text: str) -> bool:
     return bool(needle) and needle in normalize(text)
 
 
+def find_quote(quote: str, text: str, threshold: float = 0.88) -> Optional[str]:
+    """Находит цитату в тексте: точно или с небольшими расхождениями (перенос слов, лишние символы OCR).
+
+    Модели часто возвращают цитату с мелкими искажениями. Поэтому после точного поиска (с учётом
+    регистра, пробелов, кавычек) ищется ближайшее окно слов текста, похожее на цитату не менее чем на
+    ``threshold``. Возвращается фрагмент **исходного текста** — его последующая точная проверка по
+    полному тексту документа проходит.
+
+    Args:
+        quote: Цитата из ответа модели.
+        text: Текст фрагмента.
+        threshold: Минимальное сходство (0..1) для нечёткого совпадения.
+
+    Returns:
+        Optional[str]: Подтверждённая цитата (текст из документа) или ``None``.
+    """
+    needle = normalize(quote)
+    if not needle:
+        return None
+    if needle in normalize(text):
+        return quote.strip()
+    words = [(m.start(), m.end(), normalize(m.group())) for m in re.finditer(r"\S+", text or "")]
+    words = [w for w in words if w[2]]
+    n = len(needle.split())
+    best_ratio, best_span = 0.0, None
+    for size in range(max(1, n - 2), n + 3):
+        for i in range(0, len(words) - size + 1):
+            candidate = " ".join(w[2] for w in words[i:i + size])
+            matcher = SequenceMatcher(None, candidate, needle, autojunk=False)
+            if matcher.real_quick_ratio() < threshold or matcher.quick_ratio() < threshold:
+                continue
+            ratio = matcher.ratio()
+            if ratio > best_ratio:
+                best_ratio, best_span = ratio, (i, i + size)
+    if best_span and best_ratio >= threshold:
+        return text[words[best_span[0]][0]:words[best_span[1] - 1][1]]
+    return None
+
+
 def criterion_text(label: str) -> str:
     """Убирает номер критерия из названия (``1.18. Наличие…`` → ``Наличие…``) — это поисковый запрос."""
     return re.sub(r"^\s*\d+(?:\.\d+)*\.?\s*", "", label or "").strip()
@@ -122,8 +163,11 @@ def parse_answer(raw: str) -> Optional[dict]:
 def validate_answer(answer: Optional[dict], fragments: Sequence[Fragment]) -> Optional[dict]:
     """Проверяет ответ модели и превращает его в факт.
 
-    Правила: значение должно быть 0/1/2; для ``1`` цитата обязана быть найдена в показанных фрагментах
-    (сначала в указанном моделью, затем в остальных); ответ ``1`` без подтверждённой цитаты отвергается.
+    Значение должно быть 0/1/2. Цитата ищется в показанных фрагментах (сначала в указанном моделью,
+    затем в остальных, с допуском на мелкие искажения — :func:`find_quote`). Признак ``verified``
+    означает, что цитата подтверждена текстом. Ответ «1» без подтверждённой цитаты **не отбрасывается**,
+    а сохраняется как неподтверждённый (``verified=False``): в заключение он не попадёт, но эксперт увидит
+    предложение модели. Ответы «0» и «2» цитаты не требуют (отсутствие нечем процитировать).
 
     Args:
         answer: Разобранный ответ модели.
@@ -131,7 +175,7 @@ def validate_answer(answer: Optional[dict], fragments: Sequence[Fragment]) -> Op
 
     Returns:
         Optional[dict]: ``{"value", "verified", "comment", "document_id", "page", "quote"}`` или ``None``,
-        если ответ не принят.
+        если ответ невалиден (нет значения 0/1/2).
     """
     if not answer:
         return None
@@ -143,7 +187,7 @@ def validate_answer(answer: Optional[dict], fragments: Sequence[Fragment]) -> Op
         return None
     quote = (answer.get("quote") or "").strip()
     comment = (answer.get("comment") or "").strip() or None
-    found = None
+    found, found_text = None, None
     if quote:
         order = []
         try:
@@ -153,19 +197,22 @@ def validate_answer(answer: Optional[dict], fragments: Sequence[Fragment]) -> Op
         except (TypeError, ValueError):
             pass
         order += [f for f in fragments if f not in order]
-        found = next((f for f in order if quote_in_text(quote, f.text)), None)
-    if value == 1 and not found:
-        return None  # утверждение «в наличии/соответствует» без доказательства не принимаем
+        for fragment in order:
+            found_text = find_quote(quote, fragment.text)
+            if found_text:
+                found = fragment
+                break
     return {"value": value, "verified": bool(found), "comment": comment,
             "document_id": found.document_id if found else None,
-            "page": found.page if found else None, "quote": quote[:500] if found else None}
+            "page": found.page if found else None, "quote": found_text[:500] if found else None}
 
 
 class FactExtractor:
     """Извлекает значения критериев формы из сохранённых текстов документов (RAG + LLM)."""
 
     def __init__(self, llm_call: LlmCall, embedder: Any, search: Optional[Callable] = None,
-                 top_k: int = 6, concurrency: int = 4, system_prompt: Optional[str] = None):
+                 top_k: Optional[int] = None, concurrency: int = 4, system_prompt: Optional[str] = None,
+                 recheck_k: Optional[int] = None):
         """Создаёт экстрактор.
 
         Args:
@@ -173,14 +220,18 @@ class FactExtractor:
             embedder: Клиент эмбеддингов с методом ``get_embeddings(texts)``.
             search: Функция поиска ``(conn, expertise_id, vector, k) -> list[Fragment]``;
                 по умолчанию — :func:`search_fragments` (pgvector).
-            top_k: Сколько фрагментов показывать модели.
+            top_k: Сколько фрагментов показывать модели (по умолчанию ``PE_FACTS_TOP_K``, 8).
             concurrency: Максимум одновременных запросов к LLM.
             system_prompt: Текст промпта; по умолчанию читается ``prompts/fact_extractor_prompt.txt``.
+            recheck_k: Если модель ответила «0» без цитаты, критерий проверяется повторно по такому числу
+                фрагментов (по умолчанию ``PE_FACTS_RECHECK_K``, 16; ``0`` — без повторной проверки):
+                «не нашли» среди первых фрагментов ещё не значит «отсутствует».
         """
         self.llm_call = llm_call
         self.embedder = embedder
         self.search = search or search_fragments
-        self.top_k = top_k
+        self.top_k = top_k or int(os.getenv("PE_FACTS_TOP_K", "8"))
+        self.recheck_k = int(os.getenv("PE_FACTS_RECHECK_K", "16")) if recheck_k is None else recheck_k
         self.semaphore = asyncio.Semaphore(concurrency)
         self.system_prompt = system_prompt or PROMPT_PATH.read_text(encoding="utf-8")
 
@@ -203,13 +254,22 @@ class FactExtractor:
         fragments = await self.search(conn, expertise_id, vectors[0], self.top_k)
         if not fragments:
             return None
-        messages = build_messages(field["label"], field["value_kind"], fragments, self.system_prompt)
-        async with self.semaphore:
-            raw = await self.llm_call(messages, ANSWER_SCHEMA)
-        fact = validate_answer(parse_answer(raw), fragments)
+        fact = await self._ask(field, fragments)
+        if fact and fact["value"] == 0 and not fact["verified"] and self.recheck_k > len(fragments):
+            wider = await self.search(conn, expertise_id, vectors[0], self.recheck_k)
+            if len(wider) > len(fragments):
+                again = await self._ask(field, wider)
+                fact = again or fact
         if fact:
             fact["fact_key"] = field["field_key"]
         return fact
+
+    async def _ask(self, field: dict, fragments: Sequence[Fragment]) -> Optional[dict]:
+        """Один запрос к модели по фрагментам; возвращает принятый факт или ``None``."""
+        messages = build_messages(field["label"], field["value_kind"], fragments, self.system_prompt)
+        async with self.semaphore:
+            raw = await self.llm_call(messages, ANSWER_SCHEMA)
+        return validate_answer(parse_answer(raw), fragments)
 
 
 async def search_fragments(conn, expertise_id: int, vector, k: int) -> List[Fragment]:

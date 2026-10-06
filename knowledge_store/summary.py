@@ -12,12 +12,13 @@
 Модуль не зависит от сети: LLM и построение фактов передаются снаружи.
 """
 import json
+import re
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 from configs.config import Config
 from configs.logger import get_logger
-from knowledge_store import facts as facts_mod, forms, repository as repo
+from knowledge_store import eis_notice, facts as facts_mod, forms, repository as repo
 
 logger = get_logger(__name__)
 
@@ -100,7 +101,8 @@ def evidence_ok(fact: dict, doc_text: Optional[str]) -> bool:
 
     Факты из XML извещения (``eis_xml``) считаются доказанными структурой XML. Для остальных ответ «1»
     требует цитаты, которая дословно есть в тексте документа; для «0»/«2» цитата необязательна, но
-    если она указана, то тоже должна быть в тексте.
+    если она указана, то тоже должна быть в тексте. Значение «0»/«2» без подтверждения ставится в
+    заключение как предложение модели (статус ``proposed`` в ``trace``) — см. :func:`assemble`.
 
     Args:
         fact: Строка ``pe_facts`` (``dict``) с уже разобранным ``value``.
@@ -168,9 +170,18 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
         doc = documents.get(fact.get("document_id")) or {}
         entry = {"status": "unverified", "source": fact.get("source"), "document": doc.get("filename"),
                  "page": fact.get("page"), "quote": fact.get("quote"), "comment": fact["comment"]}
-        if fact["result"] is not None and fact["verified"] and evidence_ok(fact, doc.get("text")):
-            data[key] = fact["result"]
-            entry["status"] = "verified"
+        result = fact["result"]
+        proven = bool(fact["verified"]) and evidence_ok(fact, doc.get("text"))
+        if result is None:
+            pass
+        elif fact.get("source") == facts_mod.SOURCE_EIS or (result == 1 and proven):
+            data[key], entry["status"] = result, "verified"
+        elif result in (0, 2):
+            # «отсутствует»/«не предусмотрено» нечем процитировать: ставим значение как предложение модели
+            data[key], entry["status"] = result, ("verified" if proven else "proposed")
+        else:
+            # «1» без подтверждённой цитаты в заключение не попадает — эксперту остаётся предложение модели
+            entry["proposed_value"] = result
         trace[key] = entry
 
     # итоги подразделов — из решённых дочерних критериев
@@ -199,19 +210,117 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
                 data[key] = comment
                 trace[key] = {"status": "derived", "rule": f"пояснение к {base}"}
 
-    # числовые поля общих сведений из паспорта, если фактов нет
-    passport = procurement or {}
+    fill_general_info(fields, by_key, documents, procurement or {}, data, trace)
+    return data, trace
+
+
+def _number(text: Any) -> Optional[float]:
+    """Число из строки вида ``1 234 567,89`` или ``1234567.89``; ``None``, если числа нет."""
+    match = re.search(r"\d[\d\s\u00a0]*(?:[.,]\d+)?", str(text or ""))
+    if not match:
+        return None
+    try:
+        return float(re.sub(r"[\s\u00a0]", "", match.group()).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _extraction_raw(doc: dict) -> dict:
+    """``raw_data`` результата ``TypeDataExtractor`` документа (``{}``, если нет)."""
+    raw = (_as_dict(doc.get("extraction")) or {}).get("raw_data")
+    return raw if isinstance(raw, dict) else {}
+
+
+def fill_general_info(fields: Sequence[dict], by_key: Dict[str, dict], documents: Dict[int, dict],
+                      procurement: dict, data: Dict[str, Any], trace: Dict[str, Any]) -> None:
+    """Заполняет общие сведения (блок «Экспертное заключение» и блок I), изменяя ``data``/``trace`` на месте.
+
+    Источники по убыванию надёжности: XML извещения ЕИС (факты ``eis_xml``: идентификационный код,
+    наименование объекта, НМЦК, аванс), паспорт закупки, данные ``TypeDataExtractor`` документов
+    (предмет закупки, НМЦК) — последние помечаются ``proposed``. «Состав комплекта документации» собирается
+    из загруженных документов. Шифр проекта и финансирование в документах не определяются — остаются эксперту.
+
+    Args:
+        fields: Поля формы.
+        by_key: Факты по ключам (с разобранным ``value_obj``).
+        documents: ``document_id`` → описание документа (``filename``, ``doc_code``, ``extraction``).
+        procurement: Паспорт закупки.
+        data: ``data`` (изменяется на месте).
+        trace: ``trace`` (изменяется на месте).
+    """
+    kinds = {f["field_key"]: f["value_kind"] for f in fields}
+
+    def xml_value(number: str) -> Tuple[Optional[str], Optional[str]]:
+        """Значение и путь из доказательства факта XML по номеру критерия (``путь = значение``)."""
+        for f in fields:
+            if eis_notice.criterion_number(f.get("label", "")) != number:
+                continue
+            fact = by_key.get(f["field_key"])
+            if fact and fact.get("source") == facts_mod.SOURCE_EIS and fact["result"] == 1 and " = " in (fact.get("quote") or ""):
+                path, value = fact["quote"].split(" = ", 1)
+                return value.strip(), path
+        return None, None
+
+    def put(key: str, value: Any, status: str, source: str, quote: Optional[str] = None) -> None:
+        """Записывает значение, если ключ есть в форме и ещё не заполнен."""
+        if key in data and data[key] is None and value not in (None, ""):
+            data[key] = value
+            trace[key] = {"status": status, "source": source, "quote": (quote or "")[:300] or None}
+
+    docs = list(documents.values())
+    notice_docs = sorted(docs, key=lambda d: d.get("doc_code") != "docIzvejenieFiles")
+
+    # XML извещения
+    name, _ = xml_value("1.11")
+    put("name", name, "verified", facts_mod.SOURCE_EIS, name)
+    code, _ = xml_value("1.8")
+    put("inn", code, "verified", facts_mod.SOURCE_EIS, code)
+    price, _ = xml_value("1.18")
+    put("field1_1", _number(price), "verified", facts_mod.SOURCE_EIS, price)
+    advance, path = xml_value("1.22")
+    if advance and _number(advance) is not None:
+        put("field1_2", _number(advance), "verified", facts_mod.SOURCE_EIS, advance)
+        if "field1_2_unit" in data and data["field1_2_unit"] is None:
+            data["field1_2_unit"] = "%" if "sumInPercents" in (path or "") else "руб."
+            trace["field1_2_unit"] = {"status": "derived", "rule": "единица по полю XML извещения"}
+
+    # паспорт закупки
     for key, column in (("field1_1", "nmck"), ("field1_2", "advance")):
-        if key in data and data[key] is None and passport.get(column) is not None:
-            data[key] = float(passport[column])
+        if key in data and data[key] is None and procurement.get(column) is not None:
+            data[key] = float(procurement[column])
             trace[key] = {"status": "from_passport", "source": "pe_procurements"}
-    # прочие общие сведения (мета-поля, код/наименование) только из фактов — иначе остаются эксперту
+
+    # данные, извлечённые из документов (предложение модели)
+    for doc in notice_docs:
+        raw = _extraction_raw(doc)
+        subject = (raw.get("procurement_subject") or {}).get("description")
+        put("name", (subject or "").strip()[:500], "proposed", doc.get("filename") or "extraction", subject)
+        for item in raw.get("finances") or []:
+            if isinstance(item, dict) and re.search(r"нмцк|начальн", str(item.get("context") or ""), re.I):
+                put("field1_1", _number(item.get("value")), "proposed", doc.get("filename") or "extraction",
+                    (item.get("evidence") or {}).get("fragment") if isinstance(item.get("evidence"), dict) else None)
+
+    # состав комплекта документации
+    if "documents" in data and data["documents"] is None and docs:
+        try:
+            from evaluate_documents.type_data_extractor import DOCUMENT_TYPE_MAPPING as titles
+        except Exception:  # noqa: BLE001 — справочник названий нужен только для подписи
+            titles = {}
+        lines, seen = [], set()
+        for doc in docs:
+            line = f"{titles.get(doc.get('doc_code'), doc.get('doc_code') or 'Документ')}: {doc.get('filename') or '—'}"
+            if line not in seen:
+                seen.add(line)
+                lines.append(line)
+        data["documents"] = "\n".join(f"{i}. {line}" for i, line in enumerate(lines, 1))
+        trace["documents"] = {"status": "derived", "rule": "список загруженных документов экспертизы"}
+
+    # прочие мета/числовые/текстовые поля — только из подтверждённых фактов
     for key, fact in by_key.items():
         if key in data and kinds.get(key) in (forms.KIND_META, forms.KIND_NUMBER, forms.KIND_TEXT) \
                 and data[key] is None and fact["verified"] and fact["value_obj"].get("value") not in (None, ""):
             data[key] = fact["value_obj"]["value"]
             trace[key] = {"status": "verified", "source": fact.get("source"), "quote": fact.get("quote")}
-    return data, trace
 
 
 def collect_remarks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict[str, Any]) -> List[dict]:
@@ -359,14 +468,15 @@ async def precheck(conn, expertise_id: int) -> Dict[str, Any]:
 
 
 async def generate_summary(conn, expertise_id: int, llm_call: Optional[LlmCall],
-                           build_facts: Optional[FactsBuilder] = None) -> Dict[str, Any]:
+                           build_facts: Optional[FactsBuilder] = None, rebuild_facts: bool = False) -> Dict[str, Any]:
     """Собирает и сохраняет сводное ЭЗ экспертизы.
 
     Args:
         conn: Соединение ``asyncpg``.
         expertise_id: ID экспертизы.
         llm_call: Функция вызова LLM для блоков III–IV (``None`` — только шаблонные тексты).
-        build_facts: Корутина-фабрика построения фактов; вызывается, если фактов ещё нет.
+        build_facts: Корутина-фабрика построения фактов; вызывается, если фактов ещё нет (или ``rebuild_facts``).
+        rebuild_facts: Пересчитать факты перед сборкой, даже если они уже есть.
 
     Returns:
         dict: ``summary_id``, ``form_code``, ``status`` (``draft`` / ``needs_review``), ``data``
@@ -378,14 +488,15 @@ async def generate_summary(conn, expertise_id: int, llm_call: Optional[LlmCall],
     ready = await precheck(conn, expertise_id)
     code = ready["form_code"]
     fact_rows = [dict(r) for r in await repo.get_facts(conn, expertise_id)]
-    if not fact_rows and build_facts is not None:
+    if (not fact_rows or rebuild_facts) and build_facts is not None:
         await build_facts()
         fact_rows = [dict(r) for r in await repo.get_facts(conn, expertise_id)]
     if not fact_rows:
         raise NoFactsError("Факты по экспертизе ещё не построены — повторите запрос позже")
 
     fields = [dict(r) for r in await repo.get_form_fields(conn, code)]
-    documents = {d["id"]: {"filename": d["filename"], "doc_code": d["doc_code"], "text": d["text_full"]}
+    documents = {d["id"]: {"filename": d["filename"], "doc_code": d["doc_code"], "text": d["text_full"],
+                           "extraction": d.get("extraction")}
                  for d in ready["documents"]}
     data, trace = assemble(fields, fact_rows, documents, ready["passport"])
     stats = await write_blocks(fields, data, trace, llm_call)
@@ -394,9 +505,10 @@ async def generate_summary(conn, expertise_id: int, llm_call: Optional[LlmCall],
         logger.error(f"knowledge_store: сводное ЭЗ {expertise_id} не соответствует форме: {problems[:5]}")
     unresolved = [f["field_key"] for f in fields
                   if f["value_kind"] in RESULT_KINDS and data.get(f["field_key"]) is None]
-    status = "needs_review" if unresolved or problems else "draft"
-    stats.update({"fields": len(fields), "unresolved": len(unresolved)})
-    trace["_summary"] = {"unresolved": unresolved, "problems": problems}
+    proposed = [k for k, v in trace.items() if isinstance(v, dict) and v.get("status") == "proposed"]
+    status = "needs_review" if unresolved or proposed or problems else "draft"
+    stats.update({"fields": len(fields), "unresolved": len(unresolved), "proposed": len(proposed)})
+    trace["_summary"] = {"unresolved": unresolved, "proposed": proposed, "problems": problems}
     async with conn.transaction():
         summary_id = await repo.insert_summary(conn, expertise_id, code, data, trace, status)
         await repo.touch_expiry(conn, expertise_id, Config.PE_TEXT_RETENTION_DAYS)

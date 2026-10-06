@@ -120,7 +120,8 @@ async def generate_summary_opinion(
         logger.error(f"Ошибка проверки данных для сводного ЭЗ: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Не удалось проверить данные экспертизы")
 
-    task = generate_summary_opinion_task.delay(request.expertise_id, x_api_database, request.send_draft)
+    task = generate_summary_opinion_task.delay(
+        request.expertise_id, x_api_database, request.send_draft, request.rebuild_facts)
     return {"task_id": task.id, "status": "processing", "message": "Задача запущена"}
 
 
