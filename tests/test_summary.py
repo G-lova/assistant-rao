@@ -381,3 +381,16 @@ class NmckMethodRuleTests(unittest.TestCase):
         self.assertEqual((data["m_norm"], data["m_cost"], data["m_proj"]), (2, 2, 2))
         self.assertEqual(trace["m_norm"]["status"], "derived")
         self.assertEqual(summary.collect_remarks(fields, data, trace), [])
+
+
+class FallbackBlockTests(unittest.TestCase):
+    """Шаблонный текст блока IV самостоятелен."""
+
+    def test_field4_is_self_contained(self):
+        """field4 содержит итог и суть замечаний и не отсылает к разделу «Вывод»."""
+        remarks = [{"criterion": "1.14. Наличие информации о единице измерения", "comment": "", "quote": ""},
+                   {"criterion": "2.2.7.2. Соответствие потенциальных поставщиков", "comment": "", "quote": ""}]
+        text = summary.fallback_block("field4", remarks, {"checked": 60, "remarks": 2})
+        self.assertNotIn("раздел", text.lower())
+        self.assertIn("замечаний: 2", text)
+        self.assertIn("Наличие информации о единице измерения", text)

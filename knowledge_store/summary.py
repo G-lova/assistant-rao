@@ -29,7 +29,7 @@ TEXT_BLOCK_SCHEMA = {
     "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 3000}},
     "required": ["text"],
 }
-BLOCK_TITLES = {"field3": "вывод", "field4": "заключение"}
+BLOCK_TITLES = {"field3": "вывод", "field4": "заключение"}  # «Блок III. Вывод», «Блок IV. Заключение»
 
 LlmCall = Callable[[List[dict], dict], Awaitable[str]]
 FactsBuilder = Callable[[], Awaitable[Any]]
@@ -422,14 +422,16 @@ def fallback_block(key: str, remarks: Sequence[dict], stats: Dict[str, int]) -> 
         stats: Счётчики (``checked``, ``remarks``).
 
     Returns:
-        str: Текст блока.
+        str: Текст блока. ``field4`` — самостоятельный вывод (итог и суть замечаний), без ссылок на другие блоки.
     """
     if not remarks:
         return ("Замечаний по проверенным критериям не выявлено." if key == "field3"
                 else f"По результатам проверки ({stats['checked']} критериев) замечаний не выявлено.")
     if key == "field3":
         return "\n".join(f"{i}. {r['criterion']}" for i, r in enumerate(remarks, 1))
-    return f"По результатам проверки выявлено замечаний: {len(remarks)}; подробности приведены в разделе «Вывод»."
+    items = "; ".join(re.sub(r"^\s*\d+(?:\.\d+)*\.?\s*", "", r["criterion"]).rstrip(" .") for r in remarks)
+    return (f"По результатам проверки ({stats['checked']} критериев) выявлено замечаний: {len(remarks)}. "
+            f"Выявлены несоответствия: {items}. Документация требует доработки.")
 
 
 async def write_blocks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict[str, Any],
