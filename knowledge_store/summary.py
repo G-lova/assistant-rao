@@ -511,6 +511,86 @@ def _clip(text: Any, limit: int) -> str:
     return value[:limit].rsplit(" ", 1)[0].rstrip(",;:") + "…"
 
 
+def close_truncated_json(raw: str) -> str:
+    """Чинит обрезанный JSON без внешних зависимостей.
+
+    Ответ модели обрывается по лимиту токенов посреди строки или пары «ключ: значение». Сначала пробуется
+    дописать кавычку и закрывающие скобки; если так не разбирается, JSON обрезается по последней
+    «безопасной» точке (после законченного значения) и закрывается.
+
+    Args:
+        raw: Обрезанный JSON.
+
+    Returns:
+        str: Текст, который разбирается ``json.loads`` (иначе ``ValueError`` при разборе).
+    """
+    text = raw or ""
+    stack, in_str, esc, snapshots = [], False, False, []
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if stack:
+                stack.pop()
+            snapshots.append((i + 1, "".join(reversed(stack))))
+        elif ch == ",":
+            snapshots.append((i, "".join(reversed(stack))))
+    candidates = [text + ('"' if in_str else "") + "".join(reversed(stack))]
+    candidates += [text[:pos] + closers for pos, closers in reversed(snapshots)]
+    for candidate in candidates:
+        try:
+            json.loads(candidate)
+            return candidate
+        except ValueError:
+            continue
+    return candidates[0]
+
+
+def parse_block(raw: str) -> dict:
+    """Разбирает ответ модели по блоку; обрезанный/«разогнавшийся» JSON чинится ``json_repair``.
+
+    Args:
+        raw: Сырой ответ модели.
+
+    Returns:
+        dict: Объект ответа.
+
+    Raises:
+        ValueError: Ответ не удалось превратить в объект.
+    """
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        try:
+            data = json.loads(close_truncated_json(raw))
+        except Exception as e:  # noqa: BLE001
+            raise ValueError(f"ответ модели не разобран: {type(e).__name__}") from e
+    if not isinstance(data, dict):
+        raise ValueError("ответ модели не объект")
+    return data
+
+
+def _unique(items: Sequence[Any], key=lambda x: x) -> List[Any]:
+    """Элементы без повторов (модель в «разгоне» повторяет один и тот же пункт)."""
+    seen, out = set(), []
+    for item in items:
+        k = re.sub(r"\W+", " ", str(key(item))).strip().casefold()[:80]
+        if k and k not in seen:
+            seen.add(k)
+            out.append(item)
+    return out
+
+
 def render_block(key: str, parsed: dict, remarks: Sequence[dict], name: Optional[str], number: Optional[str],
                  procedure: Optional[str]) -> Optional[str]:
     """Собирает текст блока из структурированного ответа модели.
@@ -532,15 +612,23 @@ def render_block(key: str, parsed: dict, remarks: Sequence[dict], name: Optional
     """
     num = f" № {number}" if number else ""
     if key == "field3":
-        notice, items = _clip(parsed.get("notice"), 500), [i for i in parsed.get("items") or [] if isinstance(i, dict) and i.get("text")]
+        notice = _clip(parsed.get("notice"), 500)
+        items = _unique([i for i in parsed.get("items") or [] if isinstance(i, dict) and i.get("text")],
+                        key=lambda i: i["text"])[:12]
+        notice_remarks = [r for r in remarks if (r.get("number") or "").startswith("1.")]
+        if notice_remarks and not notice:
+            notice = "; ".join(_title(r["criterion"])[:90] for r in notice_remarks[:6])     # модель пропустила раздел 1
+        if remarks and not notice and not items:
+            return None                              # пустой ответ при наличии замечаний — не принимаем
         head = f"Информация, представленная в извещении{num}, соответствует требованиям законодательства"
         head += f", за исключением: {notice.rstrip('.')}." if notice else "."
         if not items:
-            return head if (notice or remarks) else None
+            return head
         lines = [f"{_clip(i.get('numbers'), 60)}. {_clip(i['text'], 400)}".strip(". ") for i in items]
         return head + "\nВыявлены несоответствия и недостатки по критериям:\n" + "\n".join(lines)
-    recs = [_clip(r, 260).rstrip(".;") for r in parsed.get("recommendations") or [] if str(r).strip()]
-    areas = [a for a in parsed.get("areas") or [] if isinstance(a, dict) and a.get("summary")]
+    recs = _unique([_clip(r, 260).rstrip(".;") for r in parsed.get("recommendations") or [] if str(r).strip()])[:6]
+    areas = _unique([a for a in parsed.get("areas") or [] if isinstance(a, dict) and a.get("summary")],
+                    key=lambda a: a["summary"])[:6]
     if not recs:
         return None
     subject = f"закупки{num}" + (f" на {name.strip().rstrip('.')}" if name else "")
@@ -655,16 +743,14 @@ async def write_blocks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict
         text, how, llm_error = None, "template", None
         if llm_call is not None and remarks:
             compact = [{"номер": r.get("number"), "критерий": _title(r["criterion"])[:140],
-                        "суть": (r.get("comment") or "")[:350], "документ": r.get("document")} for r in remarks]
+                        "суть": _clip(r.get("comment"), 260), "документ": r.get("document")} for r in remarks[:24]]
             payload = {"блок": BLOCK_TITLES[key], "объект закупки": data.get("name"), "номер закупки": data.get("code"),
                        "способ определения поставщика": procedure, "счётчики": stats, "замечания": compact}
             messages = [{"role": "system", "content": prompt},
                         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
             for attempt in range(2):          # обрезанный/невалидный ответ — одна повторная попытка
                 try:
-                    parsed = json.loads(await llm_call(messages, BLOCK_SCHEMAS[key]))
-                    if not isinstance(parsed, dict):
-                        raise ValueError("ответ модели не объект")
+                    parsed = parse_block(await llm_call(messages, BLOCK_SCHEMAS[key]))
                     candidate = ((parsed.get("text") or "").strip() if parsed.get("text")
                                  else render_block(key, parsed, remarks, data.get("name"), data.get("code"), procedure))
                     if candidate:

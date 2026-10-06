@@ -477,7 +477,7 @@ class BlockLlmTests(unittest.IsolatedAsyncioTestCase):
 
         async def bad(messages, schema):
             calls.append(messages)
-            return '{"text": "обрезано'
+            return 'не json'
 
         fields = [field("f", "presence", "1.4. Наличие почты"), field("field4", "text")]
         data, trace = {"f": 0, "field4": None, "name": "услуги", "code": "0301100027726000035"}, {"f": {"comment": "нет", "document": "n.html"}}
@@ -489,7 +489,7 @@ class BlockLlmTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["замечания"][0]["номер"], "1.4")
         self.assertEqual(payload["способ определения поставщика"], "открытого конкурса в электронной форме")
 
-        answers = iter(['{"text": "обрезано', '{"text": "Итог."}'])
+        answers = iter(['не json', '{"text": "Итог."}'])
 
         async def flaky(messages, schema):
             return next(answers)
@@ -527,10 +527,24 @@ class RenderBlockTests(unittest.TestCase):
         self.assertIn("за исключением: не указан адрес электронной почты.", text)
         self.assertIn("Выявлены несоответствия и недостатки по критериям:\n2.2.7.1. использованы данные двух поставщиков", text)
 
+    def test_truncated_json_is_repaired_and_deduped(self):
+        """Обрезанный ответ с повторами чинится, дубли убираются, пунктов не больше 6."""
+        raw = '{"areas": [], "note": "", "recommendations": [' + ", ".join('"учесть замечания по НМЦК"' for _ in range(40)) + ', "хвост обре'
+        parsed = summary.parse_block(raw)
+        text = summary.render_block("field4", parsed, self.REM, None, None, None)
+        self.assertEqual(text.count("- учесть замечания по НМЦК"), 1)
+
+    def test_empty_answer_with_remarks_rejected(self):
+        """Пустой ответ по field3 при наличии замечаний не должен давать «соответствует»: возвращается None."""
+        self.assertIsNone(summary.render_block("field3", {"notice": "", "items": []}, self.REM, None, "1", None))
+        text = summary.render_block("field3", {"notice": "", "items": []},
+                                    [{"number": "1.4", "criterion": "1.4. Наличие информации о почте", "comment": "x"}], None, "1", None)
+        self.assertIn("за исключением: Наличие информации о почте", text)
+
     def test_runaway_output_falls_back(self):
         """Бесконечный/обрезанный ответ модели → шаблон с причиной в trace."""
         async def runaway(messages, schema):
-            return '{"areas": [{"area": "' + "а" * 9000
+            return "не json " + "а" * 9000
 
         fields = [field("f", "presence", "1.4. Наличие почты"), field("field4", "text")]
         data, trace = {"f": 0, "field4": None}, {"f": {"comment": "нет"}}
