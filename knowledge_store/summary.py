@@ -163,8 +163,8 @@ def apply_nmck_method_rule(fields: Sequence[dict], documents: Dict[int, dict], d
         return
     for field in fields:
         match = re.search(r"расчета\s+НМЦК\s+([\w-]+)\s+методом", field.get("label") or "", re.I)
-        if not match or field["field_key"] not in data:
-            continue
+        if not match or field["field_key"] not in data or field["value_kind"] not in RESULT_KINDS:
+            continue          # у текстового поля `*_text` та же подпись, что у критерия — его не трогаем
         stem = next((k for k in METHOD_STEMS if match.group(1).lower().startswith(k)), None)
         if stem and stem != used:
             data[field["field_key"]] = 2

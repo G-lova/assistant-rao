@@ -244,6 +244,7 @@ class FactExtractor:
         self.notice_search = notice_search or (search_notice_fragments if search is None else None)
         self.notice_k = notice_k
         self.errors: Dict[str, str] = {}
+        self.db_lock = asyncio.Lock()      # соединение asyncpg не допускает параллельных операций
         self.semaphore = asyncio.Semaphore(concurrency)
         self.system_prompt = system_prompt or PROMPT_PATH.read_text(encoding="utf-8")
 
@@ -264,9 +265,9 @@ class FactExtractor:
         if vectors is None or len(vectors) == 0:
             self.errors[field["field_key"]] = "эмбеддинг запроса не получен"
             return None
-        fragments = await self.search(conn, expertise_id, vectors[0], self.top_k)
+        fragments = await self._db(self.search, conn, expertise_id, vectors[0], self.top_k)
         if self.notice_search and re.match(r"\s*1\.\d", field["label"] or ""):
-            notice = await self.notice_search(conn, expertise_id, vectors[0], self.notice_k)
+            notice = await self._db(self.notice_search, conn, expertise_id, vectors[0], self.notice_k)
             ids = {f.chunk_id for f in notice}
             fragments = list(notice) + [f for f in fragments if f.chunk_id not in ids]
         if not fragments:
@@ -274,13 +275,19 @@ class FactExtractor:
             return None
         fact = await self._ask(field, fragments)
         if fact and fact["value"] in (0, 3) and not fact["verified"] and self.recheck_k > len(fragments):
-            wider = await self.search(conn, expertise_id, vectors[0], self.recheck_k)
+            wider = await self._db(self.search, conn, expertise_id, vectors[0], self.recheck_k)
             if len(wider) > len(fragments):
                 again = await self._ask(field, wider)
                 fact = again or fact
         if fact:
             fact["fact_key"] = field["field_key"]
         return fact
+
+    async def _db(self, func: Callable, *args) -> Any:
+        """Вызов поиска по БД под замком: одно соединение ``asyncpg`` нельзя использовать параллельно
+        (иначе ``InterfaceError: another operation is in progress`` и критерий остаётся без значения)."""
+        async with self.db_lock:
+            return await func(*args)
 
     async def _ask(self, field: dict, fragments: Sequence[Fragment]) -> Optional[dict]:
         """Один запрос к модели по фрагментам; возвращает принятый факт или ``None``."""

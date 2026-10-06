@@ -512,3 +512,27 @@ class FailureReasonTests(unittest.TestCase):
         data, trace = summary.assemble([{"field_key": "f", "value_kind": "presence", "label": "1.1. Наличие", "ordinal": 1}], rows, {})
         self.assertIsNone(data["f"])
         self.assertEqual(trace["f"]["error"], "ReadTimeout: x")
+
+
+class DbLockTests(unittest.IsolatedAsyncioTestCase):
+    """Поиск по БД не выполняется параллельно на одном соединении."""
+
+    async def test_search_calls_are_serialized(self):
+        """Одновременные extract_field не пересекаются в поиске (иначе asyncpg: another operation is in progress)."""
+        active, peak = 0, 0
+
+        async def search(conn, expertise_id, vector, k):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return [facts.Fragment(1, 1, 1, "текст")]
+
+        async def llm(messages, schema):
+            return '{"fragment": 0, "quote": "", "comment": "нет", "value": 0}'
+
+        ex = facts.FactExtractor(llm, FakeEmbedder(), search=search, top_k=1, recheck_k=0, system_prompt="p")
+        fields = [{"field_key": f"k{i}", "label": "2.1. Соответствие", "value_kind": "compliance"} for i in range(6)]
+        await asyncio.gather(*(ex.extract_field(None, 1, f) for f in fields))
+        self.assertEqual(peak, 1)

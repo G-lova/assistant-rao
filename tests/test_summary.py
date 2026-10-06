@@ -426,3 +426,17 @@ class ExpertStyleTextTests(unittest.TestCase):
         data, _ = summary.assemble(fields, rows, DOCS)
         self.assertIn("необходимо обратить внимание", data["field2_1_text"])
         self.assertIn("1. 1.2 Почта не указана.", data["field2_1_text"])
+
+
+class NmckTextFieldTests(unittest.TestCase):
+    """Правило методов НМЦК не должно задевать текстовые поля `*_text`."""
+
+    def test_text_field_untouched(self):
+        """У ``*_text`` та же подпись, что у критерия, но значение остаётся текстом/None, а не «2»."""
+        label = "2.2.7. Соответствие законодательству расчета НМЦК нормативным методом"
+        fields = [field("m_norm", "compliance", label), field("m_norm_text", "text", label)]
+        docs = {1: {"filename": "o.xlsx", "doc_code": "d", "text": "Используемый метод определения НМЦК Метод сопоставления рыночных цен"}}
+        data, _ = summary.assemble(fields, [], docs)
+        self.assertEqual(data["m_norm"], 2)
+        self.assertIsNone(data["m_norm_text"])
+        self.assertEqual(summary.validate(data, fields), [])
