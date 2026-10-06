@@ -496,6 +496,19 @@ class RetryTests(unittest.IsolatedAsyncioTestCase):
             return next(answers)
 
         extractor = facts.FactExtractor(llm, None, search=None, top_k=1, recheck_k=0, system_prompt="p")
-        fact = await extractor._ask({"label": "Наличие чего-то", "value_kind": "presence"},
+        fact = await extractor._ask({"field_key": "k", "label": "Наличие чего-то", "value_kind": "presence"},
                                     [facts.Fragment(1, 1, 1, "текст")])
         self.assertEqual(fact["value"], 0)
+
+
+class FailureReasonTests(unittest.TestCase):
+    """Причина отказа по критерию сохраняется фактом без значения (виден в trace)."""
+
+    def test_error_fact_in_assemble(self):
+        """Факт с ``error`` и ``value=None`` даёт trace.error и оставляет критерий эксперту."""
+        from knowledge_store import summary
+        rows = [{"fact_key": "f", "value": {"value": None, "verified": False, "comment": None, "error": "ReadTimeout: x"},
+                 "document_id": None, "page": None, "quote": None, "confidence": 0.0, "source": "fact_extractor"}]
+        data, trace = summary.assemble([{"field_key": "f", "value_kind": "presence", "label": "1.1. Наличие", "ordinal": 1}], rows, {})
+        self.assertIsNone(data["f"])
+        self.assertEqual(trace["f"]["error"], "ReadTimeout: x")

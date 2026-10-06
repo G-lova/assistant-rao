@@ -385,6 +385,14 @@ ORDER BY c.embedding <=> $2::vector
 LIMIT $3
 """
 
+SQL_SEARCH_NOTICE_CHUNKS = """
+SELECT c.id AS chunk_id, c.document_id, c.page_from, c.text, d.filename, d.doc_code
+FROM pe_chunks c JOIN pe_documents d ON d.id = c.document_id
+WHERE c.expertise_id = $1 AND c.embedding IS NOT NULL AND d.doc_code = ANY($4::text[])
+ORDER BY c.embedding <=> $2::vector
+LIMIT $3
+"""
+
 SQL_SET_FORM_CODE = "UPDATE pe_procurements SET form_code = $2, updated_at = NOW() WHERE expertise_id = $1"
 
 SQL_PROCUREMENT = ("SELECT law, method, object_code, check_type2, form_code, nmck, advance, funding, passport "

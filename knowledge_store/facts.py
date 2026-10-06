@@ -217,7 +217,7 @@ class FactExtractor:
 
     def __init__(self, llm_call: LlmCall, embedder: Any, search: Optional[Callable] = None,
                  top_k: Optional[int] = None, concurrency: int = 4, system_prompt: Optional[str] = None,
-                 recheck_k: Optional[int] = None):
+                 recheck_k: Optional[int] = None, notice_search: Optional[Callable] = None, notice_k: int = 5):
         """Создаёт экстрактор.
 
         Args:
@@ -231,12 +231,19 @@ class FactExtractor:
             recheck_k: Если модель ответила «0» или «3» без цитаты, критерий проверяется повторно по такому числу
                 фрагментов (по умолчанию ``PE_FACTS_RECHECK_K``, 16; ``0`` — без повторной проверки):
                 «не нашли» среди первых фрагментов ещё не значит «отсутствует».
+            notice_search: Поиск только по документам извещения (``(conn, expertise_id, vector, k)``); для
+                критериев раздела 1 («Наличие информации…» об извещении) его фрагменты ставятся первыми.
+                По умолчанию включён только вместе со стандартным поиском pgvector.
+            notice_k: Сколько фрагментов извещения добавлять.
         """
         self.llm_call = llm_call
         self.embedder = embedder
         self.search = search or search_fragments
         self.top_k = top_k or int(os.getenv("PE_FACTS_TOP_K", "8"))
         self.recheck_k = int(os.getenv("PE_FACTS_RECHECK_K", "16")) if recheck_k is None else recheck_k
+        self.notice_search = notice_search or (search_notice_fragments if search is None else None)
+        self.notice_k = notice_k
+        self.errors: Dict[str, str] = {}
         self.semaphore = asyncio.Semaphore(concurrency)
         self.system_prompt = system_prompt or PROMPT_PATH.read_text(encoding="utf-8")
 
@@ -255,9 +262,15 @@ class FactExtractor:
         query = criterion_text(field["label"])
         vectors = await self.embedder.get_embeddings([query])
         if vectors is None or len(vectors) == 0:
+            self.errors[field["field_key"]] = "эмбеддинг запроса не получен"
             return None
         fragments = await self.search(conn, expertise_id, vectors[0], self.top_k)
+        if self.notice_search and re.match(r"\s*1\.\d", field["label"] or ""):
+            notice = await self.notice_search(conn, expertise_id, vectors[0], self.notice_k)
+            ids = {f.chunk_id for f in notice}
+            fragments = list(notice) + [f for f in fragments if f.chunk_id not in ids]
         if not fragments:
+            self.errors[field["field_key"]] = "в базе нет фрагментов для поиска"
             return None
         fact = await self._ask(field, fragments)
         if fact and fact["value"] in (0, 3) and not fact["verified"] and self.recheck_k > len(fragments):
@@ -278,7 +291,26 @@ class FactExtractor:
             fact = validate_answer(parse_answer(raw), fragments)
             if fact:
                 return fact
+            self.errors[field["field_key"]] = f"невалидный ответ модели: {str(raw)[:300]}"
         return None
+
+
+async def search_notice_fragments(conn, expertise_id: int, vector, k: int) -> List[Fragment]:
+    """Ищет ближайшие чанки только среди документов извещения (``docIzvejenieFiles``, ``linkDocs``).
+
+    Args:
+        conn: Соединение ``asyncpg``.
+        expertise_id: ID экспертизы.
+        vector: Вектор запроса.
+        k: Сколько фрагментов вернуть.
+
+    Returns:
+        list[Fragment]: Фрагменты по возрастанию расстояния.
+    """
+    rows = await conn.fetch(repo.SQL_SEARCH_NOTICE_CHUNKS, int(expertise_id), repo.vector_literal(vector), int(k),
+                            ["docIzvejenieFiles", "linkDocs"])
+    return [Fragment(r["chunk_id"], r["document_id"], r["page_from"], r["text"],
+                     r["filename"] or r["doc_code"] or "") for r in rows]
 
 
 async def search_fragments(conn, expertise_id: int, vector, k: int) -> List[Fragment]:
@@ -347,17 +379,24 @@ async def extract_facts(conn, expertise_id: int, form_code: str, extractor: Opti
     results = await asyncio.gather(*(extractor.extract_field(conn, expertise_id, f) for f in todo),
                                    return_exceptions=True)
     llm_facts = []
-    for res in results:
+    for field, res in zip(todo, results):
+        if not isinstance(res, dict):
+            # причина отказа сохраняется фактом без значения — видна в trace, а не теряется
+            reason = (f"{type(res).__name__}: {res}"[:300] if isinstance(res, Exception)
+                      else extractor.errors.get(field["field_key"], "ответ не получен"))
+            llm_facts.append({"fact_key": field["field_key"],
+                              "value": {"value": None, "verified": False, "comment": None, "error": reason},
+                              "document_id": None, "page": None, "quote": None, "confidence": 0.0})
+            stats["rejected"] += 1
+            continue
         if isinstance(res, dict):
             llm_facts.append({"fact_key": res["fact_key"],
                               "value": {"value": res["value"], "verified": res["verified"], "comment": res["comment"],
                                         "model_quote": res.get("model_quote"), "fragment": res.get("fragment")},
                               "document_id": res["document_id"], "page": res["page"], "quote": res["quote"],
                               "confidence": 0.8 if res["verified"] else 0.3})
-        else:
-            stats["rejected"] += 1
     await repo.replace_facts(conn, expertise_id, SOURCE_LLM, llm_facts)
-    stats["llm"] = len(llm_facts)
+    stats["llm"] = len(llm_facts) - stats["rejected"]
     return stats
 
 

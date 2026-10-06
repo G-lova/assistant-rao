@@ -235,6 +235,8 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
             data[key], entry["status"] = result, ("verified" if proven else "proposed")
             if not proven and fact["value_obj"].get("model_quote"):
                 entry["model_quote"] = fact["value_obj"]["model_quote"]
+        if fact["value_obj"].get("error"):
+            entry["error"] = fact["value_obj"]["error"]
         if result is None and fact["value_obj"].get("value") == 3:
             entry["note"] = "по найденным фрагментам определить нельзя — оставлено эксперту"
         trace[key] = entry
