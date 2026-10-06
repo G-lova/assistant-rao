@@ -123,7 +123,7 @@ def generate_summary_opinion_task(self, expertise_id: int, environment: str, sen
     async def run():
         """Собирает заключение внутри event loop задачи."""
         client, model = get_llm()
-        llm_call = facts_mod.make_llm_call(client, model, max_tokens=3500)   # тексты блоков III–IV длинные
+        llm_call = facts_mod.make_llm_call(client, model, max_tokens=2000)   # блоки III–IV: короткий структурированный JSON
         async with HTTPClientManager(timeout=120.0) as mgr:
             async def build_facts():
                 """Строит факты, если их ещё нет (после индексации они обычно уже есть)."""

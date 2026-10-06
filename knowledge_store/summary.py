@@ -474,6 +474,87 @@ def collect_remarks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict[st
     return remarks
 
 
+# Структурированные ответы модели для блоков III–IV: короткие поля с ограничениями. Текст блока собирается кодом,
+# поэтому «разгон» модели (десятки тысяч символов) невозможен.
+FIELD3_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "notice": {"type": "string", "maxLength": 500},
+        "items": {"type": "array", "maxItems": 12, "items": {
+            "type": "object",
+            "properties": {"numbers": {"type": "string", "maxLength": 60}, "text": {"type": "string", "maxLength": 400}},
+            "required": ["numbers", "text"]}},
+    },
+    "required": ["notice", "items"],
+}
+FIELD4_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "areas": {"type": "array", "maxItems": 6, "items": {
+            "type": "object",
+            "properties": {"area": {"type": "string", "maxLength": 80}, "summary": {"type": "string", "maxLength": 300}},
+            "required": ["area", "summary"]}},
+        "note": {"type": "string", "maxLength": 400},
+        "recommendations": {"type": "array", "maxItems": 6, "items": {"type": "string", "maxLength": 260}},
+    },
+    "required": ["areas", "note", "recommendations"],
+}
+BLOCK_SCHEMAS = {"field3": FIELD3_SCHEMA, "field4": FIELD4_SCHEMA}
+MANY_REMARKS = 8       # с такого числа замечаний заключение пишется развёрнуто (образец 2)
+
+
+def _clip(text: Any, limit: int) -> str:
+    """Строка без лишних пробелов, обрезанная по границе слова."""
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(value) <= limit:
+        return value
+    return value[:limit].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+
+
+def render_block(key: str, parsed: dict, remarks: Sequence[dict], name: Optional[str], number: Optional[str],
+                 procedure: Optional[str]) -> Optional[str]:
+    """Собирает текст блока из структурированного ответа модели.
+
+    * ``field3`` — абзац об извещении и строки ``<номера>. <суть>`` под «Выявлены несоответствия и недостатки по критериям:».
+    * ``field4`` — «образец 1» (до :data:`MANY_REMARKS` замечаний: «…соответствуют, за исключением… Заказчику рекомендуется: …»)
+      или «образец 2» (много замечаний: «…имеют недостатки… а именно: … Следует отметить… Заказчику рекомендуется: …»).
+
+    Args:
+        key: ``field3`` или ``field4``.
+        parsed: Ответ модели по схеме :data:`BLOCK_SCHEMAS`.
+        remarks: Проверенные замечания.
+        name: Наименование объекта закупки.
+        number: Реестровый номер закупки.
+        procedure: Способ определения поставщика в родительном падеже.
+
+    Returns:
+        Optional[str]: Текст блока; ``None``, если ответ модели пуст.
+    """
+    num = f" № {number}" if number else ""
+    if key == "field3":
+        notice, items = _clip(parsed.get("notice"), 500), [i for i in parsed.get("items") or [] if isinstance(i, dict) and i.get("text")]
+        head = f"Информация, представленная в извещении{num}, соответствует требованиям законодательства"
+        head += f", за исключением: {notice.rstrip('.')}." if notice else "."
+        if not items:
+            return head if (notice or remarks) else None
+        lines = [f"{_clip(i.get('numbers'), 60)}. {_clip(i['text'], 400)}".strip(". ") for i in items]
+        return head + "\nВыявлены несоответствия и недостатки по критериям:\n" + "\n".join(lines)
+    recs = [_clip(r, 260).rstrip(".;") for r in parsed.get("recommendations") or [] if str(r).strip()]
+    areas = [a for a in parsed.get("areas") or [] if isinstance(a, dict) and a.get("summary")]
+    if not recs:
+        return None
+    subject = f"закупки{num}" + (f" на {name.strip().rstrip('.')}" if name else "")
+    kind = f"{procedure} для {subject}" if procedure else subject
+    todo = "Заказчику рекомендуется:\n" + ";\n".join(f"- {r}" for r in recs) + "."
+    if len(remarks) < MANY_REMARKS or not areas:
+        return (f"Извещение и документация о проведении {kind} соответствуют требованиям законодательства, "
+                f"за исключением указанных несоответствий и недостатков.\n{todo}")
+    bullets = ",\n".join(f"- {_clip(a.get('area'), 80)} — {_clip(a['summary'], 300).rstrip('.')}" for a in areas) + "."
+    note = _clip(parsed.get("note"), 400)
+    return (f"Извещение о проведении {kind} и электронные документы имеют недостатки и несоответствия требованиям "
+            f"законодательства РФ, а именно:\n{bullets}\n\n" + (f"Следует отметить, что {note.rstrip('.')}.\n\n" if note else "") + todo)
+
+
 LAW_44FZ = ("Федерального закона от 05.04.2013 № 44-ФЗ «О контрактной системе в сфере закупок товаров, работ, услуг "
             "для обеспечения государственных и муниципальных нужд»")
 PROCEDURES = (("competition", "открытого конкурса в электронной форме"), ("auction", "электронного аукциона"),
@@ -581,8 +662,11 @@ async def write_blocks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict
                         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
             for attempt in range(2):          # обрезанный/невалидный ответ — одна повторная попытка
                 try:
-                    parsed = json.loads(await llm_call(messages, TEXT_BLOCK_SCHEMA))
-                    candidate = (parsed.get("text") or "").strip() if isinstance(parsed, dict) else ""
+                    parsed = json.loads(await llm_call(messages, BLOCK_SCHEMAS[key]))
+                    if not isinstance(parsed, dict):
+                        raise ValueError("ответ модели не объект")
+                    candidate = ((parsed.get("text") or "").strip() if parsed.get("text")
+                                 else render_block(key, parsed, remarks, data.get("name"), data.get("code"), procedure))
                     if candidate:
                         text, how = candidate, "llm"
                         break

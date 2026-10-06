@@ -497,3 +497,43 @@ class BlockLlmTests(unittest.IsolatedAsyncioTestCase):
         data["field4"] = None
         await summary.write_blocks(fields, data, trace, flaky, "44fz_competition_obj6")
         self.assertEqual((data["field4"], trace["field4"]["method"]), ("Итог.", "llm"))
+
+
+class RenderBlockTests(unittest.TestCase):
+    """Сборка текста блоков из структурированного ответа модели."""
+
+    REM = [{"number": "2.2", "criterion": "2.2. Соответствие обоснования НМЦК", "comment": "x"}]
+
+    def test_field4_sample1(self):
+        """Мало замечаний: «…соответствуют…, за исключением… Заказчику рекомендуется: - …»."""
+        parsed = {"areas": [], "note": "", "recommendations": ["указывать дату составления обоснования НМЦК"]}
+        text = summary.render_block("field4", parsed, self.REM, "услуги", "0301100027726000035", "открытого конкурса в электронной форме")
+        self.assertIn("соответствуют требованиям законодательства, за исключением указанных несоответствий и недостатков.", text)
+        self.assertIn("Заказчику рекомендуется:\n- указывать дату составления обоснования НМЦК.", text)
+
+    def test_field4_sample2_many_remarks(self):
+        """Много замечаний: «…имеют недостатки… а именно: - область — суть… Следует отметить… Заказчику рекомендуется»."""
+        parsed = {"areas": [{"area": "при расчёте НМЦК", "summary": "нет ценовых предложений"}], "note": "это не позволяет проверить обоснование",
+                  "recommendations": ["прикладывать копии ценовых предложений"]}
+        text = summary.render_block("field4", parsed, self.REM * 9, "услуги", "0373100004325000022", "открытого конкурса в электронной форме")
+        self.assertTrue(text.startswith("Извещение о проведении открытого конкурса в электронной форме для закупки № 0373100004325000022 на услуги и электронные документы имеют недостатки"))
+        self.assertIn("- при расчёте НМЦК — нет ценовых предложений", text)
+        self.assertIn("Следует отметить, что это не позволяет проверить обоснование.", text)
+
+    def test_field3(self):
+        """field3: абзац об извещении и строки «номера. суть»."""
+        parsed = {"notice": "не указан адрес электронной почты", "items": [{"numbers": "2.2.7.1", "text": "использованы данные двух поставщиков"}]}
+        text = summary.render_block("field3", parsed, self.REM, None, "0301100027726000035", None)
+        self.assertIn("за исключением: не указан адрес электронной почты.", text)
+        self.assertIn("Выявлены несоответствия и недостатки по критериям:\n2.2.7.1. использованы данные двух поставщиков", text)
+
+    def test_runaway_output_falls_back(self):
+        """Бесконечный/обрезанный ответ модели → шаблон с причиной в trace."""
+        async def runaway(messages, schema):
+            return '{"areas": [{"area": "' + "а" * 9000
+
+        fields = [field("f", "presence", "1.4. Наличие почты"), field("field4", "text")]
+        data, trace = {"f": 0, "field4": None}, {"f": {"comment": "нет"}}
+        asyncio.run(summary.write_blocks(fields, data, trace, runaway, "44fz_competition_obj6"))
+        self.assertEqual(trace["field4"]["method"], "template")
+        self.assertIn("llm_error", trace["field4"])
