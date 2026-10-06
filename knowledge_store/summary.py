@@ -18,7 +18,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tup
 
 from configs.config import Config
 from configs.logger import get_logger
-from knowledge_store import eis_notice, facts as facts_mod, forms, repository as repo
+from knowledge_store import assessment, eis_notice, facts as facts_mod, forms, repository as repo
 
 logger = get_logger(__name__)
 
@@ -251,7 +251,7 @@ def clean_comment(comment: Optional[str], filename: Optional[str] = None) -> Opt
 
 
 def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[int, dict],
-             procurement: Optional[dict] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+             procurement: Optional[dict] = None, preset: Optional[Dict[str, Tuple[Any, dict]]] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Собирает ``data`` и ``trace`` по полям формы (без LLM).
 
     Args:
@@ -259,6 +259,8 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
         fact_rows: Факты экспертизы (``pe_facts``); для одного ключа берётся последний.
         documents: ``document_id`` → ``{"filename", "doc_code", "text"}``.
         procurement: Паспорт закупки (``nmck``, ``advance``) для числовых полей общих сведений.
+        preset: Готовые значения полей, оценённых моделью по документам (:func:`assessment.compute_assessed`):
+            ``ключ → (значение, запись trace)``; они ставятся до расчёта итогов подразделов.
 
     Returns:
         Tuple[dict, dict]: ``(data, trace)``. ``data`` содержит каждый ключ формы (``None`` — оставлено
@@ -303,6 +305,10 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
         if result is None and fact["value_obj"].get("value") == 3:
             entry["note"] = "по представленным документам определить нельзя — оставлено эксперту"
         trace[key] = entry
+
+    for key, (value, entry) in (preset or {}).items():
+        if key in data:
+            data[key], trace[key] = value, entry
 
     apply_nmck_method_rule(fields, documents, data, trace)
 
@@ -1037,7 +1043,9 @@ async def generate_summary(conn, expertise_id: int, llm_call: Optional[LlmCall],
     documents = {d["id"]: {"filename": d["filename"], "doc_code": d["doc_code"], "text": d["text_full"],
                            "extraction": d.get("extraction")}
                  for d in ready["documents"]}
-    data, trace = assemble(fields, fact_rows, documents, ready["passport"])
+    fact_rows = [r for r in fact_rows if r["fact_key"] not in facts_mod.ASSESSED_KEYS]   # их оценивает модель по документам
+    preset = await assessment.compute_assessed(fields, documents, llm_call)
+    data, trace = assemble(fields, fact_rows, documents, ready["passport"], preset)
     await fill_funding_advance(fields, data, trace, documents, ready["passport"], llm_call)
     stats = await write_blocks(fields, data, trace, llm_call, code)
     problems = validate(data, fields)

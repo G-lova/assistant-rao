@@ -28,6 +28,8 @@ PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "fact_extract
 SOURCE_EIS = "eis_xml"
 SOURCE_LLM = "fact_extractor"
 LLM_KINDS = ("presence", "compliance")
+# Критерии, которые оценивает модель по документам целиком (knowledge_store.assessment), а не поиск фактов RAG
+ASSESSED_KEYS = frozenset({"field2_2_1_6"})
 
 ANSWER_SCHEMA = {
     "type": "object",
@@ -381,7 +383,8 @@ async def extract_facts(conn, expertise_id: int, form_code: str, extractor: Opti
     if extractor is None:
         return stats
     solved = {f["fact_key"] for f in eis_facts}
-    todo = [f for f in fields if f["value_kind"] in LLM_KINDS and f["field_key"] not in solved]
+    todo = [f for f in fields if f["value_kind"] in LLM_KINDS and f["field_key"] not in solved
+            and f["field_key"] not in ASSESSED_KEYS]
     stats["fields"] = len(todo)
     results = await asyncio.gather(*(extractor.extract_field(conn, expertise_id, f) for f in todo),
                                    return_exceptions=True)

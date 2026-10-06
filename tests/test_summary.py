@@ -647,3 +647,50 @@ class FundingAdvanceTests(unittest.IsolatedAsyncioTestCase):
         data, trace = self._data()
         await summary.fill_funding_advance(self.FIELDS, data, trace, self.DOCS, {}, llm)
         self.assertIsNone(data["field1_3"])
+
+
+class AssessmentTests(unittest.IsolatedAsyncioTestCase):
+    """Метод НМЦК (field2_2_2_0) и оценка стиля (field2_2_1_6) моделью."""
+
+    FIELDS = [{"field_key": "field2_2_2_0", "value_kind": "choice", "label": "Выберите метод"},
+              {"field_key": "field2_2_1", "value_kind": "section", "label": "2.1"},
+              {"field_key": "field2_2_1_6", "value_kind": "compliance", "label": "2.1.6. Соответствие: единый стиль"}]
+
+    def docs(self, text):
+        return {1: {"filename": "d.docx", "doc_code": "docIzvejenieFiles", "text": text}}
+
+    async def test_nmck_choice_by_text(self):
+        """Метод из строки «Используемый метод определения НМЦК» → код выбора."""
+        from knowledge_store import assessment
+        found = await assessment.detect_nmck_choice(self.docs("Используемый метод определения НМЦК: затратный метод"), None)
+        self.assertEqual(found["value"], 3)
+        found = await assessment.detect_nmck_choice(self.docs("Используемый метод определения НМЦК: метод сопоставимых рыночных цен"), None)
+        self.assertEqual(found["value"], 1)
+
+    async def test_nmck_choice_llm_needs_quote(self):
+        """Ответ модели без подтверждённой цитаты не принимается."""
+        from knowledge_store import assessment
+        async def llm(m, s):
+            return json.dumps({"method": "тарифный", "quote": "нет такого текста"})
+        self.assertIsNone(await assessment.detect_nmck_choice(self.docs("Метод расчёта НМЦК указан в приложении"), llm))
+
+    async def test_style_defect_and_clean(self):
+        """0 — только при дефекте с подтверждённой цитатой; иначе 1 как предложение."""
+        from knowledge_store import assessment
+        text = "Срок оказания услуг 10 дней. Срок оказания услуг 30 дней."
+        async def bad(m, s):
+            return json.dumps({"defects": [{"quote": "Срок оказания услуг 30 дней", "issue": "Противоречие сроков"},
+                                           {"quote": "выдуманная цитата", "issue": "Ложный"}]})
+        async def clean(m, s):
+            return json.dumps({"defects": []})
+        p = await assessment.compute_assessed(self.FIELDS, self.docs(text), bad)
+        self.assertEqual(p["field2_2_1_6"][0], 0)
+        self.assertEqual(len(p["field2_2_1_6"][1]["defects"]), 1)
+        p = await assessment.compute_assessed(self.FIELDS, self.docs(text), clean)
+        self.assertEqual((p["field2_2_1_6"][0], p["field2_2_1_6"][1]["status"]), (1, "proposed"))
+
+    async def test_preset_used_in_section(self):
+        """Оценённое значение попадает в итог подраздела."""
+        data, trace = summary.assemble(self.FIELDS, [], {}, None, {"field2_2_1_6": (0, {"status": "proposed"})})
+        self.assertEqual(data["field2_2_1_6"], 0)
+        self.assertEqual(data["field2_2_1"], 0)
