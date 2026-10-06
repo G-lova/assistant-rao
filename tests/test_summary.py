@@ -577,3 +577,16 @@ class DefragmentTests(unittest.TestCase):
         three = fact("f", 3, verified=False, comment="Фрагменты не по теме.")
         _, trace = summary.assemble(fields, [three], DOCS)
         self.assertNotIn("фрагмент", json.dumps(trace, ensure_ascii=False).lower())
+
+
+class WrappedAnswerTests(unittest.TestCase):
+    """Ответ модели в обёртке ``{"field3": {...}}`` разбирается как плоский."""
+
+    def test_unwrap(self):
+        """Обёртка по имени блока снимается."""
+        raw = '{"field3": {"notice": "а", "items": [{"numbers": "2.1", "text": "б"}]}}'
+        self.assertEqual(summary.parse_block(raw)["notice"], "а")
+
+    def test_flat_untouched(self):
+        """Плоский ответ не меняется."""
+        self.assertEqual(summary.parse_block('{"areas": [], "note": "", "recommendations": []}')["note"], "")

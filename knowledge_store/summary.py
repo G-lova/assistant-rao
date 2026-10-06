@@ -515,6 +515,7 @@ FIELD3_SCHEMA = {
             "required": ["numbers", "text"]}},
     },
     "required": ["notice", "items"],
+    "additionalProperties": False,
 }
 FIELD4_SCHEMA = {
     "type": "object",
@@ -527,6 +528,7 @@ FIELD4_SCHEMA = {
         "recommendations": {"type": "array", "minItems": 1, "maxItems": 6, "items": {"type": "string", "minLength": 10, "maxLength": 260}},
     },
     "required": ["areas", "note", "recommendations"],
+    "additionalProperties": False,
 }
 BLOCK_SCHEMAS = {"field3": FIELD3_SCHEMA, "field4": FIELD4_SCHEMA}
 MANY_REMARKS = 8       # с такого числа замечаний заключение пишется развёрнуто (образец 2)
@@ -606,6 +608,22 @@ def parse_block(raw: str) -> dict:
             raise ValueError(f"ответ модели не разобран: {type(e).__name__}") from e
     if not isinstance(data, dict):
         raise ValueError("ответ модели не объект")
+    return unwrap_block(data)
+
+
+def unwrap_block(data: dict) -> dict:
+    """Снимает обёртку ``{"field3": {...}}`` / ``{"field4": {...}}``, которую модель добавляет по названию блока.
+
+    Args:
+        data: Разобранный ответ модели.
+
+    Returns:
+        dict: Содержимое блока (или исходный объект, если обёртки нет).
+    """
+    for wrapper in ("field3", "field4", "блок", "result"):
+        inner = data.get(wrapper)
+        if isinstance(inner, dict) and len(data) == 1:
+            return inner
     return data
 
 
@@ -775,7 +793,8 @@ async def write_blocks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict
             compact = [{"номер": r.get("number"), "критерий": _title(r["criterion"])[:140],
                         "суть": _clip(r.get("comment"), 260), "документ": r.get("document")} for r in remarks[:24]]
             payload = {"блок": BLOCK_TITLES[key], "объект закупки": data.get("name"), "номер закупки": data.get("code"),
-                       "способ определения поставщика": procedure, "счётчики": stats, "замечания": compact}
+                       "способ определения поставщика": procedure, "счётчики": stats, "замечания": compact,
+                       "формат ответа": "плоский JSON с ключами " + ", ".join(BLOCK_SCHEMAS[key]["properties"]) + " (без обёртки)"}
             messages = [{"role": "system", "content": prompt},
                         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
             for attempt in range(2):          # обрезанный/невалидный ответ — одна повторная попытка
