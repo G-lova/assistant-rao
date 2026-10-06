@@ -844,6 +844,104 @@ async def write_blocks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict
     return stats
 
 
+FUNDING_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "funding": {"type": ["string", "null"], "maxLength": 200},
+        "funding_quote": {"type": ["string", "null"], "maxLength": 300},
+        "advance": {"type": ["number", "null"]},
+        "advance_unit": {"type": ["string", "null"], "enum": ["руб.", "%", None]},
+        "advance_quote": {"type": ["string", "null"], "maxLength": 300},
+    },
+    "required": ["funding", "funding_quote", "advance", "advance_unit", "advance_quote"],
+    "additionalProperties": False,
+}
+FUNDING_PROMPT = (
+    "Ты — эксперт по закупкам (44-ФЗ). По фрагментам документов закупки определи: 1) источник (способ) финансирования "
+    "в формулировке эксперта, например «за счет средств федерального бюджета» или «за счет средств бюджетных учреждений»; "
+    "2) размер аванса: число и единицу («руб.» или «%»). Используй ТОЛЬКО переданный текст. Если сведений нет, "
+    "или в поле размера аванса значение не указано, верни null. Для каждого значения приведи ДОСЛОВНУЮ цитату "
+    "(до 300 символов) из фрагмента, подтверждающую его. Если аванс не предусмотрен, верни null. Только JSON по схеме.")
+
+
+def keyword_windows(documents: Dict[int, dict], pattern: str, radius: int = 350, limit: int = 4) -> List[str]:
+    """Окна текста вокруг ключевых слов в документах (сначала извещение) — вход для точечного извлечения."""
+    out: List[str] = []
+    docs = sorted(documents.values(), key=lambda d: d.get("doc_code") != "docIzvejenieFiles")
+    for doc in docs:
+        text = doc.get("text") or ""
+        for m in re.finditer(pattern, text, flags=re.I):
+            lo, hi = max(0, m.start() - 80), min(len(text), m.end() + radius)
+            window = text[lo:hi]
+            if all(window[:60] not in w for w in out):
+                out.append(window)
+            if len(out) >= limit:
+                return out
+    return out
+
+
+async def fill_funding_advance(fields: Sequence[dict], data: Dict[str, Any], trace: Dict[str, Any],
+                               documents: Dict[int, dict], procurement: Optional[dict],
+                               llm_call: Optional[LlmCall]) -> None:
+    """Заполняет способ финансирования (``field1_3``) и аванс (``field1_2``/``field1_2_unit``), если они ещё пусты.
+
+    Порядок источников: колонка ``funding`` паспорта закупки → точечное извлечение моделью по фрагментам
+    документов, где встречаются «источник финансирования» и «аванс». Значение принимается, только если
+    приведённая моделью цитата дословно найдена в тексте документов; иначе поле остаётся эксперту.
+
+    Args:
+        fields: Поля формы.
+        data: ``data`` (изменяется на месте).
+        trace: ``trace`` (изменяется на месте).
+        documents: ``document_id`` → описание документа (``filename``, ``doc_code``, ``text``).
+        procurement: Паспорт закупки (``funding``).
+        llm_call: Функция вызова LLM или ``None`` (тогда только паспорт).
+    """
+    keys = {f["field_key"] for f in fields}
+    funding = ((procurement or {}).get("funding") or "").strip()
+    if "field1_3" in keys and data.get("field1_3") is None and funding:
+        data["field1_3"] = funding
+        trace["field1_3"] = {"status": "from_passport", "source": "pe_procurements"}
+    need_funding = "field1_3" in keys and data.get("field1_3") is None
+    need_advance = "field1_2" in keys and data.get("field1_2") is None
+    if llm_call is None or not (need_funding or need_advance):
+        return
+    windows = (keyword_windows(documents, r"источник\w*\s+финансирования|за счет средств|за счёт средств") if need_funding else []) \
+        + (keyword_windows(documents, r"размер\w*\s+аванс|авансов\w+\s+платеж|аванс") if need_advance else [])
+    if not windows:
+        return
+    messages = [{"role": "system", "content": FUNDING_PROMPT},
+                {"role": "user", "content": "\n\n".join(f"[{i}] {w}" for i, w in enumerate(windows, 1))}]
+    try:
+        raw = await llm_call(messages, FUNDING_SCHEMA)
+        parsed = parse_block(raw)
+    except Exception as e:  # noqa: BLE001 — общие сведения не должны ронять сборку
+        logger.warning(f"knowledge_store: финансирование/аванс не извлечены: {type(e).__name__}: {e}")
+        return
+
+    def proven(quote: Any) -> Optional[str]:
+        """Цитата, найденная в тексте документов (или ``None``)."""
+        for doc in documents.values():
+            found = facts_mod.find_quote(str(quote or ""), doc.get("text") or "") if quote else None
+            if found:
+                return found[:300]
+        return None
+
+    value = (parsed.get("funding") or "").strip()
+    quote = proven(parsed.get("funding_quote"))
+    if need_funding and value and quote:
+        data["field1_3"] = value
+        trace["field1_3"] = {"status": "verified", "source": "llm_extraction", "quote": quote}
+    number, unit = _number(parsed.get("advance")), parsed.get("advance_unit")
+    quote = proven(parsed.get("advance_quote"))
+    if need_advance and number is not None and unit and quote:
+        data["field1_2"] = number
+        trace["field1_2"] = {"status": "verified", "source": "llm_extraction", "quote": quote}
+        if "field1_2_unit" in keys and data.get("field1_2_unit") is None:
+            data["field1_2_unit"] = unit
+            trace["field1_2_unit"] = {"status": "derived", "rule": "единица из найденной формулировки аванса"}
+
+
 def validate(data: Dict[str, Any], fields: Sequence[dict]) -> List[str]:
     """Проверяет, что ``data`` соответствует форме: только её ключи и допустимые типы значений.
 
@@ -940,6 +1038,7 @@ async def generate_summary(conn, expertise_id: int, llm_call: Optional[LlmCall],
                            "extraction": d.get("extraction")}
                  for d in ready["documents"]}
     data, trace = assemble(fields, fact_rows, documents, ready["passport"])
+    await fill_funding_advance(fields, data, trace, documents, ready["passport"], llm_call)
     stats = await write_blocks(fields, data, trace, llm_call, code)
     problems = validate(data, fields)
     if problems:

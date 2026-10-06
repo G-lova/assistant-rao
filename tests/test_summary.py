@@ -610,3 +610,40 @@ class BlockCleanTests(unittest.TestCase):
         p = summary.PROMPT_PATH.read_text(encoding="utf-8")
         self.assertNotIn("# БЛОК «ЗАКЛЮЧЕНИЕ»", summary.prompt_for(p, "field3"))
         self.assertNotIn("# БЛОК «ВЫВОД»", summary.prompt_for(p, "field4"))
+
+
+class FundingAdvanceTests(unittest.IsolatedAsyncioTestCase):
+    """Способ финансирования и аванс: паспорт, затем извлечение моделью с проверкой цитаты."""
+
+    FIELDS = [{"field_key": k, "value_kind": "text", "label": k} for k in ("field1_2", "field1_2_unit", "field1_3")]
+    DOCS = {1: {"filename": "n.html", "doc_code": "docIzvejenieFiles",
+                "text": "Источник финансирования контракта:\nСредства бюджетных учреждений\nРазмер аванса 30 процентов от цены"}}
+
+    def _data(self):
+        return {k["field_key"]: None for k in self.FIELDS}, {}
+
+    async def test_from_passport(self):
+        """Финансирование берётся из паспорта без обращения к модели."""
+        data, trace = self._data()
+        await summary.fill_funding_advance(self.FIELDS, data, trace, self.DOCS, {"funding": "за счёт федерального бюджета"}, None)
+        self.assertEqual(data["field1_3"], "за счёт федерального бюджета")
+        self.assertEqual(trace["field1_3"]["status"], "from_passport")
+
+    async def test_llm_with_verified_quote(self):
+        """Значения принимаются, если цитата найдена в тексте."""
+        async def llm(messages, schema):
+            return json.dumps({"funding": "за счет средств бюджетных учреждений", "funding_quote": "Средства бюджетных учреждений",
+                               "advance": 30, "advance_unit": "%", "advance_quote": "Размер аванса 30 процентов"})
+        data, trace = self._data()
+        await summary.fill_funding_advance(self.FIELDS, data, trace, self.DOCS, {}, llm)
+        self.assertEqual(data["field1_3"], "за счет средств бюджетных учреждений")
+        self.assertEqual((data["field1_2"], data["field1_2_unit"]), (30.0, "%"))
+
+    async def test_llm_unverified_quote_rejected(self):
+        """Выдуманная цитата — поле остаётся эксперту."""
+        async def llm(messages, schema):
+            return json.dumps({"funding": "из воздуха", "funding_quote": "такого текста нет в документах",
+                               "advance": None, "advance_unit": None, "advance_quote": None})
+        data, trace = self._data()
+        await summary.fill_funding_advance(self.FIELDS, data, trace, self.DOCS, {}, llm)
+        self.assertIsNone(data["field1_3"])
