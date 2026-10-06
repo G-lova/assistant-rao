@@ -648,7 +648,7 @@ def render_block(key: str, parsed: dict, remarks: Sequence[dict], name: Optional
         if notice_remarks and not notice:
             notice = "; ".join(_title(r["criterion"])[:90] for r in notice_remarks[:6])     # модель пропустила раздел 1
         other_remarks = [r for r in remarks if r not in notice_remarks]
-        if (remarks and not parsed.get("notice") and not items) or (other_remarks and not items):
+        if (other_remarks and not items) or (remarks and not notice and not items):
             return None                              # пустой ответ при наличии замечаний — не принимаем
         head = f"Информация, представленная в извещении{num}, соответствует требованиям законодательства"
         head += f", за исключением: {notice.rstrip('.')}." if notice else "."
