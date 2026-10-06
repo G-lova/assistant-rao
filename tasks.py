@@ -99,7 +99,7 @@ def generate_summary_opinion_task(self, expertise_id: int, environment: str, sen
     """Генерирует сводное ЭЗ из хранилища знаний (факты → ``data`` по ключам формы, ``trace`` отдельно).
 
     Если фактов ещё нет и они включены (``PE_FACTS_ENABLED``), строит их по сохранённым текстам.
-    При ``send_draft=True`` отправляет ``data`` в основную БД через ``Config.get_external_api_config``.
+    При ``send_draft=True`` отправляет ``data`` в основную БД через ``ExternalAPIService`` (``Config.get_external_api_config``).
 
     Args:
         expertise_id: ID экспертизы.

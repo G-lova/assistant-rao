@@ -5,7 +5,22 @@ import os
 import re
 import unittest
 from pathlib import Path
+import sys
+import types
 from unittest import mock
+
+# В окружении без aiohttp/requests подставляем заглушки: ExternalAPIService импортируется лениво
+try:
+    import aiohttp  # noqa: F401
+    import requests  # noqa: F401
+except ImportError:
+    for _name in ("aiohttp", "requests"):
+        _stub = types.ModuleType(_name)
+        _stub.ClientError = type("ClientError", (Exception,), {})
+        sys.modules[_name] = _stub
+    _hcm = types.ModuleType("configs.http_client_manager")
+    _hcm.HTTPClientManager = object
+    sys.modules["configs.http_client_manager"] = _hcm
 
 from knowledge_store import export, facts, repository as repo, summary
 from tests.pg_psql import PsqlConn
@@ -148,6 +163,7 @@ class FakeResponse:
 
     def __init__(self, status, body):
         self.status, self._body = status, body
+        self.headers = {"content-type": "application/json"}
 
     async def json(self, content_type=None):
         """Тело ответа."""
@@ -184,24 +200,26 @@ class FakeManager:
 
 
 class ExportTests(unittest.TestCase):
-    """Отправка черновика через Config.get_external_api_config."""
+    """Отправка черновика через ExternalAPIService (Config.get_external_api_config)."""
 
-    def test_uses_external_api_config_and_payload(self):
+    def test_uses_external_api_service_and_payload(self):
         """URL и заголовки из get_external_api_config; тело {id, data}."""
         session = FakeSession()
         cfg = {"url": "https://x/api/expertise/set-hint-for-rao-expert", "headers": {"X-API-Key": "k"}}
-        with mock.patch.object(export.Config, "get_external_api_config", return_value=cfg) as m:
+        with mock.patch("conclusion.external_api_service.Config.get_external_api_config", return_value=cfg) as m:
             res = asyncio.run(export.send_draft(FakeManager(session), 5, {"field3": "т"}, "stage"))
         m.assert_called_once_with("stage")
-        self.assertEqual(res, {"ok": True, "status": 200})
+        self.assertEqual(res, {"ok": True})
         self.assertEqual(session.calls[0], (cfg["url"], cfg["headers"], {"id": 5, "data": {"field3": "т"}}))
 
     def test_http_error_and_exception_are_returned_not_raised(self):
         """Ошибка HTTP и сбой сети возвращаются в результате (заключение не теряется), ключ в ответ не попадает."""
         cfg = {"url": "https://x", "headers": {"X-API-Key": "secret"}}
-        with mock.patch.object(export.Config, "get_external_api_config", return_value=cfg):
+        with mock.patch("conclusion.external_api_service.Config.get_external_api_config", return_value=cfg):
             res = asyncio.run(export.send_draft(FakeManager(FakeSession(422, {"message": "bad"})), 5, {}))
-            self.assertEqual(res, {"ok": False, "status": 422, "error": "bad"})
+            self.assertFalse(res["ok"])
+            self.assertIn("422", res["error"])
+            self.assertIn("bad", res["error"])
 
             class Broken:
                 """Менеджер без сессии."""
@@ -210,7 +228,7 @@ class ExportTests(unittest.TestCase):
                     raise ConnectionError("down")
 
             res = asyncio.run(export.send_draft(Broken(), 5, {}))
-        self.assertEqual(res, {"ok": False, "error": "ConnectionError"})
+        self.assertFalse(res["ok"])
         self.assertNotIn("secret", json.dumps(res))
 
 
