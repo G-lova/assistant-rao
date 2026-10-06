@@ -119,6 +119,59 @@ def evidence_ok(fact: dict, doc_text: Optional[str]) -> bool:
     return bool(doc_text) and facts_mod.quote_in_text(quote, doc_text)
 
 
+METHOD_STEMS = {"нормативн": "нормативный", "затратн": "затратный", "тарифн": "тарифный",
+                "проектно-сметн": "проектно-сметный", "рыночн": "сопоставления рыночных цен"}
+
+
+def used_nmck_method(documents: Dict[int, dict]) -> Tuple[Optional[str], Optional[str]]:
+    """Метод расчёта НМЦК, указанный в документах («Используемый метод определения НМЦК…»).
+
+    Args:
+        documents: ``document_id`` → описание документа с полем ``text``.
+
+    Returns:
+        Tuple[Optional[str], Optional[str]]: ``(ключ метода из METHOD_STEMS, найденная строка)``; ``(None, None)``,
+        если метод в текстах не назван.
+    """
+    for doc in documents.values():
+        match = re.search(r"определения\s+Н\(?М?\)?ЦК[^\n]{0,300}", doc.get("text") or "", re.I)
+        if not match:
+            continue
+        snippet = match.group(0)
+        for stem in METHOD_STEMS:
+            if stem in snippet.lower() or (stem == "рыночн" and "анализ рынка" in snippet.lower()):
+                return stem, snippet.strip()
+    return None, None
+
+
+def apply_nmck_method_rule(fields: Sequence[dict], documents: Dict[int, dict], data: Dict[str, Any],
+                           trace: Dict[str, Any]) -> None:
+    """Критерии «расчёт НМЦК … методом» при другом применённом методе — «2» (не применимо).
+
+    Методы взаимоисключающие, поэтому критерии про неприменённые методы получают ``2`` детерминированно
+    (модель в этих случаях ошибочно ставит «0» и порождает ложные замечания). Критерий применённого метода
+    остаётся за моделью. Изменяет ``data``/``trace`` на месте.
+
+    Args:
+        fields: Поля формы.
+        documents: Документы экспертизы с текстами.
+        data: ``data`` (изменяется на месте).
+        trace: ``trace`` (изменяется на месте).
+    """
+    used, snippet = used_nmck_method(documents)
+    if not used:
+        return
+    for field in fields:
+        match = re.search(r"расчета\s+НМЦК\s+([\w-]+)\s+методом", field.get("label") or "", re.I)
+        if not match or field["field_key"] not in data:
+            continue
+        stem = next((k for k in METHOD_STEMS if match.group(1).lower().startswith(k)), None)
+        if stem and stem != used:
+            data[field["field_key"]] = 2
+            trace[field["field_key"]] = {"status": "derived", "rule": f"в документах применён метод «{METHOD_STEMS[used]}»; "
+                                         "другие методы расчёта НМЦК не применимы", "quote": snippet[:300]}
+
+
 def section_result(children: Sequence[Optional[int]]) -> Optional[int]:
     """Итог подраздела по его критериям: есть «0» → ``0``; все решены → ``1``; иначе ``None``.
 
@@ -185,6 +238,8 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
         if result is None and fact["value_obj"].get("value") == 3:
             entry["note"] = "по найденным фрагментам определить нельзя — оставлено эксперту"
         trace[key] = entry
+
+    apply_nmck_method_rule(fields, documents, data, trace)
 
     # итоги подразделов — из решённых дочерних критериев
     for field in fields:

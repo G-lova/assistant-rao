@@ -483,3 +483,19 @@ class RunnerDbTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RetryTests(unittest.IsolatedAsyncioTestCase):
+    """Повторный запрос при невалидном (обрезанном) ответе модели."""
+
+    async def test_invalid_answer_is_retried_once(self):
+        """Первый ответ без значения (обрезан) → второй запрос; принимается валидный."""
+        answers = iter(['{"fragment": 1, "quote": "Срок', '{"fragment": 0, "quote": "", "comment": "нет", "value": 0}'])
+
+        async def llm(messages, schema):
+            return next(answers)
+
+        extractor = facts.FactExtractor(llm, None, search=None, top_k=1, recheck_k=0, system_prompt="p")
+        fact = await extractor._ask({"label": "Наличие чего-то", "value_kind": "presence"},
+                                    [facts.Fragment(1, 1, 1, "текст")])
+        self.assertEqual(fact["value"], 0)

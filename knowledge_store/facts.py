@@ -34,8 +34,8 @@ ANSWER_SCHEMA = {
     "properties": {
         # порядок свойств важен: модель сначала находит фрагмент и цитату, потом объясняет и лишь затем решает
         "fragment": {"type": "integer", "minimum": 0},
-        "quote": {"type": "string", "maxLength": 500},
-        "comment": {"type": "string", "maxLength": 600},
+        "quote": {"type": "string", "maxLength": 400},
+        "comment": {"type": "string", "maxLength": 500},
         "value": {"type": "integer", "enum": [0, 1, 2, 3]},
     },
     "required": ["fragment", "quote", "comment", "value"],
@@ -272,9 +272,13 @@ class FactExtractor:
     async def _ask(self, field: dict, fragments: Sequence[Fragment]) -> Optional[dict]:
         """Один запрос к модели по фрагментам; возвращает принятый факт или ``None``."""
         messages = build_messages(field["label"], field["value_kind"], fragments, self.system_prompt)
-        async with self.semaphore:
-            raw = await self.llm_call(messages, ANSWER_SCHEMA)
-        return validate_answer(parse_answer(raw), fragments)
+        for _ in range(2):      # обрезанный/невалидный ответ — одна повторная попытка
+            async with self.semaphore:
+                raw = await self.llm_call(messages, ANSWER_SCHEMA)
+            fact = validate_answer(parse_answer(raw), fragments)
+            if fact:
+                return fact
+        return None
 
 
 async def search_fragments(conn, expertise_id: int, vector, k: int) -> List[Fragment]:
@@ -357,7 +361,7 @@ async def extract_facts(conn, expertise_id: int, form_code: str, extractor: Opti
     return stats
 
 
-def make_llm_call(client: Any, model: str, rate: float = 1.5, max_tokens: int = 800) -> LlmCall:
+def make_llm_call(client: Any, model: str, rate: float = 1.5, max_tokens: int = 1600) -> LlmCall:
     """Создаёт функцию вызова LLM для :class:`FactExtractor` поверх OpenAI-совместимого клиента.
 
     Использует ``guided_json`` (как ``TypeDataExtractor``) и общий ограничитель частоты запросов.

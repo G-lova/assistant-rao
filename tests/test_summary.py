@@ -364,3 +364,20 @@ class NoticeTextFallbackTests(unittest.TestCase):
         self.assertEqual(data["name"], "Услуги по организации отдыха")
         self.assertEqual(data["inn"], "262012345678901234567890123456789012")
         self.assertEqual(trace["name"]["status"], "proposed")
+
+
+class NmckMethodRuleTests(unittest.TestCase):
+    """Критерии про неприменённые методы расчёта НМЦК получают «2»."""
+
+    def test_other_methods_not_applicable(self):
+        """При методе рыночных цен критерии нормативного/затратного методов — 2, замечаний нет."""
+        fields = [field("m_norm", "compliance", "2.2.7. Соответствие законодательству расчета НМЦК нормативным методом"),
+                  field("m_cost", "compliance", "2.2.7. Соответствие законодательству расчета НМЦК затратным методом"),
+                  field("m_proj", "compliance", "2.2.7. Соответствие законодательству расчета НМЦК проектно-сметным методом")]
+        docs = {1: {"filename": "o.xlsx", "doc_code": "docObosnovanie",
+                    "text": "Используемый метод определения НМЦК с обоснованием Метод сопоставления рыночных цен (анализ рынка)"}}
+        rows = [fact("m_norm", 0, verified=False), fact("m_cost", 0, verified=False), fact("m_proj", 0, verified=False)]
+        data, trace = summary.assemble(fields, rows, docs)
+        self.assertEqual((data["m_norm"], data["m_cost"], data["m_proj"]), (2, 2, 2))
+        self.assertEqual(trace["m_norm"]["status"], "derived")
+        self.assertEqual(summary.collect_remarks(fields, data, trace), [])
