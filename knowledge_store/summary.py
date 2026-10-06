@@ -26,7 +26,7 @@ PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "summary_bloc
 RESULT_KINDS = (forms.KIND_PRESENCE, forms.KIND_COMPLIANCE)
 TEXT_BLOCK_SCHEMA = {
     "type": "object",
-    "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 3000}},
+    "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 4500}},
     "required": ["text"],
 }
 BLOCK_TITLES = {"field3": "вывод", "field4": "заключение"}  # «Блок III. Вывод», «Блок IV. Заключение»
@@ -469,7 +469,7 @@ def collect_remarks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict[st
         if field["value_kind"] in RESULT_KINDS and data.get(key) == 0:
             item = trace.get(key, {})
             remarks.append({"field_key": key, "number": eis_notice.criterion_number(field["label"]) or "",
-                            "criterion": field["label"], "comment": item.get("comment"),
+                            "criterion": field["label"], "comment": item.get("comment"), "document": item.get("document"),
                             "quote": (item.get("quote") or "")[:300]})
     return remarks
 
@@ -534,9 +534,16 @@ def fallback_block(key: str, remarks: Sequence[dict], stats: Dict[str, int], nam
     if not remarks:
         return (f"{subject} соответствуют требованиям законодательства. На основании представленной документации "
                 f"целесообразно оформить документацию и осуществить закупку в соответствии с требованиями {LAW_44FZ}.")
-    todo = "\n".join(f"- устранить выявленное несоответствие по критерию {r.get('number') or _title(r['criterion'])};" for r in remarks)
+    groups: Dict[str, List[str]] = {}
+    for r in remarks:
+        num = r.get("number") or _title(r["criterion"])
+        groups.setdefault(num.split(".")[0], []).append(num)
+    where = {"1": "в извещении о закупке", "2": "в описании объекта закупки, обосновании НМЦК и проекте контракта",
+             "3": "в документации о закупке", "4": "в части требований технических регламентов и стандартов"}
+    todo = ";\n".join(f"- учесть и устранить замечания {where.get(g, 'по документации')} (критерии {', '.join(sorted(set(n)))})"
+                      for g, n in sorted(groups.items()))
     return (f"{subject} соответствуют требованиям законодательства, за исключением указанных несоответствий и недостатков.\n"
-            f"Заказчику рекомендуется:\n{todo.rstrip(';')}.")
+            f"Заказчику рекомендуется:\n{todo}.")
 
 
 async def write_blocks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict[str, Any],
@@ -564,21 +571,29 @@ async def write_blocks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict
     for key in ("field3", "field4"):
         if key not in data:
             continue
-        text, how = None, "template"
+        text, how, llm_error = None, "template", None
         if llm_call is not None and remarks:
+            compact = [{"номер": r.get("number"), "критерий": _title(r["criterion"])[:140],
+                        "суть": (r.get("comment") or "")[:350], "документ": r.get("document")} for r in remarks]
             payload = {"блок": BLOCK_TITLES[key], "объект закупки": data.get("name"), "номер закупки": data.get("code"),
-                       "способ определения поставщика": procedure, "счётчики": stats, "замечания": remarks}
+                       "способ определения поставщика": procedure, "счётчики": stats, "замечания": compact}
             messages = [{"role": "system", "content": prompt},
                         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
-            try:
-                parsed = json.loads(await llm_call(messages, TEXT_BLOCK_SCHEMA))
-                candidate = (parsed.get("text") or "").strip() if isinstance(parsed, dict) else ""
-                if candidate:
-                    text, how = candidate, "llm"
-            except Exception as e:  # noqa: BLE001 — блок не должен ронять сборку
-                logger.warning(f"knowledge_store: блок {key} сформирован по шаблону: {type(e).__name__}")
+            for attempt in range(2):          # обрезанный/невалидный ответ — одна повторная попытка
+                try:
+                    parsed = json.loads(await llm_call(messages, TEXT_BLOCK_SCHEMA))
+                    candidate = (parsed.get("text") or "").strip() if isinstance(parsed, dict) else ""
+                    if candidate:
+                        text, how = candidate, "llm"
+                        break
+                    llm_error = "пустой ответ модели"
+                except Exception as e:  # noqa: BLE001 — блок не должен ронять сборку
+                    llm_error = f"{type(e).__name__}: {e}"[:300]
+                    logger.warning(f"knowledge_store: блок {key}, попытка {attempt + 1}: {llm_error}")
         data[key] = text or fallback_block(key, remarks, stats, data.get("name"), data.get("code"), procedure)
         trace[key] = {"status": "generated", "method": how, "based_on": [r["field_key"] for r in remarks]}
+        if how == "template" and llm_error:
+            trace[key]["llm_error"] = llm_error
     return stats
 
 

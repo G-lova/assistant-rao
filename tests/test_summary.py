@@ -458,7 +458,7 @@ class Field4SampleTests(unittest.TestCase):
         self.assertTrue(text.startswith("Извещение и документация о проведении открытого конкурса в электронной форме "
                                         "для закупки № 0373100100526000035 на оказание услуг соответствуют требованиям законодательства, "
                                         "за исключением указанных несоответствий и недостатков."))
-        self.assertIn("Заказчику рекомендуется:\n- устранить выявленное несоответствие по критерию 2.2.", text)
+        self.assertIn("Заказчику рекомендуется:\n- учесть и устранить замечания в описании объекта закупки, обосновании НМЦК и проекте контракта (критерии 2.2).", text)
 
     def test_code_is_registry_number(self):
         """code берётся из реестрового номера в имени файла извещения."""
@@ -466,3 +466,34 @@ class Field4SampleTests(unittest.TestCase):
         docs = {1: {"filename": "Печатная-форма-извещения-№-0301100027726000035-(версия-1).html", "doc_code": "docIzvejenieFiles", "text": "т"}}
         data, trace = summary.assemble(fields, [], docs)
         self.assertEqual(data["code"], "0301100027726000035")
+
+
+class BlockLlmTests(unittest.IsolatedAsyncioTestCase):
+    """LLM для блоков III–IV: повтор, сжатая нагрузка, причина отката на шаблон в trace."""
+
+    async def test_retry_then_template_reason(self):
+        """Две неудачи подряд → шаблон и trace.llm_error; успех со второй попытки → method=llm."""
+        calls = []
+
+        async def bad(messages, schema):
+            calls.append(messages)
+            return '{"text": "обрезано'
+
+        fields = [field("f", "presence", "1.4. Наличие почты"), field("field4", "text")]
+        data, trace = {"f": 0, "field4": None, "name": "услуги", "code": "0301100027726000035"}, {"f": {"comment": "нет", "document": "n.html"}}
+        await summary.write_blocks(fields, data, trace, bad, "44fz_competition_obj6")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(trace["field4"]["method"], "template")
+        self.assertIn("llm_error", trace["field4"])
+        payload = json.loads(calls[0][1]["content"])
+        self.assertEqual(payload["замечания"][0]["номер"], "1.4")
+        self.assertEqual(payload["способ определения поставщика"], "открытого конкурса в электронной форме")
+
+        answers = iter(['{"text": "обрезано', '{"text": "Итог."}'])
+
+        async def flaky(messages, schema):
+            return next(answers)
+
+        data["field4"] = None
+        await summary.write_blocks(fields, data, trace, flaky, "44fz_competition_obj6")
+        self.assertEqual((data["field4"], trace["field4"]["method"]), ("Итог.", "llm"))
