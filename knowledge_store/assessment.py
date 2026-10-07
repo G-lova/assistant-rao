@@ -165,6 +165,75 @@ def _quote_source(documents: Dict[int, dict], quote: Any) -> Tuple[Optional[str]
     return None, None
 
 
+# Косвенные признаки метода обоснования НМЦК: код метода → (шаблон, вес). Считаются совпадения по всем документам.
+NMCK_SIGNALS = {
+    1: [(r"сопоставлени\w+\s+рыночн|анализ\w*\s+рынка|метод\w*\s+сопоставимых\s+рыночных", 5),
+        (r"коммерческ\w+\s+предложени|ценов\w+\s+информаци|реестр\w*\s+(?:контрактов|договоров)|"
+         r"коэффициент\w*\s+вариаци|однородност\w+\s+совокупност", 2)],
+    2: [(r"нормативн\w+\s+метод", 8), (r"предельн\w+\s+(?:цен|стоимост)|государственн\w+\s+регулирован\w+\s+цен", 2)],
+    3: [(r"затратн\w+\s+метод", 8), (r"себестоимост|рентабельност|накладн\w+\s+расход|сметн\w+\s+прибыл", 2)],
+    4: [(r"тарифн\w+\s+метод", 8), (r"регулируем\w+\s+(?:цен|тариф)|утвержденн\w+\s+тариф|тариф\w*\s+на\s+(?:услуг|тепл|электр|водоснабж)", 2)],
+    5: [(r"проектно-сметн\w+", 8), (r"сметн\w+\s+(?:стоимост|расчет|документаци)|локальн\w+\s+смет|\bЛСР\b|\bГЭСН\b|\bФЕР\b|\bТЕР\b|ФСНБ|сметн\w+\s+норматив", 3)],
+}
+# Строгие маркеры проектно-сметного метода: «смета» сама по себе встречается и в проектах контрактов на услуги, поэтому метод
+# засчитывается только при двух разных маркерах или при группе ОКПД2 строительства/ремонта.
+ESTIMATE_MARKERS = (r"проектно-сметн", r"локальн\w+\s+смет", r"\bЛСР\b", r"\bГЭСН\b", r"\bФЕР\b", r"\bТЕР\b", r"ФСНБ",
+                    r"сметн\w+\s+норматив", r"сметн\w+\s+стоимост")
+# Группы ОКПД2 (из ИКЗ), характерные для метода: проектно-сметный — строительство и ремонт (41–43)
+NMCK_OKPD_PRIOR = {5: ("41", "42", "43")}
+
+
+def classify_nmck_method(documents: Dict[int, dict]) -> Optional[dict]:
+    """Метод обоснования НМЦК по косвенным признакам, если метод не назван прямо.
+
+    Считает взвешенные совпадения признаков каждого метода (:data:`NMCK_SIGNALS`) во всех документах, добавляет вес
+    группы ОКПД2 из ИКЗ (строительство и ремонт — проектно-сметный). Побеждает метод с наибольшим счётом; если
+    признаков нет, берётся рыночный метод — приоритетный по ст. 22 44-ФЗ и самый частый у экспертов (31 из 43).
+
+    Args:
+        documents: Документы экспертизы с текстами.
+
+    Returns:
+        Optional[dict]: ``{"value", "method", "quote", "document", "source", "scores", "basis"}`` или ``None``, если
+        документов с текстом нет.
+    """
+    docs = [d for d in documents.values() if (d.get("text") or "").strip()]
+    scores = {code: 0 for code in NMCK_SIGNALS}
+    first: Dict[int, Tuple[str, str]] = {}
+    for doc in docs:
+        text = doc["text"]
+        for code, signals in NMCK_SIGNALS.items():
+            for pattern, weight in signals:
+                found = re.findall(pattern, text, flags=re.I)
+                if found:
+                    scores[code] += weight * min(len(found), 3)
+                    if code not in first:
+                        m = re.search(pattern, text, flags=re.I)
+                        first[code] = (text[max(0, m.start() - 80):m.end() + 120].strip()[:300], doc.get("filename"))
+    okpd = None
+    for doc in docs:
+        m = re.search(r"(?<!\d)\d{29}(\d{4})\d{3}(?!\d)", doc["text"])
+        if m:
+            okpd = m.group(1)[:2]
+            break
+    all_text = "\n".join(d["text"] for d in docs)
+    distinct = sum(1 for marker in ESTIMATE_MARKERS if re.search(marker, all_text, flags=re.I))
+    if okpd not in NMCK_OKPD_PRIOR[5] and distinct < 2:
+        scores[5] = 0
+    for code, prefixes in NMCK_OKPD_PRIOR.items():
+        if okpd in prefixes:
+            scores[code] += 6
+    best = max(scores, key=lambda c: (scores[c], c == 1))
+    names = {code: label for code, label in NMCK_METHOD_CODES.values()}
+    if scores[best] == 0:
+        return {"value": 1, "method": names[1], "quote": None, "document": None, "source": "default", "scores": scores,
+                "basis": "метод в документах не назван и признаков других методов нет — принят приоритетный рыночный метод"}
+    quote, filename = first.get(best, (None, None))
+    basis = "косвенные признаки в документах" + (f" и группа ОКПД2 {okpd} из ИКЗ" if okpd and okpd in NMCK_OKPD_PRIOR.get(best, ()) else "")
+    return {"value": best, "method": names[best], "quote": quote, "document": filename, "source": "indirect", "scores": scores,
+            "basis": basis}
+
+
 async def detect_nmck_choice(documents: Dict[int, dict], llm_call: Optional[LlmCall]) -> Optional[dict]:
     """Определяет метод обоснования НМЦК для ``field2_2_2_0``.
 
@@ -181,23 +250,23 @@ async def detect_nmck_choice(documents: Dict[int, dict], llm_call: Optional[LlmC
         code, name = NMCK_METHOD_CODES[stem]
         return {"value": code, "method": name, "quote": (snippet or "")[:300], "source": "text_rule"}
     if llm_call is None:
-        return None
+        return classify_nmck_method(documents)
     windows = keyword_windows(documents, r"(?:метод\w*|методик\w*)[^\n]{0,80}Н\(?М?\)?ЦК|Н\(?М?\)?ЦК[^\n]{0,80}метод\w*")
     if not windows:
-        return None
+        return classify_nmck_method(documents)
     try:
         parsed = _parse(await llm_call([{"role": "system", "content": NMCK_PROMPT},
                                         {"role": "user", "content": "\n\n".join(f"[{i}] {w}" for i, w in enumerate(windows, 1))}],
                                        NMCK_SCHEMA)) or {}
     except Exception as e:  # noqa: BLE001
         logger.warning(f"knowledge_store: метод НМЦК не определён моделью: {type(e).__name__}: {e}")
-        return None
+        return classify_nmck_method(documents)
     name = parsed.get("method")
     quote, filename = _quote_source(documents, parsed.get("quote"))
     for code, label in NMCK_METHOD_CODES.values():
         if label == name and quote:
             return {"value": code, "method": label, "quote": quote, "document": filename, "source": "llm_extraction"}
-    return None
+    return classify_nmck_method(documents)
 
 
 def style_chunks(text: str, chunk: int = CHUNK, limit: int = MAX_CHUNKS) -> List[str]:
@@ -376,7 +445,10 @@ async def compute_assessed(fields: Sequence[dict], documents: Dict[int, dict],
             preset[NMCK_CHOICE_KEY] = (found["value"], {
                 "status": "verified" if found["source"] == "text_rule" else "proposed",
                 "source": found["source"], "document": found.get("document"), "quote": found["quote"],
-                "comment": f"Применён {found['method']} метод обоснования НМЦК"})
+                "comment": f"Применён {found['method']} метод обоснования НМЦК"
+                           + (f" ({found['basis']})" if found.get("basis") else ""),
+                **({"scores": found["scores"], "note": "метод определён косвенно, требует проверки экспертом"}
+                   if found.get("scores") else {})})
     if STYLE_KEY in keys and llm_call is not None:
         result = await assess_style(documents, llm_call)
         if result["checked_parts"] and len(result["errors"]) < result["checked_parts"]:

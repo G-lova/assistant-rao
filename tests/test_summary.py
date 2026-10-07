@@ -693,7 +693,8 @@ class AssessmentTests(unittest.IsolatedAsyncioTestCase):
         from knowledge_store import assessment
         async def llm(m, s):
             return json.dumps({"method": "тарифный", "quote": "нет такого текста"})
-        self.assertIsNone(await assessment.detect_nmck_choice(self.docs("Метод расчёта НМЦК указан в приложении"), llm))
+        fallback = await assessment.detect_nmck_choice(self.docs("Метод расчёта НМЦК указан в приложении"), llm)
+        self.assertEqual((fallback["value"], fallback["source"]), (1, "default"))   # без цитаты — косвенный вывод, не пусто
 
     async def test_style_defect_and_clean(self):
         """0 — только при дефекте с подтверждённой цитатой; иначе 1 как предложение."""
@@ -900,3 +901,36 @@ class AdvanceRublesTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(summary.usable_result("field2_2_3", "compliance", 2, "fact_extractor"))
         self.assertEqual(summary.usable_result("field2_4_3", "compliance", 2, "fact_extractor"), 2)
         self.assertEqual(summary.usable_result("field2_2_3", "compliance", 2, facts.SOURCE_EIS), 2)
+
+
+class NmckClassifierTests(unittest.TestCase):
+    """Метод НМЦК по косвенным признакам (field2_2_2_0 не должен быть пустым)."""
+
+    def docs(self, *texts):
+        """Документы с заданными текстами."""
+        return {i: {"text": t, "filename": f"d{i}.docx"} for i, t in enumerate(texts, 1)}
+
+    def test_market_by_commercial_offers(self):
+        """Коммерческие предложения и коэффициент вариации → рыночный (1)."""
+        r = assessment.classify_nmck_method(self.docs("Получены коммерческие предложения. Коэффициент вариации 12%"))
+        self.assertEqual((r["value"], r["source"]), (1, "indirect"))
+
+    def test_estimate_needs_two_markers_or_okpd(self):
+        """Одно слово «сметная стоимость» не делает метод проектно-сметным; два маркера — делают."""
+        self.assertEqual(assessment.classify_nmck_method(self.docs("сметная стоимость услуг"))["value"], 1)
+        r = assessment.classify_nmck_method(self.docs("Локальная смета ЛСР № 1, ГЭСН 46"))
+        self.assertEqual(r["value"], 5)
+
+    def test_okpd_prior_and_default(self):
+        """ИКЗ с ОКПД2 43.. → проектно-сметный; без признаков — рыночный по умолчанию, даже без текстов."""
+        r = assessment.classify_nmck_method(self.docs("Идентификационный код\n261245700735124570100100080014322244\n"))
+        self.assertEqual(r["value"], 5)
+        d = assessment.classify_nmck_method({})
+        self.assertEqual((d["value"], d["source"]), (1, "default"))
+
+    def test_direct_method_still_wins(self):
+        """Метод, названный прямо в тексте, выбирается без классификатора и подтверждается."""
+        import asyncio
+        found = asyncio.run(assessment.detect_nmck_choice(
+            self.docs("Используемый метод определения НМЦК: Затратный метод"), None))
+        self.assertEqual((found["value"], found["source"]), (3, "text_rule"))
