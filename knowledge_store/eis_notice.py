@@ -241,10 +241,16 @@ def _rule_no_preferences(notice: Notice) -> Optional[Finding]:
 def _rule_no_restrictions(notice: Notice) -> Optional[Finding]:
     """1.30: если у объектов закупки нет блока ``restrictionsInfo`` (запреты/ограничения не применяются) — ``2``.
 
-    По эталону экспертов (27 из 27 извещений без блока); при наличии блока оценки экспертов расходятся — решает LLM.
+    По эталону экспертов (27 из 27 извещений без блока). Если в блоке флаг запрета или ограничения
+    допуска иностранных товаров равен ``true`` — «в наличии» (``1``). Флаг преференции
+    (``isPreferenseRFPurchaseObjects``) оценки экспертов не определяет (расхождения) — решает LLM.
     """
     if notice.exists(OBJ) and not notice.exists(OBJ + "/restrictionsInfo"):
         return Finding(NOT_PROVIDED, "у объектов закупки нет restrictionsInfo (запреты и ограничения не установлены)", [])
+    for flag in ("isProhibitionForeignPurchaseObjects", "isRestrictForeignPurchaseObjects"):
+        path = OBJ + "/restrictionsInfo/" + flag
+        if any(v.lower() == "true" for v in notice.texts(path)):
+            return Finding(PRESENT, f"{path} = true (установлен запрет или ограничение)", [path])
     return None
 
 

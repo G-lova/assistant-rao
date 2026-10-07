@@ -103,6 +103,25 @@ class EisRulesTests(unittest.TestCase):
         self.assertEqual(self.run_rules()["1.32"].value, 1)
         self.assertIsNone(self.run_rules(procedure="в соответствии с регламентом электронной площадки")["1.32"].value)
 
+    def test_quotation_request_notice(self):
+        """Извещение ``epNotificationEZK2020`` (запрос котировок) разбирается теми же правилами."""
+        raw = (Path(__file__).parent / "data" / "ezk_notice.xml").read_text(encoding="utf-8")
+        found = eis_notice.evaluate_all(eis_notice.Notice.from_xml(raw.format(prohibition="true", preference="false")))
+        self.assertEqual(found["1.4"].value, 1)
+        self.assertIn("SurovcevAM@norvuz.ru", found["1.4"].evidence)
+        self.assertEqual(found["1.6"].value, 1)
+        self.assertEqual(found["1.9"].value, 1)
+        self.assertEqual(found["1.7"].value, 2)
+        self.assertEqual(found["1.28"].value, 2)
+
+    def test_restrictions_flags(self):
+        """1.30: флаг запрета/ограничения → 1; одна только преференция — решает не XML."""
+        raw = (Path(__file__).parent / "data" / "ezk_notice.xml").read_text(encoding="utf-8")
+        run = lambda **kw: eis_notice.evaluate_all(eis_notice.Notice.from_xml(raw.format(**kw)))["1.30"]
+        self.assertEqual(run(prohibition="true", preference="false").value, 1)
+        self.assertIsNone(run(prohibition="false", preference="true").value)
+        self.assertEqual(self.run_rules()["1.30"].value, None)
+
     def test_latest_version_wins(self):
         """Из нескольких версий извещения выбирается последняя."""
         notice = eis_notice.latest_notice([make_xml(version=1), make_xml(version=3), b"not xml", make_xml(version=2)])
