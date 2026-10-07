@@ -114,7 +114,7 @@ class AssembleTests(unittest.TestCase):
                 2: {"filename": "o.docx", "doc_code": "docOpisanieFiles", "text": "т"}}
         data, trace = summary.assemble(fields, rows, docs)
         self.assertEqual((data["name"], data["inn"], data["field1_1"], data["field1_2"], data["field1_2_unit"]),
-                         ("Услуги связи", "2325", 1500000.5, 450000.15, "руб."))   # 30% от НМЦК
+                         ("Услуги связи", "2325", 1500000.5, 30.0, "percent"))
         self.assertIn("n.xml", data["documents"])
         self.assertIn("o.docx", data["documents"])
         self.assertIsNone(data["code"])
@@ -658,7 +658,7 @@ class FundingAdvanceTests(unittest.IsolatedAsyncioTestCase):
         data, trace = self._data()
         await summary.fill_funding_advance(self.FIELDS, data, trace, self.DOCS, {}, llm)
         self.assertEqual(data["field1_3"], "за счет средств бюджетных учреждений")
-        self.assertEqual((data["field1_2"], data["field1_2_unit"]), (30.0, "%"))
+        self.assertEqual((data["field1_2"], data["field1_2_unit"]), (30.0, "percent"))
 
     async def test_llm_unverified_quote_rejected(self):
         """Выдуманная цитата — поле остаётся эксперту."""
@@ -872,13 +872,13 @@ class ExpenseTypeTests(unittest.TestCase):
 
 
 class AdvanceRublesTests(unittest.IsolatedAsyncioTestCase):
-    """Аванс (field1_2) — в рублях; «аванса нет» — 0; ответ модели с ключом ``answer``; «2» для соответствия."""
+    """Аванс (field1_2) — в единицах извещения (percent/rub); «аванса нет» — 0; ответ модели с ключом ``answer``; «2» для соответствия."""
 
-    def test_percent_to_rubles(self):
-        """30% от НМЦК 6 716 267,32 → рубли; рубли остаются рублями; проценты без НМЦК не пересчитываются."""
-        self.assertEqual(summary.advance_in_rubles(30.0, "%", 6716267.32), 2014880.2)
-        self.assertEqual(summary.advance_in_rubles(1200000.0, "руб.", None), 1200000.0)
-        self.assertIsNone(summary.advance_in_rubles(30.0, "%", None))
+    def test_advance_unit(self):
+        """Единица аванса: «%» → percent, «руб.» → rub."""
+        self.assertEqual(summary.advance_unit("%"), "percent")
+        self.assertEqual(summary.advance_unit("руб."), "rub")
+        self.assertIsNone(summary.advance_unit("шт"))
 
     async def test_no_advance_is_zero(self):
         """Критерий 1.22 = «2» → field1_2 = 0 (даже без модели), единица — руб."""
@@ -887,7 +887,7 @@ class AdvanceRublesTests(unittest.IsolatedAsyncioTestCase):
         trace = {}
         await summary.fill_funding_advance(fields, data, trace, {}, {}, None)
         self.assertEqual(data["field1_2"], 0)
-        self.assertEqual(data["field1_2_unit"], "руб.")
+        self.assertEqual(data["field1_2_unit"], "rub")
         self.assertEqual(trace["field1_2"]["status"], "derived")
 
     def test_answer_key_alias(self):

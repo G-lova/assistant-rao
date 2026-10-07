@@ -420,23 +420,18 @@ def _number(text: Any) -> Optional[float]:
         return None
 
 
-def advance_in_rubles(value: Optional[float], unit: Optional[str], nmck: Optional[float]) -> Optional[float]:
-    """Размер аванса в рублях (``field1_2`` по форме — «Авансовый платеж, руб.»).
+def advance_unit(unit: Any) -> Optional[str]:
+    """Единица аванса для ``field1_2_unit``: ``"percent"`` или ``"rub"`` (``None``, если не распознана).
 
     Args:
-        value: Число из извещения.
-        unit: ``"%"`` (процент от НМЦК) или ``"руб."``.
-        nmck: Начальная (максимальная) цена контракта, руб.
-
-    Returns:
-        Optional[float]: Сумма в рублях (для процентов — ``НМЦК × % / 100``, округление до копеек);
-        ``None``, если пересчитать нельзя (проценты без НМЦК).
+        unit: ``"%"``, ``"руб."``, ``"percent"``, ``"rub"`` и близкие написания.
     """
-    if value is None:
-        return None
-    if unit == "%":
-        return round(nmck * value / 100, 2) if nmck else None
-    return value
+    text = str(unit or "").strip().casefold()
+    if text in ("%", "percent", "процент", "проценты", "процентов"):
+        return "percent"
+    if text.startswith(("руб", "rub")) or text in ("₽", "р", "р."):
+        return "rub"
+    return None
 
 
 def _extraction_raw(doc: dict) -> dict:
@@ -493,20 +488,11 @@ def fill_general_info(fields: Sequence[dict], by_key: Dict[str, dict], documents
     put("field1_1", _number(price), "verified", facts_mod.SOURCE_EIS, price)
     advance, path = xml_value("1.22")
     if advance and _number(advance) is not None:
-        unit = "%" if ("sumInPercents" in (path or "") or "%" in (path or "") or "%" in advance) else "руб."
-        rubles = advance_in_rubles(_number(advance), unit, data.get("field1_1"))
-        if rubles is not None:
-            put("field1_2", rubles, "verified", facts_mod.SOURCE_EIS, f"{path} = {advance}")
-            if unit == "%":
-                trace["field1_2"]["note"] = f"аванс {_number(advance):g}% от НМЦК {data.get('field1_1')} руб. пересчитан в рубли"
-            if "field1_2_unit" in data and data["field1_2_unit"] is None:
-                data["field1_2_unit"] = "руб."
-                trace["field1_2_unit"] = {"status": "derived", "rule": "размер аванса указан в рублях"}
-        else:
-            put("field1_2", _number(advance), "verified", facts_mod.SOURCE_EIS, f"{path} = {advance}")
-            if "field1_2_unit" in data and data["field1_2_unit"] is None:
-                data["field1_2_unit"] = unit
-                trace["field1_2_unit"] = {"status": "derived", "rule": "НМЦК неизвестна: аванс оставлен в единицах извещения"}
+        unit = advance_unit("%" if ("sumInPercents" in (path or "") or "%" in (path or "") or "%" in advance) else "руб.")
+        put("field1_2", _number(advance), "verified", facts_mod.SOURCE_EIS, f"{path} = {advance}")
+        if "field1_2_unit" in data and data["field1_2_unit"] is None:
+            data["field1_2_unit"] = unit
+            trace["field1_2_unit"] = {"status": "derived", "rule": "единица по полю XML извещения"}
 
     # паспорт закупки
     for key, column in (("field1_1", "nmck"), ("field1_2", "advance")):
@@ -1071,8 +1057,8 @@ async def fill_funding_advance(fields: Sequence[dict], data: Dict[str, Any], tra
         data["field1_2"] = 0
         trace["field1_2"] = {"status": "derived", "note": "аванс не предусмотрен (критерий 1.22 = «2») — 0 руб."}
         if "field1_2_unit" in keys and data.get("field1_2_unit") is None:
-            data["field1_2_unit"] = "руб."
-            trace["field1_2_unit"] = {"status": "derived", "rule": "размер аванса в рублях"}
+            data["field1_2_unit"] = "rub"
+            trace["field1_2_unit"] = {"status": "derived", "rule": "аванса нет: 0 руб."}
         need_advance = False
     if llm_call is None or not (need_funding or need_advance):
         return
@@ -1113,15 +1099,11 @@ async def fill_funding_advance(fields: Sequence[dict], data: Dict[str, Any], tra
     advance_quote = proven(parsed.get("advance_quote"))
     quote = advance_quote
     if need_advance and number is not None and unit and quote:
-        rubles = advance_in_rubles(number, unit, data.get("field1_1"))
-        data["field1_2"] = rubles if rubles is not None else number
+        data["field1_2"] = number
         trace["field1_2"] = {"status": "verified", "source": "llm_extraction", "quote": quote}
-        if unit == "%" and rubles is not None:
-            trace["field1_2"]["note"] = f"аванс {number:g}% от НМЦК {data.get('field1_1')} руб. пересчитан в рубли"
-        if "field1_2_unit" in keys and data.get("field1_2_unit") is None:
-            data["field1_2_unit"] = "руб." if rubles is not None else unit
-            trace["field1_2_unit"] = {"status": "derived", "rule": "размер аванса в рублях" if rubles is not None
-                                      else "НМЦК неизвестна: единица из формулировки аванса"}
+        if "field1_2_unit" in keys and data.get("field1_2_unit") is None and advance_unit(unit):
+            data["field1_2_unit"] = advance_unit(unit)
+            trace["field1_2_unit"] = {"status": "derived", "rule": "единица из найденной формулировки аванса"}
     if need_funding and data.get("field1_3") is None:
         found = funding_from_print_form(documents)
         if found:
