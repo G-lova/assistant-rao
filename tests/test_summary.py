@@ -831,3 +831,15 @@ class RobustParsingTests(unittest.IsolatedAsyncioTestCase):
         value, quote = summary.funding_from_print_form(docs)
         self.assertEqual(value, "Закупка за счет собственных средств организации")
         self.assertIn("Да", quote)
+
+
+class WeakZeroRemarksTests(unittest.TestCase):
+    """«0» на общей фразе не становится нарушением в блоках III–IV."""
+
+    def test_weak_zero_not_in_remarks(self):
+        """collect_remarks пропускает критерии с trace.weak_zero."""
+        fields = [{"field_key": "a", "label": "1.36. Размер", "value_kind": "presence"},
+                  {"field_key": "b", "label": "1.37. Порядок", "value_kind": "presence"}]
+        data = {"a": 0, "b": 0}
+        trace = {"a": {"status": "proposed", "weak_zero": True}, "b": {"status": "verified", "comment": "нет"}}
+        self.assertEqual([r["field_key"] for r in summary.collect_remarks(fields, data, trace)], ["b"])

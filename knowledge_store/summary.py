@@ -322,6 +322,7 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
             generic = result == 0 and weak_quote(fact.get("quote"))
             data[key], entry["status"] = result, ("verified" if proven and not generic else "proposed")
             if generic:
+                entry["weak_zero"] = True
                 entry["note"] = "«0» подтверждён только общей фразой («информация отсутствует», «не требуется»): требует проверки экспертом"
             if not proven and fact["value_obj"].get("model_quote"):
                 entry["model_quote"] = fact["value_obj"]["model_quote"]
@@ -516,7 +517,10 @@ def fill_general_info(fields: Sequence[dict], by_key: Dict[str, dict], documents
 
 
 def collect_remarks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict[str, Any]) -> List[dict]:
-    """Список проверенных замечаний (критерии со значением ``0``) для блоков III–IV.
+    """Список замечаний (критерии со значением ``0``) для блоков III–IV.
+
+    Значения ``0``, подтверждённые только общей фразой (``trace[key].weak_zero``), в список не попадают:
+    они остаются предложением для эксперта в ``data``/``trace``, но не превращаются в нарушения в тексте.
 
     Args:
         fields: Поля формы.
@@ -531,6 +535,8 @@ def collect_remarks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict[st
         key = field["field_key"]
         if field["value_kind"] in RESULT_KINDS and data.get(key) == 0:
             item = trace.get(key, {})
+            if item.get("weak_zero"):
+                continue          # «0» держится на общей фразе («не требуется»): нарушением в текстах блоков не называем
             remarks.append({"field_key": key, "number": eis_notice.criterion_number(field["label"]) or "",
                             "criterion": field["label"], "comment": item.get("comment"), "document": item.get("document"),
                             "quote": (item.get("quote") or "")[:300]})
@@ -903,6 +909,9 @@ async def write_blocks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict
                     logger.warning(f"knowledge_store: блок {key}, попытка {attempt + 1}: {llm_error}")
         data[key] = defragment(text or fallback_block(key, remarks, stats, data.get("name"), data.get("code"), procedure))
         trace[key] = {"status": "generated", "method": how, "based_on": [r["field_key"] for r in remarks]}
+        weak = [k for k, v in trace.items() if isinstance(v, dict) and v.get("weak_zero")]
+        if weak:
+            trace[key]["excluded_weak"] = weak
         if how == "template" and llm_error:
             trace[key]["llm_error"] = llm_error
     return stats
