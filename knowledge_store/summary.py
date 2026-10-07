@@ -326,6 +326,16 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
                  "page": fact.get("page"), "quote": fact.get("quote"),
                  "comment": clean_comment(fact["comment"], doc.get("filename"))}
         result = usable_result(key, kind, fact["result"], fact.get("source"))
+        chosen = (preset or {}).get(assessment.NMCK_CHOICE_KEY, (None,))[0]
+        other = assessment.method_conflict(f"{fact.get('comment') or ''} {fact.get('quote') or ''}", chosen) \
+            if key == assessment.METHOD_FIT_KEY and result is not None else None
+        if other:
+            # модель оценивала другой метод (например, формулу баллов из порядка оценки приняла за метод НМЦК)
+            entry_note = f"комментарий модели относится к другому методу ({other}), а определён иной (код {chosen}): значение отброшено"
+            trace[key] = {"status": "unverified", "source": fact.get("source"), "document": doc.get("filename"),
+                          "quote": fact.get("quote"), "comment": clean_comment(fact["comment"], doc.get("filename")),
+                          "note": entry_note}
+            continue
         if result is None and fact["result"] == 2:
             entry["note"] = "модель ответила «2» (не применимо) для критерия, где эксперты так не отвечают: оставлено эксперту"
         proven = bool(fact["verified"]) and evidence_ok(fact, doc.get("text"))
@@ -1220,7 +1230,8 @@ async def generate_summary(conn, expertise_id: int, llm_call: Optional[LlmCall],
     decided = {r["fact_key"] for r in fact_rows
                if usable_result(r["fact_key"], kinds.get(r["fact_key"]),
                                 normalize_result((_as_dict(r.get("value")) or {}).get("value")), r.get("source")) is not None}
-    preset = await assessment.compute_assessed(fields, documents, llm_call, skip=decided)
+    texts = {r["fact_key"]: f"{(_as_dict(r.get('value')) or {}).get('comment') or ''} {r.get('quote') or ''}" for r in fact_rows}
+    preset = await assessment.compute_assessed(fields, documents, llm_call, skip=decided, fact_texts=texts)
     data, trace = assemble(fields, fact_rows, documents, ready["passport"], preset)
     await fill_funding_advance(fields, data, trace, documents, ready["passport"], llm_call)
     stats = await write_blocks(fields, data, trace, llm_call, code)

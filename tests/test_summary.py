@@ -934,3 +934,30 @@ class NmckClassifierTests(unittest.TestCase):
         found = asyncio.run(assessment.detect_nmck_choice(
             self.docs("Используемый метод определения НМЦК: Затратный метод"), None))
         self.assertEqual((found["value"], found["source"]), (3, "text_rule"))
+
+
+class MethodFitTests(unittest.IsolatedAsyncioTestCase):
+    """Критерий 2.2.3 опирается на определённый метод НМЦК, а не на комментарий про другой метод."""
+
+    def test_method_conflict(self):
+        """Комментарий про «нормативный метод» при рыночном методе — конфликт; про рыночный — нет."""
+        self.assertEqual(assessment.method_conflict("что является нормативным методом", 1), "нормативный")
+        self.assertIsNone(assessment.method_conflict("рыночный метод, коммерческие предложения", 1))
+        self.assertIsNone(assessment.method_conflict("текст без методов", 1))
+        self.assertIsNone(assessment.method_conflict("нормативным методом", None))
+
+    async def test_preset_replaces_conflicting_fact(self):
+        """Факт про другой метод не считается решением: критерий получает вывод по определённому методу."""
+        fields = [{"field_key": k, "value_kind": "choice" if k.endswith("_0") else "compliance", "label": k}
+                  for k in ("field2_2_2_0", "field2_2_2_3")]
+        docs = {1: {"text": "Использованы коммерческие предложения, ценовая информация", "filename": "n.xlsx"}}
+        preset = await assessment.compute_assessed(
+            fields, docs, None, skip=["field2_2_2_3"],
+            fact_texts={"field2_2_2_3": "цена рассчитывается нормативным методом по постановлению № 2604"})
+        self.assertEqual(preset["field2_2_2_0"][0], 1)
+        self.assertEqual(preset["field2_2_2_3"][0], 1)
+        self.assertIn("рыночный", preset["field2_2_2_3"][1]["comment"])
+        # факт без конфликта остаётся решением
+        again = await assessment.compute_assessed(fields, docs, None, skip=["field2_2_2_3"],
+                                                   fact_texts={"field2_2_2_3": "рыночный метод применён верно"})
+        self.assertNotIn("field2_2_2_3", again)

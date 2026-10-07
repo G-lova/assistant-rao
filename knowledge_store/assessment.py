@@ -69,10 +69,36 @@ PRESUMPTION = {
 EDUCATION_KEY = "field2_3_2"
 EDUCATION_RE = r"образовательн|обучени|учебн|школ|вуз\b|университет|дошкольн|повышени\w+ квалификации|курсов\w+ подготовк|студент"
 EXPENSE_KEY = "field2_3_5"
+METHOD_FIT_KEY = "field2_2_2_3"       # «Соответствие выбранного метода обоснования цены …»: зависит от определённого метода
+# слова, по которым в комментарии узнаётся метод обоснования НМЦК: код метода → шаблон
+METHOD_WORDS = {1: r"рыночн|сопоставлени\w+\s+цен|коммерческ\w+\s+предложени", 2: r"нормативн\w+\s+метод",
+                3: r"затратн\w+\s+метод", 4: r"тарифн\w+\s+метод", 5: r"проектно-сметн\w+"}
+
+
+def method_conflict(text: Optional[str], chosen: Optional[int]) -> Optional[str]:
+    """Название другого метода, если текст (комментарий модели) говорит о нём, а не об определённом методе.
+
+    Args:
+        text: Комментарий и цитата факта.
+        chosen: Код определённого метода (``field2_2_2_0``).
+
+    Returns:
+        Optional[str]: Название конфликтующего метода или ``None``, если конфликта нет (метод не определён, текст
+        не называет методов или называет определённый метод).
+    """
+    if chosen not in METHOD_WORDS or not text:
+        return None
+    if re.search(METHOD_WORDS[chosen], text, flags=re.I):
+        return None
+    names = {code: label for code, label in NMCK_METHOD_CODES.values()}
+    for code, pattern in METHOD_WORDS.items():
+        if code != chosen and re.search(pattern, text, flags=re.I):
+            return names[code]
+    return None
 # Критерии соответствия, где эксперты применяют «2» (не применимо). Для остальных «2» от модели — не ответ,
 # а признак «не нашла сведений»: значение остаётся эксперту (по эталону «2» здесь не встречается).
 NOT_APPLICABLE_ALLOWED = frozenset({"field2_2_1_5", "field2_2_2_5_2", "field2_2_2_5_3", "field2_4_3", "field2_4_4", "field2_4_5"})
-FILL_IF_EMPTY = frozenset(PRESUMPTION) | {EDUCATION_KEY, EXPENSE_KEY}   # ставятся, только если поиск фактов значения не дал
+FILL_IF_EMPTY = frozenset(PRESUMPTION) | {EDUCATION_KEY, EXPENSE_KEY, "field2_2_2_3"}   # ставятся, только если поиск фактов значения не дал
 VIOLATION_SCHEMA = {"type": "object", "properties": {"violations": {"type": "array", "maxItems": 2, "items": {
     "type": "object", "properties": {"quote": {"type": "string", "maxLength": 300}, "issue": {"type": "string", "maxLength": 300}},
     "required": ["quote", "issue"]}}}, "required": ["violations"], "additionalProperties": False}
@@ -423,7 +449,8 @@ def education_applicable(documents: Dict[int, dict]) -> bool:
 
 
 async def compute_assessed(fields: Sequence[dict], documents: Dict[int, dict],
-                           llm_call: Optional[LlmCall], skip: Sequence[str] = ()) -> Dict[str, Tuple[Any, dict]]:
+                           llm_call: Optional[LlmCall], skip: Sequence[str] = (),
+                           fact_texts: Optional[Dict[str, str]] = None) -> Dict[str, Tuple[Any, dict]]:
     """Значения ``field2_2_2_0`` и ``field2_2_1_6`` (если они есть в форме) для передачи в :func:`summary.assemble`.
 
     Значения считаются до сборки, чтобы итоги подразделов и пояснения ``*_text`` учитывали их.
@@ -433,6 +460,8 @@ async def compute_assessed(fields: Sequence[dict], documents: Dict[int, dict],
         documents: Документы экспертизы с текстами.
         llm_call: Функция вызова LLM или ``None``.
         skip: Ключи, уже решённые поиском фактов (для :data:`FILL_IF_EMPTY` повторно не оцениваются).
+        fact_texts: ``ключ → комментарий и цитата`` факта модели: если комментарий критерия
+            :data:`METHOD_FIT_KEY` говорит о другом методе, чем определённый, факт не считается решением.
 
     Returns:
         dict: ``ключ → (значение, запись trace)``; ключ отсутствует, если определить значение не удалось.
@@ -449,6 +478,16 @@ async def compute_assessed(fields: Sequence[dict], documents: Dict[int, dict],
                            + (f" ({found['basis']})" if found.get("basis") else ""),
                 **({"scores": found["scores"], "note": "метод определён косвенно, требует проверки экспертом"}
                    if found.get("scores") else {})})
+    if METHOD_FIT_KEY in keys and NMCK_CHOICE_KEY in preset and (
+            METHOD_FIT_KEY not in skip
+            or method_conflict((fact_texts or {}).get(METHOD_FIT_KEY), preset[NMCK_CHOICE_KEY][0])):
+        code = preset[NMCK_CHOICE_KEY][0]
+        name = {c: label for c, label in NMCK_METHOD_CODES.values()}[code]
+        preset[METHOD_FIT_KEY] = (1, {
+            "status": "proposed", "source": "rule", "quote": None,
+            "comment": f"Для обоснования НМЦК применён {name} метод"
+                       + (" — приоритетный по ст. 22 Закона № 44-ФЗ; его выбор нарушением не является." if code == 1 else "."),
+            "note": "вывод по определённому методу НМЦК; требует проверки экспертом"})
     if STYLE_KEY in keys and llm_call is not None:
         result = await assess_style(documents, llm_call)
         if result["checked_parts"] and len(result["errors"]) < result["checked_parts"]:
