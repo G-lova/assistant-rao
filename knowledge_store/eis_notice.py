@@ -18,6 +18,11 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence
 
+try:                                        # XML приходит из внешнего источника: без раскрытия сущностей (XML bomb, XXE)
+    from defusedxml import ElementTree as _safe_et
+except ImportError:                         # pragma: no cover - defusedxml есть в requirements.txt
+    _safe_et = None
+
 PRESENT, ABSENT, NOT_PROVIDED = 1, 0, 2
 
 CRI = "notificationInfo/customerRequirementsInfo/customerRequirementInfo"
@@ -86,10 +91,11 @@ class Notice:
         Raises:
             ValueError: Если XML некорректен или в нём нет элемента ``epNotification*``.
         """
+        raw = data if isinstance(data, bytes) else data.encode("utf-8")
         try:
-            root = ET.fromstring(data if isinstance(data, bytes) else data.encode("utf-8"))
-        except ET.ParseError as exc:
-            raise ValueError(f"некорректный XML: {exc}") from exc
+            root = (_safe_et or ET).fromstring(raw)
+        except Exception as exc:  # noqa: BLE001 — ParseError и запрещённые конструкции defusedxml (сущности, DTD)
+            raise ValueError(f"некорректный XML: {type(exc).__name__}: {exc}") from exc
         if _local(root).startswith("epNotification"):
             return cls(root)
         for child in root:
@@ -145,8 +151,8 @@ def _local(el: ET.Element) -> str:
 
 
 def _is_placeholder(text: str) -> bool:
-    """Значение-заглушка: только нули/точки/дефисы (например, БИК ``000000000``)."""
-    return bool(re.fullmatch(r"[0\s.\-]+", text))
+    """Значение-заглушка: только нули/точки/дефисы (например, БИК ``000000000``) или «информация отсутствует»/«нет»."""
+    return bool(re.fullmatch(r"[0\s.\-]+|(?:информация\s+)?отсутствует\.?|нет\.?|не\s+указан\w*\.?", text.strip(), re.I))
 
 
 def _evidence(notice: Notice, path: str) -> str:
@@ -219,6 +225,29 @@ def _rule_preference_30(notice: Notice) -> Optional[Finding]:
     return None
 
 
+def _rule_no_preferences(notice: Notice) -> Optional[Finding]:
+    """1.28: если в извещении нет блока ``preferensesInfo`` (преимущества не установлены) — «не предусмотрено» (``2``).
+
+    По эталону экспертов (13 из 13 извещений без блока). Если блок есть, решает :func:`_rule_preference_28_29`.
+    """
+    found = _rule_preference_28_29(notice)
+    if found is not None:
+        return found
+    if not notice.exists("notificationInfo/preferensesInfo") and notice.exists("notificationInfo"):
+        return Finding(NOT_PROVIDED, "в извещении нет notificationInfo/preferensesInfo (преимущества не установлены)", [])
+    return None
+
+
+def _rule_no_restrictions(notice: Notice) -> Optional[Finding]:
+    """1.30: если у объектов закупки нет блока ``restrictionsInfo`` (запреты/ограничения не применяются) — ``2``.
+
+    По эталону экспертов (27 из 27 извещений без блока); при наличии блока оценки экспертов расходятся — решает LLM.
+    """
+    if notice.exists(OBJ) and not notice.exists(OBJ + "/restrictionsInfo"):
+        return Finding(NOT_PROVIDED, "у объектов закупки нет restrictionsInfo (запреты и ограничения не установлены)", [])
+    return None
+
+
 def _procedure_rule(path: str) -> Callable[[Notice], Optional[Finding]]:
     """Правило «порядок обеспечения»: ссылка на регламент площадки — это не порядок, решение за экспертом.
 
@@ -267,9 +296,9 @@ RULES: List[Rule] = [
     Rule("1.25", "частью 1 статьи 31", ["notificationInfo/requirementsInfo/requirementInfo/preferenseRequirementInfo/shortName"]),
     Rule("1.26", "частью 1.1 статьи 31", []),
     Rule("1.27", "частями 2 и 2.1", ["notificationInfo/requirementsInfo/requirementInfo/addRequirements/addRequirement/content"]),
-    Rule("1.28", "статьями 28 и 29", custom=_rule_preference_28_29),
+    Rule("1.28", "статьями 28 и 29", custom=_rule_no_preferences),
     Rule("1.29", "частью 3 статьи 30", custom=_rule_preference_30),
-    Rule("1.30", "запрете или об ограничении", []),  # флаги restrictionsInfo не совпали с оценкой экспертов (50%) — решает LLM
+    Rule("1.30", "запрете или об ограничении", [], custom=_rule_no_restrictions),  # при наличии restrictionsInfo оценки экспертов расходятся — решает LLM
     Rule("1.31", "размере обеспечения заявки", [CRI + "/applicationGuarantee/amount", CRI + "/applicationGuarantee/part"]),
     Rule("1.32", "порядке внесения денежных средств", [CRI + "/applicationGuarantee/procedureInfo"],
          custom=_procedure_rule(CRI + "/applicationGuarantee/procedureInfo")),
@@ -319,7 +348,7 @@ def evaluate_rule(rule: Rule, notice: Notice) -> Finding:
     if found:
         return found
     if rule.absent is not None and (rule.paths or rule.custom):
-        return Finding(rule.absent, "в извещении нет: " + ", ".join(rule.paths or ["(правило)"]) [:480], list(rule.paths))
+        return Finding(rule.absent, "в извещении нет: " + ", ".join(rule.paths or [f"сведений по критерию {rule.criterion}"])[:480], list(rule.paths))
     return Finding(None, "XML не позволяет решить", [])
 
 

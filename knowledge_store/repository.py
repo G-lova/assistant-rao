@@ -304,6 +304,14 @@ FROM pe_documents
 WHERE expertise_id = $1 AND extraction ? 'eis_notice'
 """
 
+SQL_PRINT_FORM_DOCUMENTS = """
+SELECT id, filename, text_full
+FROM pe_documents
+WHERE expertise_id = $1 AND text_full IS NOT NULL
+  AND left(text_full, 600) LIKE '%Печатная форма%' AND left(text_full, 600) LIKE '%Извещение о проведении%'
+ORDER BY id
+"""
+
 SQL_DELETE_FACTS_BY_SOURCE = "DELETE FROM pe_facts WHERE expertise_id = $1 AND source = $2"
 
 SQL_INSERT_FACT = """
@@ -339,6 +347,19 @@ async def get_eis_notices(conn, expertise_id: int) -> list:
         list: Записи ``id``, ``filename``, ``eis_notice`` (JSON ``{"version", "criteria"}``).
     """
     return list(await conn.fetch(SQL_EIS_DOCUMENTS, int(expertise_id)))
+
+
+async def get_print_form_documents(conn, expertise_id: int) -> list:
+    """Возвращает документы экспертизы, похожие на печатную форму извещения ЕИС (по заголовку текста).
+
+    Args:
+        conn: Соединение ``asyncpg``.
+        expertise_id: ID экспертизы.
+
+    Returns:
+        list: Записи ``id``, ``filename``, ``text_full`` (окончательная проверка — ``eis_printform.is_print_form``).
+    """
+    return list(await conn.fetch(SQL_PRINT_FORM_DOCUMENTS, int(expertise_id)))
 
 
 async def replace_facts(conn, expertise_id: int, source: str, facts: Sequence[dict]) -> int:

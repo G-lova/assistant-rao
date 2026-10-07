@@ -270,6 +270,9 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
     by_key: Dict[str, dict] = {}
     for row in fact_rows:
         value = _as_dict(row.get("value")) or {}
+        prev = by_key.get(row["fact_key"])
+        if prev and prev.get("source") == facts_mod.SOURCE_EIS and row.get("source") != facts_mod.SOURCE_EIS:
+            continue          # детерминированный факт XML/печатной формы важнее ответа модели
         by_key[row["fact_key"]] = {**row, "value_obj": value, "result": normalize_result(value.get("value")),
                                    "verified": bool(value.get("verified")), "comment": value.get("comment")}
     data: Dict[str, Any] = {f["field_key"]: None for f in fields}
@@ -294,6 +297,8 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
             pass
         elif fact.get("source") == facts_mod.SOURCE_EIS or (result == 1 and proven):
             data[key], entry["status"] = result, "verified"
+            if fact["value_obj"].get("origin"):
+                entry["origin"] = fact["value_obj"]["origin"]
         else:
             # значение без подтверждённой цитаты («отсутствует» нечем процитировать; «1» модель не смогла
             # подтвердить) ставится как предложение модели: эксперт видит его в trace и проверяет
@@ -430,7 +435,7 @@ def fill_general_info(fields: Sequence[dict], by_key: Dict[str, dict], documents
     if advance and _number(advance) is not None:
         put("field1_2", _number(advance), "verified", facts_mod.SOURCE_EIS, advance)
         if "field1_2_unit" in data and data["field1_2_unit"] is None:
-            data["field1_2_unit"] = "%" if "sumInPercents" in (path or "") else "руб."
+            data["field1_2_unit"] = "%" if ("sumInPercents" in (path or "") or "%" in (path or "")) else "руб."
             trace["field1_2_unit"] = {"status": "derived", "rule": "единица по полю XML извещения"}
 
     # паспорт закупки
@@ -1078,8 +1083,11 @@ async def generate_summary(conn, expertise_id: int, llm_call: Optional[LlmCall],
     """
     ready = await precheck(conn, expertise_id)
     code = ready["form_code"]
+    # факты раздела 1 из XML/печатной формы дёшевы и детерминированы — обновляются при каждой сборке
+    eis_stats = await facts_mod.extract_facts(conn, expertise_id, code, None)
     fact_rows = [dict(r) for r in await repo.get_facts(conn, expertise_id)]
-    if (not fact_rows or rebuild_facts) and build_facts is not None:
+    has_llm = any(r["source"] == facts_mod.SOURCE_LLM for r in fact_rows)
+    if (not has_llm or rebuild_facts) and build_facts is not None:
         await build_facts()
         fact_rows = [dict(r) for r in await repo.get_facts(conn, expertise_id)]
     if not fact_rows:
@@ -1102,7 +1110,8 @@ async def generate_summary(conn, expertise_id: int, llm_call: Optional[LlmCall],
                   if f["value_kind"] in RESULT_KINDS and data.get(f["field_key"]) is None]
     proposed = [k for k, v in trace.items() if isinstance(v, dict) and v.get("status") == "proposed"]
     status = "needs_review" if unresolved or proposed or problems else "draft"
-    stats.update({"fields": len(fields), "unresolved": len(unresolved), "proposed": len(proposed)})
+    stats.update({"fields": len(fields), "unresolved": len(unresolved), "proposed": len(proposed),
+                  "eis_xml": eis_stats.get("eis_xml", 0), "eis_print_form": eis_stats.get("eis_print_form", 0)})
     trace["_summary"] = {"unresolved": unresolved, "proposed": proposed, "problems": problems}
     async with conn.transaction():
         summary_id = await repo.insert_summary(conn, expertise_id, code, data, trace, status)

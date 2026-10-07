@@ -366,6 +366,25 @@ class FactsDbTests(unittest.TestCase):
         self.assertIn("нет паспорта", asyncio.run(backfill_facts.process(self.conn, 7999, None)))
         self.conn._run("DELETE FROM pe_form_fields WHERE form_code = '44fz_competition_obj6' AND field_key = 'bf_key'")
 
+    def test_print_form_facts_without_xml(self):
+        """Без XML факты раздела 1 строятся по сохранённому тексту печатной формы (источник eis_xml, origin=print_form)."""
+        notice = (Path(__file__).parent / "data" / "printform_notice.txt").read_text(encoding="utf-8")
+        form = "44fz_competition_obj6"
+        self.conn._run(f"DELETE FROM pe_form_fields WHERE form_code = '{form}'")
+        for key, n, label in (("p_email", 1, "1.4. Наличие информации об адресе электронной почты"),
+                              ("p_spec", 2, "1.7. Наличие информации о специализированной организации")):
+            self.conn._run(f"INSERT INTO pe_form_fields (form_code, field_key, ordinal, label, value_kind) "
+                           f"VALUES ('{form}', '{key}', {n}, '{label}', 'presence')")
+        self.conn._run("DELETE FROM pe_documents WHERE expertise_id = 7201")
+        doc = self.conn._run("INSERT INTO pe_documents (expertise_id, doc_code, filename, sha256, text_full) VALUES "
+                             f"(7201, 'docIzvejenieFiles', 'Печатная-форма-извещения-(версия-1).html', 'p1', $t${notice}$t$) RETURNING id").splitlines()[0]
+        stats = asyncio.run(facts.extract_facts(self.conn, 7201, form, None))
+        self.assertEqual((stats["eis"], stats["eis_xml"], stats["eis_print_form"]), (2, 0, 2))
+        self.assertEqual(self.q("SELECT (value->>'value')||'|'||(value->>'origin')||'|'||document_id||'|'||quote FROM pe_facts "
+                                "WHERE expertise_id=7201 AND fact_key='p_email'"),
+                         f"1|print_form|{doc}|Адрес электронной почты = UsatovaTM@mpei.ru")
+        self.assertEqual(self.q("SELECT (value->>'value') FROM pe_facts WHERE expertise_id=7201 AND fact_key='p_spec'"), "2")
+
     def test_non_xml_file_is_ignored(self):
         """Для не-XML файла (и битого XML) разбор извещения возвращает None."""
         self.assertIsNone(hooks._eis_notice_patch("/nonexistent.txt", "a.txt"))

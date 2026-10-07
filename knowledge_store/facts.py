@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
-from knowledge_store import eis_notice, repository as repo
+from knowledge_store import eis_notice, eis_printform, repository as repo
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "fact_extractor_prompt.txt"
 SOURCE_EIS = "eis_xml"
@@ -363,6 +363,35 @@ def build_eis_facts(notices: Sequence[dict], fields: Sequence[dict]) -> List[dic
             for key, f in eis_notice.map_to_fields(data, fields).items()]
 
 
+def _form_version(filename: str, doc_id: int) -> tuple:
+    """Ключ сортировки версий печатной формы: номер из «(версия-N)» в имени файла, затем ``id`` документа."""
+    match = re.search(r"верси[яи][\s_-]*(\d+)", filename or "", re.I)
+    return (int(match.group(1)) if match else 0, doc_id)
+
+
+def build_printform_facts(documents: Sequence[dict], fields: Sequence[dict], solved: Sequence[str] = ()) -> List[dict]:
+    """Формирует факты раздела 1 по печатной форме извещения (если XML извещения нет или он решил не всё).
+
+    Берётся последняя версия печатной формы; критерии, уже решённые по XML (``solved``), не перезаписываются.
+
+    Args:
+        documents: Записи :func:`knowledge_store.repository.get_print_form_documents`.
+        fields: Поля формы.
+        solved: Ключи полей, уже решённые по XML.
+
+    Returns:
+        list[dict]: Факты источника ``eis_xml`` с пометкой ``origin = print_form``.
+    """
+    forms = [d for d in documents if eis_printform.is_print_form(d["text_full"])]
+    if not forms:
+        return []
+    doc = max(forms, key=lambda d: _form_version(d["filename"], d["id"]))
+    data = eis_printform.to_json(eis_printform.evaluate_text(doc["text_full"]))
+    return [{"fact_key": key, "value": {"value": f.value, "verified": True, "comment": None, "origin": "print_form"},
+             "document_id": doc["id"], "page": None, "quote": f.evidence, "confidence": 1.0}
+            for key, f in eis_notice.map_to_fields(data, fields).items() if key not in set(solved)]
+
+
 async def extract_facts(conn, expertise_id: int, form_code: str, extractor: Optional[FactExtractor]) -> Dict[str, int]:
     """Строит и сохраняет факты экспертизы по полям формы.
 
@@ -378,8 +407,12 @@ async def extract_facts(conn, expertise_id: int, form_code: str, extractor: Opti
     """
     fields = [dict(r) for r in await repo.get_form_fields(conn, form_code)]
     eis_facts = build_eis_facts(await repo.get_eis_notices(conn, expertise_id), fields)
+    xml_keys = [f["fact_key"] for f in eis_facts]
+    form_facts = build_printform_facts(await repo.get_print_form_documents(conn, expertise_id), fields, xml_keys)
+    eis_facts = eis_facts + form_facts
     await repo.replace_facts(conn, expertise_id, SOURCE_EIS, eis_facts)
-    stats = {"eis": len(eis_facts), "llm": 0, "rejected": 0, "fields": 0}
+    stats = {"eis": len(eis_facts), "eis_xml": len(xml_keys), "eis_print_form": len(form_facts),
+             "llm": 0, "rejected": 0, "fields": 0}
     if extractor is None:
         return stats
     solved = {f["fact_key"] for f in eis_facts}

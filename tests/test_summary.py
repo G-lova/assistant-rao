@@ -347,6 +347,25 @@ class SummaryDbTests(unittest.TestCase):
         self.assertEqual(trace["k_name"]["quote"], "Адрес: Москва")
         c._run(f"DELETE FROM pe_form_fields WHERE form_code = '{form}'")
 
+    def test_print_form_facts_refreshed_on_summary(self):
+        """Факты раздела 1 берутся из печатной формы при каждой сборке, без пересчёта фактов модели."""
+        form, c = "44fz_competition_obj6", self.conn
+        notice = (Path(__file__).parent / "data" / "printform_notice.txt").read_text(encoding="utf-8")
+        c._run(f"DELETE FROM pe_form_fields WHERE form_code = '{form}'")
+        for key, n, label in [("k_email", 1, "1.4. Наличие информации об адресе электронной почты"),
+                              ("k_spec", 2, "1.7. Наличие информации о специализированной организации")]:
+            c._run(f"INSERT INTO pe_form_fields (form_code, field_key, ordinal, label, value_kind) "
+                   f"VALUES ('{form}', '{key}', {n}, '{label}', 'presence')")
+        c._run("INSERT INTO pe_procurements (expertise_id, law, method, object_code, check_type2) VALUES (8201, '44-ФЗ', 'Конкурс', 6, 1)")
+        c._run("INSERT INTO pe_documents (expertise_id, doc_code, filename, sha256, text_full) VALUES "
+               f"(8201, 'docIzvejenieFiles', 'Печатная-форма-извещения-(версия-1).html', 'pf1', $t${notice}$t$)")
+        res = self.run_async(summary.generate_summary(c, 8201, None, None))
+        self.assertEqual((res["data"]["k_email"], res["data"]["k_spec"]), (1, 2))
+        self.assertEqual(res["trace"]["k_email"]["origin"], "print_form")
+        self.assertEqual(res["trace"]["k_email"]["status"], "verified")
+        self.assertEqual((res["stats"]["eis_xml"], res["stats"]["eis_print_form"]), (0, 2))
+        c._run(f"DELETE FROM pe_form_fields WHERE form_code = '{form}'")
+
 
 if __name__ == "__main__":
     unittest.main()
