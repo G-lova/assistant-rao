@@ -843,3 +843,27 @@ class WeakZeroRemarksTests(unittest.TestCase):
         data = {"a": 0, "b": 0}
         trace = {"a": {"status": "proposed", "weak_zero": True}, "b": {"status": "verified", "comment": "нет"}}
         self.assertEqual([r["field_key"] for r in summary.collect_remarks(fields, data, trace)], ["b"])
+
+
+class ExpenseTypeTests(unittest.TestCase):
+    """Критерий 3.5: КВР из ИКЗ."""
+
+    def docs(self, ikz):
+        """Документ извещения с ИКЗ."""
+        return {1: {"text": f"Идентификационный код закупки\n{ikz}\n", "filename": "f.html", "doc_code": "docIzvejenieFiles"}}
+
+    def test_kvr_244_matches(self):
+        """КВР 244 подходит к любой группе ОКПД2."""
+        value, entry = assessment.assess_expense_type(self.docs("261245700735124570100100080016110244"))
+        self.assertEqual(value, 1)
+        self.assertIn("244", entry["comment"])
+        self.assertEqual(entry["status"], "proposed")
+
+    def test_kvr_mismatch_is_left_to_expert(self):
+        """КВР 243 при ОКПД2 61.10 (связь) не сходится: значение не ставится."""
+        self.assertIsNone(assessment.assess_expense_type(self.docs("261245700735124570100100080016110243")))
+        self.assertEqual(assessment.assess_expense_type(self.docs("261245700735124570100100080014322243"))[0], 1)
+
+    def test_no_ikz(self):
+        """ИКЗ нет — решения нет."""
+        self.assertIsNone(assessment.assess_expense_type({1: {"text": "текст"}}))

@@ -60,7 +60,8 @@ PRESUMPTION = {
 }
 EDUCATION_KEY = "field2_3_2"
 EDUCATION_RE = r"образовательн|обучени|учебн|школ|вуз\b|университет|дошкольн|повышени\w+ квалификации|курсов\w+ подготовк|студент"
-FILL_IF_EMPTY = frozenset(PRESUMPTION) | {EDUCATION_KEY}   # ставятся, только если поиск фактов значения не дал
+EXPENSE_KEY = "field2_3_5"
+FILL_IF_EMPTY = frozenset(PRESUMPTION) | {EDUCATION_KEY, EXPENSE_KEY}   # ставятся, только если поиск фактов значения не дал
 VIOLATION_SCHEMA = {"type": "object", "properties": {"violations": {"type": "array", "maxItems": 2, "items": {
     "type": "object", "properties": {"quote": {"type": "string", "maxLength": 300}, "issue": {"type": "string", "maxLength": 300}},
     "required": ["quote", "issue"]}}}, "required": ["violations"], "additionalProperties": False}
@@ -286,6 +287,51 @@ async def assess_presumption(key: str, documents: Dict[int, dict], llm_call: Llm
                "note": "презумпция соответствия: нарушений с цитатой не найдено, требует проверки экспертом"}
 
 
+# КВР (последние 3 знака ИКЗ) → (описание, префиксы ОКПД2, при которых вид работ соответствует; ``None`` — любые)
+KVR_RULES = {
+    "244": ("прочая закупка товаров, работ и услуг для обеспечения государственных (муниципальных) нужд", None),
+    "241": ("закупка научно-исследовательских, опытно-конструкторских и технологических работ", ("72",)),
+    "242": ("закупка товаров, работ, услуг в сфере информационно-коммуникационных технологий",
+            ("26", "58.2", "61", "62", "63.1")),
+    "243": ("закупка товаров, работ, услуг в целях капитального ремонта государственного (муниципального) имущества",
+            ("41", "42", "43", "71", "33")),
+    "247": ("закупка энергетических ресурсов", ("35", "36")),
+}
+
+
+def assess_expense_type(documents: Dict[int, dict]) -> Optional[Tuple[int, dict]]:
+    """Критерий 3.5: соответствие видов работ (услуг) виду расходов бюджета — по КВР в ИКЗ.
+
+    ИКЗ — 36 цифр: последние 3 — код вида расходов (КВР), перед ними 4 — группа ОКПД2. КВР 244 («прочая закупка»)
+    подходит к любым услугам; для 241/242/243/247 вид работ должен относиться к своей группе ОКПД2. По эталону
+    экспертов «0» здесь почти не встречается, поэтому несоответствие кодом не объявляется: если КВР и ОКПД2
+    не сходятся или КВР неизвестен, значение остаётся эксперту.
+
+    Args:
+        documents: Документы экспертизы с текстами (печатная форма извещения и др.).
+
+    Returns:
+        Optional[Tuple[int, dict]]: ``(1, запись trace)`` или ``None``, если ИКЗ не найден или КВР не сходится с ОКПД2.
+    """
+    for doc in sorted(documents.values(), key=lambda d: d.get("doc_code") != "docIzvejenieFiles"):
+        text = doc.get("text") or ""
+        for match in re.finditer(r"(?<!\d)(\d{36})(?!\d)", text):
+            code = match.group(1)
+            kvr, okpd = code[-3:], code[-7:-3]
+            rule = KVR_RULES.get(kvr)
+            if not rule:
+                continue
+            title, prefixes = rule
+            dotted = f"{okpd[:2]}.{okpd[2:]}"
+            if prefixes is not None and not any(dotted.startswith(p) for p in prefixes):
+                return None
+            return 1, {"status": "proposed", "source": "rule", "document": doc.get("filename"), "quote": code,
+                       "comment": f"По ИКЗ закупки код вида расходов (КВР) {kvr} — {title}; вид работ (услуг, ОКПД2 {dotted}) "
+                                  "ему соответствует.",
+                       "note": "вывод по коду КВР из ИКЗ; требует проверки экспертом"}
+    return None
+
+
 def education_applicable(documents: Dict[int, dict]) -> bool:
     """Относится ли закупка к сфере образования (по объекту закупки в документах извещения)."""
     for doc in sorted(documents.values(), key=lambda d: d.get("doc_code") != "docIzvejenieFiles")[:2]:
@@ -342,6 +388,10 @@ async def compute_assessed(fields: Sequence[dict], documents: Dict[int, dict],
         for key, res in zip(todo, await asyncio.gather(*(assess_presumption(k, documents, llm_call) for k in todo))):
             if res:
                 preset[key] = res
+    if EXPENSE_KEY in keys and EXPENSE_KEY not in skip:
+        found = assess_expense_type(documents)
+        if found:
+            preset[EXPENSE_KEY] = found
     if EDUCATION_KEY in keys and EDUCATION_KEY not in skip and not education_applicable(documents) and documents:
         preset[EDUCATION_KEY] = (1, {
             "status": "proposed", "source": "rule", "quote": None,
