@@ -214,7 +214,7 @@ async def assess_style(documents: Dict[int, dict], llm_call: LlmCall, concurrenc
     return {"defects": unique, "checked_docs": len(docs), "checked_parts": len(jobs), "errors": errors}
 
 
-async def assess_presumption(key: str, documents: Dict[int, dict], llm_call: LlmCall) -> Optional[Tuple[int, dict]]:
+async def assess_presumption(key: str, documents: Dict[int, dict], llm_call: LlmCall) -> Tuple[Optional[int], dict]:
     """Презумпция соответствия для ``key`` (см. :data:`PRESUMPTION`): ищет нарушения из чек-листа в релевантных фрагментах.
 
     Args:
@@ -223,7 +223,7 @@ async def assess_presumption(key: str, documents: Dict[int, dict], llm_call: Llm
         llm_call: Функция вызова LLM.
 
     Returns:
-        Optional[Tuple[int, dict]]: ``(0 или 1, запись trace)``; ``None``, если модель не ответила.
+        Tuple[Optional[int], dict]: ``(0 или 1, запись trace)``; ``(None, {"error"})``, если модель не ответила.
     """
     checklist, pattern, phrase = PRESUMPTION[key]
     windows = keyword_windows(documents, pattern, radius=500, limit=6)
@@ -237,10 +237,10 @@ async def assess_presumption(key: str, documents: Dict[int, dict], llm_call: Llm
                              VIOLATION_SCHEMA)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"knowledge_store: проверка {key} не выполнена: {type(e).__name__}: {e}")
-        return None
+        return None, {"error": f"{type(e).__name__}: {e}"[:300]}
     parsed = _parse(raw)
     if parsed is None:
-        return None
+        return None, {"error": f"ответ модели не разобран: {str(raw)[:200]}"}
     found = []
     for item in parsed.get("violations") or []:
         if isinstance(item, dict) and str(item.get("issue") or "").strip():

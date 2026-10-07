@@ -747,3 +747,39 @@ class PresumptionTests(unittest.IsolatedAsyncioTestCase):
                   "page": None, "quote": None, "source": "fact_extractor"}]
         data, trace = summary.assemble(self.FIELDS, facts, {}, None, {"field2_3_4": (1, {"status": "proposed"})})
         self.assertEqual(data["field2_3_4"], 0)
+
+
+class ClipAndDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
+    """Аккуратная обрезка текста и причины пустых полей в trace."""
+
+    def test_clip_text_no_ellipsis_or_dangling(self):
+        """Обрезка по границе фразы, без «…» и висячих предлогов."""
+        text = "Отсутствуют сведения об адресе, ответственном лице, специализированной организации и о"
+        out = summary.clip_text(text, 200)
+        self.assertFalse(out.endswith(("о", "…", ",")))
+        self.assertNotIn("…", summary.clip_text("а, б, в, г, д " * 30, 40))
+        self.assertLessEqual(len(summary.clip_text("слово " * 100, 50)), 50)
+
+    async def test_funding_failure_reason_in_trace(self):
+        """Если значение не принято, в trace записана причина и ответ модели."""
+        fields = [{"field_key": k, "value_kind": "text", "label": k} for k in ("field1_2", "field1_3")]
+        docs = {1: {"filename": "n.html", "doc_code": "docIzvejenieFiles", "text": "Источник финансирования: бюджет. Размер аванса"}}
+        async def llm(m, s):
+            return json.dumps({"funding": "бюджет", "funding_quote": "нет в тексте", "funding_quote_x": 1,
+                               "advance": None, "advance_unit": None, "advance_quote": None})
+        data, trace = {"field1_2": None, "field1_3": None}, {}
+        await summary.fill_funding_advance(fields, data, trace, docs, {}, llm)
+        self.assertIsNone(data["field1_3"])
+        self.assertIn("ответ модели", trace["field1_3"]["note"])
+
+    async def test_presumption_error_in_trace(self):
+        """Сбой модели при презумпции — причина в trace, значение остаётся эксперту."""
+        from knowledge_store import assessment
+        fields = [{"field_key": "field2_3_3", "value_kind": "compliance", "label": "x"}]
+        docs = {1: {"filename": "k.docx", "doc_code": "docIzvejenieFiles", "text": "Размер неустойки (пени) 5 процентов"}}
+        async def llm(m, s):
+            return "не json"
+        preset = await assessment.compute_assessed(fields, docs, llm)
+        data, trace = summary.assemble(fields, [], docs, None, preset)
+        self.assertIsNone(data["field2_3_3"])
+        self.assertIn("не разобран", trace["field2_3_3"]["assessment_error"])

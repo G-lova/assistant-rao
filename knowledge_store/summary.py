@@ -308,7 +308,10 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
 
     for key, (value, entry) in (preset or {}).items():
         if key in data and (key not in assessment.FILL_IF_EMPTY or data[key] is None):
-            data[key], trace[key] = value, entry
+            if value is None:           # оценка не удалась: значение остаётся эксперту, причина видна в trace
+                trace.setdefault(key, {})["assessment_error"] = entry.get("error")
+            else:
+                data[key], trace[key] = value, entry
 
     apply_nmck_method_rule(fields, documents, data, trace)
 
@@ -548,6 +551,36 @@ def _clip(text: Any, limit: int) -> str:
     return value[:limit].rsplit(" ", 1)[0].rstrip(",;:") + "…"
 
 
+_DANGLING = re.compile(r"(?:\s+(?:и|а|но|о|об|в|во|на|по|за|из|из-за|к|с|со|у|для|при|от|до|или|а также|что|как))+$", re.I)
+
+
+def clip_text(text: Any, limit: int) -> str:
+    """Текст для итогового заключения, обрезанный по границе предложения/запятой без «…» и «висячих» предлогов.
+
+    Args:
+        text: Исходный текст.
+        limit: Максимальная длина.
+
+    Returns:
+        str: Строка не длиннее ``limit``; обрыв посреди фразы не оставляет многоточий и союзов в конце.
+    """
+    value = re.sub(r"\s+", " ", str(text or "")).strip().replace("…", "").strip()
+    if len(value) <= limit:
+        return _DANGLING.sub("", value).rstrip(" ,;:—-")
+    cut = value[:limit]
+    for sep in (". ", "; ", ", ", " "):
+        pos = cut.rfind(sep)
+        if pos >= limit * 0.5:
+            cut = cut[:pos]
+            break
+    return _DANGLING.sub("", cut).rstrip(" ,;:—-")
+
+
+def lower_first(text: str) -> str:
+    """Первая буква строчная (для фраз после тире), если слово не аббревиатура."""
+    return text[:1].lower() + text[1:] if text and not text[:2].isupper() else text
+
+
 def close_truncated_json(raw: str) -> str:
     """Чинит обрезанный JSON без внешних зависимостей.
 
@@ -646,11 +679,11 @@ def _unique(items: Sequence[Any], key=lambda x: x) -> List[Any]:
 
 def clean_notice(value: Any) -> str:
     """Суть замечаний к извещению без повтора вводной фразы и без оборванного хвоста «…» (модель дублирует «Информация… за исключением»)."""
-    text = _clip(value, 500)
+    text = clip_text(value, 500)
     text = re.sub(r"^\s*Информация,? представленная в извещении[^,]*?(?:№\s*\d+)?[^,]*,?\s*соответствует требованиям законодательства,?\s*(?:за исключением:?)?\s*",
                   "", text, flags=re.I)
     text = re.sub(r"\s*(?:\.{3}|…)\.?$", "", text).strip()
-    return text[:1].lower() + text[1:] if text and not text[:2].isupper() else text
+    return lower_first(_DANGLING.sub("", text).rstrip(" ,;:"))
 
 
 def clean_numbers(value: Any) -> str:
@@ -705,9 +738,9 @@ def render_block(key: str, parsed: dict, remarks: Sequence[dict], name: Optional
         head += f", за исключением: {notice.rstrip('.')}." if notice else "."
         if not items:
             return head
-        lines = [f"{clean_numbers(i.get('numbers'))}. {_clip(i['text'], 400)}".strip(". ") for i in items]
+        lines = [f"{clean_numbers(i.get('numbers'))}. {clip_text(i['text'], 400)}".strip(". ") for i in items]
         return head + "\nВыявлены несоответствия и недостатки по критериям:\n" + "\n".join(lines)
-    recs = _unique([_clip(r, 260).rstrip(".;") for r in parsed.get("recommendations") or [] if str(r).strip()])[:6]
+    recs = _unique([clip_text(r, 260).rstrip(".;") for r in parsed.get("recommendations") or [] if str(r).strip()])[:6]
     areas = _unique([a for a in parsed.get("areas") or [] if isinstance(a, dict) and a.get("summary")],
                     key=lambda a: a["summary"])[:6]
     if not recs:
@@ -718,8 +751,8 @@ def render_block(key: str, parsed: dict, remarks: Sequence[dict], name: Optional
     if len(remarks) < MANY_REMARKS or not areas:
         return (f"Извещение и документация о проведении {kind} соответствуют требованиям законодательства, "
                 f"за исключением указанных несоответствий и недостатков.\n{todo}")
-    bullets = ",\n".join(f"- {_clip(a.get('area'), 80)} — {_clip(a['summary'], 300).rstrip('.')}" for a in areas) + "."
-    note = _clip(parsed.get("note"), 400)
+    bullets = ",\n".join(f"- {clip_text(a.get('area'), 80)} — {lower_first(clip_text(a['summary'], 300).rstrip('.'))}" for a in areas) + "."
+    note = lower_first(clip_text(parsed.get("note"), 400))
     return (f"Извещение о проведении {kind} и электронные документы имеют недостатки и несоответствия требованиям "
             f"законодательства РФ, а именно:\n{bullets}\n\n" + (f"Следует отметить, что {note.rstrip('.')}.\n\n" if note else "") + todo)
 
@@ -914,8 +947,15 @@ async def fill_funding_advance(fields: Sequence[dict], data: Dict[str, Any], tra
         return
     windows = (keyword_windows(documents, r"источник\w*\s+финансирования|за счет средств|за счёт средств") if need_funding else []) \
         + (keyword_windows(documents, r"размер\w*\s+аванс|авансов\w+\s+платеж|аванс") if need_advance else [])
+
+    def fail(reason: str) -> None:
+        """Причина, по которой поле осталось пустым, — в trace (иначе её не видно)."""
+        for key, needed in (("field1_3", need_funding), ("field1_2", need_advance)):
+            if needed and data.get(key) is None:
+                trace[key] = {"status": "no_fact", "note": reason}
+
     if not windows:
-        return
+        return fail("в документах не найдено мест со словами «источник финансирования» / «аванс»")
     messages = [{"role": "system", "content": FUNDING_PROMPT},
                 {"role": "user", "content": "\n\n".join(f"[{i}] {w}" for i, w in enumerate(windows, 1))}]
     try:
@@ -923,7 +963,7 @@ async def fill_funding_advance(fields: Sequence[dict], data: Dict[str, Any], tra
         parsed = parse_block(raw)
     except Exception as e:  # noqa: BLE001 — общие сведения не должны ронять сборку
         logger.warning(f"knowledge_store: финансирование/аванс не извлечены: {type(e).__name__}: {e}")
-        return
+        return fail(f"ошибка модели: {type(e).__name__}: {e}"[:300])
 
     def proven(quote: Any) -> Optional[str]:
         """Цитата, найденная в тексте документов (или ``None``)."""
@@ -939,13 +979,19 @@ async def fill_funding_advance(fields: Sequence[dict], data: Dict[str, Any], tra
         data["field1_3"] = value
         trace["field1_3"] = {"status": "verified", "source": "llm_extraction", "quote": quote}
     number, unit = _number(parsed.get("advance")), parsed.get("advance_unit")
-    quote = proven(parsed.get("advance_quote"))
+    advance_quote = proven(parsed.get("advance_quote"))
+    quote = advance_quote
     if need_advance and number is not None and unit and quote:
         data["field1_2"] = number
         trace["field1_2"] = {"status": "verified", "source": "llm_extraction", "quote": quote}
         if "field1_2_unit" in keys and data.get("field1_2_unit") is None:
             data["field1_2_unit"] = unit
             trace["field1_2_unit"] = {"status": "derived", "rule": "единица из найденной формулировки аванса"}
+    answer = f"ответ модели: {_clip(raw, 300)}; окон текста: {len(windows)}"
+    if need_funding and data.get("field1_3") is None:
+        trace["field1_3"] = {"status": "no_fact", "note": "значение не принято (нет значения или цитата не найдена в тексте); " + answer}
+    if need_advance and data.get("field1_2") is None:
+        trace["field1_2"] = {"status": "no_fact", "note": "аванс не принят (нет числа/единицы или цитата не найдена в тексте); " + answer}
 
 
 def validate(data: Dict[str, Any], fields: Sequence[dict]) -> List[str]:
