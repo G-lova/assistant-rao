@@ -96,6 +96,22 @@ def normalize_result(value: Any) -> Optional[int]:
     return number if number in (0, 1, 2) else None
 
 
+_WEAK_QUOTE_RE = re.compile(r"^(?:.{0,90}\s)?(?:не\s+требуется|не\s+установлен\w*|не\s+предусмотрен\w*|информация\s+отсутствует)\W*$",
+                            re.IGNORECASE | re.DOTALL)
+
+
+def weak_quote(quote: Any) -> bool:
+    """Цитата слишком общая, чтобы подтверждать отсутствие сведений.
+
+    Фразы вроде «Информация отсутствует» или «Обеспечение … не требуется» встречаются в печатной форме
+    у любого пустого раздела и сами по себе не доказывают, что именно требуемой сведения нет: значение «0»
+    с такой цитатой ставится как предложение модели (``proposed``), а не как проверенное. Пустая цитата
+    для «0» допустима (отсутствие нечем процитировать) и слабой не считается.
+    """
+    text = re.sub(r"\s+", " ", str(quote or "")).strip()
+    return bool(text) and bool(_WEAK_QUOTE_RE.match(text))
+
+
 def evidence_ok(fact: dict, doc_text: Optional[str]) -> bool:
     """Проверяет доказательство факта (валидатор 5.4).
 
@@ -296,13 +312,17 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
         if result is None:
             pass
         elif fact.get("source") == facts_mod.SOURCE_EIS or (result == 1 and proven):
-            data[key], entry["status"] = result, "verified"
+            tentative = fact.get("source") == facts_mod.SOURCE_EIS and fact["value_obj"].get("verified") is False
+            data[key], entry["status"] = result, ("proposed" if tentative else "verified")
             if fact["value_obj"].get("origin"):
                 entry["origin"] = fact["value_obj"]["origin"]
         else:
             # значение без подтверждённой цитаты («отсутствует» нечем процитировать; «1» модель не смогла
             # подтвердить) ставится как предложение модели: эксперт видит его в trace и проверяет
-            data[key], entry["status"] = result, ("verified" if proven else "proposed")
+            generic = result == 0 and weak_quote(fact.get("quote"))
+            data[key], entry["status"] = result, ("verified" if proven and not generic else "proposed")
+            if generic:
+                entry["note"] = "«0» подтверждён только общей фразой («информация отсутствует», «не требуется»): требует проверки экспертом"
             if not proven and fact["value_obj"].get("model_quote"):
                 entry["model_quote"] = fact["value_obj"]["model_quote"]
         if fact["value_obj"].get("error"):
@@ -908,6 +928,47 @@ FUNDING_PROMPT = (
     "(до 300 символов) из фрагмента, подтверждающую его. Если аванс не предусмотрен, верни null. Только JSON по схеме.")
 
 
+_FUNDING_ALIASES = {
+    "funding": ("источник_финансирования", "источник финансирования", "источник", "финансирование"),
+    "funding_quote": ("цитата_источника", "цитата_финансирования", "источник_цитата"),
+    "advance": ("размер_аванса", "аванс"),
+    "advance_unit": ("единица_аванса", "единица", "unit"),
+    "advance_quote": ("цитата_аванса", "аванс_цитата"),
+}
+
+
+def _funding_aliases(parsed: dict) -> dict:
+    """Приводит имена полей ответа модели к схеме :data:`FUNDING_SCHEMA`.
+
+    Бэкенд не гарантирует соблюдение схемы: модель отвечает, например, ``{"источник_финансирования": …,
+    "размер_аванса": null}``. Известные синонимы переименовываются; значение по каноническому имени не затирается.
+    """
+    out = dict(parsed or {})
+    lowered = {str(k).casefold(): v for k, v in out.items()}
+    for canon, names in _FUNDING_ALIASES.items():
+        if out.get(canon) is None:
+            for name in names:
+                if lowered.get(name) is not None:
+                    out[canon] = lowered[name]
+                    break
+    return out
+
+
+def funding_from_print_form(documents: Dict[int, dict]) -> Optional[Tuple[str, str]]:
+    """Источник финансирования по печатной форме: строка «Закупка за счет …» со значением «Да».
+
+    Returns:
+        Optional[Tuple[str, str]]: ``(формулировка, цитата)`` или ``None``. Формулировка — это название отмеченной
+        строки (например, «Закупка за счет собственных средств организации»), как её пишут эксперты.
+    """
+    for doc in documents.values():
+        lines = [ln.strip() for ln in (doc.get("text") or "").splitlines() if ln.strip()]
+        for i, line in enumerate(lines[:-1]):
+            if re.match(r"закупка за счет\s", line, re.IGNORECASE) and lines[i + 1].casefold() == "да":
+                return line, f"{line}\n{lines[i + 1]}"
+    return None
+
+
 def keyword_windows(documents: Dict[int, dict], pattern: str, radius: int = 350, limit: int = 4) -> List[str]:
     """Окна текста вокруг ключевых слов в документах (сначала извещение) — вход для точечного извлечения."""
     out: List[str] = []
@@ -965,7 +1026,7 @@ async def fill_funding_advance(fields: Sequence[dict], data: Dict[str, Any], tra
                 {"role": "user", "content": "\n\n".join(f"[{i}] {w}" for i, w in enumerate(windows, 1))}]
     try:
         raw = await llm_call(messages, FUNDING_SCHEMA)
-        parsed = parse_block(raw)
+        parsed = _funding_aliases(parse_block(raw))
     except Exception as e:  # noqa: BLE001 — общие сведения не должны ронять сборку
         logger.warning(f"knowledge_store: финансирование/аванс не извлечены: {type(e).__name__}: {e}")
         return fail(f"ошибка модели: {type(e).__name__}: {e}"[:300])
@@ -992,7 +1053,16 @@ async def fill_funding_advance(fields: Sequence[dict], data: Dict[str, Any], tra
         if "field1_2_unit" in keys and data.get("field1_2_unit") is None:
             data["field1_2_unit"] = unit
             trace["field1_2_unit"] = {"status": "derived", "rule": "единица из найденной формулировки аванса"}
+    if need_funding and data.get("field1_3") is None:
+        found = funding_from_print_form(documents)
+        if found:
+            data["field1_3"] = found[0]
+            trace["field1_3"] = {"status": "verified", "source": "print_form", "quote": found[1],
+                                 "note": "источник финансирования по отмеченной строке печатной формы"}
     answer = f"ответ модели: {_clip(raw, 300)}; окон текста: {len(windows)}"
+    if need_advance and data.get("field1_2") is None and data.get("field2_1_22") == 2:
+        trace["field1_2"] = {"status": "derived", "note": "аванс не предусмотрен (критерий 1.22 = «2»), размер не указывается"}
+        need_advance = False
     if need_funding and data.get("field1_3") is None:
         trace["field1_3"] = {"status": "no_fact", "note": "значение не принято (нет значения или цитата не найдена в тексте); " + answer}
     if need_advance and data.get("field1_2") is None:

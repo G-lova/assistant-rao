@@ -22,7 +22,7 @@ except ImportError:
     _hcm.HTTPClientManager = object
     sys.modules["configs.http_client_manager"] = _hcm
 
-from knowledge_store import export, facts, repository as repo, summary
+from knowledge_store import assessment, export, facts, repository as repo, summary
 from tests.pg_psql import PsqlConn
 
 PG = os.getenv("PE_TEST_PG")
@@ -802,3 +802,32 @@ class ClipAndDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         data, trace = summary.assemble(fields, [], docs, None, preset)
         self.assertIsNone(data["field2_3_3"])
         self.assertIn("не разобран", trace["field2_3_3"]["assessment_error"])
+
+
+class RobustParsingTests(unittest.IsolatedAsyncioTestCase):
+    """Разбор «неудобных» ответов модели и слабых цитат (прогон по закупке 0301100027726000035)."""
+
+    def test_fenced_list_is_parsed(self):
+        """Список в обёртке ```json с русскими ключами разбирается как нарушения."""
+        raw = '```json\n[{"нарушение": "Нет неустойки", "цитата": "штраф"}]\n```'
+        parsed = assessment._parse(raw)
+        item = assessment._items(parsed, "violations")[0]
+        self.assertEqual(assessment._pick(item, assessment._ISSUE_KEYS), "Нет неустойки")
+        self.assertEqual(assessment._pick(item, assessment._QUOTE_KEYS), "штраф")
+        self.assertEqual(assessment._parse("```json\n[]\n```"), {"items": []})
+
+    def test_weak_quote(self):
+        """Общие фразы — слабые цитаты, конкретный текст и пустая цитата — нет."""
+        self.assertTrue(summary.weak_quote("Информация отсутствует"))
+        self.assertTrue(summary.weak_quote("Обеспечение гарантийных обязательств не требуется"))
+        self.assertFalse(summary.weak_quote("Срок оплаты не более 7 рабочих дней с даты подписания акта"))
+        self.assertFalse(summary.weak_quote(None))
+
+    def test_funding_aliases_and_print_form(self):
+        """Русские имена полей приводятся к схеме; источник финансирования берётся из печатной формы."""
+        parsed = summary._funding_aliases({"источник_финансирования": "Средства бюджетных учреждений", "размер_аванса": None})
+        self.assertEqual(parsed["funding"], "Средства бюджетных учреждений")
+        docs = {1: {"text": "Закупка за счет бюджетных средств\nНет\nЗакупка за счет собственных средств организации\nДа\n"}}
+        value, quote = summary.funding_from_print_form(docs)
+        self.assertEqual(value, "Закупка за счет собственных средств организации")
+        self.assertIn("Да", quote)

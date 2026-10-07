@@ -93,9 +93,39 @@ STYLE_PROMPT = ("Ты — эксперт по закупкам (44-ФЗ). Про
                 "коротко (одно предложение) опиши, в чём он состоит. Если дефектов нет, верни пустой список. Только JSON.")
 
 
+_ISSUE_KEYS = ("issue", "нарушение", "violation", "описание", "проблема", "defect", "дефект", "comment")
+_QUOTE_KEYS = ("quote", "цитата", "fragment", "фрагмент")
+
+
 def _parse(raw: str) -> Optional[dict]:
-    """Ответ модели как объект (``None``, если разобрать нельзя)."""
-    return facts_mod.parse_answer(raw)
+    """Ответ модели как объект (``None``, если разобрать нельзя).
+
+    Модель на практике отдаёт то объект ``{"violations": [...]}``, то голый список, то список в обёртке
+    ```json; список приводится к объекту ``{"items": [...]}``.
+    """
+    data = facts_mod.parse_json_any(raw)
+    if isinstance(data, list):
+        return {"items": data}
+    return data
+
+
+def _items(parsed: dict, *names: str) -> List[dict]:
+    """Элементы списка нарушений/дефектов из ответа: по ключам ``names``, затем ``items``; только словари."""
+    for name in (*names, "items"):
+        value = parsed.get(name)
+        if isinstance(value, list):
+            return [x for x in value if isinstance(x, dict)]
+    return []
+
+
+def _pick(item: dict, keys: Sequence[str]) -> str:
+    """Первое непустое строковое значение из ``item`` по списку допустимых имён полей (регистр не важен)."""
+    lowered = {str(k).casefold(): v for k, v in item.items()}
+    for key in keys:
+        value = lowered.get(key)
+        if value and str(value).strip():
+            return str(value).strip()
+    return ""
 
 
 def keyword_windows(documents: Dict[int, dict], pattern: str, radius: int = 350, limit: int = 4) -> List[str]:
@@ -194,12 +224,11 @@ async def assess_style(documents: Dict[int, dict], llm_call: LlmCall, concurrenc
             errors.append(f"{type(e).__name__}: {e}"[:200])
             return []
         out = []
-        for item in (_parse(raw) or {}).get("defects") or []:
-            if not isinstance(item, dict):
-                continue
-            found = facts_mod.find_quote(str(item.get("quote") or ""), part)
-            if found and str(item.get("issue") or "").strip():
-                out.append({"document": doc.get("filename"), "quote": found[:300], "issue": str(item["issue"]).strip()})
+        for item in _items(_parse(raw) or {}, "defects"):
+            issue = _pick(item, _ISSUE_KEYS)
+            found = facts_mod.find_quote(_pick(item, _QUOTE_KEYS), part)
+            if found and issue:
+                out.append({"document": doc.get("filename"), "quote": found[:300], "issue": issue})
         return out
 
     jobs = [check(d, part) for d in docs for part in style_chunks(d["text"])]
@@ -242,11 +271,12 @@ async def assess_presumption(key: str, documents: Dict[int, dict], llm_call: Llm
     if parsed is None:
         return None, {"error": f"ответ модели не разобран: {str(raw)[:200]}"}
     found = []
-    for item in parsed.get("violations") or []:
-        if isinstance(item, dict) and str(item.get("issue") or "").strip():
-            quote, filename = _quote_source(documents, item.get("quote"))
+    for item in _items(parsed, "violations"):
+        issue = _pick(item, _ISSUE_KEYS)
+        if issue:
+            quote, filename = _quote_source(documents, _pick(item, _QUOTE_KEYS))
             if quote:
-                found.append({"document": filename, "quote": quote, "issue": str(item["issue"]).strip()})
+                found.append({"document": filename, "quote": quote, "issue": issue})
     if found:
         return 0, {"status": "proposed", "source": "llm_presumption", "document": found[0]["document"],
                    "quote": found[0]["quote"], "defects": found,

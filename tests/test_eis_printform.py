@@ -60,7 +60,7 @@ class PrintFormRulesTests(unittest.TestCase):
         """Даты, цена, ИКЗ, валюта, критерии, обеспечение."""
         for number in ("1.8", "1.18", "1.21", "1.23", "1.24", "1.31", "1.34", "1.41", "1.44", "1.45", "1.46", "1.40"):
             self.assertEqual(self.value(number), 1, number)
-        self.assertIsNone(self.value("1.42"))          # первых частей нет — решает эксперт
+        self.assertEqual(self.value("1.42"), 2)       # первых частей нет — «не предусмотрено» (как предложение)
         self.assertIsNone(self.value("1.38"))          # «не требуется» эксперты оценивают по-разному
 
     def test_empty_values_are_absent(self):

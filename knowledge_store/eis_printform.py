@@ -353,6 +353,9 @@ def _antimonopoly(form: PrintForm) -> Optional[Finding]:
 
 
 # критерий → правило печатной формы
+#: Критерии, где «2» по отсутствию в печатной форме — только предположение (на эталоне 11 из 14): ставится как ``proposed``.
+TENTATIVE_ABSENT = frozenset({"1.42"})
+
 RULES: Dict[str, Callable[[PrintForm], Optional[Finding]]] = {
     "1.1": lambda f: _first(f, ["placing", "org"], "Наименование заказчика"),
     "1.2": lambda f: _present(f, "fact_address", "Место нахождения"),
@@ -395,7 +398,8 @@ RULES: Dict[str, Callable[[PrintForm], Optional[Finding]]] = {
     "1.39": _multi,
     "1.40": _one_side,
     "1.41": lambda f: _present(f, "end_dt", "Дата и время окончания срока подачи заявок", absent=None),
-    "1.42": lambda f: _present(f, "first_parts", "Дата рассмотрения и оценки первых частей заявок", absent=None),
+    "1.42": lambda f: _present(f, "first_parts", "Дата рассмотрения и оценки первых частей заявок", absent=NOT_PROVIDED)
+    or Finding(NOT_PROVIDED, "в печатной форме нет даты рассмотрения и оценки первых частей заявок"),
     "1.43": lambda f: _present(f, "bidding", "Дата проведения процедуры подачи предложений", absent=None),
     "1.44": lambda f: _present(f, "second_parts", "Дата рассмотрения и оценки вторых частей заявок", absent=None),
     "1.45": lambda f: _present(f, "summarizing", "Дата подведения итогов определения поставщика", absent=None),

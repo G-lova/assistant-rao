@@ -151,16 +151,32 @@ def build_messages(label: str, kind: str, fragments: Sequence[Fragment], system_
     return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user}]
 
 
-def parse_answer(raw: str) -> Optional[dict]:
-    """Разбирает ответ модели в словарь; при невалидном JSON пытается починить через ``json_repair``."""
+def parse_json_any(raw: str) -> Any:
+    """Разбирает ответ модели в JSON-значение любого вида (объект или список).
+
+    Снимает обёртку markdown (```json … ```), при невалидном JSON пытается починить через ``json_repair``.
+
+    Args:
+        raw: Сырой ответ модели.
+
+    Returns:
+        Any: ``dict``, ``list`` или ``None``, если разобрать не удалось.
+    """
+    text = re.sub(r"^\s*```[a-zA-Z]*\s*|\s*```\s*$", "", raw) if isinstance(raw, str) else raw
     try:
-        data = json.loads(raw)
+        data = json.loads(text)
     except (TypeError, ValueError):
         try:
             from json_repair import repair_json
-            data = json.loads(repair_json(raw))
+            data = json.loads(repair_json(text))
         except Exception:
             return None
+    return data if isinstance(data, (dict, list)) else None
+
+
+def parse_answer(raw: str) -> Optional[dict]:
+    """Разбирает ответ модели в словарь (``None``, если ответ не объект); см. :func:`parse_json_any`."""
+    data = parse_json_any(raw)
     return data if isinstance(data, dict) else None
 
 
@@ -387,7 +403,10 @@ def build_printform_facts(documents: Sequence[dict], fields: Sequence[dict], sol
         return []
     doc = max(forms, key=lambda d: _form_version(d["filename"], d["id"]))
     data = eis_printform.to_json(eis_printform.evaluate_text(doc["text_full"]))
-    return [{"fact_key": key, "value": {"value": f.value, "verified": True, "comment": None, "origin": "print_form"},
+    tentative = {f["field_key"] for f in fields
+                 if eis_notice.criterion_number(f.get("label")) in eis_printform.TENTATIVE_ABSENT}
+    return [{"fact_key": key, "value": {"value": f.value, "verified": not (key in tentative and f.value == eis_notice.NOT_PROVIDED),
+                                        "comment": None, "origin": "print_form"},
              "document_id": doc["id"], "page": None, "quote": f.evidence, "confidence": 1.0}
             for key, f in eis_notice.map_to_fields(data, fields).items() if key not in set(solved)]
 
