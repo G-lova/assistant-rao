@@ -88,8 +88,10 @@ class AssembleTests(unittest.TestCase):
         self.assertEqual((data["field2_1_1"], data["field2_1_2"]), (1, 1))
         self.assertEqual(trace["field2_1_1"]["status"], "proposed")
         self.assertEqual(trace["field2_1_1"]["model_quote"], "Срок оплаты")
-        self.assertEqual((data["field2_2_4_1"], data["field2_2_4_2"]), (0, 2))
-        self.assertEqual((trace["field2_2_4_1"]["status"], trace["field2_2_4_2"]["status"]), ("proposed", "proposed"))
+        self.assertEqual(data["field2_2_4_1"], 0)
+        self.assertEqual(trace["field2_2_4_1"]["status"], "proposed")
+        self.assertIsNone(data["field2_2_4_2"])           # «2» модели для критерия соответствия не принимается
+        self.assertIn("оставлено эксперту", trace["field2_2_4_2"]["note"])
         three = fact("field2_1_1", 3, verified=False, comment="не по теме")
         data, trace = summary.assemble(FIELDS, [three], DOCS)
         self.assertIsNone(data["field2_1_1"])
@@ -112,7 +114,7 @@ class AssembleTests(unittest.TestCase):
                 2: {"filename": "o.docx", "doc_code": "docOpisanieFiles", "text": "т"}}
         data, trace = summary.assemble(fields, rows, docs)
         self.assertEqual((data["name"], data["inn"], data["field1_1"], data["field1_2"], data["field1_2_unit"]),
-                         ("Услуги связи", "2325", 1500000.5, 30.0, "%"))
+                         ("Услуги связи", "2325", 1500000.5, 450000.15, "руб."))   # 30% от НМЦК
         self.assertIn("n.xml", data["documents"])
         self.assertIn("o.docx", data["documents"])
         self.assertIsNone(data["code"])
@@ -867,3 +869,34 @@ class ExpenseTypeTests(unittest.TestCase):
     def test_no_ikz(self):
         """ИКЗ нет — решения нет."""
         self.assertIsNone(assessment.assess_expense_type({1: {"text": "текст"}}))
+
+
+class AdvanceRublesTests(unittest.IsolatedAsyncioTestCase):
+    """Аванс (field1_2) — в рублях; «аванса нет» — 0; ответ модели с ключом ``answer``; «2» для соответствия."""
+
+    def test_percent_to_rubles(self):
+        """30% от НМЦК 6 716 267,32 → рубли; рубли остаются рублями; проценты без НМЦК не пересчитываются."""
+        self.assertEqual(summary.advance_in_rubles(30.0, "%", 6716267.32), 2014880.2)
+        self.assertEqual(summary.advance_in_rubles(1200000.0, "руб.", None), 1200000.0)
+        self.assertIsNone(summary.advance_in_rubles(30.0, "%", None))
+
+    async def test_no_advance_is_zero(self):
+        """Критерий 1.22 = «2» → field1_2 = 0 (даже без модели), единица — руб."""
+        fields = [{"field_key": k, "value_kind": "number", "label": k} for k in ("field1_1", "field1_2", "field1_2_unit", "field2_1_22")]
+        data = {"field1_1": 100.0, "field1_2": None, "field1_2_unit": None, "field2_1_22": 2}
+        trace = {}
+        await summary.fill_funding_advance(fields, data, trace, {}, {}, None)
+        self.assertEqual(data["field1_2"], 0)
+        self.assertEqual(data["field1_2_unit"], "руб.")
+        self.assertEqual(trace["field1_2"]["status"], "derived")
+
+    def test_answer_key_alias(self):
+        """Ответ ``{"answer": "2", ...}`` без ключа ``value`` принимается."""
+        res = facts.validate_answer({"answer": "1", "quote": "", "fragment": "0", "comment": "ок"}, [])
+        self.assertEqual(res["value"], 1)
+
+    def test_not_applicable_only_where_experts_use_it(self):
+        """«2» от модели для критерия 2.2.3 не принимается, для 4.3 — принимается; факты XML не ограничиваются."""
+        self.assertIsNone(summary.usable_result("field2_2_3", "compliance", 2, "fact_extractor"))
+        self.assertEqual(summary.usable_result("field2_4_3", "compliance", 2, "fact_extractor"), 2)
+        self.assertEqual(summary.usable_result("field2_2_3", "compliance", 2, facts.SOURCE_EIS), 2)

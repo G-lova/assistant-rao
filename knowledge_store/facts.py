@@ -201,8 +201,12 @@ def validate_answer(answer: Optional[dict], fragments: Sequence[Fragment]) -> Op
     """
     if not answer:
         return None
+    raw_value = answer.get("value")
+    for alias in ("answer", "ответ", "значение", "result"):     # схему бэкенд не гарантирует: ключ бывает другим
+        if raw_value is None:
+            raw_value = answer.get(alias)
     try:
-        value = int(answer.get("value"))
+        value = int(raw_value)
     except (TypeError, ValueError):
         return None
     if value not in (0, 1, 2, 3):

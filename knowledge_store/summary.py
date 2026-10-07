@@ -112,6 +112,24 @@ def weak_quote(quote: Any) -> bool:
     return bool(text) and bool(_WEAK_QUOTE_RE.match(text))
 
 
+def usable_result(key: str, kind: str, result: Optional[int], source: Optional[str]) -> Optional[int]:
+    """Допустимое значение критерия: «2» от модели для критерия соответствия вне :data:`assessment.NOT_APPLICABLE_ALLOWED` — ``None``.
+
+    Args:
+        key: Ключ поля.
+        kind: Тип поля (``forms.KIND_*``).
+        result: Значение факта (0/1/2/``None``).
+        source: Источник факта (факты XML/печатной формы не ограничиваются).
+
+    Returns:
+        Optional[int]: Значение или ``None``, если оно не принимается.
+    """
+    if (result == 2 and kind == forms.KIND_COMPLIANCE and source != facts_mod.SOURCE_EIS
+            and key not in assessment.NOT_APPLICABLE_ALLOWED):
+        return None
+    return result
+
+
 def evidence_ok(fact: dict, doc_text: Optional[str]) -> bool:
     """Проверяет доказательство факта (валидатор 5.4).
 
@@ -307,7 +325,9 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
         entry = {"status": "unverified", "source": fact.get("source"), "document": doc.get("filename"),
                  "page": fact.get("page"), "quote": fact.get("quote"),
                  "comment": clean_comment(fact["comment"], doc.get("filename"))}
-        result = fact["result"]
+        result = usable_result(key, kind, fact["result"], fact.get("source"))
+        if result is None and fact["result"] == 2:
+            entry["note"] = "модель ответила «2» (не применимо) для критерия, где эксперты так не отвечают: оставлено эксперту"
         proven = bool(fact["verified"]) and evidence_ok(fact, doc.get("text"))
         if result is None:
             pass
@@ -400,6 +420,25 @@ def _number(text: Any) -> Optional[float]:
         return None
 
 
+def advance_in_rubles(value: Optional[float], unit: Optional[str], nmck: Optional[float]) -> Optional[float]:
+    """Размер аванса в рублях (``field1_2`` по форме — «Авансовый платеж, руб.»).
+
+    Args:
+        value: Число из извещения.
+        unit: ``"%"`` (процент от НМЦК) или ``"руб."``.
+        nmck: Начальная (максимальная) цена контракта, руб.
+
+    Returns:
+        Optional[float]: Сумма в рублях (для процентов — ``НМЦК × % / 100``, округление до копеек);
+        ``None``, если пересчитать нельзя (проценты без НМЦК).
+    """
+    if value is None:
+        return None
+    if unit == "%":
+        return round(nmck * value / 100, 2) if nmck else None
+    return value
+
+
 def _extraction_raw(doc: dict) -> dict:
     """``raw_data`` результата ``TypeDataExtractor`` документа (``{}``, если нет)."""
     raw = (_as_dict(doc.get("extraction")) or {}).get("raw_data")
@@ -454,10 +493,20 @@ def fill_general_info(fields: Sequence[dict], by_key: Dict[str, dict], documents
     put("field1_1", _number(price), "verified", facts_mod.SOURCE_EIS, price)
     advance, path = xml_value("1.22")
     if advance and _number(advance) is not None:
-        put("field1_2", _number(advance), "verified", facts_mod.SOURCE_EIS, advance)
-        if "field1_2_unit" in data and data["field1_2_unit"] is None:
-            data["field1_2_unit"] = "%" if ("sumInPercents" in (path or "") or "%" in (path or "")) else "руб."
-            trace["field1_2_unit"] = {"status": "derived", "rule": "единица по полю XML извещения"}
+        unit = "%" if ("sumInPercents" in (path or "") or "%" in (path or "") or "%" in advance) else "руб."
+        rubles = advance_in_rubles(_number(advance), unit, data.get("field1_1"))
+        if rubles is not None:
+            put("field1_2", rubles, "verified", facts_mod.SOURCE_EIS, f"{path} = {advance}")
+            if unit == "%":
+                trace["field1_2"]["note"] = f"аванс {_number(advance):g}% от НМЦК {data.get('field1_1')} руб. пересчитан в рубли"
+            if "field1_2_unit" in data and data["field1_2_unit"] is None:
+                data["field1_2_unit"] = "руб."
+                trace["field1_2_unit"] = {"status": "derived", "rule": "размер аванса указан в рублях"}
+        else:
+            put("field1_2", _number(advance), "verified", facts_mod.SOURCE_EIS, f"{path} = {advance}")
+            if "field1_2_unit" in data and data["field1_2_unit"] is None:
+                data["field1_2_unit"] = unit
+                trace["field1_2_unit"] = {"status": "derived", "rule": "НМЦК неизвестна: аванс оставлен в единицах извещения"}
 
     # паспорт закупки
     for key, column in (("field1_1", "nmck"), ("field1_2", "advance")):
@@ -1018,6 +1067,13 @@ async def fill_funding_advance(fields: Sequence[dict], data: Dict[str, Any], tra
         trace["field1_3"] = {"status": "from_passport", "source": "pe_procurements"}
     need_funding = "field1_3" in keys and data.get("field1_3") is None
     need_advance = "field1_2" in keys and data.get("field1_2") is None
+    if need_advance and data.get("field1_2") is None and data.get("field2_1_22") == 2:
+        data["field1_2"] = 0
+        trace["field1_2"] = {"status": "derived", "note": "аванс не предусмотрен (критерий 1.22 = «2») — 0 руб."}
+        if "field1_2_unit" in keys and data.get("field1_2_unit") is None:
+            data["field1_2_unit"] = "руб."
+            trace["field1_2_unit"] = {"status": "derived", "rule": "размер аванса в рублях"}
+        need_advance = False
     if llm_call is None or not (need_funding or need_advance):
         return
     windows = (keyword_windows(documents, r"источник\w*\s+финансирования|за счет средств|за счёт средств") if need_funding else []) \
@@ -1057,11 +1113,15 @@ async def fill_funding_advance(fields: Sequence[dict], data: Dict[str, Any], tra
     advance_quote = proven(parsed.get("advance_quote"))
     quote = advance_quote
     if need_advance and number is not None and unit and quote:
-        data["field1_2"] = number
+        rubles = advance_in_rubles(number, unit, data.get("field1_1"))
+        data["field1_2"] = rubles if rubles is not None else number
         trace["field1_2"] = {"status": "verified", "source": "llm_extraction", "quote": quote}
+        if unit == "%" and rubles is not None:
+            trace["field1_2"]["note"] = f"аванс {number:g}% от НМЦК {data.get('field1_1')} руб. пересчитан в рубли"
         if "field1_2_unit" in keys and data.get("field1_2_unit") is None:
-            data["field1_2_unit"] = unit
-            trace["field1_2_unit"] = {"status": "derived", "rule": "единица из найденной формулировки аванса"}
+            data["field1_2_unit"] = "руб." if rubles is not None else unit
+            trace["field1_2_unit"] = {"status": "derived", "rule": "размер аванса в рублях" if rubles is not None
+                                      else "НМЦК неизвестна: единица из формулировки аванса"}
     if need_funding and data.get("field1_3") is None:
         found = funding_from_print_form(documents)
         if found:
@@ -1069,9 +1129,6 @@ async def fill_funding_advance(fields: Sequence[dict], data: Dict[str, Any], tra
             trace["field1_3"] = {"status": "verified", "source": "print_form", "quote": found[1],
                                  "note": "источник финансирования по отмеченной строке печатной формы"}
     answer = f"ответ модели: {_clip(raw, 300)}; окон текста: {len(windows)}"
-    if need_advance and data.get("field1_2") is None and data.get("field2_1_22") == 2:
-        trace["field1_2"] = {"status": "derived", "note": "аванс не предусмотрен (критерий 1.22 = «2»), размер не указывается"}
-        need_advance = False
     if need_funding and data.get("field1_3") is None:
         trace["field1_3"] = {"status": "no_fact", "note": "значение не принято (нет значения или цитата не найдена в тексте); " + answer}
     if need_advance and data.get("field1_2") is None:
@@ -1177,7 +1234,10 @@ async def generate_summary(conn, expertise_id: int, llm_call: Optional[LlmCall],
                            "extraction": d.get("extraction")}
                  for d in ready["documents"]}
     fact_rows = [r for r in fact_rows if r["fact_key"] not in facts_mod.ASSESSED_KEYS]   # их оценивает модель по документам
-    decided = {r["fact_key"] for r in fact_rows if normalize_result((_as_dict(r.get("value")) or {}).get("value")) is not None}
+    kinds = {f["field_key"]: f["value_kind"] for f in fields}
+    decided = {r["fact_key"] for r in fact_rows
+               if usable_result(r["fact_key"], kinds.get(r["fact_key"]),
+                                normalize_result((_as_dict(r.get("value")) or {}).get("value")), r.get("source")) is not None}
     preset = await assessment.compute_assessed(fields, documents, llm_call, skip=decided)
     data, trace = assemble(fields, fact_rows, documents, ready["passport"], preset)
     await fill_funding_advance(fields, data, trace, documents, ready["passport"], llm_call)
