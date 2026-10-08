@@ -18,7 +18,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tup
 
 from configs.config import Config
 from configs.logger import get_logger
-from knowledge_store import assessment, eis_notice, facts as facts_mod, forms, repository as repo
+from knowledge_store import assessment, contract_check, eis_notice, facts as facts_mod, forms, repository as repo
 
 logger = get_logger(__name__)
 
@@ -284,6 +284,25 @@ def clean_comment(comment: Optional[str], filename: Optional[str] = None) -> Opt
     return defragment(text).strip()
 
 
+def derive_documentation(data: Dict[str, Any], trace: Dict[str, Any]) -> None:
+    """3.7 (соответствие документации 44-ФЗ) из 2.5: проект контракта — часть документации.
+
+    По эталону экспертов при «0» в 2.5 в критерии 3.7 тоже «0» (19 из 19). Если 2.5 = «0» (кроме «0» на слабой
+    цитате), а 3.7 не решён или равен «1», ставится «0» как предложение; отдельного комментария к 3.7 не пишется
+    (``derived_from``), чтобы нарушение не повторялось в замечаниях дважды.
+    """
+    src, dst = contract_check_keys()
+    if src in data and dst in data and data[src] == 0 and data[dst] in (None, 1) and not trace.get(src, {}).get("weak_zero"):
+        data[dst] = 0
+        trace[dst] = {"status": "proposed", "source": "derived", "derived_from": src, "quote": None, "comment": None,
+                      "note": "в проекте контракта (часть документации) выявлены нарушения (критерий 2.5); требует проверки экспертом"}
+
+
+def contract_check_keys() -> Tuple[str, str]:
+    """Ключи ``(2.5, 3.7)`` формы."""
+    return contract_check.CONTRACT_KEY, contract_check.DOCUMENTATION_KEY
+
+
 def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[int, dict],
              procurement: Optional[dict] = None, preset: Optional[Dict[str, Tuple[Any, dict]]] = None,
              judged: Optional[Dict[str, str]] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -400,13 +419,15 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
         trace[key] = entry
 
     for key, (value, entry) in (preset or {}).items():
-        if key in data and (key not in assessment.FILL_IF_EMPTY or data[key] is None):
+        if key in data and (key not in assessment.FILL_IF_EMPTY or data[key] is None
+                            or (key in assessment.ZERO_OVERRIDES and value == 0 and data[key] == 1)):
             if value is None:           # оценка не удалась: значение остаётся эксперту, причина видна в trace
                 trace.setdefault(key, {})["assessment_error"] = entry.get("error")
             else:
                 data[key], trace[key] = value, entry
 
     apply_nmck_method_rule(fields, documents, data, trace)
+    derive_documentation(data, trace)
 
     # итоги подразделов — из решённых дочерних критериев
     for field in fields:
@@ -617,6 +638,8 @@ def collect_remarks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict[st
         key = field["field_key"]
         if field["value_kind"] in RESULT_KINDS and data.get(key) == 0:
             item = trace.get(key, {})
+            if item.get("derived_from"):
+                continue          # 3.7 выведен из 2.5: то же нарушение уже в замечаниях 2.5
             if item.get("weak_zero"):
                 continue          # «0» держится на общей фразе («не требуется»): нарушением в текстах блоков не называем
             remarks.append({"field_key": key, "number": eis_notice.criterion_number(field["label"]) or "",
@@ -1268,7 +1291,8 @@ async def generate_summary(conn, expertise_id: int, llm_call: Optional[LlmCall],
                if usable_result(r["fact_key"], kinds.get(r["fact_key"]),
                                 normalize_result((_as_dict(r.get("value")) or {}).get("value")), r.get("source")) is not None}
     texts = {r["fact_key"]: f"{(_as_dict(r.get('value')) or {}).get('comment') or ''} {r.get('quote') or ''}" for r in fact_rows}
-    preset = await assessment.compute_assessed(fields, documents, llm_call, skip=decided, fact_texts=texts)
+    preset = await assessment.compute_assessed(fields, documents, llm_call, skip=decided, fact_texts=texts,
+                                               competition="competition" in code)
     judged = await assessment.judge_zeros(fields, fact_rows, documents, llm_call)
     data, trace = assemble(fields, fact_rows, documents, ready["passport"], preset, judged)
     await fill_funding_advance(fields, data, trace, documents, ready["passport"], llm_call)

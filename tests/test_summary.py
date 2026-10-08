@@ -1060,3 +1060,53 @@ class NotSetAndAdvanceTests(unittest.TestCase):
         self.assertEqual(trace["field2_1_22"]["status"], "proposed")
         data, _ = self.build("field2_1_22", "1.22. Размер аванса", "указан", "размер аванса 30 % от цены", value=1)
         self.assertEqual(data["field2_1_22"], 1)
+
+
+class ContractCheckTests(unittest.TestCase):
+    """Правила нарушений проекта контракта (2.5) и вывод 3.7 из 2.5."""
+
+    BODY = ("Заказчик оплачивает услуги по мере поступления денежных средств. Исполнение контракта обеспечивается "
+            "банковской гарантией. Приёмка оформляется актом по форме КС-2. Штраф по ПП № 1042. ") * 60
+
+    def test_detects_typical_violations(self):
+        """Находит оплату «по мере поступления», банковскую гарантию, отсутствие электронной приёмки и уведомлений."""
+        from knowledge_store import contract_check
+        codes = {d["code"] for d in contract_check.check_contract(self.BODY)}
+        self.assertTrue({"pay_on_funds", "bank_guarantee", "e_acceptance", "e_notices"} <= codes)
+
+    def test_short_text_and_clean_contract(self):
+        """Короткий текст проверок не вызывает; контракт с ЕИС-приёмкой и уведомлениями — чистый."""
+        from knowledge_store import contract_check
+        self.assertEqual(contract_check.check_contract("короткий"), [])
+        clean = ("Приёмка: заказчик формирует в единой информационной системе документ о приёмке. При применении мер "
+                 "ответственности стороны обмениваются документами в единой информационной системе путём электронных "
+                 "уведомлений. Штраф по ПП № 1042. ") * 80
+        self.assertEqual(contract_check.check_contract(clean), [])
+
+    def test_price_right_only_in_competition(self):
+        """Ответственность за «цену за право заключения» — нарушение только в конкурсе."""
+        from knowledge_store import contract_check
+        text = (self.BODY + "победителем, предложившим наиболее высокую цену за право заключения контракта. ") * 2
+        self.assertIn("price_right_fine", {d["code"] for d in contract_check.check_contract(text, competition=True)})
+        self.assertNotIn("price_right_fine", {d["code"] for d in contract_check.check_contract(text, competition=False)})
+
+    def test_rule_overrides_one_and_derives_37(self):
+        """Правило даёт 2.5 = 0 вместо «1» модели; 3.7 выводится из 2.5 и не дублируется в замечаниях."""
+        fields = [{"field_key": "field2_2_5", "value_kind": "compliance", "label": "2.5. Проект контракта", "ordinal": 1},
+                  {"field_key": "field2_3_7", "value_kind": "compliance", "label": "3.7. Документация", "ordinal": 2}]
+        docs = {1: {"filename": "Проект контракта.docx", "doc_code": None, "text": self.BODY}}
+        rows = [{"fact_key": "field2_2_5", "source": "fact_extractor", "document_id": 1, "page": 1, "quote": None,
+                 "value": {"value": 1, "verified": True, "comment": None}}]
+        preset = asyncio.run(assessment.compute_assessed(fields, docs, None))
+        data, trace = summary.assemble(fields, rows, docs, None, preset)
+        self.assertEqual((data["field2_2_5"], data["field2_3_7"]), (0, 0))
+        self.assertEqual(trace["field2_3_7"]["derived_from"], "field2_2_5")
+        remarks = summary.collect_remarks(fields, data, trace)
+        self.assertEqual([r["field_key"] for r in remarks], ["field2_2_5"])
+
+    def test_only_weak_findings_give_no_zero(self):
+        """Только слабые признаки (уведомления, «цена за право») значение 2.5 не определяют."""
+        text = ("Приёмка: заказчик формирует в единой информационной системе документ о приёмке. Штраф по ПП № 1042, "
+                "победителем, предложившим наиболее высокую цену за право заключения контракта. ") * 80
+        docs = {1: {"filename": "Проект контракта.docx", "text": text}}
+        self.assertIsNone(assessment.assess_contract(docs, True))

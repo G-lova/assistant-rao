@@ -21,7 +21,7 @@ import re
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 from configs.logger import get_logger
-from knowledge_store import facts as facts_mod
+from knowledge_store import contract_check, facts as facts_mod
 
 logger = get_logger(__name__)
 
@@ -548,6 +548,36 @@ async def recheck_presets(preset: Dict[str, Tuple[Any, dict]], fields: Sequence[
                                "note": "замечания модели отклонены повторной проверкой; требует проверки экспертом"})
 
 
+# Ключи, где «0» по правилам заменяет «1» модели (но не наоборот)
+ZERO_OVERRIDES = frozenset({contract_check.CONTRACT_KEY})
+
+
+def assess_contract(documents: Dict[int, dict], competition: bool = True) -> Optional[Tuple[int, dict]]:
+    """Критерий 2.5: типичные нарушения проекта контракта по правилам (:mod:`knowledge_store.contract_check`).
+
+    Args:
+        documents: Документы экспертизы с текстами.
+        competition: Закупка — конкурс.
+
+    Returns:
+        Optional[Tuple[int, dict]]: ``(0, запись trace)``, если найдено хотя бы одно «сильное» нарушение
+        (:data:`contract_check.STRONG_CODES`); иначе ``None``
+        (отсутствие находок не доказывает соответствие — значение определяют остальные источники).
+    """
+    defects = []
+    for doc in documents.values():
+        if contract_check.is_contract(doc):
+            for item in contract_check.check_contract(doc.get("text"), competition):
+                defects.append({**item, "document": doc.get("filename")})
+    if not any(d["code"] in contract_check.STRONG_CODES for d in defects):
+        return None          # только слабые признаки (есть почти в каждом контракте) — «0» не ставим
+    lines = [f"{d['issue'].rstrip('.')} ({d['norm']})." for d in defects]
+    first = next((d for d in defects if d["quote"]), defects[0])
+    return 0, {"status": "proposed", "source": "contract_rules", "document": first["document"], "quote": first["quote"],
+               "comment": " ".join(f"{i}. {line}" for i, line in enumerate(lines, 1)) if len(lines) > 1 else lines[0],
+               "defects": defects, "note": "нарушения найдены правилами по тексту проекта контракта; требует проверки экспертом"}
+
+
 # КВР (последние 3 знака ИКЗ) → (описание, префиксы ОКПД2, при которых вид работ соответствует; ``None`` — любые)
 KVR_RULES = {
     "244": ("прочая закупка товаров, работ и услуг для обеспечения государственных (муниципальных) нужд", None),
@@ -605,7 +635,8 @@ def education_applicable(documents: Dict[int, dict]) -> bool:
 
 async def compute_assessed(fields: Sequence[dict], documents: Dict[int, dict],
                            llm_call: Optional[LlmCall], skip: Sequence[str] = (),
-                           fact_texts: Optional[Dict[str, str]] = None) -> Dict[str, Tuple[Any, dict]]:
+                           fact_texts: Optional[Dict[str, str]] = None,
+                           competition: bool = True) -> Dict[str, Tuple[Any, dict]]:
     """Значения ``field2_2_2_0`` и ``field2_2_1_6`` (если они есть в форме) для передачи в :func:`summary.assemble`.
 
     Значения считаются до сборки, чтобы итоги подразделов и пояснения ``*_text`` учитывали их.
@@ -617,6 +648,7 @@ async def compute_assessed(fields: Sequence[dict], documents: Dict[int, dict],
         skip: Ключи, уже решённые поиском фактов (для :data:`FILL_IF_EMPTY` повторно не оцениваются).
         fact_texts: ``ключ → комментарий и цитата`` факта модели: если комментарий критерия
             :data:`METHOD_FIT_KEY` говорит о другом методе, чем определённый, факт не считается решением.
+        competition: Закупка — конкурс (для проверки проекта контракта, см. :func:`contract_check.check_contract`).
 
     Returns:
         dict: ``ключ → (значение, запись trace)``; ключ отсутствует, если определить значение не удалось.
@@ -667,6 +699,10 @@ async def compute_assessed(fields: Sequence[dict], documents: Dict[int, dict],
                 preset[key] = res
     if llm_call is not None:
         await recheck_presets(preset, fields, documents, llm_call)
+    if contract_check.CONTRACT_KEY in keys:
+        found = assess_contract(documents, competition)
+        if found:
+            preset[contract_check.CONTRACT_KEY] = found
     if EXPENSE_KEY in keys and EXPENSE_KEY not in skip:
         found = assess_expense_type(documents)
         if found:
