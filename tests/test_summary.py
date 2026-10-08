@@ -335,7 +335,9 @@ class SummaryDbTests(unittest.TestCase):
                    f"(8101, 'k_cmp', '{{\"value\": 0, \"verified\": true, \"comment\": \"не совпадает\"}}', {doc_id}, 1, NULL, 0.8, 'fact_extractor')")
 
         async def llm(messages, schema):
-            """Ответ модели для блока."""
+            """Ответ модели: проверка замечания — «подтверждается», блок — текст."""
+            if "verdict" in schema.get("properties", {}):
+                return json.dumps({"verdict": "подтверждается"})
             return json.dumps({"text": "Вывод по замечанию."})
 
         res = self.run_async(summary.generate_summary(c, 8101, llm, build_facts))
@@ -961,3 +963,69 @@ class MethodFitTests(unittest.IsolatedAsyncioTestCase):
         again = await assessment.compute_assessed(fields, docs, None, skip=["field2_2_2_3"],
                                                    fact_texts={"field2_2_2_3": "рыночный метод применён верно"})
         self.assertNotIn("field2_2_2_3", again)
+
+
+class JudgeTests(unittest.TestCase):
+    """Вторая проверка замечаний «0» от модели (judge) и её влияние на сборку."""
+
+    FIELDS = [{"field_key": "k_cmp", "value_kind": "compliance", "label": "2.1.1. Соответствие", "ordinal": 1},
+              {"field_key": "k_ns", "value_kind": "compliance", "label": "4.3. Требование", "ordinal": 2}]
+
+    def row(self, key, comment, quote="цитата"):
+        """Факт модели «0» для ключа."""
+        return {"fact_key": key, "source": "fact_extractor", "document_id": 1, "page": 1, "quote": quote,
+                "value": {"value": 0, "verified": True, "comment": comment}}
+
+    def build(self, judged):
+        """Сборка с вердиктами ``judged`` по двум критериям."""
+        docs = {1: {"filename": "d.docx", "doc_code": "docIzvejenieFiles", "text": "цитата в тексте документа"}}
+        rows = [self.row("k_cmp", "нарушено"), self.row("k_ns", "не требуется")]
+        return summary.assemble(self.FIELDS, rows, docs, None, None, judged)
+
+    def test_parse_verdict(self):
+        """Разбор вердикта: объект, алиасы, «не подтверждается» не равно «подтверждается»."""
+        self.assertEqual(assessment.parse_verdict('{"verdict": "подтверждается"}'), "supported")
+        self.assertEqual(assessment.parse_verdict('{"вердикт": "Нет"}'), "unsupported")
+        self.assertEqual(assessment.parse_verdict('```json\n{"verdict": "не применимо"}\n```'), "not_applicable")
+        self.assertEqual(assessment.parse_verdict('{"verdict": "не подтверждается"}'), "unsupported")
+        self.assertIsNone(assessment.parse_verdict("ерунда"))
+
+    def test_supported_is_verified_zero(self):
+        """Подтверждённый «0» — verified и попадает в замечания."""
+        data, trace = self.build({"k_cmp": "supported", "k_ns": "supported"})
+        self.assertEqual(data["k_cmp"], 0)
+        self.assertEqual(trace["k_cmp"]["status"], "verified")
+        self.assertEqual(trace["k_cmp"]["judged"], "supported")
+
+    def test_unsupported_and_not_applicable(self):
+        """Отклонённый «0» → «1» (proposed); «не применимо» → «2» только где допустимо, иначе эксперту."""
+        data, trace = self.build({"k_cmp": "unsupported", "k_ns": "not_applicable"})
+        self.assertEqual(data["k_cmp"], 1)
+        self.assertEqual(trace["k_cmp"]["status"], "proposed")
+        self.assertIsNone(data["k_ns"])
+        self.assertEqual(trace["k_ns"]["judged"], "not_applicable")
+
+    def test_no_verdict_is_not_a_remark(self):
+        """Нет вердикта: «0» — предложение и не идёт в замечания; без проверки (None) поведение прежнее."""
+        data, trace = self.build({})
+        self.assertEqual(data["k_cmp"], 0)
+        self.assertEqual(trace["k_cmp"]["status"], "proposed")
+        self.assertEqual(summary.collect_remarks(self.FIELDS, data, trace), [])
+        data, trace = self.build(None)
+        self.assertEqual(trace["k_cmp"]["status"], "verified")
+
+    def test_judge_zeros_calls_model_per_zero(self):
+        """Каждый «0» модели проверяется отдельным вызовом; факты ЕИС не проверяются."""
+        calls = []
+
+        async def llm(messages, schema):
+            """Заглушка модели: «нет» для всех."""
+            calls.append(messages[-1]["content"])
+            return '{"verdict": "нет"}'
+
+        docs = {1: {"filename": "d.docx", "text": "цитата в тексте документа"}}
+        rows = [self.row("k_cmp", "нарушено"), dict(self.row("k_ns", "x"), source="eis_xml")]
+        out = asyncio.run(assessment.judge_zeros(self.FIELDS, rows, docs, llm))
+        self.assertEqual(out, {"k_cmp": "unsupported"})
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(asyncio.run(assessment.judge_zeros(self.FIELDS, rows, docs, None)))

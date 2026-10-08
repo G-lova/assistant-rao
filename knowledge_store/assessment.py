@@ -393,6 +393,147 @@ async def assess_presumption(key: str, documents: Dict[int, dict], llm_call: Llm
                "note": "презумпция соответствия: нарушений с цитатой не найдено, требует проверки экспертом"}
 
 
+JUDGE_SCHEMA = {"type": "object", "properties": {
+    "verdict": {"type": "string", "enum": ["подтверждается", "нет", "не применимо"]},
+    "reason": {"type": "string", "maxLength": 200}}, "required": ["verdict"], "additionalProperties": False}
+JUDGE_PROMPT = ("Ты — строгий проверяющий эксперт по закупкам (44-ФЗ). Тебе дано предполагаемое замечание к документации: "
+                "критерий, утверждение о нарушении и цитата из документа. Реши, ДОКАЗЫВАЕТ ли цитата именно это нарушение "
+                "критерия. Ответ «подтверждается» — только если из цитаты (с её окружением) прямо следует, что требуемое "
+                "условие нарушено или отсутствует там, где закон его требует. Ответ «нет» — если цитата говорит о другом, "
+                "нарушение домыслено, либо требование соблюдено. Ответ «не применимо» — если цитата лишь сообщает, что "
+                "соответствующее требование НЕ УСТАНОВЛЕНО или НЕ ПРЕДУСМОТРЕНО (например, «обеспечение не требуется», "
+                "«антидемпинговые меры не применяются»): это не нарушение, а отсутствие предмета проверки. "
+                "Только JSON: {{\"verdict\": ..., \"reason\": ...}}.")
+_VERDICTS = (("подтвержд", "supported"), ("не применим", "not_applicable"), ("неприменим", "not_applicable"),
+             ("supported", "supported"), ("not_applicable", "not_applicable"), ("нет", "unsupported"),
+             ("не подтвержд", "unsupported"), ("unsupported", "unsupported"))
+
+
+def parse_verdict(raw: Any) -> Optional[str]:
+    """Вердикт проверки замечания: ``supported`` / ``unsupported`` / ``not_applicable`` / ``None`` (ответ не разобран)."""
+    parsed = facts_mod.parse_json_any(raw) if isinstance(raw, str) else raw
+    if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+        parsed = parsed[0]
+    if isinstance(parsed, dict):
+        lowered = {str(k).casefold(): v for k, v in parsed.items()}
+        value = next((lowered[k] for k in ("verdict", "вердикт", "answer", "ответ", "result") if k in lowered), None)
+    else:
+        value = raw
+    text = str(value or "").casefold().strip()
+    if text.startswith("не подтвержд"):
+        return "unsupported"
+    for word, verdict in _VERDICTS:
+        if text.startswith(word) or (len(word) > 4 and word in text):
+            return verdict
+    return None
+
+
+def quote_context(documents: Dict[int, dict], quote: Any, radius: int = 600) -> str:
+    """Цитата с окружением из документа (для проверки замечания); без окружения — сама цитата."""
+    for doc in documents.values():
+        text = doc.get("text") or ""
+        found = facts_mod.find_quote(str(quote or ""), text) if quote else None
+        if found:
+            at = text.find(found)
+            if at >= 0:
+                return text[max(0, at - radius):at + len(found) + radius]
+    return str(quote or "")
+
+
+async def judge_claim(label: str, comment: Any, quote: Any, context: str, llm_call: LlmCall) -> Optional[str]:
+    """Отдельная проверка замечания «0»: доказывает ли цитата нарушение критерия.
+
+    Args:
+        label: Название критерия формы.
+        comment: Утверждение модели о нарушении.
+        quote: Цитата, которой модель обосновала «0».
+        context: Цитата с окружением из документа.
+        llm_call: Функция вызова LLM.
+
+    Returns:
+        Optional[str]: ``supported`` (замечание подтверждено), ``unsupported`` (не подтверждено),
+        ``not_applicable`` (требование не установлено) или ``None``, если проверить не удалось.
+    """
+    user = (f"Критерий: {label}\nУтверждение: {comment or '—'}\nЦитата: {quote or '—'}\n"
+            f"Окружение цитаты в документе:\n{context[:1800]}")
+    try:
+        raw = await llm_call([{"role": "system", "content": JUDGE_PROMPT},
+                              {"role": "user", "content": user}], JUDGE_SCHEMA)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"knowledge_store: проверка замечания не выполнена: {type(e).__name__}: {e}")
+        return None
+    return parse_verdict(raw)
+
+
+async def judge_zeros(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[int, dict],
+                      llm_call: Optional[LlmCall], limit: int = 8) -> Optional[Dict[str, str]]:
+    """Проверяет каждый «0», найденный моделью по документам (факты не из ЕИС), отдельным вызовом.
+
+    Args:
+        fields: Поля формы.
+        fact_rows: Факты экспертизы.
+        documents: Документы экспертизы с текстами.
+        llm_call: Функция вызова LLM; ``None`` — проверка не выполняется (результат ``None``).
+        limit: Сколько вызовов выполнять параллельно.
+
+    Returns:
+        Optional[dict]: ``ключ → вердикт``; ключ отсутствует, если вердикт получить не удалось.
+    """
+    if llm_call is None:
+        return None
+    labels = {f["field_key"]: f.get("label") or "" for f in fields}
+    todo = []
+    for row in fact_rows:
+        if row.get("source") == facts_mod.SOURCE_EIS or row["fact_key"] not in labels:
+            continue
+        value = row.get("value")
+        value = json.loads(value) if isinstance(value, str) else (value or {})
+        if value.get("value") in (0, "0", False):
+            todo.append((row["fact_key"], value.get("comment"), row.get("quote")))
+    sem = asyncio.Semaphore(limit)
+
+    async def one(key: str, comment: Any, quote: Any) -> Tuple[str, Optional[str]]:
+        async with sem:
+            return key, await judge_claim(labels[key], comment, quote, quote_context(documents, quote), llm_call)
+
+    out: Dict[str, str] = {}
+    for key, verdict in await asyncio.gather(*(one(*t) for t in todo)):
+        if verdict:
+            out[key] = verdict
+    return out
+
+
+async def recheck_presets(preset: Dict[str, Tuple[Any, dict]], fields: Sequence[dict], documents: Dict[int, dict],
+                          llm_call: LlmCall) -> None:
+    """Вторая проверка нарушений, найденных моделью при оценке по документам (презумпция, единый стиль).
+
+    Каждый дефект проверяется отдельным вызовом (:func:`judge_claim`); в «0» остаются только подтверждённые.
+    Если подтверждённых нет, значение заменяется на «1» (предложение модели). Если вердикт получить не удалось,
+    «0» остаётся предложением, но помечается ``weak_zero`` (в замечания блоков III–IV не попадает).
+    Изменяет ``preset`` на месте.
+    """
+    labels = {f["field_key"]: f.get("label") or "" for f in fields}
+    todo = [(key, entry) for key, (value, entry) in preset.items() if value == 0 and entry.get("defects")]
+    for key, entry in todo:
+        defects = entry["defects"]
+        verdicts = await asyncio.gather(*(judge_claim(labels.get(key, key), d["issue"], d["quote"],
+                                                       quote_context(documents, d["quote"]), llm_call) for d in defects))
+        kept = [d for d, v in zip(defects, verdicts) if v == "supported"]
+        entry["judged"] = [v or "unknown" for v in verdicts]
+        if kept:
+            entry["defects"] = kept
+            entry["quote"] = kept[0]["quote"]
+            entry["comment"] = " ".join(f"В документе «{d['document']}»: {d['issue'].rstrip('.')}." for d in kept)
+        elif all(v is None for v in verdicts):
+            entry["weak_zero"] = True
+            entry["note"] = "замечание модели не прошло проверку (вердикт не получен): требует проверки экспертом"
+        else:
+            preset[key] = (1, {"status": "proposed", "source": entry.get("source"), "quote": None,
+                               "comment": "Нарушений, подтверждаемых цитатами документов, не выявлено.",
+                               "rejected_defects": defects, "judged": entry["judged"],
+                               "note": "замечания модели отклонены повторной проверкой; требует проверки экспертом"})
+
+
 # КВР (последние 3 знака ИКЗ) → (описание, префиксы ОКПД2, при которых вид работ соответствует; ``None`` — любые)
 KVR_RULES = {
     "244": ("прочая закупка товаров, работ и услуг для обеспечения государственных (муниципальных) нужд", None),
@@ -510,6 +651,8 @@ async def compute_assessed(fields: Sequence[dict], documents: Dict[int, dict],
         for key, res in zip(todo, await asyncio.gather(*(assess_presumption(k, documents, llm_call) for k in todo))):
             if res:
                 preset[key] = res
+    if llm_call is not None:
+        await recheck_presets(preset, fields, documents, llm_call)
     if EXPENSE_KEY in keys and EXPENSE_KEY not in skip:
         found = assess_expense_type(documents)
         if found:

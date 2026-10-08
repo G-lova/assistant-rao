@@ -285,7 +285,8 @@ def clean_comment(comment: Optional[str], filename: Optional[str] = None) -> Opt
 
 
 def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[int, dict],
-             procurement: Optional[dict] = None, preset: Optional[Dict[str, Tuple[Any, dict]]] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+             procurement: Optional[dict] = None, preset: Optional[Dict[str, Tuple[Any, dict]]] = None,
+             judged: Optional[Dict[str, str]] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Собирает ``data`` и ``trace`` по полям формы (без LLM).
 
     Args:
@@ -295,6 +296,11 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
         procurement: Паспорт закупки (``nmck``, ``advance``) для числовых полей общих сведений.
         preset: Готовые значения полей, оценённых моделью по документам (:func:`assessment.compute_assessed`):
             ``ключ → (значение, запись trace)``; они ставятся до расчёта итогов подразделов.
+        judged: Вердикты проверки «0» модели (:func:`assessment.judge_zeros`): ``ключ → supported / unsupported /
+            not_applicable``. Если задан (проверка выполнялась), «0» модели принимается проверенным только при
+            ``supported``; ``not_applicable`` («требование не установлено») даёт «2» там, где эксперты так отвечают,
+            ``unsupported`` — «1» (критерий соответствия, презумпция) или значение остаётся эксперту; без вердикта
+            «0» — только предложение и в замечания не попадает. ``None`` — проверка не выполнялась (прежнее поведение).
 
     Returns:
         Tuple[dict, dict]: ``(data, trace)``. ``data`` содержит каждый ключ формы (``None`` — оставлено
@@ -339,8 +345,27 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
         if result is None and fact["result"] == 2:
             entry["note"] = "модель ответила «2» (не применимо) для критерия, где эксперты так не отвечают: оставлено эксперту"
         proven = bool(fact["verified"]) and evidence_ok(fact, doc.get("text"))
+        verdict = None
+        if judged is not None and result == 0 and fact.get("source") != facts_mod.SOURCE_EIS:
+            verdict = judged.get(key) or "unknown"
+            entry["judged"] = verdict
+            if verdict == "not_applicable":
+                result = 2 if (key in assessment.NOT_APPLICABLE_ALLOWED or kind == forms.KIND_PRESENCE) else None
+                entry["note"] = "проверка замечания: требование не установлено — это не нарушение"
+            elif verdict == "unsupported":
+                result = 1 if kind == forms.KIND_COMPLIANCE else None
+                entry["note"] = "проверка замечания: цитата не доказывает нарушение, «0» отклонён"
+                entry["comment"] = None
         if result is None:
             pass
+        elif verdict in ("not_applicable", "unsupported", "unknown"):
+            data[key] = result if verdict != "unknown" else 0
+            entry["status"] = "proposed"
+            if verdict == "unknown":
+                entry["weak_zero"] = True
+                entry["note"] = "«0» модели не прошёл проверку (вердикт не получен): требует проверки экспертом"
+            if verdict == "unsupported":
+                entry["quote"] = None
         elif fact.get("source") == facts_mod.SOURCE_EIS or (result == 1 and proven):
             tentative = fact.get("source") == facts_mod.SOURCE_EIS and fact["value_obj"].get("verified") is False
             data[key], entry["status"] = result, ("proposed" if tentative else "verified")
@@ -350,7 +375,8 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
             # значение без подтверждённой цитаты («отсутствует» нечем процитировать; «1» модель не смогла
             # подтвердить) ставится как предложение модели: эксперт видит его в trace и проверяет
             generic = result == 0 and weak_quote(fact.get("quote"))
-            data[key], entry["status"] = result, ("verified" if proven and not generic else "proposed")
+            ok = (proven or verdict == "supported") and not generic
+            data[key], entry["status"] = result, ("verified" if ok else "proposed")
             if generic:
                 entry["weak_zero"] = True
                 entry["note"] = "«0» подтверждён только общей фразой («информация отсутствует», «не требуется»): требует проверки экспертом"
@@ -1232,7 +1258,8 @@ async def generate_summary(conn, expertise_id: int, llm_call: Optional[LlmCall],
                                 normalize_result((_as_dict(r.get("value")) or {}).get("value")), r.get("source")) is not None}
     texts = {r["fact_key"]: f"{(_as_dict(r.get('value')) or {}).get('comment') or ''} {r.get('quote') or ''}" for r in fact_rows}
     preset = await assessment.compute_assessed(fields, documents, llm_call, skip=decided, fact_texts=texts)
-    data, trace = assemble(fields, fact_rows, documents, ready["passport"], preset)
+    judged = await assessment.judge_zeros(fields, fact_rows, documents, llm_call)
+    data, trace = assemble(fields, fact_rows, documents, ready["passport"], preset, judged)
     await fill_funding_advance(fields, data, trace, documents, ready["passport"], llm_call)
     stats = await write_blocks(fields, data, trace, llm_call, code)
     problems = validate(data, fields)
