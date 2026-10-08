@@ -18,3 +18,4 @@
 make_api_key.ipynb
 example
 data/outputs/
+*.xlsx

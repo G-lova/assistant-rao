@@ -18,6 +18,8 @@ from configs.parsing import CloudStorageParser
 from evaluate_documents.send_subject_service import SendSubjectService
 from evaluate_documents.type_data_extractor import DOCUMENT_TYPE_MAPPING, TypeDataExtractor
 from src.subject_detector import SubjectDetector
+from knowledge_store import hooks as ks_hooks
+from evaluate_documents.package_view import completeness_input
 
 
 logger = get_logger(__name__)
@@ -187,6 +189,10 @@ class TasksPipeline:
         if not extracted_text or "[Нет читаемого текста]" in extracted_text:
             raise ValueError("Не удалось извлечь текст")
 
+        # Хранилище знаний «РАО Эксперт»: сохраняем текст документа (при выключенном флаге — no-op)
+        ks_doc_id = await ks_hooks.on_document_text(
+            int(self.df['id'].iloc[0]), link.doc_code, filename, getattr(link, 'media_links', None), file_path, extracted_text)
+
         chunks = split_large_text(extracted_text, max_chunk_size=10000)
         if not chunks:
             fallback = {
@@ -201,6 +207,8 @@ class TasksPipeline:
         extracted_data = await self.type_data_extractor.extract_data_from_document(chunks, filename, link.doc_code, link.object)
         if isinstance(extracted_data, str):
             extracted_data = json.loads(extracted_data)
+
+        await ks_hooks.on_document_extracted(ks_doc_id, extracted_data)
 
         return extracted_data
     
@@ -258,6 +266,9 @@ class TasksPipeline:
             # создание нового признака для сохранения результатов проверки документов по типам документов
             self.df['documents_results'] = [[] for _ in range(len(self.df))]
 
+            # Хранилище знаний: очистка прошлого прогона и сохранение паспорта закупки (при выключенном флаге — no-op)
+            await ks_hooks.on_run_start(self.df)
+
             # === Парсинг ссылок ===
             media_links = self.df[self.df['media_links'].notna()]
             if len(media_links) > 0:
@@ -306,12 +317,12 @@ class TasksPipeline:
             # ====== Оценка полноты и соответствия данных в документе ======
             completeness_tasks = []
             for row in self.df[self.df['documents_results'].map(bool)].itertuples():
-                data_for_completeness = {
-                    **data_for_final_evaluation, 
-                    "doc_code": row.doc_code, 
-                    "doc_type": 'Ссылка на ЕИС' if row.doc_code == 'linkDocs' else DOCUMENT_TYPE_MAPPING.get(row.doc_code, "Неизвестный документ"),
-                    "documents": row.documents_results
-                }
+                # Полнота оценивается только по документам этого типа: отсутствие других типов на неё не влияет
+                data_for_completeness = completeness_input(
+                    data_for_final_evaluation,
+                    row.doc_code,
+                    'Ссылка на ЕИС' if row.doc_code == 'linkDocs' else DOCUMENT_TYPE_MAPPING.get(row.doc_code, "Неизвестный документ"),
+                    row.documents_results)
                 completeness_tasks.append(self.completeness_checker.check_doc_completeness(self.consistency_checker.remove_empty(data_for_completeness), row.doc_code))
 
             async with self.llm_semaphore:
@@ -351,6 +362,9 @@ class TasksPipeline:
             # logger.info(f"type: {type(data_for_final_evaluation)}, data_for_final_evaluation: {data_for_final_evaluation}")
             final_evaluation_result = await self.consistency_checker.check_consistency(data_for_final_evaluation)
             await save_summary_report(procurement_id=self.df['id'].iloc[0], summary_data=final_evaluation_result)
+
+            # Хранилище знаний: фоновая индексация текстов (при выключенном флаге — no-op)
+            await ks_hooks.on_run_finished(int(self.df['id'].iloc[0]))
 
             # заполнение поля subjectContract в БД
             if pd.isna(self.df["subjectContract"][0]):

@@ -21,7 +21,7 @@ from configs.eis_parsing import EISParser
 from configs.http_client_manager import HTTPClientManager
 from configs.llm_client import get_llm
 from configs.logger import setup_logging, get_logger
-from configs.schemas import EISParseRequest, EvaluateRequest, ExpertsScoringRequest, FileEntity, RAOConclusionRequest, ViolationsReportRequest
+from configs.schemas import EISParseRequest, EvaluateRequest, SummaryOpinionRequest, ExpertsScoringRequest, FileEntity, RAOConclusionRequest, ViolationsReportRequest
 from configs.utils import APIKeyMiddleware, split_large_text
 from configs.working_with_db import get_async_summary_report_from_db, get_contract_info_from_db
 from evaluate_documents.send_subject_service import SendSubjectService
@@ -32,7 +32,7 @@ from src.rating import rating
 from src.scoring import scoring
 from src.subject_detector import SubjectDetector
 from src.violations_reporter import ViolationsReporter
-from tasks import evaluate_documents_task
+from tasks import evaluate_documents_task, generate_summary_opinion_task
 
 # Глобальный экземпляр (настраивается под вашу нагрузку)
 http_manager = HTTPClientManager(timeout=120.0, limit=50)
@@ -92,6 +92,37 @@ async def evaluate_documents_batch(
     except Exception as e:
         logger.error(f"Ошибка при анализе документов: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Ошибка при анализе документов: {str(e)}")
+
+
+@app.post("/generate-summary-opinion")
+async def generate_summary_opinion(
+    request: SummaryOpinionRequest,
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
+):
+    """Запускает генерацию сводного экспертного заключения («РАО Эксперт») из хранилища знаний.
+
+    Статус и результат — через существующий ``GET /task/{task_id}``. Если по экспертизе нет данных
+    (``/evaluate-documents`` не выполнялся), тексты очищены политикой хранения или форма не
+    поддерживается — сразу возвращается 409/422 с пояснением, задача не создаётся.
+    """
+    from configs.working_with_db import get_async_db_connection
+    from knowledge_store import summary
+    from knowledge_store.safe import is_enabled
+
+    if not is_enabled():
+        raise HTTPException(status_code=503, detail="Хранилище знаний выключено (KNOWLEDGE_STORE_ENABLED=false)")
+    try:
+        async with get_async_db_connection() as conn:
+            await summary.precheck(conn, request.expertise_id)
+    except summary.SummaryError as e:
+        raise HTTPException(status_code=e.http_status, detail=e.message)
+    except Exception as e:
+        logger.error(f"Ошибка проверки данных для сводного ЭЗ: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Не удалось проверить данные экспертизы")
+
+    task = generate_summary_opinion_task.delay(
+        request.expertise_id, x_api_database, request.send_draft, request.rebuild_facts)
+    return {"task_id": task.id, "status": "processing", "message": "Задача запущена"}
 
 
 @app.get("/task/{task_id}")

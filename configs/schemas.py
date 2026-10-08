@@ -118,3 +118,17 @@ class FileEntity(BaseModel):
     id: int
     context: str = None
     send_to_external: bool = False
+
+
+class SummaryOpinionRequest(BaseModel):
+    """Запрос на генерацию сводного экспертного заключения («РАО Эксперт»).
+
+    Attributes:
+        expertise_id: ID экспертизы (документы должны быть обработаны ``/evaluate-documents``).
+        send_draft: Отправить ``data`` в основную БД как черновик заключения (по умолчанию нет).
+        rebuild_facts: Пересчитать факты по сохранённым текстам перед сборкой (нужно после обновления правил
+            извлечения; по умолчанию используются уже построенные факты).
+    """
+    expertise_id: int
+    send_draft: bool = False
+    rebuild_facts: bool = False
