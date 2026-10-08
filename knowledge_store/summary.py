@@ -346,6 +346,17 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
             entry["note"] = "модель ответила «2» (не применимо) для критерия, где эксперты так не отвечают: оставлено эксперту"
         proven = bool(fact["verified"]) and evidence_ok(fact, doc.get("text"))
         verdict = None
+        model_fact = fact.get("source") != facts_mod.SOURCE_EIS
+        if (model_fact and result == 0 and key in assessment.NOT_SET_KEYS
+                and assessment.NOT_SET_RE.search(f"{fact.get('comment') or ''} {fact.get('quote') or ''}")):
+            judged = {**(judged or {}), key: "not_applicable"}       # «требование не установлено» — не нарушение
+        if model_fact and key == assessment.ADVANCE_KEY and result == 1 and not assessment.advance_confirmed(
+                f"{fact.get('quote') or ''} {fact.get('comment') or ''}"):
+            # «если предусмотрен аванс» в шаблоне — не размер аванса; в большинстве заключений экспертов аванса нет
+            data[key], entry["status"] = 2, "proposed"
+            entry["note"] = "размер аванса в документах не найден (фраза шаблона «если предусмотрен»): предложено «2», требует проверки"
+            trace[key] = entry
+            continue
         if judged is not None and result == 0 and fact.get("source") != facts_mod.SOURCE_EIS:
             verdict = judged.get(key) or "unknown"
             entry["judged"] = verdict

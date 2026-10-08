@@ -1029,3 +1029,34 @@ class JudgeTests(unittest.TestCase):
         self.assertEqual(out, {"k_cmp": "unsupported"})
         self.assertEqual(len(calls), 1)
         self.assertIsNone(asyncio.run(assessment.judge_zeros(self.FIELDS, rows, docs, None)))
+
+
+class NotSetAndAdvanceTests(unittest.TestCase):
+    """4.3–4.5: «требование не установлено» → «2»; 1.22 по модели — только с размером аванса в цитате."""
+
+    def build(self, key, label, comment, quote, value=0):
+        """Сборка одного критерия по факту модели."""
+        fields = [{"field_key": key, "value_kind": "compliance", "label": label, "ordinal": 1}]
+        row = {"fact_key": key, "source": "fact_extractor", "document_id": 1, "page": 1, "quote": quote,
+               "value": {"value": value, "verified": True, "comment": comment}}
+        docs = {1: {"filename": "d.docx", "doc_code": "docIzvejenieFiles", "text": f"текст {quote} конец"}}
+        return summary.assemble(fields, [row], docs)
+
+    def test_requirement_not_set_is_two(self):
+        """«Требование о лицензии не установлено» для 4.4 — «2» (proposed), а не нарушение."""
+        data, trace = self.build("field2_4_4", "4.4. Лицензия", "требование о лицензии не установлено", "лицензия не требуется")
+        self.assertEqual(data["field2_4_4"], 2)
+        self.assertEqual(trace["field2_4_4"]["status"], "proposed")
+
+    def test_real_violation_stays_zero(self):
+        """Настоящее нарушение в 4.4 остаётся «0»."""
+        data, _ = self.build("field2_4_4", "4.4. Лицензия", "лицензия указана без вида деятельности", "наличие лицензии")
+        self.assertEqual(data["field2_4_4"], 0)
+
+    def test_advance_template_phrase_is_not_amount(self):
+        """1.22: фраза «если предусмотрен аванс» без числа → «2» (proposed); с числом — «1»."""
+        data, trace = self.build("field2_1_22", "1.22. Размер аванса", "указан", "если предусмотрен аванс", value=1)
+        self.assertEqual(data["field2_1_22"], 2)
+        self.assertEqual(trace["field2_1_22"]["status"], "proposed")
+        data, _ = self.build("field2_1_22", "1.22. Размер аванса", "указан", "размер аванса 30 % от цены", value=1)
+        self.assertEqual(data["field2_1_22"], 1)
