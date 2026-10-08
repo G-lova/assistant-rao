@@ -31,9 +31,14 @@ def load_generated(directory: str) -> dict:
         directory: Папка с файлами ``<id>.json`` (ответ эндпоинта целиком или только ``result``).
     """
     out = {}
-    for path in glob.glob(os.path.join(directory, "*.json")):
-        raw = json.load(open(path, encoding="utf-8"))
-        result = raw.get("result", raw)
+    for path in glob.glob(os.path.join(directory, "**", "*.json"), recursive=True):
+        try:
+            raw = json.load(open(path, encoding="utf-8"))
+        except ValueError:
+            continue
+        result = raw.get("result", raw) if isinstance(raw, dict) else {}
+        if not isinstance(result, dict) or "data" not in result:
+            continue          # не ответ конвейера (например, out.json самого скрипта)
         out[os.path.basename(path)[:-5]] = {"data": result.get("data") or {}, "trace": result.get("trace") or {},
                                              "stats": result.get("stats") or {}}
     return out
@@ -52,6 +57,10 @@ def evaluate(xlsx: str, csv_path: str, directory: str) -> dict:
     opinions = latest_opinions(csv_path)
     generated = load_generated(directory)
     ids = sorted(i for i in generated if i in opinions and i not in OUTLIERS)
+    if not ids:
+        raise SystemExit(f"Нет общих экспертиз: ответов конвейера в «{directory}» — {len(generated)} "
+                         f"(id: {sorted(generated)[:5]}), заключений экспертов в CSV — {len(opinions)} "
+                         f"(id: {sorted(opinions)[:5]}). Проверьте путь к папке и имена файлов <expertise_id>.json.")
 
     pairs, per_key, per_status, per_source = [], defaultdict(Counter), defaultdict(Counter), defaultdict(Counter)
     cover = Counter()
