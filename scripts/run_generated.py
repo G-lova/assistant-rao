@@ -6,7 +6,8 @@
 
 Запуск::
 
-    python -m scripts.run_generated --base-url http://localhost:8000 --ids 4669,4684,5110 --out gen_new/
+    # внутри контейнера rao_api (порт 20142, ключ берётся из окружения API_KEY):
+    python -m scripts.run_generated --base-url http://localhost:20142 --ids 4669,4684,5110 --out gen_new/
     python -m scripts.run_generated --base-url http://dev:8000 --csv expertise_expert_opinion7s_rao.csv --out gen_new/ --rebuild-facts
 
 Затем::
@@ -27,16 +28,25 @@ from scripts.eval_eis_rules import latest_opinions
 from scripts.eval_generated import OUTLIERS
 
 
-def call(method: str, url: str, database: str, body: Optional[dict] = None, timeout: int = 60) -> tuple:
-    """HTTP-запрос с JSON; возвращает ``(код, объект ответа)``. Ошибки HTTP не бросают исключение."""
+def call(method: str, url: str, database: str, body: Optional[dict] = None, timeout: int = 60,
+         api_key: Optional[str] = None) -> tuple:
+    """HTTP-запрос с JSON; возвращает ``(код, объект ответа)``. Ошибки HTTP не бросают исключение.
+
+    Заголовок ``X-API-Key`` обязателен для сервиса (``APIKeyMiddleware``); ``X-API-Database`` выбирает базу.
+    """
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    request = urllib.request.Request(url, data=data, method=method,
-                                     headers={"Content-Type": "application/json", "X-API-Database": database})
+    headers = {"Content-Type": "application/json", "X-API-Database": database}
+    if api_key:
+        headers["X-API-Key"] = api_key
+    request = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, json.loads(response.read().decode("utf-8") or "null")
     except urllib.error.HTTPError as e:
-        raw = e.read().decode("utf-8", "replace")
+        try:
+            raw = e.read().decode("utf-8", "replace")
+        except OSError:
+            raw = ""
         try:
             return e.code, json.loads(raw)
         except ValueError:
@@ -44,6 +54,14 @@ def call(method: str, url: str, database: str, body: Optional[dict] = None, time
 
 
 def run_one(expertise_id: str, args: argparse.Namespace) -> Dict[str, str]:
+    """Обёртка над :func:`_run_one`: сетевая ошибка по одной экспертизе не прерывает весь прогон."""
+    try:
+        return _run_one(expertise_id, args)
+    except (OSError, ValueError) as e:       # URLError, обрыв соединения, неразобранный ответ
+        return {"id": expertise_id, "outcome": "failed", "detail": f"{type(e).__name__}: {e}"[:300]}
+
+
+def _run_one(expertise_id: str, args: argparse.Namespace) -> Dict[str, str]:
     """Запускает задачу по одной экспертизе и ждёт результат.
 
     Returns:
@@ -53,13 +71,14 @@ def run_one(expertise_id: str, args: argparse.Namespace) -> Dict[str, str]:
     if os.path.exists(path) and not args.force:
         return {"id": expertise_id, "outcome": "skipped", "detail": "файл уже есть"}
     code, started = call("POST", f"{args.base_url}/generate-summary-opinion", args.database,
-                         {"expertise_id": int(expertise_id), "send_draft": False, "rebuild_facts": args.rebuild_facts})
+                         {"expertise_id": int(expertise_id), "send_draft": False, "rebuild_facts": args.rebuild_facts},
+                         api_key=args.api_key)
     if code != 200:
         return {"id": expertise_id, "outcome": "rejected", "detail": f"HTTP {code}: {(started or {}).get('detail')}"}
     task_id, deadline = started["task_id"], time.time() + args.timeout
     while time.time() < deadline:
         time.sleep(args.poll)
-        code, state = call("GET", f"{args.base_url}/task/{task_id}", args.database)
+        code, state = call("GET", f"{args.base_url}/task/{task_id}", args.database, api_key=args.api_key)
         status = (state or {}).get("status")
         if status == "completed":
             with open(path, "w", encoding="utf-8") as f:
@@ -83,6 +102,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--ids", help="список expertise_id через запятую")
     parser.add_argument("--csv", help="выгрузка заключений экспертов: взять все expertise_id из неё")
     parser.add_argument("--database", default="dev", help="значение заголовка X-API-Database (по умолчанию dev)")
+    parser.add_argument("--api-key", default=os.environ.get("API_KEY"),
+                        help="значение заголовка X-API-Key (по умолчанию переменная окружения API_KEY, в контейнере она есть)")
     parser.add_argument("--rebuild-facts", action="store_true", help="пересчитать факты модели перед сборкой")
     parser.add_argument("--workers", type=int, default=2, help="сколько экспертиз вести параллельно")
     parser.add_argument("--timeout", type=int, default=1800, help="сколько секунд ждать одну экспертизу")
@@ -93,6 +114,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ids = [x.strip() for x in args.ids.split(",") if x.strip()] if args.ids else (ids_from_csv(args.csv) if args.csv else [])
     if not ids:
         parser.error("нужен --ids или --csv")
+    if not args.api_key:
+        parser.error("нет ключа: задайте --api-key или переменную окружения API_KEY")
     os.makedirs(args.out, exist_ok=True)
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         results = []
