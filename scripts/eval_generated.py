@@ -7,7 +7,7 @@
 
 Запуск::
 
-    python -m scripts.eval_generated "Отчеты и закупки поля.xlsx" expertise_expert_opinion7s_rao.csv generated/ [--json out.json]
+    python -m scripts.eval_generated "Отчеты и закупки поля.xlsx" expertise_expert_opinion7s_rao.csv generated/ [--json out.json] [--brief]
 """
 import glob
 import json
@@ -22,6 +22,34 @@ from scripts.import_forms import load_forms
 
 OUTLIERS = {"5162", "5263", "2403"}      # выброс (всё «0»), тестовая и неполная экспертизы
 NUMBER_RE = re.compile(r"(?<![\d.])(\d\.\d{1,2}(?:\.\d{1,2})?)(?![\d.])")
+
+
+def source_label(entry: dict) -> str:
+    """Подпись источника значения для отчёта: ``source``, иначе ``rule:<начало правила>``, иначе ``-``."""
+    if entry.get("source"):
+        return str(entry["source"])
+    if entry.get("rule"):
+        return "rule:" + str(entry["rule"])[:40]
+    return "-"
+
+
+def funding_categories(text) -> frozenset:
+    """Категории источника финансирования в тексте: собственные средства, внебюджет, субсидия, бюджет.
+
+    Нужны для сравнения ``field1_3`` по смыслу: «Закупка за счет собственных средств организации» и «За счет
+    собственных средств организации» — одно и то же.
+    """
+    low = str(text or "").casefold()
+    found = set()
+    if "собственн" in low:
+        found.add("own")
+    if "внебюджет" in low:
+        found.add("extra")
+    if "субсиди" in low:
+        found.add("subsidy")
+    if re.search(r"(?<!вне)бюджет", low):
+        found.add("budget")
+    return frozenset(found)
 
 
 def load_generated(directory: str) -> dict:
@@ -63,13 +91,15 @@ def evaluate(xlsx: str, csv_path: str, directory: str) -> dict:
                          f"(id: {sorted(opinions)[:5]}). Проверьте путь к папке и имена файлов <expertise_id>.json.")
 
     pairs, per_key, per_status, per_source = [], defaultdict(Counter), defaultdict(Counter), defaultdict(Counter)
-    cover = Counter()
+    cover, records = Counter(), []
     for exp_id in ids:
         data, trace, expert = generated[exp_id]["data"], generated[exp_id]["trace"], opinions[exp_id]
         for f in leaf:
             ours, theirs = norm(data.get(f.field_key)), norm(expert.get(f.field_key))
             entry = trace.get(f.field_key) or {}
-            status, source = entry.get("status") or "none", entry.get("source") or entry.get("rule") or "-"
+            status, source = entry.get("status") or "none", source_label(entry)
+            records.append({"id": exp_id, "key": f.field_key, "ours": ours, "theirs": theirs, "entry": entry,
+                            "status": status, "source": source})
             cover["expert_filled"] += theirs is not None
             cover["ours_filled"] += ours is not None
             cover["both"] += ours is not None and theirs is not None
@@ -112,6 +142,8 @@ def evaluate(xlsx: str, csv_path: str, directory: str) -> dict:
                 same = abs(float(ours) - float(theirs)) < 0.01
             elif key == "field2_2_2_0":
                 same = str(ours) == str(theirs)
+            elif key == "field1_3":
+                same = funding_categories(ours) == funding_categories(theirs) and bool(funding_categories(ours))
             else:
                 same = str(ours).strip().casefold() == str(theirs).strip().casefold()
             general[key]["same"] += same
@@ -131,7 +163,92 @@ def evaluate(xlsx: str, csv_path: str, directory: str) -> dict:
             "confusion": confusion, "zeros_ours": len(zeros_ours), "zeros_ours_hit": sum(p[3] == 0 for p in zeros_ours),
             "zeros_exp": len(zeros_exp), "zeros_exp_found": sum(p[2] == 0 for p in zeros_exp), "per_key": per_key,
             "per_status": per_status, "per_source": per_source, "sections": sections, "general": general,
-            "cited": cited, "label": label, "pairs_list": pairs, "number": {f.field_key: eis_notice.criterion_number(f.label) for f in leaf}}
+            "cited": cited, "label": label, "pairs_list": pairs, "records": records, "number": {f.field_key: eis_notice.criterion_number(f.label) for f in leaf}}
+
+
+def diagnose(res: dict, generated: dict, opinions: dict) -> str:
+    """Диагностика причин ошибок: нули по источнику и вердикту проверки, потерянные нули экспертов, путаница «1»↔«2»,
+    матрицы по худшим критериям, промахи правил проекта контракта, расхождения ``field1_3``.
+
+    Args:
+        res: Результат :func:`evaluate`.
+        generated: Ответы конвейера (:func:`load_generated`).
+        opinions: Заключения экспертов (``latest_opinions``).
+
+    Returns:
+        str: Текст раздела «Диагностика» отчёта.
+    """
+    rec, out = res["records"], ["\n=== Диагностика ==="]
+
+    # 1. наши «0»: по источнику и вердикту проверки
+    out.append("\nНаши «0» по источнику и вердикту проверки (верных / всего):")
+    groups = defaultdict(Counter)
+    for r in rec:
+        if r["ours"] == 0 and r["theirs"] is not None:
+            judged = r["entry"].get("judged")
+            judged = ",".join(map(str, judged)) if isinstance(judged, list) else (judged or "—")
+            label = f"{r['source']} | judged={judged} | {r['status']}" + (" | weak" if r["entry"].get("weak_zero") else "")
+            groups[label]["n"] += 1
+            groups[label]["ok"] += r["theirs"] == 0
+    for label, v in sorted(groups.items(), key=lambda x: -x[1]["n"])[:12]:
+        out.append(f"  {label}: {v['ok']}/{v['n']}")
+
+    # 2. нули экспертов, которые мы потеряли: что стояло у нас и почему
+    out.append("\nНули экспертов, которых мы не нашли (что у нас; источник; вердикт проверки):")
+    lost = Counter()
+    for r in rec:
+        if r["theirs"] == 0 and r["ours"] != 0:
+            entry = r["entry"]
+            reason = entry.get("judged") or ("нет значения" if r["ours"] is None else "")
+            if isinstance(reason, list):
+                reason = ",".join(map(str, reason))
+            lost[f"наше={r['ours']}; {r['source']}; {reason or '—'}"] += 1
+    for label, n in lost.most_common(12):
+        out.append(f"  {n:3d}  {label}")
+    by_key = Counter(r["key"] for r in rec if r["theirs"] == 0 and r["ours"] != 0)
+    out.append("  чаще всего пропущены: " + ", ".join(f"{k} ({n})" for k, n in by_key.most_common(8)))
+
+    # 3. путаница «1»↔«2»
+    out.append("\nПутаница «2»↔«1» (наше→эксперта: критерий, число, источник):")
+    for pair in ((2, 1), (1, 2)):
+        counter = Counter((r["key"], r["source"]) for r in rec if (r["ours"], r["theirs"]) == pair)
+        total = sum(counter.values())
+        out.append(f"  {pair[0]}→{pair[1]}: {total}")
+        for (key, source), n in counter.most_common(8):
+            out.append(f"     {res['number'].get(key)} {key} [{source}]: {n}")
+
+    # 4. матрицы по худшим критериям
+    out.append("\nМатрицы по худшим критериям (наше→эксперта; None — пусто):")
+    worst = sorted(((v["ok"] / v["n"], key) for key, v in res["per_key"].items() if v["n"] >= 5))[:10]
+    for _, key in worst:
+        matrix = Counter((r["ours"], r["theirs"]) for r in rec if r["key"] == key)
+        out.append(f"  {res['number'].get(key)} {key}: " + ", ".join(f"{o}→{t}: {n}" for (o, t), n in sorted(matrix.items(), key=str)))
+
+    # 5. правила проекта контракта
+    out.append("\nПроект контракта (contract_rules): срабатывания и признаки")
+    codes = defaultdict(Counter)
+    for r in rec:
+        if r["source"] == "contract_rules":
+            for d in r["entry"].get("defects") or []:
+                codes[d.get("code")]["n"] += 1
+                codes[d.get("code")]["ok"] += r["theirs"] == 0
+            out.append(f"  {r['id']} {r['key']}: наше={r['ours']} эксперт={r['theirs']} признаки="
+                       f"{[d.get('code') for d in r['entry'].get('defects') or []]}")
+    for code, v in codes.items():
+        out.append(f"  признак {code}: на «0» эксперта {v['ok']} из {v['n']}")
+    c25 = [r for r in rec if r["key"] == "field2_2_5"]
+    out.append("  2.5: эксперт 0 — " + str(sum(r["theirs"] == 0 for r in c25)) + ", из них нашли правилами — "
+               + str(sum(r["theirs"] == 0 and r["source"] == "contract_rules" for r in c25)))
+
+    # 6. field1_3 (способ финансирования)
+    out.append("\nfield1_3: расхождения по смыслу — категории источника (собственные / внебюджет / субсидия / бюджет) (наше | эксперта):")
+    shown = 0
+    for exp_id in res["ids"]:
+        ours, theirs = generated[exp_id]["data"].get("field1_3"), opinions[exp_id].get("field1_3")
+        if ours and theirs and funding_categories(ours) != funding_categories(theirs) and shown < 10:
+            out.append(f"  {exp_id}: {str(ours)[:80]!r} | {str(theirs)[:80]!r}")
+            shown += 1
+    return "\n".join(out)
 
 
 def report(res: dict) -> str:
@@ -172,6 +289,8 @@ if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     result = evaluate(*args[:3])
     print(report(result))
+    if "--brief" not in sys.argv:
+        print(diagnose(result, load_generated(args[2]), latest_opinions(args[1])))
     if "--json" in sys.argv:
         target = sys.argv[sys.argv.index("--json") + 1]
         json.dump({k: v for k, v in result.items() if k in ("ids", "pairs", "agree", "zeros_ours", "zeros_ours_hit",
