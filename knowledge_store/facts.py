@@ -22,14 +22,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
-from knowledge_store import eis_notice, eis_printform, repository as repo
+from knowledge_store import eis_notice, eis_printform, form_keys, repository as repo
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "fact_extractor_prompt.txt"
 SOURCE_EIS = "eis_xml"
 SOURCE_LLM = "fact_extractor"
 LLM_KINDS = ("presence", "compliance")
 # Критерии, которые оценивает модель по документам целиком (knowledge_store.assessment), а не поиск фактов RAG
-ASSESSED_KEYS = frozenset({"field2_2_1_6"})
+ASSESSED_KEYS = frozenset({"field2_2_1_6"})      # конкурс; для других форм — form_keys.FormKeys.assessed()
 
 ANSWER_SCHEMA = {
     "type": "object",
@@ -408,7 +408,7 @@ def build_printform_facts(documents: Sequence[dict], fields: Sequence[dict], sol
     doc = max(forms, key=lambda d: _form_version(d["filename"], d["id"]))
     data = eis_printform.to_json(eis_printform.evaluate_text(doc["text_full"]))
     tentative = {f["field_key"] for f in fields
-                 if eis_notice.criterion_number(f.get("label")) in eis_printform.TENTATIVE_ABSENT}
+                 if eis_notice.rule_id(f.get("label")) in eis_printform.TENTATIVE_ABSENT}
     return [{"fact_key": key, "value": {"value": f.value, "verified": not (key in tentative and f.value == eis_notice.NOT_PROVIDED),
                                         "comment": None, "origin": "print_form"},
              "document_id": doc["id"], "page": None, "quote": f.evidence, "confidence": 1.0}
@@ -440,7 +440,7 @@ async def extract_facts(conn, expertise_id: int, form_code: str, extractor: Opti
         return stats
     solved = {f["fact_key"] for f in eis_facts}
     todo = [f for f in fields if f["value_kind"] in LLM_KINDS and f["field_key"] not in solved
-            and f["field_key"] not in ASSESSED_KEYS]
+            and f["field_key"] not in form_keys.resolve(fields).assessed()]
     stats["fields"] = len(todo)
     results = await asyncio.gather(*(extractor.extract_field(conn, expertise_id, f) for f in todo),
                                    return_exceptions=True)

@@ -18,7 +18,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tup
 
 from configs.config import Config
 from configs.logger import get_logger
-from knowledge_store import assessment, contract_check, doc_titles, eis_notice, facts as facts_mod, forms, repository as repo
+from knowledge_store import assessment, contract_check, doc_titles, eis_notice, facts as facts_mod, form_keys, forms, repository as repo
 
 logger = get_logger(__name__)
 
@@ -112,7 +112,8 @@ def weak_quote(quote: Any) -> bool:
     return bool(text) and bool(_WEAK_QUOTE_RE.match(text))
 
 
-def usable_result(key: str, kind: str, result: Optional[int], source: Optional[str]) -> Optional[int]:
+def usable_result(key: str, kind: str, result: Optional[int], source: Optional[str],
+                  allowed: Optional[frozenset] = None) -> Optional[int]:
     """Допустимое значение критерия: «2» от модели для критерия соответствия вне :data:`assessment.NOT_APPLICABLE_ALLOWED` — ``None``.
 
     Args:
@@ -120,12 +121,13 @@ def usable_result(key: str, kind: str, result: Optional[int], source: Optional[s
         kind: Тип поля (``forms.KIND_*``).
         result: Значение факта (0/1/2/``None``).
         source: Источник факта (факты XML/печатной формы не ограничиваются).
+        allowed: Ключи, где «2» допустима (``form_keys.FormKeys.not_applicable_allowed()``); по умолчанию — ключи конкурса.
 
     Returns:
         Optional[int]: Значение или ``None``, если оно не принимается.
     """
     if (result == 2 and kind == forms.KIND_COMPLIANCE and source != facts_mod.SOURCE_EIS
-            and key not in assessment.NOT_APPLICABLE_ALLOWED):
+            and key not in (assessment.NOT_APPLICABLE_ALLOWED if allowed is None else allowed)):
         return None
     return result
 
@@ -286,14 +288,20 @@ def clean_comment(comment: Optional[str], filename: Optional[str] = None) -> Opt
     return defragment(text).strip()
 
 
-def derive_documentation(data: Dict[str, Any], trace: Dict[str, Any]) -> None:
+def derive_documentation(data: Dict[str, Any], trace: Dict[str, Any], contract_key: Optional[str] = None) -> None:
     """3.7 (соответствие документации 44-ФЗ) из 2.5: проект контракта — часть документации.
 
     По эталону экспертов при «0» в 2.5 в критерии 3.7 тоже «0» (19 из 19). Если 2.5 = «0» (кроме «0» на слабой
     цитате), а 3.7 не решён или равен «1», ставится «0» как предложение; отдельного комментария к 3.7 не пишется
     (``derived_from``), чтобы нарушение не повторялось в замечаниях дважды.
+
+    Args:
+        data: ``data`` (изменяется на месте).
+        trace: ``trace`` (изменяется на месте).
+        contract_key: Ключ 2.5 в форме (``form_keys.FormKeys.contract``); по умолчанию — ключ конкурса.
     """
     src, dst = contract_check_keys()
+    src = contract_key or src
     if src in data and dst in data and data[src] == 0 and data[dst] in (None, 1) and not trace.get(src, {}).get("weak_zero"):
         data[dst] = 0
         trace[dst] = {"status": "proposed", "source": "derived", "derived_from": src, "quote": None, "comment": None,
@@ -343,6 +351,9 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
     data: Dict[str, Any] = {f["field_key"]: None for f in fields}
     trace: Dict[str, Any] = {}
     kinds = {f["field_key"]: f["value_kind"] for f in fields}
+    fk = form_keys.resolve(fields)
+    allowed_na = fk.not_applicable_allowed()
+    fill_if_empty, zero_overrides = assessment.fill_if_empty(fk), assessment.zero_overrides(fk)
 
     for field in fields:
         key, kind = field["field_key"], field["value_kind"]
@@ -356,10 +367,10 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
         entry = {"status": "unverified", "source": fact.get("source"), "document": doc.get("filename"),
                  "page": fact.get("page"), "quote": fact.get("quote"),
                  "comment": clean_comment(fact["comment"], doc.get("filename"))}
-        result = usable_result(key, kind, fact["result"], fact.get("source"))
-        chosen = (preset or {}).get(assessment.NMCK_CHOICE_KEY, (None,))[0]
+        result = usable_result(key, kind, fact["result"], fact.get("source"), allowed_na)
+        chosen = (preset or {}).get(fk.nmck_choice, (None,))[0] if fk.nmck_choice else None
         other = assessment.method_conflict(f"{fact.get('comment') or ''} {fact.get('quote') or ''}", chosen) \
-            if key == assessment.METHOD_FIT_KEY and result is not None else None
+            if fk.method_fit and key == fk.method_fit and result is not None else None
         if other:
             # модель оценивала другой метод (например, формулу баллов из порядка оценки приняла за метод НМЦК)
             entry_note = f"комментарий модели относится к другому методу ({other}), а определён иной (код {chosen}): значение отброшено"
@@ -375,7 +386,7 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
         if (model_fact and result == 0 and key in assessment.NOT_SET_KEYS
                 and assessment.NOT_SET_RE.search(f"{fact.get('comment') or ''} {fact.get('quote') or ''}")):
             judged = {**(judged or {}), key: "not_applicable"}       # «требование не установлено» — не нарушение
-        if model_fact and key == assessment.ADVANCE_KEY and result == 1 and not assessment.advance_confirmed(
+        if model_fact and fk.advance and key == fk.advance and result == 1 and not assessment.advance_confirmed(
                 f"{fact.get('quote') or ''} {fact.get('comment') or ''}"):
             # «если предусмотрен аванс» в шаблоне — не размер аванса; в большинстве заключений экспертов аванса нет
             data[key], entry["status"] = 2, "proposed"
@@ -395,7 +406,7 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
             verdict = judged.get(key) or "unknown"
             entry["judged"] = verdict
             if verdict == "not_applicable":
-                result = 2 if (key in assessment.NOT_APPLICABLE_ALLOWED or kind == forms.KIND_PRESENCE) else None
+                result = 2 if (key in allowed_na or kind == forms.KIND_PRESENCE) else None
                 entry["note"] = "проверка замечания: требование не установлено — это не нарушение"
             elif verdict == "unsupported":
                 result = 1 if kind == forms.KIND_COMPLIANCE else None
@@ -434,8 +445,8 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
         trace[key] = entry
 
     for key, (value, entry) in (preset or {}).items():
-        if key in data and (key not in assessment.FILL_IF_EMPTY or data[key] is None
-                            or (key in assessment.ZERO_OVERRIDES and value == 0 and data[key] == 1)):
+        if key in data and (key not in fill_if_empty or data[key] is None
+                            or (key in zero_overrides and value == 0 and data[key] == 1)):
             if value is None:           # оценка не удалась: значение остаётся эксперту, причина видна в trace
                 trace.setdefault(key, {})["assessment_error"] = entry.get("error")
             elif (model_zeros == "suspect" and value == 0 and entry.get("source") in assessment.MODEL_ZERO_SOURCES
@@ -451,7 +462,7 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
                 data[key], trace[key] = value, entry
 
     apply_nmck_method_rule(fields, documents, data, trace)
-    derive_documentation(data, trace)
+    derive_documentation(data, trace, fk.contract)
 
     # итоги подразделов — из решённых дочерних критериев
     for field in fields:
@@ -554,7 +565,7 @@ def fill_general_info(fields: Sequence[dict], by_key: Dict[str, dict], documents
     def xml_value(number: str) -> Tuple[Optional[str], Optional[str]]:
         """Значение и путь из доказательства факта XML по номеру критерия (``путь = значение``)."""
         for f in fields:
-            if eis_notice.criterion_number(f.get("label", "")) != number:
+            if eis_notice.rule_id(f.get("label", "")) != number:
                 continue
             fact = by_key.get(f["field_key"])
             if fact and fact.get("source") == facts_mod.SOURCE_EIS and fact["result"] == 1 and " = " in (fact.get("quote") or ""):
@@ -1170,13 +1181,14 @@ async def fill_funding_advance(fields: Sequence[dict], data: Dict[str, Any], tra
         llm_call: Функция вызова LLM или ``None`` (тогда только паспорт).
     """
     keys = {f["field_key"] for f in fields}
+    fk = form_keys.resolve(fields)
     funding = ((procurement or {}).get("funding") or "").strip()
     if "field1_3" in keys and data.get("field1_3") is None and funding:
         data["field1_3"] = funding
         trace["field1_3"] = {"status": "from_passport", "source": "pe_procurements"}
     need_funding = "field1_3" in keys and data.get("field1_3") is None
     need_advance = "field1_2" in keys and data.get("field1_2") is None
-    if need_advance and data.get("field1_2") is None and data.get("field2_1_22") == 2:
+    if need_advance and data.get("field1_2") is None and fk.advance and data.get(fk.advance) == 2:
         data["field1_2"] = 0
         trace["field1_2"] = {"status": "derived", "note": "аванс не предусмотрен (критерий 1.22 = «2») — 0 руб."}
         if "field1_2_unit" in keys and data.get("field1_2_unit") is None:
@@ -1338,11 +1350,13 @@ async def generate_summary(conn, expertise_id: int, llm_call: Optional[LlmCall],
     documents = {d["id"]: {"filename": d["filename"], "doc_code": d["doc_code"], "text": d["text_full"],
                            "extraction": d.get("extraction")}
                  for d in ready["documents"]}
-    fact_rows = [r for r in fact_rows if r["fact_key"] not in facts_mod.ASSESSED_KEYS]   # их оценивает модель по документам
+    fk = form_keys.resolve(fields)
+    fact_rows = [r for r in fact_rows if r["fact_key"] not in fk.assessed()]   # их оценивает модель по документам
     kinds = {f["field_key"]: f["value_kind"] for f in fields}
     decided = {r["fact_key"] for r in fact_rows
                if usable_result(r["fact_key"], kinds.get(r["fact_key"]),
-                                normalize_result((_as_dict(r.get("value")) or {}).get("value")), r.get("source")) is not None}
+                                normalize_result((_as_dict(r.get("value")) or {}).get("value")), r.get("source"),
+                                fk.not_applicable_allowed()) is not None}
     texts = {r["fact_key"]: f"{(_as_dict(r.get('value')) or {}).get('comment') or ''} {r.get('quote') or ''}" for r in fact_rows}
     preset = await assessment.compute_assessed(fields, documents, llm_call, skip=decided, fact_texts=texts,
                                                competition="competition" in code,

@@ -21,7 +21,7 @@ import re
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 from configs.logger import get_logger
-from knowledge_store import contract_check, facts as facts_mod
+from knowledge_store import contract_check, facts as facts_mod, form_keys
 
 logger = get_logger(__name__)
 
@@ -364,18 +364,21 @@ async def assess_style(documents: Dict[int, dict], llm_call: LlmCall, concurrenc
     return {"defects": unique, "checked_docs": len(docs), "checked_parts": len(jobs), "errors": errors}
 
 
-async def assess_presumption(key: str, documents: Dict[int, dict], llm_call: LlmCall) -> Tuple[Optional[int], dict]:
+async def assess_presumption(key: str, documents: Dict[int, dict], llm_call: LlmCall,
+                             spec: Optional[tuple] = None) -> Tuple[Optional[int], dict]:
     """Презумпция соответствия для ``key`` (см. :data:`PRESUMPTION`): ищет нарушения из чек-листа в релевантных фрагментах.
 
     Args:
         key: Ключ критерия.
         documents: Документы экспертизы с текстами.
         llm_call: Функция вызова LLM.
+        spec: ``(чек-лист, шаблон, формулировка)``; по умолчанию ``PRESUMPTION[key]``. Нужен, когда ключ критерия
+            в форме не совпадает с ключом конкурса (см. :mod:`knowledge_store.form_keys`).
 
     Returns:
         Tuple[Optional[int], dict]: ``(0 или 1, запись trace)``; ``(None, {"error"})``, если модель не ответила.
     """
-    checklist, pattern, phrase = PRESUMPTION[key]
+    checklist, pattern, phrase = spec or PRESUMPTION[key]
     windows = keyword_windows(documents, pattern, radius=500, limit=6)
     if not windows:
         return 1, {"status": "proposed", "source": "llm_presumption", "quote": None,
@@ -553,6 +556,24 @@ MODEL_ZERO_SOURCES = frozenset({"llm_presumption", "llm_assessment"})      # «0
 ZERO_OVERRIDES = frozenset({contract_check.CONTRACT_KEY})
 
 
+def fill_if_empty(fk: "form_keys.FormKeys") -> frozenset:
+    """Ключи формы, значения которых ставятся оценкой только если поиск фактов значения не дал (см. :data:`FILL_IF_EMPTY`).
+
+    Args:
+        fk: Ключи особых критериев формы (:func:`knowledge_store.form_keys.resolve`).
+
+    Returns:
+        frozenset: Для конкурса совпадает с :data:`FILL_IF_EMPTY`; для других форм ключи 2.3 и «метод соответствует» заменены своими.
+    """
+    base = (set(PRESUMPTION) - {"field2_2_3"}) | {EDUCATION_KEY, EXPENSE_KEY}
+    return frozenset(base | {k for k in (fk.composition, fk.method_fit) if k})
+
+
+def zero_overrides(fk: "form_keys.FormKeys") -> frozenset:
+    """Ключи, где «0» по правилам заменяет «1» модели: проект контракта формы (:data:`ZERO_OVERRIDES` для конкурса)."""
+    return frozenset({fk.contract} if fk.contract else ())
+
+
 def assess_contract(documents: Dict[int, dict], competition: bool = True) -> Optional[Tuple[int, dict]]:
     """Критерий 2.5: типичные нарушения проекта контракта по правилам (:mod:`knowledge_store.contract_check`).
 
@@ -656,28 +677,33 @@ async def compute_assessed(fields: Sequence[dict], documents: Dict[int, dict],
         dict: ``ключ → (значение, запись trace)``; ключ отсутствует, если определить значение не удалось.
     """
     keys = {f["field_key"] for f in fields}
+    fk = form_keys.resolve(fields)
+    nmck_key, fit_key, style_key, contract_key = fk.nmck_choice, fk.method_fit, fk.style, fk.contract
+    presumption = {k: v for k, v in PRESUMPTION.items() if k != "field2_2_3"}
+    if fk.composition:
+        presumption[fk.composition] = PRESUMPTION["field2_2_3"]
     preset: Dict[str, Tuple[Any, dict]] = {}
-    if NMCK_CHOICE_KEY in keys:
+    if nmck_key and nmck_key in keys:
         found = await detect_nmck_choice(documents, llm_call)
         if found:
-            preset[NMCK_CHOICE_KEY] = (found["value"], {
+            preset[nmck_key] = (found["value"], {
                 "status": "verified" if found["source"] == "text_rule" else "proposed",
                 "source": found["source"], "document": found.get("document"), "quote": found["quote"],
                 "comment": f"Применён {found['method']} метод обоснования НМЦК"
                            + (f" ({found['basis']})" if found.get("basis") else ""),
                 **({"scores": found["scores"], "note": "метод определён косвенно, требует проверки экспертом"}
                    if found.get("scores") else {})})
-    if METHOD_FIT_KEY in keys and NMCK_CHOICE_KEY in preset and (
-            METHOD_FIT_KEY not in skip
-            or method_conflict((fact_texts or {}).get(METHOD_FIT_KEY), preset[NMCK_CHOICE_KEY][0])):
-        code = preset[NMCK_CHOICE_KEY][0]
+    if fit_key and fit_key in keys and nmck_key in preset and (
+            fit_key not in skip
+            or method_conflict((fact_texts or {}).get(fit_key), preset[nmck_key][0])):
+        code = preset[nmck_key][0]
         name = {c: label for c, label in NMCK_METHOD_CODES.values()}[code]
-        preset[METHOD_FIT_KEY] = (1, {
+        preset[fit_key] = (1, {
             "status": "proposed", "source": "rule", "quote": None,
             "comment": f"Для обоснования НМЦК применён {name} метод"
                        + (" — приоритетный по ст. 22 Закона № 44-ФЗ; его выбор нарушением не является." if code == 1 else "."),
             "note": "вывод по определённому методу НМЦК; требует проверки экспертом"})
-    if STYLE_KEY in keys and llm_call is not None:
+    if style_key and style_key in keys and llm_call is not None:
         result = await assess_style(documents, llm_call)
         if result["checked_parts"] and len(result["errors"]) < result["checked_parts"]:
             defects = result["defects"][:3]
@@ -685,26 +711,26 @@ async def compute_assessed(fields: Sequence[dict], documents: Dict[int, dict],
                 entry = {"status": "proposed", "source": "llm_assessment", "quote": defects[0]["quote"],
                          "comment": " ".join(f"В документе «{d['document']}»: {d['issue'].rstrip('.')}." for d in defects),
                          "defects": defects}
-                preset[STYLE_KEY] = (0, entry)
+                preset[style_key] = (0, entry)
             else:
                 entry = {"status": "proposed", "source": "llm_assessment", "quote": None,
                          "comment": "Единый стиль документации выдержан, логических ошибок и противоречий не выявлено "
                                     f"(просмотрено документов: {result['checked_docs']}, частей: {result['checked_parts']}).",
                          "note": "оценка модели без цитаты: требует проверки экспертом"}
-                preset[STYLE_KEY] = (1, entry)
+                preset[style_key] = (1, entry)
             if result["errors"]:
                 entry["errors"] = result["errors"][:3]
     if llm_call is not None:
-        todo = [k for k in PRESUMPTION if k in keys and k not in skip]
-        for key, res in zip(todo, await asyncio.gather(*(assess_presumption(k, documents, llm_call) for k in todo))):
+        todo = [k for k in presumption if k in keys and k not in skip]
+        for key, res in zip(todo, await asyncio.gather(*(assess_presumption(k, documents, llm_call, presumption[k]) for k in todo))):
             if res:
                 preset[key] = res
     if llm_call is not None and recheck:
         await recheck_presets(preset, fields, documents, llm_call)
-    if contract_check.CONTRACT_KEY in keys:
+    if contract_key and contract_key in keys:
         found = assess_contract(documents, competition)
         if found:
-            preset[contract_check.CONTRACT_KEY] = found
+            preset[contract_key] = found
     if EXPENSE_KEY in keys and EXPENSE_KEY not in skip:
         found = assess_expense_type(documents)
         if found:

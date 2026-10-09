@@ -57,7 +57,9 @@ class Rule:
 
     Attributes:
         criterion: Номер критерия (``1.18``).
-        hint: Фрагмент названия критерия (нижний регистр); защита от сдвига нумерации в другой форме.
+        hint: Фрагмент названия критерия (нижний регистр). По нему правило находит поле в любой форме: номера критериев
+            в формах аукциона, котировок и единственного поставщика сдвинуты относительно конкурса.
+        alt_hints: Другие формулировки того же критерия в иных формах (нижний регистр).
         paths: Пути, наличие хотя бы одного непустого значения даёт ``1``.
         absent: Что вернуть, если ни один путь не заполнен: ``0``, ``2`` или ``None`` (не решать).
         custom: Необязательная функция ``(Notice) -> Optional[Finding]`` для нетипичных правил;
@@ -69,6 +71,7 @@ class Rule:
     paths: Sequence[str] = ()
     absent: Optional[int] = None
     custom: Optional[Callable[["Notice"], Optional[Finding]]] = None
+    alt_hints: Sequence[str] = ()
 
 
 class Notice:
@@ -316,7 +319,7 @@ RULES: List[Rule] = [
     Rule("1.36", "размере обеспечения гарантийных обязательств", [CRI + "/provisionWarranty/amount", CRI + "/provisionWarranty/part"]),
     Rule("1.37", "порядке предоставления обеспечения гарантийных", [CRI + "/provisionWarranty/procedureInfo"],
          custom=_procedure_rule(CRI + "/provisionWarranty/procedureInfo")),
-    Rule("1.38", "банковском и казначейском сопровождении", []),
+    Rule("1.38", "банковском и казначейском сопровождении", [], alt_hints=("банковском сопровождении",)),
     Rule("1.39", "нескольких контрактов", [], custom=_rule_multi_contracts),
     Rule("1.40", "одностороннего отказа", [CC + "/isOneSideRejectionSt95"]),
     Rule("1.41", "окончания срока подачи заявок", [PROC + "/collectingInfo/endDT"]),
@@ -334,6 +337,30 @@ def criterion_number(label: str) -> Optional[str]:
     """Извлекает номер критерия из названия поля (``1.18. Наличие…`` → ``1.18``)."""
     match = _CRITERION_RE.match(label or "")
     return match.group(1) if match else None
+
+
+def rule_for_label(label: Optional[str]) -> Optional[Rule]:
+    """Правило, подходящее к названию критерия, независимо от его номера в форме.
+
+    Нумерация критериев раздела 1 различается между способами закупки (в аукционе нет критериев оценки, в
+    единственном поставщике нет дат этапов), поэтому правило ищется по смыслу названия. Если названию подходит
+    не ровно одно правило, возвращается ``None``: критерий остаётся за моделью и экспертом.
+
+    Args:
+        label: Название поля формы (``1.18. Наличие информации о начальной цене…``).
+
+    Returns:
+        Rule: Единственное подходящее правило или ``None``.
+    """
+    text = (label or "").lower()
+    hits = [r for r in RULES if any(h in text for h in (r.hint, *r.alt_hints))]
+    return hits[0] if len(hits) == 1 else None
+
+
+def rule_id(label: Optional[str]) -> Optional[str]:
+    """Идентификатор правила (номер критерия в форме конкурса) для названия поля или ``None``."""
+    rule = rule_for_label(label)
+    return rule.criterion if rule else None
 
 
 def evaluate_rule(rule: Rule, notice: Notice) -> Finding:
@@ -364,8 +391,8 @@ def evaluate_section1(notice: Notice, fields: Sequence[dict]) -> Dict[str, Findi
     Args:
         notice: Разобранное извещение.
         fields: Поля формы из ``pe_form_fields`` (``field_key``, ``label``, ``value_kind``);
-            обрабатываются только поля с ``value_kind == 'presence'`` и номером критерия ``1.N``,
-            для которого есть правило и совпадает подсказка названия.
+            обрабатываются только поля с ``value_kind == 'presence'``, для названия которых нашлось
+            ровно одно правило (:func:`rule_for_label`).
 
     Returns:
         dict: ``ключ поля → Finding`` для полей, у которых есть правило (в том числе с ``value=None``).
@@ -374,9 +401,8 @@ def evaluate_section1(notice: Notice, fields: Sequence[dict]) -> Dict[str, Findi
     for item in fields:
         if item.get("value_kind") != "presence":
             continue
-        number = criterion_number(item.get("label", ""))
-        rule = RULES_BY_CRITERION.get(number or "")
-        if not rule or rule.hint not in (item.get("label") or "").lower():
+        rule = rule_for_label(item.get("label"))
+        if not rule:
             continue
         result[item["field_key"]] = evaluate_rule(rule, notice)
     return result
@@ -449,10 +475,9 @@ def map_to_fields(data: dict, fields: Sequence[dict]) -> Dict[str, Finding]:
     for item in fields:
         if item.get("value_kind") != "presence":
             continue
-        number = criterion_number(item.get("label", ""))
-        rule = RULES_BY_CRITERION.get(number or "")
-        found = criteria.get(number or "")
-        if not rule or not found or rule.hint not in (item.get("label") or "").lower():
+        rule = rule_for_label(item.get("label"))
+        found = criteria.get(rule.criterion) if rule else None
+        if not rule or not found:
             continue
         out[item["field_key"]] = Finding(found["value"], found.get("evidence", ""), [])
     return out

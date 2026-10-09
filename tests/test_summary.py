@@ -676,9 +676,9 @@ class FundingAdvanceTests(unittest.IsolatedAsyncioTestCase):
 class AssessmentTests(unittest.IsolatedAsyncioTestCase):
     """Метод НМЦК (field2_2_2_0) и оценка стиля (field2_2_1_6) моделью."""
 
-    FIELDS = [{"field_key": "field2_2_2_0", "value_kind": "choice", "label": "Выберите метод"},
+    FIELDS = [{"field_key": "field2_2_2_0", "value_kind": "choice", "label": "Выберите метод обоснования начальной (максимальной) цены контракта"},
               {"field_key": "field2_2_1", "value_kind": "section", "label": "2.1"},
-              {"field_key": "field2_2_1_6", "value_kind": "compliance", "label": "2.1.6. Соответствие: единый стиль"}]
+              {"field_key": "field2_2_1_6", "value_kind": "compliance", "label": "2.1.6. Соответствие содержания представленной документации единому стилю и отсутствию логических ошибок"}]
 
     def docs(self, text):
         return {1: {"filename": "d.docx", "doc_code": "docIzvejenieFiles", "text": text}}
@@ -886,7 +886,8 @@ class AdvanceRublesTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_advance_is_zero(self):
         """Критерий 1.22 = «2» → field1_2 = 0 (даже без модели), единица — руб."""
-        fields = [{"field_key": k, "value_kind": "number", "label": k} for k in ("field1_1", "field1_2", "field1_2_unit", "field2_1_22")]
+        fields = [{"field_key": k, "value_kind": "number", "label": "1.22. Наличие информации о размере аванса" if k == "field2_1_22" else k}
+                  for k in ("field1_1", "field1_2", "field1_2_unit", "field2_1_22")]
         data = {"field1_1": 100.0, "field1_2": None, "field1_2_unit": None, "field2_1_22": 2}
         trace = {}
         await summary.fill_funding_advance(fields, data, trace, {}, {}, None)
@@ -951,7 +952,9 @@ class MethodFitTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_preset_replaces_conflicting_fact(self):
         """Факт про другой метод не считается решением: критерий получает вывод по определённому методу."""
-        fields = [{"field_key": k, "value_kind": "choice" if k.endswith("_0") else "compliance", "label": k}
+        labels = {"field2_2_2_0": "Выберите метод обоснования начальной (максимальной) цены контракта",
+                  "field2_2_2_3": "2.2.3. Соответствие выбранного метода обоснования цены товара, работ (услуг)"}
+        fields = [{"field_key": k, "value_kind": "choice" if k.endswith("_0") else "compliance", "label": labels[k]}
                   for k in ("field2_2_2_0", "field2_2_2_3")]
         docs = {1: {"text": "Использованы коммерческие предложения, ценовая информация", "filename": "n.xlsx"}}
         preset = await assessment.compute_assessed(
@@ -1056,10 +1059,10 @@ class NotSetAndAdvanceTests(unittest.TestCase):
 
     def test_advance_template_phrase_is_not_amount(self):
         """1.22: фраза «если предусмотрен аванс» без числа → «2» (proposed); с числом — «1»."""
-        data, trace = self.build("field2_1_22", "1.22. Размер аванса", "указан", "если предусмотрен аванс", value=1)
+        data, trace = self.build("field2_1_22", "1.22. Наличие информации о размере аванса", "указан", "если предусмотрен аванс", value=1)
         self.assertEqual(data["field2_1_22"], 2)
         self.assertEqual(trace["field2_1_22"]["status"], "proposed")
-        data, _ = self.build("field2_1_22", "1.22. Размер аванса", "указан", "размер аванса 30 % от цены", value=1)
+        data, _ = self.build("field2_1_22", "1.22. Наличие информации о размере аванса", "указан", "размер аванса 30 % от цены", value=1)
         self.assertEqual(data["field2_1_22"], 1)
 
 
@@ -1093,7 +1096,7 @@ class ContractCheckTests(unittest.TestCase):
 
     def test_rule_overrides_one_and_derives_37(self):
         """Правило даёт 2.5 = 0 вместо «1» модели; 3.7 выводится из 2.5 и не дублируется в замечаниях."""
-        fields = [{"field_key": "field2_2_5", "value_kind": "compliance", "label": "2.5. Проект контракта", "ordinal": 1},
+        fields = [{"field_key": "field2_2_5", "value_kind": "compliance", "label": "2.5. Соответствие проекта контракта действующему законодательству Российской Федерации", "ordinal": 1},
                   {"field_key": "field2_3_7", "value_kind": "compliance", "label": "3.7. Документация", "ordinal": 2}]
         docs = {1: {"filename": "Проект контракта.docx", "doc_code": None, "text": self.BODY}}
         rows = [{"fact_key": "field2_2_5", "source": "fact_extractor", "document_id": 1, "page": 1, "quote": None,
@@ -1194,7 +1197,7 @@ class SuspectZerosTests(unittest.TestCase):
     def test_preset_zero_becomes_suspect(self):
         """«0» презумпции в режиме suspect заменяется «1», находка уходит в suspected_zero; правила контракта не затрагиваются."""
         fields = [{"field_key": "field2_3_3", "value_kind": "compliance", "label": "3.3.", "ordinal": 1},
-                  {"field_key": "field2_2_5", "value_kind": "compliance", "label": "2.5.", "ordinal": 2}]
+                  {"field_key": "field2_2_5", "value_kind": "compliance", "label": "2.5. Соответствие проекта контракта действующему законодательству Российской Федерации", "ordinal": 2}]
         preset = {"field2_3_3": (0, {"status": "proposed", "source": "llm_presumption", "quote": "q", "comment": "нарушение",
                                      "defects": [{"issue": "x", "quote": "q"}]}),
                   "field2_2_5": (0, {"status": "proposed", "source": "contract_rules", "quote": None, "comment": "нет ЕИС"})}
