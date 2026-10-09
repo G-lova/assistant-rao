@@ -1149,7 +1149,7 @@ class DocumentTitlesTests(unittest.TestCase):
         items = asyncio.run(doc_titles.document_titles(docs, llm))
         titles = [i["title"] for i in items]
         self.assertEqual(titles[0], "Описание объекта закупки (Приложение 1)")
-        self.assertEqual(titles[1], "Приложение 5")
+        self.assertEqual(titles[1], "Порядок рассмотрения и оценки заявок")
         self.assertEqual(len(titles), 3)          # дубль объединён, ЭЗ и итоги по лотам не включены
         self.assertTrue(titles[2].startswith("Протокол подведения итогов"))
         self.assertEqual(doc_titles.format_titles(items).splitlines()[0], "1. Описание объекта закупки (Приложение 1).")
