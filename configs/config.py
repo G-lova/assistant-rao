@@ -134,6 +134,10 @@ class Config:
     # Срок хранения полных текстов, чанков и эмбеддингов (дней) — политика утверждена 05.10.2026
     PE_TEXT_RETENTION_DAYS = int(os.getenv("PE_TEXT_RETENTION_DAYS", "365"))
     # Построение фактов сразу после индексации (задача index_documents_task); нужен KNOWLEDGE_STORE_ENABLED
+    # Что делать с «0», найденным моделью по тексту документов (факты, презумпция, единый стиль): "suspect" — в значение
+    # не ставить (замечание в trace.suspected, для критерия соответствия ставится «1» как предложение); "value" — ставить «0»
+    # как предложение после повторной проверки (judge). На эталоне экспертов точность таких «0» 10–30%.
+    PE_MODEL_ZEROS = os.getenv("PE_MODEL_ZEROS", "suspect").lower()
     PE_FACTS_ENABLED = os.getenv("PE_FACTS_ENABLED", "false").lower() == "true"
     # Максимум времени на построение фактов (запросы к LLM), секунд; при превышении этап прерывается
     PE_FACTS_TIMEOUT_SEC = int(os.getenv("PE_FACTS_TIMEOUT_SEC", "900"))

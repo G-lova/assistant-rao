@@ -340,7 +340,8 @@ class SummaryDbTests(unittest.TestCase):
                 return json.dumps({"verdict": "подтверждается"})
             return json.dumps({"text": "Вывод по замечанию."})
 
-        res = self.run_async(summary.generate_summary(c, 8101, llm, build_facts))
+        with mock.patch.object(summary.Config, "PE_MODEL_ZEROS", "value"):
+            res = self.run_async(summary.generate_summary(c, 8101, llm, build_facts))
         self.assertEqual(res["form_code"], form)
         self.assertEqual(res["status"], "draft")
         self.assertEqual(res["data"], {"k_name": 1, "k_cmp": 0, "field3": "Вывод по замечанию."})
@@ -393,7 +394,7 @@ class NmckMethodRuleTests(unittest.TestCase):
     """Критерии про неприменённые методы расчёта НМЦК получают «2»."""
 
     def test_other_methods_not_applicable(self):
-        """При методе рыночных цен критерии нормативного/затратного методов — 2, замечаний нет."""
+        """При методе рыночных цен критерии нормативного/затратного методов — 1 (proposed), замечаний нет."""
         fields = [field("m_norm", "compliance", "2.2.7. Соответствие законодательству расчета НМЦК нормативным методом"),
                   field("m_cost", "compliance", "2.2.7. Соответствие законодательству расчета НМЦК затратным методом"),
                   field("m_proj", "compliance", "2.2.7. Соответствие законодательству расчета НМЦК проектно-сметным методом")]
@@ -401,8 +402,8 @@ class NmckMethodRuleTests(unittest.TestCase):
                     "text": "Используемый метод определения НМЦК с обоснованием Метод сопоставления рыночных цен (анализ рынка)"}}
         rows = [fact("m_norm", 0, verified=False), fact("m_cost", 0, verified=False), fact("m_proj", 0, verified=False)]
         data, trace = summary.assemble(fields, rows, docs)
-        self.assertEqual((data["m_norm"], data["m_cost"], data["m_proj"]), (2, 2, 2))
-        self.assertEqual(trace["m_norm"]["status"], "derived")
+        self.assertEqual((data["m_norm"], data["m_cost"], data["m_proj"]), (1, 1, 1))
+        self.assertEqual(trace["m_norm"]["status"], "proposed")
         self.assertEqual(summary.collect_remarks(fields, data, trace), [])
 
 
@@ -465,7 +466,7 @@ class NmckTextFieldTests(unittest.TestCase):
         fields = [field("m_norm", "compliance", label), field("m_norm_text", "text", label)]
         docs = {1: {"filename": "o.xlsx", "doc_code": "d", "text": "Используемый метод определения НМЦК Метод сопоставления рыночных цен"}}
         data, _ = summary.assemble(fields, [], docs)
-        self.assertEqual(data["m_norm"], 2)
+        self.assertEqual(data["m_norm"], 1)
         self.assertIsNone(data["m_norm_text"])
         self.assertEqual(summary.validate(data, fields), [])
 
@@ -1153,3 +1154,50 @@ class DocumentTitlesTests(unittest.TestCase):
         self.assertEqual(len(titles), 3)          # дубль объединён, ЭЗ и итоги по лотам не включены
         self.assertTrue(titles[2].startswith("Протокол подведения итогов"))
         self.assertEqual(doc_titles.format_titles(items).splitlines()[0], "1. Описание объекта закупки (Приложение 1).")
+
+
+class SuspectZerosTests(unittest.TestCase):
+    """Режим PE_MODEL_ZEROS=suspect: «0» модели не становится значением, а остаётся предположением в trace."""
+
+    FIELDS = [{"field_key": "k_cmp", "value_kind": "compliance", "label": "2.1.1. Соответствие", "ordinal": 1},
+              {"field_key": "k_pres", "value_kind": "presence", "label": "1.5. Наличие", "ordinal": 2},
+              {"field_key": "field2_4_4", "value_kind": "compliance", "label": "4.4. Лицензия", "ordinal": 3}]
+
+    def row(self, key, comment, quote="цитата"):
+        """Факт модели «0»."""
+        return {"fact_key": key, "source": "fact_extractor", "document_id": 1, "page": 1, "quote": quote,
+                "value": {"value": 0, "verified": True, "comment": comment}}
+
+    def build(self, mode):
+        """Сборка трёх фактов «0» в заданном режиме."""
+        docs = {1: {"filename": "d.docx", "doc_code": "docIzvejenieFiles", "text": "цитата в тексте документа"}}
+        rows = [self.row("k_cmp", "нарушено"), self.row("k_pres", "нет сведений"),
+                self.row("field2_4_4", "лицензия не требуется")]
+        return summary.assemble(self.FIELDS, rows, docs, None, None, None, mode)
+
+    def test_suspect_mode(self):
+        """Соответствие → «1» (proposed), наличие → эксперту, предположение сохранено; «не требуется» → «2»."""
+        data, trace = self.build("suspect")
+        self.assertEqual(data["k_cmp"], 1)
+        self.assertEqual(trace["k_cmp"]["status"], "proposed")
+        self.assertEqual(trace["k_cmp"]["suspected_zero"]["comment"], "нарушено")
+        self.assertIsNone(data["k_pres"])
+        self.assertIn("suspected_zero", trace["k_pres"])
+        self.assertEqual(data["field2_4_4"], 2)
+        self.assertEqual(summary.collect_remarks(self.FIELDS, data, trace), [])
+
+    def test_value_mode_keeps_zero(self):
+        """Режим value: прежнее поведение — «0» подтверждённой цитатой остаётся значением."""
+        data, _ = self.build("value")
+        self.assertEqual(data["k_cmp"], 0)
+
+    def test_preset_zero_becomes_suspect(self):
+        """«0» презумпции в режиме suspect заменяется «1», находка уходит в suspected_zero; правила контракта не затрагиваются."""
+        fields = [{"field_key": "field2_3_3", "value_kind": "compliance", "label": "3.3.", "ordinal": 1},
+                  {"field_key": "field2_2_5", "value_kind": "compliance", "label": "2.5.", "ordinal": 2}]
+        preset = {"field2_3_3": (0, {"status": "proposed", "source": "llm_presumption", "quote": "q", "comment": "нарушение",
+                                     "defects": [{"issue": "x", "quote": "q"}]}),
+                  "field2_2_5": (0, {"status": "proposed", "source": "contract_rules", "quote": None, "comment": "нет ЕИС"})}
+        data, trace = summary.assemble(fields, [], {1: {"filename": "d", "text": "t"}}, None, preset, None, "suspect")
+        self.assertEqual((data["field2_3_3"], data["field2_2_5"]), (1, 0))
+        self.assertEqual(trace["field2_3_3"]["suspected_zero"]["comment"], "нарушение")

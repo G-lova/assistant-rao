@@ -96,8 +96,8 @@ def method_conflict(text: Optional[str], chosen: Optional[int]) -> Optional[str]
             return names[code]
     return None
 # Критерии соответствия, где эксперты применяют «2» (не применимо). Для остальных «2» от модели — не ответ,
-# а признак «не нашла сведений»: значение остаётся эксперту (по эталону «2» здесь не встречается).
-NOT_APPLICABLE_ALLOWED = frozenset({"field2_2_1_5", "field2_2_2_5_2", "field2_2_2_5_3", "field2_4_3", "field2_4_4", "field2_4_5"})
+# а признак «не нашла сведений»: значение остаётся эксперту (по эталону «2» здесь почти не встречается; для 2.1.5 — 1 из 36).
+NOT_APPLICABLE_ALLOWED = frozenset({"field2_2_2_5_2", "field2_2_2_5_3", "field2_4_3", "field2_4_4", "field2_4_5"})
 FILL_IF_EMPTY = frozenset(PRESUMPTION) | {EDUCATION_KEY, EXPENSE_KEY, "field2_2_2_3"}   # ставятся, только если поиск фактов значения не дал
 VIOLATION_SCHEMA = {"type": "object", "properties": {"violations": {"type": "array", "maxItems": 2, "items": {
     "type": "object", "properties": {"quote": {"type": "string", "maxLength": 300}, "issue": {"type": "string", "maxLength": 300}},
@@ -549,6 +549,7 @@ async def recheck_presets(preset: Dict[str, Tuple[Any, dict]], fields: Sequence[
 
 
 # Ключи, где «0» по правилам заменяет «1» модели (но не наоборот)
+MODEL_ZERO_SOURCES = frozenset({"llm_presumption", "llm_assessment"})      # «0» этих источников — находки модели по тексту
 ZERO_OVERRIDES = frozenset({contract_check.CONTRACT_KEY})
 
 
@@ -636,7 +637,7 @@ def education_applicable(documents: Dict[int, dict]) -> bool:
 async def compute_assessed(fields: Sequence[dict], documents: Dict[int, dict],
                            llm_call: Optional[LlmCall], skip: Sequence[str] = (),
                            fact_texts: Optional[Dict[str, str]] = None,
-                           competition: bool = True) -> Dict[str, Tuple[Any, dict]]:
+                           competition: bool = True, recheck: bool = True) -> Dict[str, Tuple[Any, dict]]:
     """Значения ``field2_2_2_0`` и ``field2_2_1_6`` (если они есть в форме) для передачи в :func:`summary.assemble`.
 
     Значения считаются до сборки, чтобы итоги подразделов и пояснения ``*_text`` учитывали их.
@@ -649,6 +650,7 @@ async def compute_assessed(fields: Sequence[dict], documents: Dict[int, dict],
         fact_texts: ``ключ → комментарий и цитата`` факта модели: если комментарий критерия
             :data:`METHOD_FIT_KEY` говорит о другом методе, чем определённый, факт не считается решением.
         competition: Закупка — конкурс (для проверки проекта контракта, см. :func:`contract_check.check_contract`).
+        recheck: Проверять найденные моделью нарушения повторным вызовом (:func:`recheck_presets`).
 
     Returns:
         dict: ``ключ → (значение, запись trace)``; ключ отсутствует, если определить значение не удалось.
@@ -697,7 +699,7 @@ async def compute_assessed(fields: Sequence[dict], documents: Dict[int, dict],
         for key, res in zip(todo, await asyncio.gather(*(assess_presumption(k, documents, llm_call) for k in todo))):
             if res:
                 preset[key] = res
-    if llm_call is not None:
+    if llm_call is not None and recheck:
         await recheck_presets(preset, fields, documents, llm_call)
     if contract_check.CONTRACT_KEY in keys:
         found = assess_contract(documents, competition)

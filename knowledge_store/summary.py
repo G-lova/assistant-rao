@@ -180,11 +180,12 @@ def used_nmck_method(documents: Dict[int, dict]) -> Tuple[Optional[str], Optiona
 
 def apply_nmck_method_rule(fields: Sequence[dict], documents: Dict[int, dict], data: Dict[str, Any],
                            trace: Dict[str, Any]) -> None:
-    """Критерии «расчёт НМЦК … методом» при другом применённом методе — «2» (не применимо).
+    """Критерии «расчёт НМЦК … методом» при другом применённом методе — «1» (не нарушено), не «2».
 
-    Методы взаимоисключающие, поэтому критерии про неприменённые методы получают ``2`` детерминированно
-    (модель в этих случаях ошибочно ставит «0» и порождает ложные замечания). Критерий применённого метода
-    остаётся за моделью. Изменяет ``data``/``trace`` на месте.
+    Методы взаимоисключающие, и модель в этих случаях ошибочно ставит «0» (ложные замечания). Эксперты для неприменённых
+    методов (2.2.7 нормативный / затратный) ставят «1» либо оставляют пустым и никогда не ставят «2» (на эталоне 22 из 22
+    заполненных — «1»), поэтому значение — «1» как предложение. Критерий применённого метода остаётся за моделью.
+    Изменяет ``data``/``trace`` на месте.
 
     Args:
         fields: Поля формы.
@@ -201,9 +202,10 @@ def apply_nmck_method_rule(fields: Sequence[dict], documents: Dict[int, dict], d
             continue          # у текстового поля `*_text` та же подпись, что у критерия — его не трогаем
         stem = next((k for k in METHOD_STEMS if match.group(1).lower().startswith(k)), None)
         if stem and stem != used:
-            data[field["field_key"]] = 2
-            trace[field["field_key"]] = {"status": "derived", "rule": f"в документах применён метод «{METHOD_STEMS[used]}»; "
-                                         "другие методы расчёта НМЦК не применимы", "quote": snippet[:300]}
+            data[field["field_key"]] = 1
+            trace[field["field_key"]] = {"status": "proposed", "source": "nmck_method_rule", "quote": snippet[:300],
+                                         "rule": f"в документах применён метод «{METHOD_STEMS[used]}»; метод «{METHOD_STEMS[stem]}» не применялся",
+                                         "note": "метод не применялся: эксперты ставят «1» или оставляют пустым"}
 
 
 def section_result(children: Sequence[Optional[int]]) -> Optional[int]:
@@ -305,7 +307,7 @@ def contract_check_keys() -> Tuple[str, str]:
 
 def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[int, dict],
              procurement: Optional[dict] = None, preset: Optional[Dict[str, Tuple[Any, dict]]] = None,
-             judged: Optional[Dict[str, str]] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+             judged: Optional[Dict[str, str]] = None, model_zeros: str = "value") -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Собирает ``data`` и ``trace`` по полям формы (без LLM).
 
     Args:
@@ -320,6 +322,10 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
             ``supported``; ``not_applicable`` («требование не установлено») даёт «2» там, где эксперты так отвечают,
             ``unsupported`` — «1» (критерий соответствия, презумпция) или значение остаётся эксперту; без вердикта
             «0» — только предложение и в замечания не попадает. ``None`` — проверка не выполнялась (прежнее поведение).
+        model_zeros: Как поступать с «0», найденным моделью по тексту (``Config.PE_MODEL_ZEROS``): ``"value"`` — как выше;
+            ``"suspect"`` — «0» в значение не ставится: для критерия соответствия ставится «1» (предложение), для критерия
+            наличия значение остаётся эксперту, а находка сохраняется в ``trace[key].suspected_zero``. Нули детерминированных
+            правил (ЕИС, проект контракта, формальные правила) не затрагиваются.
 
     Returns:
         Tuple[dict, dict]: ``(data, trace)``. ``data`` содержит каждый ключ формы (``None`` — оставлено
@@ -376,6 +382,15 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
             entry["note"] = "размер аванса в документах не найден (фраза шаблона «если предусмотрен»): предложено «2», требует проверки"
             trace[key] = entry
             continue
+        if (model_zeros == "suspect" and model_fact and result == 0
+                and (judged or {}).get(key) != "not_applicable"):
+            # находки модели по тексту на эталоне верны в 10–30% случаев: не превращаем их в нарушение, а показываем эксперту
+            entry["suspected_zero"] = {"comment": fact.get("comment"), "quote": (fact.get("quote") or "")[:300]}
+            entry["comment"] = None
+            entry["note"] = ("модель предполагает нарушение, но такие находки на эталоне верны лишь в 10–30% случаев: "
+                             "значение не изменено, предположение — в suspected_zero")
+            result = 1 if kind == forms.KIND_COMPLIANCE else None
+            verdict = "suspect"
         if judged is not None and result == 0 and fact.get("source") != facts_mod.SOURCE_EIS:
             verdict = judged.get(key) or "unknown"
             entry["judged"] = verdict
@@ -388,7 +403,7 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
                 entry["comment"] = None
         if result is None:
             pass
-        elif verdict in ("not_applicable", "unsupported", "unknown"):
+        elif verdict in ("not_applicable", "unsupported", "unknown", "suspect"):
             data[key] = result if verdict != "unknown" else 0
             entry["status"] = "proposed"
             if verdict == "unknown":
@@ -423,6 +438,15 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
                             or (key in assessment.ZERO_OVERRIDES and value == 0 and data[key] == 1)):
             if value is None:           # оценка не удалась: значение остаётся эксперту, причина видна в trace
                 trace.setdefault(key, {})["assessment_error"] = entry.get("error")
+            elif (model_zeros == "suspect" and value == 0 and entry.get("source") in assessment.MODEL_ZERO_SOURCES
+                  ):
+                data[key] = 1
+                trace[key] = {"status": "proposed", "source": entry.get("source"), "quote": None,
+                              "comment": "Нарушений, подтверждаемых документами, не выявлено.",
+                              "suspected_zero": {"comment": entry.get("comment"), "quote": entry.get("quote"),
+                                                 "defects": entry.get("defects")},
+                              "note": "модель предполагает нарушение, но такие находки на эталоне верны лишь в 10–30% случаев: "
+                                      "значение не изменено, предположение — в suspected_zero"}
             else:
                 data[key], trace[key] = value, entry
 
@@ -1321,9 +1345,10 @@ async def generate_summary(conn, expertise_id: int, llm_call: Optional[LlmCall],
                                 normalize_result((_as_dict(r.get("value")) or {}).get("value")), r.get("source")) is not None}
     texts = {r["fact_key"]: f"{(_as_dict(r.get('value')) or {}).get('comment') or ''} {r.get('quote') or ''}" for r in fact_rows}
     preset = await assessment.compute_assessed(fields, documents, llm_call, skip=decided, fact_texts=texts,
-                                               competition="competition" in code)
-    judged = await assessment.judge_zeros(fields, fact_rows, documents, llm_call)
-    data, trace = assemble(fields, fact_rows, documents, ready["passport"], preset, judged)
+                                               competition="competition" in code,
+                                               recheck=Config.PE_MODEL_ZEROS == "value")
+    judged = await assessment.judge_zeros(fields, fact_rows, documents, llm_call) if Config.PE_MODEL_ZEROS == "value" else None
+    data, trace = assemble(fields, fact_rows, documents, ready["passport"], preset, judged, Config.PE_MODEL_ZEROS)
     await fill_funding_advance(fields, data, trace, documents, ready["passport"], llm_call)
     await fill_documents_list(data, trace, documents, llm_call)
     stats = await write_blocks(fields, data, trace, llm_call, code)
@@ -1333,10 +1358,11 @@ async def generate_summary(conn, expertise_id: int, llm_call: Optional[LlmCall],
     unresolved = [f["field_key"] for f in fields
                   if f["value_kind"] in RESULT_KINDS and data.get(f["field_key"]) is None]
     proposed = [k for k, v in trace.items() if isinstance(v, dict) and v.get("status") == "proposed"]
+    suspected = [k for k, v in trace.items() if isinstance(v, dict) and v.get("suspected_zero")]
     status = "needs_review" if unresolved or proposed or problems else "draft"
     stats.update({"fields": len(fields), "unresolved": len(unresolved), "proposed": len(proposed),
                   "eis_xml": eis_stats.get("eis_xml", 0), "eis_print_form": eis_stats.get("eis_print_form", 0)})
-    trace["_summary"] = {"unresolved": unresolved, "proposed": proposed, "problems": problems}
+    trace["_summary"] = {"unresolved": unresolved, "proposed": proposed, "suspected": suspected, "problems": problems}
     async with conn.transaction():
         summary_id = await repo.insert_summary(conn, expertise_id, code, data, trace, status)
         await repo.touch_expiry(conn, expertise_id, Config.PE_TEXT_RETENTION_DAYS)
