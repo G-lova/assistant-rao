@@ -18,7 +18,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tup
 
 from configs.config import Config
 from configs.logger import get_logger
-from knowledge_store import assessment, contract_check, eis_notice, facts as facts_mod, forms, repository as repo
+from knowledge_store import assessment, contract_check, doc_titles, eis_notice, facts as facts_mod, forms, repository as repo
 
 logger = get_logger(__name__)
 
@@ -1083,6 +1083,35 @@ def funding_from_print_form(documents: Dict[int, dict]) -> Optional[Tuple[str, s
     return None
 
 
+async def fill_documents_list(data: Dict[str, Any], trace: Dict[str, Any], documents: Dict[int, dict],
+                              llm_call: Optional[LlmCall]) -> None:
+    """Поле ``documents``: названия документов из самих документов, с реквизитами (см. :mod:`doc_titles`).
+
+    Заменяет предварительный перечень «тип: имя файла» из :func:`fill_general_info`, но не трогает значение,
+    подтверждённое фактом.
+
+    Args:
+        data: Собранный ``data`` (изменяется).
+        trace: Собранный ``trace`` (изменяется).
+        documents: Документы экспертизы с текстами.
+        llm_call: Функция вызова LLM или ``None``.
+    """
+    if "documents" not in data or trace.get("documents", {}).get("status") not in (None, "derived"):
+        return
+    try:
+        items = await doc_titles.document_titles(list(documents.values()), llm_call)
+    except Exception as e:  # noqa: BLE001 — перечень документов не должен ронять сборку
+        logger.warning(f"knowledge_store: перечень документов не построен: {type(e).__name__}: {e}")
+        return
+    if not items:
+        return
+    data["documents"] = doc_titles.format_titles(items)
+    weak = [i["filename"] for i in items if i["source"] == "filename"]
+    trace["documents"] = {"status": "derived", "rule": "названия документов из самих документов (XML ЕИС, начало текста)",
+                          "sources": {i["title"]: i["source"] for i in items},
+                          **({"note": f"название не найдено в тексте, взято из имени файла: {', '.join(weak)}"} if weak else {})}
+
+
 def keyword_windows(documents: Dict[int, dict], pattern: str, radius: int = 350, limit: int = 4) -> List[str]:
     """Окна текста вокруг ключевых слов в документах (сначала извещение) — вход для точечного извлечения."""
     out: List[str] = []
@@ -1296,6 +1325,7 @@ async def generate_summary(conn, expertise_id: int, llm_call: Optional[LlmCall],
     judged = await assessment.judge_zeros(fields, fact_rows, documents, llm_call)
     data, trace = assemble(fields, fact_rows, documents, ready["passport"], preset, judged)
     await fill_funding_advance(fields, data, trace, documents, ready["passport"], llm_call)
+    await fill_documents_list(data, trace, documents, llm_call)
     stats = await write_blocks(fields, data, trace, llm_call, code)
     problems = validate(data, fields)
     if problems:

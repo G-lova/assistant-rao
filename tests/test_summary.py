@@ -1110,3 +1110,46 @@ class ContractCheckTests(unittest.TestCase):
                 "победителем, предложившим наиболее высокую цену за право заключения контракта. ") * 80
         docs = {1: {"filename": "Проект контракта.docx", "text": text}}
         self.assertIsNone(assessment.assess_contract(docs, True))
+
+
+class DocumentTitlesTests(unittest.TestCase):
+    """Поле documents: названия из самих документов с реквизитами."""
+
+    XML = ('<?xml version="1.0" encoding="UTF-8"?><ns3:export xmlns:ns3="a" xmlns:ns5="b"><ns3:epProtocolEOK2020Final>'
+           '<ns5:commonInfo><ns5:purchaseNumber>0334100018225000001</ns5:purchaseNumber><ns5:docNumber>ИЭОК1</ns5:docNumber>'
+           '<ns5:publishDTInEIS>2025-09-02T11:38:40+08:00</ns5:publishDTInEIS></ns5:commonInfo>'
+           '</ns3:epProtocolEOK2020Final></ns3:export>')
+
+    def test_xml_title_has_number_and_date(self):
+        """Протокол из XML: вид, дата и номер документа."""
+        from knowledge_store import doc_titles
+        self.assertEqual(doc_titles.xml_title(self.XML),
+                         "Протокол подведения итогов определения поставщика (подрядчика, исполнителя) от 02.09.2025 №ИЭОК1")
+        self.assertIsNone(doc_titles.xml_title("обычный текст"))
+        self.assertIsNone(doc_titles.xml_title(self.XML.replace("epProtocolEOK2020Final", "fcsPlacementResult")))
+
+    def test_list_uses_titles_from_documents(self):
+        """Перечень: модель называет документ по тексту; выдуманное название отбрасывается; порядок и дубли."""
+        from knowledge_store import doc_titles
+
+        async def llm(messages, schema):
+            """Модель: для «Описания» — верное название, для остальных — выдуманное."""
+            if "ОПИСАНИЕ ОБЪЕКТА ЗАКУПКИ" in messages[-1]["content"]:
+                return '{"title": "Описание объекта закупки (Приложение 1)"}'
+            return '{"title": "Совершенно другой документ про космос"}'
+
+        docs = [
+            {"filename": "Протокол.xml", "text": self.XML},
+            {"filename": "ТЗ.docx", "text": "ОПИСАНИЕ ОБЪЕКТА ЗАКУПКИ (Приложение 1)\\nна оказание услуг"},
+            {"filename": "Порядок.docx", "text": "Приложение 5\nПорядок рассмотрения и оценки заявок\nтекст"},
+            {"filename": "Порядок_1.docx", "text": "Приложение 5\nПорядок рассмотрения и оценки заявок\nтекст"},
+            {"filename": "ЭЗ_5110_эксперт_30.pdf", "text": "заключение"},
+            {"filename": "Итоги.xml", "text": self.XML.replace("epProtocolEOK2020Final", "fcsPlacementResult")},
+        ]
+        items = asyncio.run(doc_titles.document_titles(docs, llm))
+        titles = [i["title"] for i in items]
+        self.assertEqual(titles[0], "Описание объекта закупки (Приложение 1)")
+        self.assertEqual(titles[1], "Приложение 5")
+        self.assertEqual(len(titles), 3)          # дубль объединён, ЭЗ и итоги по лотам не включены
+        self.assertTrue(titles[2].startswith("Протокол подведения итогов"))
+        self.assertEqual(doc_titles.format_titles(items).splitlines()[0], "1. Описание объекта закупки (Приложение 1).")
