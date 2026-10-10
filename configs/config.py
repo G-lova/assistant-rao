@@ -331,3 +331,29 @@ class Config:
             url = f"{cls.SYSTEM_URL_DEV}/api/risk-monitoring/ai-analysis"
         
         return UpdateAIDBConfig(url=url, bearer_key=bearer_key)
+    @classmethod
+    def get_risk_api_config(cls, environment: str = None) -> dict:
+        """Конфигурация API анализа ИИ риск-мониторинга (``GET/PATCH /api/risk-monitoring/ai-analysis``).
+
+        Тот же адрес и Bearer-токен, что у :meth:`get_update_ai_db_config`, в виде словаря для
+        ``risk_monitoring.risk_monitoring_api.RiskMonitoringAPI``.
+
+        Args:
+            environment: Окружение (``dev`` / ``stage`` / ``prod`` / ``neuro``). По умолчанию ``APP_ENV``.
+
+        Returns:
+            dict: ``{"url": ..., "headers": {...}}``.
+        """
+        cfg = cls.get_update_ai_db_config(environment)
+        return {"url": cfg.url, "headers": cfg.headers}
+
+    @classmethod
+    def risk_monitoring_debug(cls) -> bool:
+        """Включён ли режим отладки риск-мониторинга (повторный анализ уже проанализированных документов).
+
+        Читается при каждом вызове, чтобы флаг ``RISK_MONITORING_DEBUG`` можно было менять без пересборки.
+
+        Returns:
+            bool: ``True``, если ``RISK_MONITORING_DEBUG=true``.
+        """
+        return os.getenv("RISK_MONITORING_DEBUG", "false").lower() == "true"

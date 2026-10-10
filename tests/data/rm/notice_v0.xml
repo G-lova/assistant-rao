@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<export xmlns="http://zakupki.gov.ru/oos/export/1" xmlns:ns2="http://zakupki.gov.ru/oos/EPtypes/1" xmlns:c="http://zakupki.gov.ru/oos/common/1" xmlns:b="http://zakupki.gov.ru/oos/base/1">
+ <ns2:epNotificationEF2020 schemeVersion="14.0">
+  <ns2:id>100</ns2:id>
+  <ns2:versionNumber>0</ns2:versionNumber>
+  <ns2:commonInfo>
+   <ns2:purchaseNumber>0354100008624000011</ns2:purchaseNumber>
+   <ns2:docNumber>№0354100008624000011</ns2:docNumber>
+   <ns2:publishDTInEIS>2024-11-12T17:04:17.493+03:00</ns2:publishDTInEIS>
+   <ns2:placingWay><b:code>EAB20</b:code><b:name>Электронный аукцион</b:name></ns2:placingWay>
+   <ns2:purchaseObjectInfo>Капитальный ремонт лабораторного корпуса</ns2:purchaseObjectInfo>
+  </ns2:commonInfo>
+  <ns2:notificationInfo>
+   <ns2:procedureInfo><ns2:collectingInfo><ns2:endDT>2024-11-20T09:00:00+03:00</ns2:endDT></ns2:collectingInfo></ns2:procedureInfo>
+   <ns2:contractConditionsInfo><ns2:maxPriceInfo><ns2:maxPrice>12100920</ns2:maxPrice><ns2:currency><b:code>RUB</b:code></ns2:currency></ns2:maxPriceInfo></ns2:contractConditionsInfo>
+   <ns2:customerRequirementsInfo><ns2:customerRequirementInfo>
+     <ns2:customer><c:regNum>03541000086</c:regNum><c:fullName>ФГБНУ ВНИИСПК</c:fullName></ns2:customer>
+     <ns2:applicationGuarantee><ns2:amount>121009.20</ns2:amount></ns2:applicationGuarantee>
+     <ns2:contractGuarantee><ns2:part>5</ns2:part></ns2:contractGuarantee>
+     <ns2:purchaseCode>241572000318857200100100160164339243</ns2:purchaseCode>
+   </ns2:customerRequirementInfo></ns2:customerRequirementsInfo>
+  </ns2:notificationInfo>
+  <ns2:attachmentsInfo>
+   <c:attachmentInfo><c:publishedContentId>A1</c:publishedContentId><c:fileName>ТЗ.docx</c:fileName><c:docDescription>Техническое задание</c:docDescription><c:url>https://zakupki.gov.ru/file/1</c:url></c:attachmentInfo>
+   <c:attachmentInfo><c:publishedContentId>A2</c:publishedContentId><c:fileName>Проект контракта.docx</c:fileName><c:docDescription>Проект контракта</c:docDescription><c:url>https://zakupki.gov.ru/file/2</c:url></c:attachmentInfo>
+  </ns2:attachmentsInfo>
+  <ns2:printFormInfo><c:url>https://zakupki.gov.ru/print/1</c:url></ns2:printFormInfo>
+ </ns2:epNotificationEF2020>
+</export>

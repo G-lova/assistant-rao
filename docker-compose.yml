@@ -116,6 +116,28 @@ services:
     command: celery -A celery_app worker -E --pool=solo --loglevel=info --concurrency=4 -Q evaluation,parsing,scoring
     restart: unless-stopped
 
+  celery_worker_rm:
+    build: .
+    env_file:
+      - .env
+    container_name: rao_celery_worker_rm
+    volumes:
+      - .:/app
+      - /tmp:/tmp
+    environment:
+      - REDIS_URL=redis://rao_redis:6379/0
+      - CELERY_BROKER_URL=redis://rao_redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://rao_redis:6379/0
+      - TZ=${TZ}
+      - API_KEY=${API_KEY}
+    depends_on:
+      - redis
+    networks:
+      - rao_network
+    # Риск-мониторинг: отдельная очередь, чтобы ночной анализ не блокировал /evaluate-documents
+    command: celery -A celery_app worker -E --pool=prefork --concurrency=2 --loglevel=info -Q risk_monitoring -n rm@%h
+    restart: unless-stopped
+
   celery_beat:
     build: .
     env_file:

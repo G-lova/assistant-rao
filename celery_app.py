@@ -20,6 +20,7 @@ celery_app = Celery(
     include=[
         'tasks',
         'main',  # Импортируем задачи из main.py
+        'risk_monitoring.tasks',  # Риск-мониторинг: анализ файлов и XML (очередь risk_monitoring)
     ]
 )
 
@@ -66,6 +67,9 @@ celery_app.conf.update(
         'index_documents_task': {'queue': 'evaluation'},
         'generate_summary_opinion_task': {'queue': 'evaluation'},
         'purge_expired_texts_task': {'queue': 'evaluation'},
+        # Риск-мониторинг — отдельная очередь и отдельный воркер (не блокирует /evaluate-documents)
+        'rm_analyze_files_task': {'queue': 'risk_monitoring'},
+        'rm_analyze_xml_task': {'queue': 'risk_monitoring'},
         'main.get_experts_task': {
             'queue': 'scoring',
             'retry_policy': {

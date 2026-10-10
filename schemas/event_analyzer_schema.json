@@ -1,50 +1,23 @@
 {
     "type": "object",
-    "required": [
-        "event_date",
-        "event_summary"
-    ],
+    "required": ["event_summary", "significance", "risks", "confidence"],
     "properties": {
-        "event_date": {
-            "type": "string",
-            "description": "Дата события."
-        },
-        "event_summary": {
-            "type": "string",
-            "description": "Краткое описание события."
-        },
+        "event_summary": {"type": "string", "description": "Краткое описание события."},
+        "significance": {"type": "number", "minimum": 0, "maximum": 1, "description": "Значимость события для риск-мониторинга."},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "changes": {
             "type": "array",
             "default": [],
             "items": {
                 "type": "object",
+                "required": ["change_type", "description", "severity"],
                 "properties": {
-                    "change_type": {
-                        "type": "string",
-                        "description": "Тип изменения (например, 'НМЦК', 'цена контракта', 'сроки исполнения', 'поставщик' и т.д.)"
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Описание изменения"
-                    },
-                    "old_value": {
-                        "type": ["string", "null"],
-                        "description": "Старое значение"
-                    },
-                    "new_value": {
-                        "type": ["string", "null"],
-                        "description": "Новое значение"
-                    },
-                    "severity": {
-                        "type": "number",
-                        "description": "Степень критичости изменения (от 0 до 1)",
-                        "minimum": 0.0,
-                        "maximum": 1.0
-                    },
-                    "change_justification": {
-                        "type": "string",
-                        "description": "Обоснование изменений"
-                    }
+                    "change_type": {"type": "string"},
+                    "description": {"type": "string"},
+                    "old_value": {"type": ["string", "null"]},
+                    "new_value": {"type": ["string", "null"]},
+                    "severity": {"type": "number", "minimum": 0, "maximum": 1},
+                    "change_justification": {"type": ["string", "null"]}
                 }
             }
         },
@@ -53,40 +26,15 @@
             "default": [],
             "items": {
                 "type": "object",
-                "required": [
-                    "rule_id",
-                    "title",
-                    "description",
-                    "confidence",
-                    "verification_needed"
-                ],
+                "required": ["rule_id", "title", "description", "level", "confidence", "verification_needed"],
                 "properties": {
-                    "rule_id": {
-                        "type": "string",
-                        "enum": "EVENT_RISKS_KEYS",
-                        "description": "Код обнаруженного риска."
-                    },
-                    "title": {
-                        "type": "string",
-                        "description": "Название обнаруженного риска."
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Описание обнаруженного риска с указанием причин обнаружения."
-                    },
-                    "confidence": {
-                        "type": "number",
-                        "minimum": 0.0,
-                        "maximum": 1.0,
-                        "description": "Уверенность модели в наличии данного риска"
-                    },
-                    "verification_needed": {
-                        "type": "array",
-                        "description": "Список действий эксперта для подтверждения или опровержения обнаруженного риска",
-                        "items": {
-                            "type": "string"
-                        }
-                    }
+                    "rule_id": {"type": "string", "enum": "EVENT_RISKS_KEYS", "description": "Код риска из справочника."},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "level": {"type": "number", "minimum": 0, "maximum": 1},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "law": {"type": ["string", "null"]},
+                    "verification_needed": {"type": "array", "items": {"type": "string"}}
                 }
             }
         }

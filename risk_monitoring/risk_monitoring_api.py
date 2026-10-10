@@ -1,3 +1,4 @@
+"""Клиент API анализа ИИ внешней системы риск-мониторинга (чтение и запись ``ai_analysis``)."""
 import asyncio
 from typing import Any, Dict
 
@@ -47,7 +48,14 @@ class RiskMonitoringAPI:
     PATCH /api/risk-monitoring/ai-analysis  {table, id, ai_analysis}
     """
 
-    def __init__(self, http_manager: HTTPClientManager, environment: str = None, rate: float = 3.0):
+    def __init__(self, http_manager: HTTPClientManager, environment: str = None, rate: float = 0.9):
+        """Настраивает адрес и токен по окружению; лимит API — 60 запросов в минуту с IP, поэтому rate ≤ 1/с безопаснее.
+
+        Args:
+            http_manager: Общий ``HTTPClientManager``.
+            environment: Окружение (``dev`` / ``stage`` / ``prod``).
+            rate: Запросов в секунду.
+        """
         cfg = Config.get_risk_api_config(environment)
         self.url = cfg["url"]
         self.headers = cfg["headers"]
@@ -56,11 +64,13 @@ class RiskMonitoringAPI:
 
     @staticmethod
     def _check_table(table: str) -> None:
+        """Проверяет, что таблица входит в закрытый список API."""
         if table not in ALLOWED_TABLES:
             raise ValueError(f"Недопустимая таблица: {table}")
 
     @async_retry(RISK_API_RETRY_CONFIG)
     async def _request(self, method: str, **kwargs) -> Dict[str, Any]:
+        """Запрос к API с лимитом частоты и повторами на 429/503/5xx (с учётом ``Retry-After``)."""
         await self.rate_limiter.acquire()
         session = self.http_manager.get_session()
 
@@ -85,6 +95,7 @@ class RiskMonitoringAPI:
             return data
 
     async def get_record(self, table: str, record_id: int) -> Dict[str, Any]:
+        """Полная запись таблицы по id (``GET /api/risk-monitoring/ai-analysis``)."""
         self._check_table(table)
         data = await self._request("GET", params={"table": table, "id": record_id})
         return data["data"]

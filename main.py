@@ -33,6 +33,7 @@ from src.scoring import scoring
 from src.subject_detector import SubjectDetector
 from src.violations_reporter import ViolationsReporter
 from tasks import evaluate_documents_task, generate_summary_opinion_task
+from risk_monitoring.router import router as risk_monitoring_router
 
 # Глобальный экземпляр (настраивается под вашу нагрузку)
 http_manager = HTTPClientManager(timeout=120.0, limit=50)
@@ -60,6 +61,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(APIKeyMiddleware)
+
+# Риск-мониторинг: новые эндпоинты /risk-monitoring/* (существующие эндпоинты не меняются)
+app.include_router(risk_monitoring_router)
 
 # logging.basicConfig(level=logging.INFO)
 # logger = logging.getLogger(__name__)

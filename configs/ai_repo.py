@@ -9,6 +9,11 @@ from configs.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _load(v: Any) -> Any:
+    """asyncpg без кодека возвращает jsonb строкой."""
+    return json.loads(v) if isinstance(v, str) else v
+
+
 def _vec(v: Sequence[float]) -> str:
     """Формат pgvector: '[0.1,0.2,...]' (приводится к vector через $n::vector)."""
     return "[" + ",".join(f"{float(x):.6f}" for x in v) + "]"
@@ -31,6 +36,7 @@ class AIRepo:
         self.pool: Optional[asyncpg.Pool] = None
 
     async def __aenter__(self):
+        """Создаёт пул соединений с Postgres сервиса (параметры ``DB_*``)."""
         self.pool = await asyncpg.create_pool(
             host=Config.DB_HOST,
             port=int(Config.DB_PORT),
@@ -44,18 +50,39 @@ class AIRepo:
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
+        """Закрывает пул соединений."""
         if self.pool:
             await self.pool.close()
 
     # ---------- ссылки внешний файл -> документ ----------
 
     async def get_link(self, env: str, external_file_id: int) -> Optional[asyncpg.Record]:
+        """Документ, связанный с внешним файлом ``risk_monitoring_files.id``, и хэш его содержимого.
+
+        Args:
+            env: Окружение внешней системы (dev / stage / prod) — id файлов в окружениях разные.
+            external_file_id: ``risk_monitoring_files.id``.
+
+        Returns:
+            Optional[asyncpg.Record]: ``document_id``, ``content_sha256`` или ``None``.
+        """
         return await self.pool.fetchrow(
-            "SELECT document_id FROM ai_file_links WHERE env=$1 AND external_file_id=$2",
+            """
+            SELECT l.document_id, d.content_sha256
+            FROM ai_file_links l JOIN ai_documents d ON d.id = l.document_id
+            WHERE l.env=$1 AND l.external_file_id=$2
+            """,
             env, external_file_id,
         )
 
     async def link_file(self, env: str, external_file_id: int, document_id: int) -> None:
+        """Связывает внешний файл с документом (повторная связь перезаписывается).
+
+        Args:
+            env: Окружение внешней системы.
+            external_file_id: ``risk_monitoring_files.id``.
+            document_id: ``ai_documents.id``.
+        """
         await self.pool.execute(
             """
             INSERT INTO ai_file_links (env, external_file_id, document_id)
@@ -69,12 +96,28 @@ class AIRepo:
     # ---------- документы ----------
 
     async def get_document_by_sha(self, content_sha256: str) -> Optional[asyncpg.Record]:
+        """Документ по SHA-256 содержимого файла (дедупликация одинаковых файлов).
+
+        Args:
+            content_sha256: Хэш байтов файла.
+
+        Returns:
+            Optional[asyncpg.Record]: ``id``, ``text``, ``ocr_status`` или ``None``.
+        """
         return await self.pool.fetchrow(
             "SELECT id, text, ocr_status FROM ai_documents WHERE content_sha256=$1",
             content_sha256,
         )
 
     async def get_document(self, document_id: int) -> Optional[asyncpg.Record]:
+        """Документ по id.
+
+        Args:
+            document_id: ``ai_documents.id``.
+
+        Returns:
+            Optional[asyncpg.Record]: ``id``, ``text``, ``ocr_status`` или ``None``.
+        """
         return await self.pool.fetchrow(
             "SELECT id, text, ocr_status FROM ai_documents WHERE id=$1", document_id
         )
@@ -89,6 +132,20 @@ class AIRepo:
         ocr_status: str = "done",
         ocr_error: Optional[str] = None,
     ) -> int:
+        """Создаёт или обновляет документ по хэшу содержимого.
+
+        Args:
+            content_sha256: SHA-256 байтов файла.
+            text_sha256: SHA-256 извлечённого текста (поиск точных дублей между форматами).
+            file_ext: Расширение файла.
+            size_bytes: Размер файла.
+            text: Извлечённый текст (``None``, если извлечь не удалось).
+            ocr_status: ``done`` / ``failed``.
+            ocr_error: Причина неудачи.
+
+        Returns:
+            int: ``ai_documents.id``.
+        """
         # ON CONFLICT защищает от гонки: два воркера обрабатывают один и тот же файл
         return await self.pool.fetchval(
             """
@@ -109,6 +166,7 @@ class AIRepo:
     # ---------- чанки и эмбеддинги ----------
 
     async def has_chunks(self, document_id: int, embedding_model: str) -> bool:
+        """Есть ли у документа чанки с эмбеддингами указанной модели."""
         return bool(await self.pool.fetchval(
             "SELECT 1 FROM ai_document_chunks WHERE document_id=$1 AND embedding_model=$2 LIMIT 1",
             document_id, embedding_model,
@@ -121,6 +179,14 @@ class AIRepo:
         embeddings: Sequence[Sequence[float]],
         embedding_model: str,
     ) -> None:
+        """Заменяет чанки документа для модели эмбеддингов (в одной транзакции).
+
+        Args:
+            document_id: ``ai_documents.id``.
+            chunks: Тексты чанков.
+            embeddings: Векторы в порядке чанков.
+            embedding_model: Название модели эмбеддингов.
+        """
         rows = [
             (document_id, i, chunk, _vec(emb), embedding_model)
             for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
@@ -156,18 +222,112 @@ class AIRepo:
             _vec(embedding), embedding_model, limit,
         )
 
+    async def find_similar_documents(
+        self,
+        document_id: int,
+        embedding_model: str,
+        env: str,
+        min_similarity: float = 0.85,
+        limit: int = 10,
+        per_chunk: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """
+        Похожие документы: для каждого чанка исходного документа берём ближайшие чанки
+        чужих документов, затем агрегируем по документам.
+        coverage = доля чанков исходного документа, у которых нашёлся близкий аналог.
+        """
+        rows = await self.pool.fetch(
+            """
+            WITH src AS (
+                SELECT chunk_no, embedding FROM ai_document_chunks
+                WHERE document_id = $1 AND embedding_model = $2
+            ),
+            nn AS (
+                SELECT s.chunk_no AS src_chunk, n.document_id,
+                       1 - (n.embedding <=> s.embedding) AS sim
+                FROM src s
+                CROSS JOIN LATERAL (
+                    SELECT c.document_id, c.embedding
+                    FROM ai_document_chunks c
+                    WHERE c.embedding_model = $2 AND c.document_id <> $1
+                    ORDER BY c.embedding <=> s.embedding
+                    LIMIT $6
+                ) n
+            ),
+            best AS (
+                SELECT document_id, src_chunk, MAX(sim) AS sim
+                FROM nn WHERE sim >= $3
+                GROUP BY document_id, src_chunk
+            )
+            SELECT b.document_id,
+                   COUNT(*)::int AS matched_chunks,
+                   (SELECT COUNT(*) FROM src)::int AS total_chunks,
+                   AVG(b.sim)::float AS avg_similarity,
+                   MAX(b.sim)::float AS max_similarity,
+                   (SELECT COALESCE(array_agg(l.external_file_id), '{}')
+                      FROM ai_file_links l
+                     WHERE l.document_id = b.document_id AND l.env = $5) AS external_file_ids
+            FROM best b
+            GROUP BY b.document_id
+            ORDER BY COUNT(*) DESC, AVG(b.sim) DESC
+            LIMIT $4
+            """,
+            document_id, embedding_model, min_similarity, limit, env, per_chunk,
+        )
+        result = []
+        for r in rows:
+            total = r["total_chunks"] or 1
+            result.append({
+                "document_id": r["document_id"],
+                "external_file_ids": list(r["external_file_ids"] or []),
+                "coverage": round(r["matched_chunks"] / total, 3),
+                "avg_similarity": round(r["avg_similarity"], 3),
+                "max_similarity": round(r["max_similarity"], 3),
+            })
+        return result
+
+    async def find_text_duplicates(self, document_id: int) -> List[int]:
+        """Документы с идентичным извлечённым текстом (тот же текст в pdf и docx)."""
+        rows = await self.pool.fetch(
+            """
+            SELECT d2.id FROM ai_documents d1
+            JOIN ai_documents d2 ON d2.text_sha256 = d1.text_sha256 AND d2.id <> d1.id
+            WHERE d1.id = $1 AND d1.text_sha256 IS NOT NULL
+            """,
+            document_id,
+        )
+        return [r["id"] for r in rows]
+
     # ---------- результаты анализа ----------
 
     async def get_analysis(
         self, document_id: int, analysis_type: str, prompt_version: str, model: str
-    ) -> Optional[asyncpg.Record]:
-        return await self.pool.fetchrow(
+    ) -> Optional[Dict[str, Any]]:
+        """Сохранённый результат анализа документа (кэш по типу анализа, версии промпта и модели).
+
+        Args:
+            document_id: ``ai_documents.id``.
+            analysis_type: Тип анализа (``doc_type``, ``data_extraction``, ``risk_analysis`` …).
+            prompt_version: Хэш промпта и схемы.
+            model: Модель LLM.
+
+        Returns:
+            Optional[Dict[str, Any]]: ``{"result", "compact", "confidence"}`` или ``None``.
+        """
+        row = await self.pool.fetchrow(
             """
             SELECT result, compact, confidence FROM ai_document_analysis
             WHERE document_id=$1 AND analysis_type=$2 AND prompt_version=$3 AND model=$4
             """,
             document_id, analysis_type, prompt_version, model,
         )
+        if not row:
+            return None
+        return {
+            "result": _load(row["result"]),
+            "compact": _load(row["compact"]),
+            "confidence": row["confidence"],
+        }
 
     async def save_analysis(
         self,
@@ -179,6 +339,17 @@ class AIRepo:
         compact: Dict[str, Any],
         confidence: Optional[float],
     ) -> None:
+        """Сохраняет результат анализа (повторное сохранение перезаписывает).
+
+        Args:
+            document_id: ``ai_documents.id``.
+            analysis_type: Тип анализа.
+            prompt_version: Хэш промпта и схемы.
+            model: Модель LLM.
+            result: Полный результат (с evidence).
+            compact: Компактный результат для внешней БД.
+            confidence: Уверенность (если есть).
+        """
         await self.pool.execute(
             """
             INSERT INTO ai_document_analysis
