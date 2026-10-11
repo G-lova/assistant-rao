@@ -18,6 +18,7 @@ SELECT
     JSON_UNQUOTE(JSON_EXTRACT(x.ai_analysis, '$.pipeline.status')) AS rm_status,
     JSON_EXTRACT(x.ai_analysis, '$.pipeline.attempt') AS rm_attempt,
     c.number AS card_number,
+    c.fz_type AS card_fz,
     c.risk_monitoring_organisation_id AS organisation_id
 FROM risk_monitoring_eis_xml_sources x
 JOIN risk_monitoring_eis_archives a ON a.id = x.eis_archive_id

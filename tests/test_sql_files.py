@@ -17,7 +17,7 @@ class SqlFilesTests(unittest.TestCase):
         self.assertEqual(Config.SQL_QUERIES_PATH.rstrip("/"), "queries")
 
     def test_referenced_sql_files_exist(self):
-        """Каждое имя ``*.sql`` из кода (кроме миграций) существует в ``queries/``."""
+        """Каждое имя ``*.sql`` из кода (кроме миграций) существует в ``queries/`` или ``queries/rm/`` (риск-мониторинг)."""
         files = subprocess.run(["git", "ls-files", "*.py"], cwd=ROOT, capture_output=True, text=True).stdout.split()
         names = set()
         for f in files:
@@ -27,7 +27,8 @@ class SqlFilesTests(unittest.TestCase):
         names -= {"get_experts.sql", "init.sql"}  # примеры в docstring
         self.assertTrue(names, "в коде не найдено ссылок на SQL-файлы")
         for name in names:
-            self.assertTrue((ROOT / "queries" / name).exists(), f"нет queries/{name}")
+            self.assertTrue((ROOT / "queries" / name).exists() or (ROOT / "queries" / "rm" / name).exists(),
+                            f"нет queries/{name} и queries/rm/{name}")
 
     def test_no_sql_left_in_configs(self):
         """В ``configs/`` не осталось SQL-файлов."""

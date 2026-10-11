@@ -242,6 +242,7 @@ class XmlEventAnalyzer:
                 previous = None
 
         facts = xml_events.extract_facts(tag, body)
+        fz = risk_catalog.normalize_fz(row.get("fz")) or risk_catalog.normalize_fz(row.get("card_fz"))
         changes = xml_events.diff(xml_events.strip_ignored(prev_body), xml_events.strip_ignored(body)) if prev_body else []
         atts = xml_events.attachments(body)
         doc_changes = xml_events.document_changes(xml_events.attachments(prev_body) if prev_body else None, atts)
@@ -258,6 +259,7 @@ class XmlEventAnalyzer:
         llm = None
         if self.event_analyzer and self._needs_llm(event, changes):
             payload = xml_events.build_llm_payload(event, facts, changes, doc_changes, files)
+            payload["law"] = f"{fz}-ФЗ" if fz else "закон не определён"
             llm = await self.event_analyzer.analyze(payload, row.get("entry_name") or str(xml_id))
 
         pipeline = passport.pipeline_block(STAGE, "completed", self.model, self.versions,
@@ -267,7 +269,7 @@ class XmlEventAnalyzer:
                                            files=files, link=link, rule_risk_list=rules, llm=llm,
                                            previous={"id": previous["id"], "eis_version": _int(previous.get("eis_version"))} if previous else None,
                                            pipeline=pipeline, model=self.model if llm else None,
-                                           all_files=all_files)
+                                           all_files=all_files, fz=fz)
         response = {"xml_id": xml_id, "status": "done", "pushed": False, "ai_analysis": ai}
         if self.push_results:
             try:

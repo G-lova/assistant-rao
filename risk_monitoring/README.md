@@ -32,7 +32,7 @@
 | `resume`, `confidence` | AI-заключение (5–10 предложений) и уверенность (0–1) |
 | `raw_data` | Извлечённые данные с `evidence` (`fragment`, `section`, `page`, `confidence`): `document_name`, `summary`, `contract_number`, `dates`, `finances`, `organizations`, `law_references`, `procurement_subject`, `items`, `planned_timeline`, `execution_location`, `other_data`, … |
 | `total_doc_risk` | Интегральный риск 0–1 = `1 − Π(1 − level × confidence)` по рискам документа |
-| `risks[]` | `rule_id`, `title`, `description`, `level` (0–1), `confidence` (0–1), `law`, `evidence[]` (`fragment`, `section`, `page`, `confidence`, `quote_verified`), `verification_needed[]`, а также `category`, `severity`, `sources[]` (`ai_file` / `version_diff`). Один код — один риск: фрагменты одного кода объединены, потому что во внешней БД уникальность по `(file_id, rule_id)` |
+| `risks[]` | `rule_id`, `title`, `description`, `level` (0–1), `confidence` (0–1), `law` (по закону закупки, см. «Каталог»), `evidence[]` (`fragment`, `section`, `page`, `confidence`, `quote_verified`), `verification_needed[]`, а также `category`, `kind`, `indicator`, `fz`, `law_model`, `severity`, `sources[]` (`ai_file` / `version_diff`). Один код — один риск: фрагменты одного кода объединены, потому что во внешней БД уникальность по `(file_id, rule_id)` |
 | `similar_doc_ids[]` | `id` (id файла), `similarity`, `coverage`, `near_duplicate`, `exact_text_duplicate` |
 
 Расширение по концепции (интерфейс пока не показывает, в `unknown_keys`):
@@ -69,11 +69,55 @@
 
 ## Каталог рисков и событий
 
-`risk_monitoring/risk_catalog.py` — единственный источник кодов. Промпты и JSON-схемы получают список кодов оттуда.
+Каталог рисков — `rm-catalog-2`, 93 кода, полная таблица в `docs/risk_catalog.md`:
+- каждому из 41 показателя внешней системы (`pz_p1 … pc_n6`) соответствует ровно один код, сами показатели не меняются;
+- риски концепции без показателя — отдельные коды;
+- у каждого риска две нормы: по 44-ФЗ и по 223-ФЗ.
 
-⚠️ Коды `DOC-001…DOC-010` совпадают с новым промптом `risk_analysis_prompt.txt` (DOC-001 — товарный знак). В старом `doc_risks_detector.py` те же коды значили другое (DOC-001 — «Неполнота документа»). Строки `risk_monitoring_document_risks`, созданные старым детектором, нужно пересоздать.
+Документ — источник истины. Из него скрипт `python -m scripts.build_risk_catalog` собирает `risk_monitoring/config/risk_catalog.json`, который читают `risk_monitoring/risk_catalog.py` и, при необходимости, PHP. Тест `test_catalog_json_matches_document` следит, чтобы JSON не отставал от документа. После правки таблицы:
 
-Коды событий по концепции (гл. 11.4–11.5), но контрактные события имеют префикс `CON-`, чтобы не совпадать с кодами рисков `CTR-*`.
+```bash
+python -m scripts.build_risk_catalog          # пересобрать JSON
+python -m scripts.build_risk_catalog --check  # проверить, что JSON актуален
+```
+
+Промпты и JSON-схемы получают списки разрешённых кодов из `risk_catalog.py`:
+- `DOCUMENT_RISK_CODES` — анализ файлов;
+- `EVENT_RISK_CODES` — XML-события;
+- `VERSION_RISK_CODES` — сравнение редакций.
+
+**Поля риска, которые задаёт каталог** (во всех `risks[]`):
+- `law` — норма по закону закупки: `fz_type` карточки для файлов, `fz` архива или карточки для XML. Например, «Федеральный закон № 223-ФЗ: ч. 25 ст. 3.2; …». Если закон не определён, указываются нормы обоих законов через « | ». Норма модели, если она отличается от каталожной, сохраняется в `law_model`;
+- `kind` — `risk` / `violation` / `ai`;
+- `indicator` — показатель внешней системы (`pz_p1` …) или `null`;
+- `fz` — 44 / 223 / `null`.
+
+Риски, неприменимые к закону закупки, отбрасываются. Например, PROC-007 (ст. 111 44-ФЗ) для 223-ФЗ.
+
+**Детерминированные риски XML-событий:**
+
+| Событие | Код |
+|---|---|
+| Изменение НМЦК ≥ 10 % | FIN-013 |
+| Изменение цены контракта | CTR-004 |
+| Изменение сроков | CTR-005 |
+| Доп. соглашение по коду основания | 011 → CTR-004, 012 → CTR-008, 021 → CTR-005, 051 → CTR-007, иное → CTR-014 |
+| Претензии | CTR-019 |
+| Расторжение или односторонний отказ | CTR-020 |
+| Уклонение | PROC-009 |
+| Нет заявок | PROC-001 |
+| Отзыв заявки | PROC-005 |
+| Отмена | PROC-002 |
+| Жалобы | PROC-008 |
+
+**Сравнение редакций документа:**
+- DOC-011 — содержательное изменение, низкий уровень;
+- DOC-012 — изменение в сторону риска;
+- AI-004 — текст почти не изменился (схожесть ≥ 0,9), а смысл изменился существенно.
+
+⚠️ Старый `risk_monitoring/doc_risks_detector.py` (через `FileProcessor` его использует существующий `/get-ai-analysis/file`) работает со старыми кодами концепции, и их значения не совпадают с `rm-catalog-2`. Результаты этого эндпоинта нельзя раскладывать в `risk_monitoring_document_risks` вместе с новыми.
+
+Коды событий — по концепции (гл. 11.4–11.5), но контрактные события имеют префикс `CON-`, чтобы не совпадать с кодами рисков `CTR-*`.
 
 ## Покрытие концепции
 

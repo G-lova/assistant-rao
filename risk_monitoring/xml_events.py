@@ -515,14 +515,31 @@ def classify(tag: str, version: Optional[int], has_previous: bool, changes: Sequ
 
 def _risk(code: str, description: str, level: float, evidence: List[Dict[str, Any]],
           verification: List[str]) -> Dict[str, Any]:
-    """Риск детерминированного правила во внешнем формате."""
+    """Риск детерминированного правила во внешнем формате (норма подставляется каталогом по закону закупки)."""
     return {"rule_id": code, "title": risk_catalog.title(code), "description": description, "level": level,
-            "confidence": 1.0, "law": risk_catalog.default_law(code), "evidence": evidence,
-            "verification_needed": verification, "source": "rule"}
+            "confidence": 1.0, "law": None, "evidence": evidence, "verification_needed": verification,
+            "source": "rule"}
+
+
+# Код основания изменения контракта (ЕИС) → риск каталога
+MODIFICATION_REASON_RISKS = {
+    "011": "CTR-004",  # изменение цены
+    "012": "CTR-008",  # изменение объёма / количества
+    "021": "CTR-005",  # изменение срока исполнения
+    "051": "CTR-007",  # замена ТРУ на ТРУ с улучшенными характеристиками
+}
+CLAIM_TAGS = {"claimsCorrespondenceNotice", "parClaimsCorrespondenceNotice"}
+APPLICATION_CANCEL_TAGS = {"epNoticeApplicationCancel"}
 
 
 def rule_risks(event: Dict[str, Any], changes: Sequence[Dict[str, Any]], facts: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Риски, которые выставляет код (без LLM) по типу события и изменениям.
+
+    Коды — по каталогу ``rm-catalog-2``: изменение НМЦК → FIN-013; цена контракта → CTR-004;
+    сроки → CTR-005; доп. соглашение — по коду основания (011 → CTR-004, 012 → CTR-008,
+    021 → CTR-005, 051 → CTR-007, иное → CTR-014); претензии → CTR-019; расторжение и
+    односторонний отказ → CTR-020; уклонение → PROC-009; нет заявок → PROC-001; отзыв заявки →
+    PROC-005; отмена → PROC-002; жалобы → PROC-008.
 
     Args:
         event: Результат :func:`classify`.
@@ -534,48 +551,60 @@ def rule_risks(event: Dict[str, Any], changes: Sequence[Dict[str, Any]], facts: 
     """
     risks: List[Dict[str, Any]] = []
     codes = {event["code"]} | {s["code"] for s in event.get("subtypes", [])}
+    tag = event.get("xml_tag")
+    tag_ev = [{"xml_tag": tag}]
     price_changes = [c for c in changes if c.get("label") in ("НМЦК", "Цена", "Цена, руб.") and c.get("delta_pct") is not None]
     ev = [{"path": c["path"], "before": c["old"], "after": c["new"], "delta_pct": c.get("delta_pct")} for c in price_changes[:3]]
 
     if "PUR-003" in codes and price_changes:
         d = max(abs(c["delta_pct"]) for c in price_changes)
         if d >= 10:
-            risks.append(_risk("FIN-007", f"НМЦК изменена на {d:.1f} %", 0.8 if d >= 25 else 0.6, ev,
+            risks.append(_risk("FIN-013", f"НМЦК изменена на {d:.1f} %", 0.8 if d >= 25 else 0.6, ev,
                                ["Проверить обоснование изменения НМЦК и обновлённое обоснование цены"]))
     if "CON-002" in codes and price_changes:
         d = max(abs(c["delta_pct"]) for c in price_changes)
         reason = facts.get("modification_reason")
-        risks.append(_risk("CTR-001", f"Цена контракта изменена на {d:.1f} %" + (f" (основание: {reason})" if reason else ""),
+        risks.append(_risk("CTR-004", f"Цена контракта изменена на {d:.1f} %" + (f" (основание: {reason})" if reason else ""),
                            0.8 if d >= 10 else 0.5, ev,
-                           ["Проверить основание изменения цены по ст. 95 44-ФЗ и наличие доп. соглашения"]))
+                           ["Проверить законность основания изменения цены и наличие доп. соглашения"]))
     if "CON-003" in codes:
-        risks.append(_risk("CTR-003", "Изменены сроки исполнения контракта", 0.5,
+        risks.append(_risk("CTR-005", "Изменены сроки исполнения контракта", 0.5,
                            [{"path": c["path"], "before": c["old"], "after": c["new"]} for c in changes
                             if re.search(r"date|period|stage", c["path"], re.I)][:3],
                            ["Проверить основание переноса сроков и применение неустоек"]))
     if "CON-004" in codes:
-        code = str(facts.get("modification_reason_code") or "")
-        target = "CTR-002" if code in ("012", "051") else "CTR-005" if code == "099" else "CTR-004"
-        risks.append(_risk(target, f"Дополнительное соглашение к контракту" + (f", основание {code}: {facts.get('modification_reason') or ''}" if code else ""),
-                           0.5, [{"modification_reason_code": code or None, "modification_reason": facts.get("modification_reason")}],
-                           ["Проверить соответствие основания изменения ст. 95 44-ФЗ"]))
-    if event["code"] in ("CON-007", "CON-009"):
-        risks.append(_risk("CTR-009", event["title"] + (f": {facts.get('termination_reason')}" if facts.get("termination_reason") else ""),
+        reason_code = str(facts.get("modification_reason_code") or "")
+        target = MODIFICATION_REASON_RISKS.get(reason_code, "CTR-014")
+        text = "Дополнительное соглашение к контракту" + (
+            f", основание {reason_code}: {facts.get('modification_reason') or ''}" if reason_code else "")
+        risks.append(_risk(target, text, 0.5,
+                           [{"modification_reason_code": reason_code or None,
+                             "modification_reason": facts.get("modification_reason")}],
+                           ["Проверить законность основания изменения и его отражение в доп. соглашении"]))
+    if event["code"] == "CON-009" and tag in CLAIM_TAGS:
+        risks.append(_risk("CTR-019", event["title"], 0.6, tag_ev,
+                           ["Изучить предмет претензии и применение мер ответственности"]))
+    elif event["code"] in ("CON-007", "CON-009"):
+        risks.append(_risk("CTR-020", event["title"] + (f": {facts.get('termination_reason')}" if facts.get("termination_reason") else ""),
                            0.8, [{"termination_reason_code": facts.get("termination_reason_code"),
                                   "termination_reason": facts.get("termination_reason"),
                                   "termination_date": facts.get("termination_date")}],
-                           ["Проверить причины расторжения или отказа и включение поставщика в РНП"]))
-    if event["code"] == "PUR-013" or event["code"] == "CON-012":
-        risks.append(_risk("PROC-007", event["title"], 0.7, [{"xml_tag": event["xml_tag"]}],
+                           ["Проверить причины расторжения или отказа, возврат аванса и включение поставщика в РНП"]))
+    if event["code"] in ("PUR-013", "CON-012"):
+        risks.append(_risk("PROC-009", event["title"], 0.7, tag_ev,
                            ["Проверить, кому перешло право заключения контракта и цену второго участника"]))
     if event["code"] == "PUR-012":
-        risks.append(_risk("PROC-001", event["title"], 0.6, [{"xml_tag": event["xml_tag"]}],
-                           ["Проверить, не ограничивала ли документация круг участников"]))
+        if tag in APPLICATION_CANCEL_TAGS:
+            risks.append(_risk("PROC-005", event["title"], 0.4, tag_ev,
+                               ["Проверить причины отзыва заявок и число оставшихся участников"]))
+        else:
+            risks.append(_risk("PROC-001", event["title"], 0.6, tag_ev,
+                               ["Проверить, не ограничивала ли документация круг участников"]))
     if event["code"] in ("PUR-008", "PUR-016"):
-        risks.append(_risk("PROC-002", event["title"], 0.5, [{"xml_tag": event["xml_tag"]}],
+        risks.append(_risk("PROC-002", event["title"], 0.5, tag_ev,
                            ["Проверить причины отмены и наличие повторной закупки"]))
     if event["code"] == "CMP-001":
-        risks.append(_risk("PROC-006", event["title"], 0.6, [{"xml_tag": event["xml_tag"]}],
+        risks.append(_risk("PROC-008", event["title"], 0.6, tag_ev,
                            ["Изучить доводы жалобы и решение контрольного органа"]))
     return risks
 
@@ -677,7 +706,7 @@ def to_external_event_risks(llm_risks: Sequence[Dict[str, Any]]) -> List[Dict[st
         out.append({"rule_id": code, "title": r.get("title") or risk_catalog.title(code),
                     "description": r.get("description") or "", "level": clamp01(r.get("level")) or 0.5,
                     "confidence": clamp01(r.get("confidence")) or 0.0,
-                    "law": r.get("law") or risk_catalog.default_law(code), "evidence": [],
+                    "law": r.get("law"), "evidence": [],
                     "verification_needed": list(r.get("verification_needed") or []), "source": "ai_event"})
     return out
 
@@ -686,7 +715,7 @@ def build_xml_analysis(*, event: Dict[str, Any], facts: Dict[str, Any], changes:
                        doc_changes: Dict[str, List], files: Sequence[Dict[str, Any]], link: Optional[Dict[str, Any]],
                        rule_risk_list: Sequence[Dict[str, Any]], llm: Optional[Dict[str, Any]],
                        previous: Optional[Dict[str, Any]], pipeline: Dict[str, Any], model: Optional[str],
-                       all_files: Optional[Sequence[Dict[str, Any]]] = None) -> Dict[str, Any]:
+                       all_files: Optional[Sequence[Dict[str, Any]]] = None, fz: Any = None) -> Dict[str, Any]:
     """Собирает ``ai_analysis`` XML-документа (событие ЕИС).
 
     Args:
@@ -702,13 +731,14 @@ def build_xml_analysis(*, event: Dict[str, Any], facts: Dict[str, Any], changes:
         pipeline: Блок ``pipeline``.
         model: Модель LLM.
         all_files: Файлы текущей и предыдущей версий (для id заменённых и удалённых вложений).
+        fz: Закон закупки (44 / 223) — для норм и применимости рисков.
 
     Returns:
         Dict[str, Any]: ``ai_analysis`` для ``PATCH /api/risk-monitoring/ai-analysis``.
     """
     llm = llm or {}
     lookup = list(all_files) if all_files is not None else list(files)
-    risks = merge_risks(list(rule_risk_list or []), to_external_event_risks(llm.get("risks") or []))
+    risks = merge_risks(list(rule_risk_list or []), to_external_event_risks(llm.get("risks") or []), fz=fz)
     event_out = dict(event)
     event_out["event_at"] = facts.get("published_at") or facts.get("sign_date")
     event_out["previous_xml_id"] = int(previous["id"]) if previous else None
@@ -737,6 +767,7 @@ def build_xml_analysis(*, event: Dict[str, Any], facts: Dict[str, Any], changes:
         "status": "completed",
         "event": event_out,
         "facts": facts,
+        "fz": risk_catalog.normalize_fz(fz),
         "changes": list(changes)[:MAX_CHANGES_STORED],
         "changes_total": len(changes),
         "changes_assessment": llm.get("changes") or [],

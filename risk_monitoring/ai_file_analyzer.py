@@ -29,7 +29,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from configs.config import Config
 from configs.logger import get_logger
-from risk_monitoring import passport, rm_sql, version_diff
+from risk_monitoring import passport, risk_catalog, rm_sql, version_diff
 from risk_monitoring.llm_json import prompt_version as _hash_version
 
 logger = get_logger(__name__)
@@ -316,8 +316,10 @@ class AIFileAnalyzer:
 
         profile = await self._cached(document_id, "document_profile",
                                      lambda: self.profiler.profile(text, file_name, type_decode, summary, purchase))
+        fz = risk_catalog.normalize_fz(row.get("fz_type"))
         risk_context = {"detected_type": type_info.get("detected_type"), "type_decode": type_decode,
-                        "summary": summary, "purchase": purchase}
+                        "summary": summary, "purchase": purchase,
+                        "law": f"{fz}-ФЗ" if fz else "закон не определён"}
         risk = await self._cached(document_id, "risk_analysis",
                                   lambda: self.risk_analyzer.analyze(text, file_name, risk_context),
                                   compact=self.risk_analyzer.to_compact,
@@ -485,7 +487,7 @@ class AIFileAnalyzer:
                            "changes": llm.get("changes") or []})
         else:
             result["fragments"] = diff["fragments"][:10]
-        return result, version_diff.version_risks(llm, prev_id)
+        return result, version_diff.version_risks(llm, prev_id, diff.get("similarity"))
 
     # --------------------------------------------------------------- эмбеддинги
 

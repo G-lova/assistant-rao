@@ -24,6 +24,21 @@ def compact_risk(code="DOC-002", severity="high", fragment="модель X-100",
 class RisksTests(unittest.TestCase):
     """Внешний формат рисков, объединение, интегральный балл."""
 
+    def test_law_from_catalog_by_fz(self):
+        """Норма — из каталога по закону закупки; иная норма модели сохраняется в law_model; вид и показатель из каталога."""
+        out = passport.to_external_risks([compact_risk(code="FIN-004", law="ст. 44 44-ФЗ")], fz=223)
+        self.assertTrue(out[0]["law"].startswith("Федеральный закон № 223-ФЗ: ч. 25 ст. 3.2"))
+        self.assertEqual(out[0]["law_model"], "ст. 44 44-ФЗ")
+        self.assertEqual(out[0]["indicator"], "pz_p1")
+        self.assertEqual(out[0]["kind"], "risk")
+        self.assertEqual(out[0]["fz"], 223)
+
+    def test_not_applicable_dropped(self):
+        """Риск, неприменимый к 223-ФЗ (ст. 111), отбрасывается."""
+        risks = [{"rule_id": "PROC-007", "level": 0.5, "confidence": 1}]
+        self.assertEqual(passport.merge_risks(risks, fz=223), [])
+        self.assertEqual(len(passport.merge_risks(risks, fz=44)), 1)
+
     def test_external_format_fields(self):
         """Риск содержит все поля, которые читает паспорт; норма по умолчанию из каталога."""
         out = passport.to_external_risks([compact_risk()])
@@ -152,15 +167,17 @@ class VersionDiffTests(unittest.TestCase):
         self.assertGreater(d["similarity"], 0.3)
 
     def test_version_risk(self):
-        """Риск DOC-011 — только если модель отметила изменения, повышающие риск."""
+        """DOC-011 — содержательное изменение; DOC-012 — изменение в сторону риска; AI-004 — смысл при почти том же тексте."""
         llm = {"risk_relevant": True, "summary": "Появился производитель",
-               "changes": [{"risk_effect": "increases", "significance": 0.8, "subject": "производитель",
+               "changes": [{"type": "modified", "risk_effect": "increases", "significance": 0.8, "subject": "производитель",
                             "before": "Поставка оборудования", "after": "Поставка оборудования производителя XXX"}]}
-        risks = version_diff.version_risks(llm, 10)
-        self.assertEqual(risks[0]["rule_id"], "DOC-011")
-        self.assertEqual(risks[0]["level"], 0.8)
-        self.assertEqual(risks[0]["evidence"][0]["previous_file_id"], 10)
-        self.assertEqual(version_diff.version_risks({"risk_relevant": False}, 10), [])
+        codes = {r["rule_id"]: r for r in version_diff.version_risks(llm, 10, similarity=0.95)}
+        self.assertEqual(set(codes), {"DOC-011", "DOC-012", "AI-004"})
+        self.assertEqual(codes["DOC-012"]["level"], 0.8)
+        self.assertEqual(codes["DOC-012"]["evidence"][0]["previous_file_id"], 10)
+        self.assertEqual({r["rule_id"] for r in version_diff.version_risks(llm, 10, similarity=0.4)}, {"DOC-011", "DOC-012"})
+        editorial = {"risk_relevant": False, "changes": [{"type": "editorial", "risk_effect": "neutral", "significance": 0.05}]}
+        self.assertEqual(version_diff.version_risks(editorial, 10), [])
 
 
 class HelpersTests(unittest.TestCase):

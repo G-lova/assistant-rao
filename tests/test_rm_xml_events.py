@@ -97,17 +97,17 @@ class ClassifyTests(unittest.TestCase):
         self.assertFalse(event["previous_missing"])
 
     def test_nmck_risk_threshold(self):
-        """Риск FIN-007 — только при изменении НМЦК от 10 %."""
+        """Риск FIN-013 — только при изменении НМЦК от 10 %."""
         changes = [{"path": "a.maxPrice", "label": "НМЦК", "old": "100", "new": "125", "change": "modified", "delta_pct": 25.0}]
         event = {"code": "PUR-003", "subtypes": [], "title": "x", "xml_tag": "epNotificationEF2020"}
         risks = xml_events.rule_risks(event, changes, {})
-        self.assertEqual([r["rule_id"] for r in risks], ["FIN-007"])
+        self.assertEqual([r["rule_id"] for r in risks], ["FIN-013"])
         self.assertEqual(risks[0]["level"], 0.8)
         small = [dict(changes[0], delta_pct=5.0)]
         self.assertEqual(xml_events.rule_risks(event, small, {}), [])
 
     def test_contract_modification(self):
-        """Новая версия контракта с доп. соглашением: подтипы цены и сроков, риски CTR-001/CTR-003/CTR-004."""
+        """Новая версия контракта с доп. соглашением (код 011): подтипы цены и сроков, риски CTR-004 и CTR-005."""
         tag, _, v0 = load("contract_v0.xml")
         _, _, v1 = load("contract_v1.xml")
         facts = xml_events.extract_facts(tag, v1)
@@ -117,7 +117,7 @@ class ClassifyTests(unittest.TestCase):
         codes = {event["code"]} | {s["code"] for s in event["subtypes"]}
         self.assertTrue({"CON-002", "CON-003", "CON-004"} <= codes, codes)
         risk_codes = {r["rule_id"] for r in xml_events.rule_risks(event, changes, facts)}
-        self.assertTrue({"CTR-001", "CTR-003", "CTR-004"} <= risk_codes, risk_codes)
+        self.assertEqual(risk_codes, {"CTR-004", "CTR-005"})
 
     def test_contract_first_version(self):
         """Контракт версии 0 — «Заключён контракт», без подтипов."""
@@ -127,13 +127,27 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(event["subtypes"], [])
 
     def test_termination(self):
-        """Сведения об исполнении с расторжением — «Расторжение контракта», критично, риск CTR-009."""
+        """Сведения об исполнении с расторжением — «Расторжение контракта», критично, риск CTR-020."""
         tag, _, body = load("procedure_term.xml")
         facts = xml_events.extract_facts(tag, body)
         event = xml_events.classify(tag, 0, False, [], facts)
         self.assertEqual(event["code"], "CON-007")
         self.assertEqual(event["importance"], "critical")
-        self.assertEqual([r["rule_id"] for r in xml_events.rule_risks(event, [], facts)], ["CTR-009"])
+        self.assertEqual([r["rule_id"] for r in xml_events.rule_risks(event, [], facts)], ["CTR-020"])
+
+    def test_modification_reason_codes(self):
+        """Доп. соглашение: код основания → риск каталога; неизвестный код → CTR-014."""
+        event = {"code": "CON-008", "subtypes": [{"code": "CON-004"}], "title": "x", "xml_tag": "contract"}
+        for reason, code in (("012", "CTR-008"), ("021", "CTR-005"), ("051", "CTR-007"), ("099", "CTR-014")):
+            got = [r["rule_id"] for r in xml_events.rule_risks(event, [], {"modification_reason_code": reason})]
+            self.assertEqual(got, [code], reason)
+
+    def test_claims_vs_refusal(self):
+        """Претензионная переписка — CTR-019, односторонний отказ — CTR-020."""
+        claim = {"code": "CON-009", "subtypes": [], "title": "x", "xml_tag": "claimsCorrespondenceNotice"}
+        refusal = dict(claim, xml_tag="contractProcedureUnilateralRefusal")
+        self.assertEqual([r["rule_id"] for r in xml_events.rule_risks(claim, [], {})], ["CTR-019"])
+        self.assertEqual([r["rule_id"] for r in xml_events.rule_risks(refusal, [], {})], ["CTR-020"])
 
     def test_previous_missing(self):
         """Версия больше 0 без предыдущей версии в БД — помечается ``previous_missing``."""
@@ -234,10 +248,10 @@ class AnalysisTests(unittest.TestCase):
     def test_llm_risks_filtered_by_catalog(self):
         """Риски модели вне каталога отбрасываются, уровни приводятся к 0–1."""
         out = xml_events.to_external_event_risks([
-            {"rule_id": "CTR-001", "level": 70, "confidence": 0.9, "description": "d"},
+            {"rule_id": "CTR-004", "level": 70, "confidence": 0.9, "description": "d"},
             {"rule_id": "XXX-1", "level": 0.5, "confidence": 0.9},
         ])
-        self.assertEqual([r["rule_id"] for r in out], ["CTR-001"])
+        self.assertEqual([r["rule_id"] for r in out], ["CTR-004"])
         self.assertEqual(out[0]["level"], 0.7)
 
 
@@ -254,6 +268,32 @@ class CatalogTests(unittest.TestCase):
     def test_event_and_risk_codes_do_not_collide(self):
         """Коды событий не совпадают с кодами рисков (в концепции оба набора называются CTR-*)."""
         self.assertFalse(set(risk_catalog.EVENTS) & set(risk_catalog.RISKS))
+
+    def test_catalog_json_matches_document(self):
+        """``config/risk_catalog.json`` собран из актуального ``docs/risk_catalog.md``."""
+        from scripts import build_risk_catalog as b
+        built = b.build()
+        self.assertEqual(built["version"], risk_catalog.CATALOG_VERSION)
+        self.assertEqual([r["code"] for r in built["risks"]], list(risk_catalog.RISKS))
+        self.assertEqual(built["risks"], list(risk_catalog.RISKS.values()))
+
+    def test_every_indicator_mapped_once(self):
+        """Все 41 показатель внешней системы привязаны ровно к одному коду."""
+        self.assertEqual(len(risk_catalog.INDICATORS), 41)
+        self.assertEqual(risk_catalog.INDICATORS["pz_p1"], "FIN-004")
+        self.assertEqual(risk_catalog.INDICATORS["ic_n5"], "CTR-013")
+        self.assertEqual(risk_catalog.INDICATORS["pc_n6"], "DATA-001")
+
+    def test_law_by_fz(self):
+        """Норма выбирается по закону закупки; без закона — обе; ст. 111 к 223-ФЗ не применяется."""
+        self.assertEqual(risk_catalog.default_law("FIN-003", 44), "Федеральный закон № 44-ФЗ: ст. 37")
+        self.assertIn("223-ФЗ: положение о закупке", risk_catalog.default_law("FIN-003", "223"))
+        both = risk_catalog.default_law("DOC-002", None)
+        self.assertIn("44-ФЗ: п. 1 ч. 1 ст. 33", both)
+        self.assertIn("223-ФЗ: п. 3 ч. 6.1 ст. 3", both)
+        self.assertFalse(risk_catalog.applicable("PROC-007", 223))
+        self.assertTrue(risk_catalog.applicable("PROC-007", 44))
+        self.assertIsNone(risk_catalog.default_law("DOC-013", 44))
 
     def test_prompt_placeholders(self):
         """Промпты и схемы содержат маркеры, которые подставляет код."""

@@ -90,7 +90,7 @@ def pipeline_block(stage: str, status: str, model: Optional[str], prompt_version
 
 # ------------------------------------------------------------------------------ риски
 
-def to_external_risks(compact_risks: Iterable[Dict[str, Any]], source: str = "ai_file") -> List[Dict[str, Any]]:
+def to_external_risks(compact_risks: Iterable[Dict[str, Any]], source: str = "ai_file", fz: Any = None) -> List[Dict[str, Any]]:
     """Переводит риски ``DocumentRiskAnalyzer.to_compact`` во внешний формат ``risks[]``.
 
     Несколько фрагментов одного кода объединяются в один риск: во внешней БД уникальность
@@ -100,6 +100,7 @@ def to_external_risks(compact_risks: Iterable[Dict[str, Any]], source: str = "ai
         compact_risks: Риски с полями ``code``, ``severity``, ``title``, ``explanation``, ``fragment``,
             ``section``, ``page``, ``confidence``, ``law``, ``verification_needed``.
         source: Источник риска (``ai_file``, ``version_diff``, ``rule``, ``ai_event``).
+        fz: Закон закупки (44 / 223) — для выбора нормы из каталога.
 
     Returns:
         List[Dict[str, Any]]: Риски во внешнем формате.
@@ -116,7 +117,7 @@ def to_external_risks(compact_risks: Iterable[Dict[str, Any]], source: str = "ai
             "description": r.get("explanation") or r.get("description") or "",
             "level": level,
             "confidence": clamp01(r.get("confidence")) or 0.0,
-            "law": r.get("law") or risk_catalog.default_law(code),
+            "law": r.get("law"),
             "evidence": [{
                 "fragment": r.get("fragment"),
                 "section": r.get("section"),
@@ -128,17 +129,46 @@ def to_external_risks(compact_risks: Iterable[Dict[str, Any]], source: str = "ai
             "severity": r.get("severity"),
             "source": source,
         })
-    return merge_risks(items)
+    return merge_risks(items, fz=fz)
 
 
-def merge_risks(*lists: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Объединяет списки рисков по ``rule_id``.
+def apply_catalog(risk: Dict[str, Any], fz: Any = None) -> Dict[str, Any]:
+    """Дополняет риск сведениями каталога: вид, показатель внешней системы, закон, норма.
+
+    Норма берётся из каталога по закону закупки (модель могла указать норму 44-ФЗ для закупки
+    по 223-ФЗ). Если в каталоге нормы нет — остаётся норма модели. Норма модели, отличная
+    от каталожной, сохраняется в ``law_model``.
+
+    Args:
+        risk: Риск во внешнем формате.
+        fz: Закон закупки (44 / 223 / ``None``).
+
+    Returns:
+        Dict[str, Any]: Тот же словарь с полями ``kind``, ``indicator``, ``fz``, ``law``.
+    """
+    code = risk.get("rule_id", "")
+    catalog_law = risk_catalog.default_law(code, fz)
+    model_law = risk.get("law")
+    if catalog_law:
+        risk["law"] = catalog_law
+        if model_law and model_law != catalog_law:
+            risk["law_model"] = model_law
+    risk["kind"] = risk_catalog.kind(code)
+    risk["indicator"] = risk_catalog.indicator(code)
+    risk["fz"] = risk_catalog.normalize_fz(fz)
+    return risk
+
+
+def merge_risks(*lists: Iterable[Dict[str, Any]], fz: Any = None) -> List[Dict[str, Any]]:
+    """Объединяет списки рисков по ``rule_id`` и дополняет их сведениями каталога.
 
     Уровень и уверенность — максимум; описания — первое непустое (остальные не теряются в evidence);
     цитаты и действия эксперта — объединение без повторов; ``sources`` — все источники риска.
+    Риски, неприменимые к закону закупки (ст. 111 44-ФЗ для 223-ФЗ), отбрасываются.
 
     Args:
         *lists: Списки рисков во внешнем формате.
+        fz: Закон закупки (44 / 223 / ``None``) — для нормы и применимости.
 
     Returns:
         List[Dict[str, Any]]: По одному риску на код, по убыванию ``level × confidence``.
@@ -159,7 +189,6 @@ def merge_risks(*lists: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 if r.get("source") and r["source"] not in cur["sources"]:
                     cur["sources"].append(r["source"])
                 cur["title"] = r.get("title") or risk_catalog.title(code)
-                cur["law"] = r.get("law") or risk_catalog.default_law(code)
                 merged[code] = cur
                 continue
             cur["level"] = max(cur.get("level") or 0, r.get("level") or 0)
@@ -177,10 +206,11 @@ def merge_risks(*lists: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
             for src in list(r.get("sources") or []) + ([r["source"]] if r.get("source") else []):
                 if src not in cur["sources"]:
                     cur["sources"].append(src)
-    out = list(merged.values())
+    out = [r for r in merged.values() if risk_catalog.applicable(r["rule_id"], fz)]
     for r in out:
         r["evidence"] = r["evidence"][:MAX_EVIDENCE_PER_RISK]
         r.pop("source", None)
+        apply_catalog(r, fz)
     out.sort(key=lambda r: (r.get("level") or 0) * (r.get("confidence") or 0), reverse=True)
     return out
 
@@ -404,7 +434,8 @@ def build_file_analysis(*, file_meta: Dict[str, Any], type_info: Optional[Dict[s
         Dict[str, Any]: ``ai_analysis`` для ``PATCH /api/risk-monitoring/ai-analysis``.
     """
     rc = risk_compact or {}
-    risks = merge_risks(to_external_risks(rc.get("risks") or [], "ai_file"), extra_risks or [])
+    fz = file_meta.get("fz_type")
+    risks = merge_risks(to_external_risks(rc.get("risks") or [], "ai_file", fz), extra_risks or [], fz=fz)
     pr = profile or {}
     raw = (extraction or {}).get("raw_data") or {}
     resume = pr.get("resume") or raw.get("summary") or rc.get("summary") or ""

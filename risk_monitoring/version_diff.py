@@ -83,42 +83,81 @@ def text_diff(old_text: str, new_text: str, max_fragments: int = MAX_FRAGMENTS) 
     }
 
 
-def version_risks(llm_diff: Optional[Dict[str, Any]], previous_file_id: Optional[int]) -> List[Dict[str, Any]]:
-    """Риски по смысловым изменениям редакции (DOC-011) во внешнем формате.
+MEANINGFUL_SIGNIFICANCE = 0.5     # порог «содержательного» изменения (DOC-011)
+SEMANTIC_SIMILARITY = 0.9         # текст почти не изменился …
+SEMANTIC_SIGNIFICANCE = 0.6       # … а смысл изменился существенно (AI-004)
 
-    Риск ставится, если LLM отметила ``risk_relevant`` и есть изменения, повышающие риск.
+
+def _evidence(changes: List[Dict[str, Any]], previous_file_id: Optional[int]) -> List[Dict[str, Any]]:
+    """Доказательная база риска изменения: было / стало, раздел, влияние (до 5 изменений)."""
+    return [{
+        "previous_file_id": previous_file_id,
+        "section": c.get("section"),
+        "before": c.get("before"),
+        "after": c.get("after"),
+        "fragment": c.get("after") or c.get("before"),
+        "impact": c.get("impact"),
+    } for c in changes[:5]]
+
+
+def _version_risk(code: str, description: str, level: float, changes: List[Dict[str, Any]],
+                  previous_file_id: Optional[int], verification: str) -> Dict[str, Any]:
+    """Риск изменения редакции во внешнем формате."""
+    return {
+        "rule_id": code,
+        "title": risk_catalog.title(code),
+        "description": description,
+        "level": round(min(1.0, max(0.3, level)), 4),
+        "confidence": 0.8,
+        "law": None,
+        "evidence": _evidence(changes, previous_file_id),
+        "verification_needed": [verification],
+        "source": "version_diff",
+    }
+
+
+def version_risks(llm_diff: Optional[Dict[str, Any]], previous_file_id: Optional[int],
+                  similarity: Optional[float] = None) -> List[Dict[str, Any]]:
+    """Риски изменения документа между редакциями (каталог ``rm-catalog-2``).
+
+    * **DOC-011** «Изменение содержания документа в новой редакции» — есть содержательные
+      (не редакционные) изменения значимостью от 0,5; уровень низкий — это информация для эксперта;
+    * **DOC-012** «Подозрительное изменение документа» — есть изменения, повышающие риск;
+    * **AI-004** «Смысловое изменение версии» — текст почти не изменился (схожесть ≥ 0,9), а смысл
+      изменился существенно и в сторону риска («поставка оборудования» → «… производителя X»).
 
     Args:
         llm_diff: Ответ ``DocumentDiffAnalyzer``.
         previous_file_id: id предыдущей версии файла (в доказательную базу).
+        similarity: Текстовая схожесть редакций (``text_diff``), 0–1.
 
     Returns:
-        List[Dict[str, Any]]: Ноль или один риск.
+        List[Dict[str, Any]]: Ноль–три риска.
     """
-    if not llm_diff or not llm_diff.get("risk_relevant"):
+    if not llm_diff:
         return []
-    worse = [c for c in llm_diff.get("changes") or [] if c.get("risk_effect") == "increases"]
-    if not worse:
-        return []
-    level = max(float(c.get("significance") or 0) for c in worse)
-    return [{
-        "rule_id": "DOC-011",
-        "title": risk_catalog.title("DOC-011"),
-        "description": llm_diff.get("summary") or "; ".join(c.get("subject", "") for c in worse),
-        "level": round(min(1.0, max(0.3, level)), 4),
-        "confidence": 0.8,
-        "law": None,
-        "evidence": [{
-            "previous_file_id": previous_file_id,
-            "section": c.get("section"),
-            "before": c.get("before"),
-            "after": c.get("after"),
-            "fragment": c.get("after") or c.get("before"),
-            "impact": c.get("impact"),
-        } for c in worse[:5]],
-        "verification_needed": ["Сравнить редакции документа и оценить обоснованность изменений"],
-        "source": "version_diff",
-    }]
+    changes = [c for c in llm_diff.get("changes") or [] if isinstance(c, dict)]
+    meaningful = [c for c in changes if c.get("type") != "editorial"
+                  and float(c.get("significance") or 0) >= MEANINGFUL_SIGNIFICANCE]
+    worse = [c for c in changes if c.get("risk_effect") == "increases"]
+    summary = llm_diff.get("summary")
+    risks: List[Dict[str, Any]] = []
+    if meaningful:
+        risks.append(_version_risk(
+            "DOC-011", summary or "; ".join(c.get("subject", "") for c in meaningful), 0.3, meaningful,
+            previous_file_id, "Сравнить редакции документа и проверить, размещены ли изменения в установленном порядке"))
+    if worse and llm_diff.get("risk_relevant", True):
+        level = max(float(c.get("significance") or 0) for c in worse)
+        risks.append(_version_risk(
+            "DOC-012", summary or "; ".join(c.get("subject", "") for c in worse), level, worse,
+            previous_file_id, "Оценить обоснованность изменений, повышающих риск"))
+        strong = [c for c in worse if float(c.get("significance") or 0) >= SEMANTIC_SIGNIFICANCE]
+        if strong and similarity is not None and similarity >= SEMANTIC_SIMILARITY:
+            risks.append(_version_risk(
+                "AI-004", f"При почти неизменном тексте (схожесть {similarity:.0%}) существенно изменился смысл: "
+                + "; ".join(c.get("subject", "") for c in strong), max(float(c.get("significance") or 0) for c in strong),
+                strong, previous_file_id, "Проверить, не меняет ли небольшая правка круг возможных участников или условия"))
+    return risks
 
 
 class DocumentDiffAnalyzer:
