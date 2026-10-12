@@ -36,7 +36,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from configs.config import Config
 from configs.logger import get_logger
-from risk_monitoring import doc_kind, passport, pdf_text, risk_catalog, rm_sql, text_quality, version_diff
+from risk_monitoring import (doc_kind, file_versions, passport, pdf_text, risk_catalog, rm_sql, text_quality,
+                             version_diff, xml_events)
 from risk_monitoring.llm_json import prompt_version as _hash_version
 
 logger = get_logger(__name__)
@@ -206,30 +207,138 @@ class AIFileAnalyzer:
         df = await self.data_fetcher.fetch_async_expertise_data(sql, bindings=bindings)
         return [{k: _none(v) for k, v in r.items()} for r in df.to_dict("records")] if not df.empty else []
 
-    async def fetch_previous_versions(self, file_ids: List[int]) -> Dict[int, Dict[str, Any]]:
-        """Предыдущие версии файлов: тот же файл той же закупки с меньшей версией XML, а для печатных
-        форм — печатная форма предыдущей версии того же XML-документа.
+    async def _query(self, name: str, head: List[Any] = (), **lists: List[Any]) -> List[Dict[str, Any]]:
+        """Выполняет запрос ``queries/rm/<name>`` и возвращает строки как словари."""
+        sql, bindings = rm_sql.render(name, head=head, **lists)
+        df = await self.data_fetcher.fetch_async_expertise_data(sql, bindings=bindings)
+        return [{k: _none(v) for k, v in r.items()} for r in df.to_dict("records")] if not df.empty else []
+
+    def _with_url(self, r: Dict[str, Any]) -> Dict[str, Any]:
+        """Добавляет ссылку для скачивания: хранилище внешней системы (``path``) или ЕИС (``source_url``)."""
+        r["url"] = f"{self.storage_path}{r['path']}" if r.get("path") else r.get("source_url")
+        return r
+
+    async def fetch_previous_versions(self, rows: List[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
+        """Предыдущие версии файлов через diff вложений XML (``file_versions``).
+
+        1. XML файла — ``xml_source_id`` или XML с тем же ``owner_number``, версией и группой, в чьих
+           вложениях есть ссылка файла.
+        2. Предыдущая версия XML — ``xml_previous.sql``.
+        3. Diff вложений: заменённый файл → его прежняя ссылка; печатная форма → печатная форма прошлого XML;
+           добавленный файл → предыдущей версии нет.
+        4. Если XML не прочитаны — запасной поиск по имени файла (``files_previous.sql``).
 
         Args:
-            file_ids: id файлов.
+            rows: Строки ``files_meta.sql``.
 
         Returns:
-            Dict[int, Dict[str, Any]]: ``current_id → строка предыдущей версии`` (максимальная версия).
+            Dict[int, Dict[str, Any]]: ``id файла → строка предыдущей версии`` с ``url``, ``match``,
+            ``previous_xml_id``.
         """
-        sql, bindings = rm_sql.render("files_previous.sql", ids=file_ids, ids2=file_ids)
-        try:
-            df = await self.data_fetcher.fetch_async_expertise_data(sql, bindings=bindings)
-        except Exception as e:  # noqa: BLE001 — без предыдущей версии анализ всё равно возможен
-            logger.warning(f"Предыдущие версии файлов не получены: {e}")
+        from risk_monitoring.xml_event_analyzer import ArchiveCache
+
+        # Первая версия XML (0) не имеет предыдущей — XML не читаем
+        rows = [r for r in rows if r.get("eis_version") is None or int(r["eis_version"]) > 0]
+        if not rows:
             return {}
-        best: Dict[int, Dict[str, Any]] = {}
-        for r in (df.to_dict("records") if not df.empty else []):
-            r = {k: _none(v) for k, v in r.items()}
-            r["url"] = f"{self.storage_path}{r['path']}" if r.get("path") else r.get("source_url")
-            cur = int(r["current_id"])
-            if cur not in best or (r.get("eis_version") or 0) > (best[cur].get("eis_version") or 0):
-                best[cur] = r
-        return best
+        result: Dict[int, Dict[str, Any]] = {}
+        resolved: set = set()
+        archives = ArchiveCache(self.parser)
+        try:
+            xml_of = await self._current_xml(rows, archives)
+            xml_ids = sorted({x["id"] for x in xml_of.values()})
+            prev_rows = await self._query("xml_previous.sql", head=[self.storage_path], ids=xml_ids) if xml_ids else []
+            prev_xml: Dict[int, Dict[str, Any]] = {}
+            for p in prev_rows:
+                cur = int(p["current_id"])
+                if cur not in prev_xml or (p.get("eis_version") or -1) > (prev_xml[cur].get("eis_version") or -1):
+                    prev_xml[cur] = p
+            refs: Dict[int, Dict[str, Any]] = {}
+            for r in rows:
+                fid = int(r["id"])
+                x = xml_of.get(fid)
+                if not x:
+                    continue
+                px = prev_xml.get(int(x["id"]))
+                try:
+                    body = x.get("body") or (await self._read_xml(archives, x))
+                    prev_body = await self._read_xml(archives, px) if px else None
+                except Exception as e:  # noqa: BLE001 — запасной путь по имени файла
+                    logger.warning(f"Файл {fid}: XML {x['id']} / предыдущий не прочитан: {e}")
+                    continue
+                ref = file_versions.previous_ref(r, body, prev_body)
+                ref["previous_xml_id"] = int(px["id"]) if px else None
+                refs[fid] = ref
+                resolved.add(fid)
+            urls = sorted({u for ref in refs.values() for u in ref.get("urls") or []})[:500]
+            pids = sorted({ref["previous_xml_id"] for ref in refs.values() if ref.get("previous_xml_id")})
+            cands = await self._query("files_by_ref.sql", urls=urls, ids=pids) if (urls or pids) else []
+            for r in rows:
+                fid = int(r["id"])
+                ref = refs.get(fid)
+                if not ref:
+                    continue
+                prev = file_versions.pick_previous(ref, r, cands, ref.get("previous_xml_id"))
+                if prev:
+                    result[fid] = self._with_url({**prev, "match": ref["match"],
+                                                  "previous_xml_id": ref.get("previous_xml_id")})
+                logger.info(f"Файл {fid}: предыдущая версия — {prev and prev['id']} ({ref['match']})")
+        except Exception as e:  # noqa: BLE001 — без предыдущей версии анализ всё равно возможен
+            logger.warning(f"Предыдущие версии файлов через XML не найдены: {type(e).__name__}: {e}")
+        finally:
+            archives.close()
+
+        rest = [int(r["id"]) for r in rows if int(r["id"]) not in resolved]
+        if rest:
+            try:
+                for p in await self._query("files_previous.sql", ids=rest):
+                    cur = int(p["current_id"])
+                    if cur not in result or (p.get("eis_version") or 0) > (result[cur].get("eis_version") or 0):
+                        result[cur] = self._with_url({**p, "match": "file_name"})
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Предыдущие версии файлов (по имени) не получены: {e}")
+        return result
+
+    async def _read_xml(self, archives: Any, x: Dict[str, Any]) -> Dict[str, Any]:
+        """Читает XML из архива и возвращает нормализованное тело."""
+        _, _, body = xml_events.parse_xml(await archives.read(x["archive_url"], x["entry_name"]))
+        return body
+
+    async def _current_xml(self, rows: List[Dict[str, Any]], archives: Any) -> Dict[int, Dict[str, Any]]:
+        """XML каждого файла: по ``xml_source_id``, иначе по ``owner_number`` с проверкой вложений.
+
+        Args:
+            rows: Файлы.
+            archives: ``ArchiveCache``.
+
+        Returns:
+            Dict[int, Dict[str, Any]]: ``id файла → строка XML`` (``id``, ``archive_url``, ``entry_name``,
+            для найденных по номеру — ``body``).
+        """
+        out: Dict[int, Dict[str, Any]] = {}
+        linked = sorted({int(r["xml_source_id"]) for r in rows if r.get("xml_source_id")})
+        if linked:
+            meta = {int(x["id"]): x for x in await self._query("xml_meta.sql", head=[self.storage_path], ids=linked)}
+            for r in rows:
+                if r.get("xml_source_id") and int(r["xml_source_id"]) in meta:
+                    out[int(r["id"])] = meta[int(r["xml_source_id"])]
+        orphans = [r for r in rows if int(r["id"]) not in out and r.get("owner_number")]
+        if not orphans:
+            return out
+        nums = sorted({str(r["owner_number"]) for r in orphans})
+        cands = await self._query("xml_by_owner.sql", head=[self.storage_path], nums=nums, nums2=nums)
+        for r in orphans:
+            own = [c for c in cands if str(r["owner_number"]) in (str(c.get("purchase_number")), str(c.get("contract_number")))]
+            for c in file_versions.choose_xml(r, own)[:5]:
+                try:
+                    body = await self._read_xml(archives, c)
+                except Exception as e:  # noqa: BLE001 — пробуем следующий кандидат
+                    logger.warning(f"Файл {r['id']}: XML {c['id']} не прочитан: {e}")
+                    continue
+                if file_versions.contains(body, r):
+                    out[int(r["id"])] = {**c, "body": body}
+                    break
+        return out
 
     async def analyze_ids(self, file_ids: List[int]) -> List[Dict[str, Any]]:
         """Анализирует файлы по id.
@@ -244,7 +353,8 @@ class AIFileAnalyzer:
         ids = list(dict.fromkeys(int(i) for i in file_ids))
         rows = await self.fetch_files_meta(ids)
         found = {int(r["id"]): r for r in rows}
-        previous = await self.fetch_previous_versions(list(found)) if found else {}
+        todo = [r for r in found.values() if self.force or r.get("rm_status") != "completed"]
+        previous = await self.fetch_previous_versions(todo) if todo else {}
         results = await asyncio.gather(*(self._guarded(found[i], previous.get(i)) for i in ids if i in found))
         missing = [{"file_id": i, "status": "not_found"} for i in ids if i not in found]
         return list(results) + missing
@@ -576,7 +686,8 @@ class AIFileAnalyzer:
             tuple: ``(version_changes, risks)``.
         """
         prev_id = int(previous["id"])
-        base = {"previous_file_id": prev_id, "previous_eis_version": previous.get("eis_version")}
+        base = {"previous_file_id": prev_id, "previous_eis_version": previous.get("eis_version"),
+                "matched_by": previous.get("match"), "previous_xml_id": previous.get("previous_xml_id")}
         if previous.get("content_sha256") and previous["content_sha256"] == sha:
             return {**base, "identical": True, "similarity": 1.0}, []
         prev_doc_id, prev_text = None, None

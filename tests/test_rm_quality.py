@@ -247,5 +247,103 @@ class PdfTextTest(unittest.TestCase):
         self.assertEqual(pdf_text.ocr_schema(proc)["required"], ["raw_text"])
 
 
+class FileVersionsTest(unittest.TestCase):
+    """``file_versions``: предыдущая версия файла по diff вложений двух версий XML."""
+
+    @staticmethod
+    def body(*files, print_url=None):
+        """Тело XML с вложениями ``(имя, ссылка)`` и печатной формой."""
+        b = {"attachmentsInfo": {"attachmentInfo": [{"fileName": n, "docDescription": n, "url": u} for n, u in files]}}
+        if print_url:
+            b["printFormInfo"] = {"url": print_url}
+        return b
+
+    def test_replaced(self):
+        """Заменённое вложение → файл со старой ссылкой."""
+        from risk_monitoring import file_versions as fv
+
+        old = self.body(("Проект контракта.docx", "https://zakupki.gov.ru/file?uid=A"), ("ТЗ.docx", "https://zakupki.gov.ru/file?uid=T"))
+        new = self.body(("Проект контракта.docx", "https://zakupki.gov.ru/file?uid=B"), ("ТЗ.docx", "https://zakupki.gov.ru/file?uid=T"))
+        cur = {"id": 20, "file_name": "Проект контракта.docx", "source_url": "http://www.zakupki.gov.ru/file?uid=B"}
+        ref = fv.previous_ref(cur, new, old)
+        self.assertEqual(ref["match"], "replaced")
+        cands = [{"id": 10, "source_url": "https://zakupki.gov.ru/file?uid=A", "xml_source_id": "5", "eis_version": "1"},
+                 {"id": 11, "source_url": "https://zakupki.gov.ru/file?uid=T", "xml_source_id": "5"}]
+        self.assertEqual(fv.pick_previous(ref, cur, cands, 5)["id"], 10)
+        self.assertEqual(fv.previous_ref({"id": 21, "file_name": "ТЗ.docx", "source_url": "https://zakupki.gov.ru/file?uid=T"},
+                                         new, old)["match"], "unchanged")
+
+    def test_added_and_print_form(self):
+        """Новое вложение — без предыдущей версии; печатная форма — печатная форма прошлого XML."""
+        from risk_monitoring import file_versions as fv
+
+        old = self.body(("ТЗ.docx", "u:T"), print_url="https://zakupki.gov.ru/epz/order/notice/printForm/view.html?regNumber=1&v=1")
+        new = self.body(("ТЗ.docx", "u:T"), ("Обоснование НМЦК.xlsx", "u:N"),
+                        print_url="https://zakupki.gov.ru/epz/order/notice/printForm/view.html?regNumber=1&v=2")
+        ref = fv.previous_ref({"id": 1, "file_name": "Обоснование НМЦК.xlsx", "source_url": "u:N"}, new, old)
+        self.assertEqual(ref["match"], "added")
+        self.assertIsNone(fv.pick_previous(ref, {"id": 1}, [{"id": 2, "source_url": "u:N"}], 5))
+        pf = {"id": 3, "file_name": "print_form_notice.html", "source_url": None}
+        ref = fv.previous_ref(pf, new, old)
+        self.assertEqual(ref["match"], "print_form")
+        prev = [{"id": 4, "file_name": "Печатная форма извещения (версия 1).html", "source_url": None, "xml_source_id": 5}]
+        self.assertEqual(fv.pick_previous(ref, pf, prev, 5)["id"], 4)
+
+    def test_choose_xml_by_owner(self):
+        """XML для файла без xml_source_id: та же версия и группа владельца."""
+        from risk_monitoring import file_versions as fv
+
+        cands = [{"id": 1, "tag": "epNotificationEF2020", "eis_version": 1},
+                 {"id": 2, "tag": "epNotificationEF2020", "eis_version": 2},
+                 {"id": 3, "tag": "contract", "eis_version": 2},
+                 {"id": 4, "tag": "epNotificationEF2020", "eis_version": 3}]
+        order = [c["id"] for c in fv.choose_xml({"owner_type": "notice", "eis_version": 2}, cands)]
+        self.assertEqual(order, [2, 1])
+        self.assertTrue(fv.contains(self.body(("a", "https://x/f?uid=1")), {"source_url": "https://x/f?uid=1"}))
+
+
+class FetchPreviousTest(unittest.TestCase):
+    """``AIFileAnalyzer.fetch_previous_versions``: XML по owner_number, diff вложений, запасной путь по имени."""
+
+    def test_flow(self):
+        """Файл 20 без xml_source_id находит XML 2 по номеру, затем прошлый XML 1 и заменённое вложение."""
+        try:
+            from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
+        except ImportError as e:
+            raise unittest.SkipTest(f"нет зависимостей: {e}")
+
+        body = FileVersionsTest.body
+        bodies = {1: body(("Проект контракта.docx", "u:A")), 2: body(("Проект контракта.docx", "u:B"))}
+        data = {
+            "xml_by_owner.sql": [{"id": 2, "tag": "epNotificationEF2020", "eis_version": 1, "purchase_number": "0373",
+                                  "archive_url": "a", "entry_name": "e2"}],
+            "xml_previous.sql": [{"current_id": 2, "id": 1, "eis_version": 0, "archive_url": "a", "entry_name": "e1"}],
+            "files_by_ref.sql": [{"id": 10, "source_url": "u:A", "xml_source_id": 1, "eis_version": 0, "path": "/f/10"}],
+            "files_previous.sql": [{"current_id": 30, "id": 31, "eis_version": 0, "path": None, "source_url": "u:Z"}],
+        }
+        an = AIFileAnalyzer.__new__(AIFileAnalyzer)
+        an.storage_path, an.parser = "https://s", None
+
+        async def query(name, head=(), **lists):
+            """Имитация запросов к внешней БД."""
+            return [dict(r) for r in data.get(name, [])]
+
+        async def read_xml(archives, x):
+            """Имитация чтения XML из архива."""
+            return bodies[int(x["id"])]
+
+        an._query, an._read_xml = query, read_xml
+        rows = [{"id": 20, "owner_number": "0373", "owner_type": "notice", "eis_version": 1,
+                 "file_name": "Проект контракта.docx", "source_url": "u:B"},
+                {"id": 30, "owner_number": "9999", "owner_type": "notice", "eis_version": 1, "file_name": "x.pdf"},
+                {"id": 40, "owner_number": "0373", "eis_version": 0, "file_name": "y.pdf"}]
+        res = asyncio.run(an.fetch_previous_versions(rows))
+        self.assertEqual(res[20]["id"], 10)
+        self.assertEqual(res[20]["match"], "replaced")
+        self.assertEqual(res[20]["url"], "https://s/f/10")
+        self.assertEqual(res[30]["match"], "file_name")
+        self.assertNotIn(40, res)
+
+
 if __name__ == "__main__":
     unittest.main()
