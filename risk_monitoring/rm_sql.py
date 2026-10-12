@@ -4,6 +4,7 @@
 ``{urls}``, ``{nums}`` и раскрываются в нужное число плейсхолдеров ``?`` (значения уходят биндингами,
 а не подставляются в текст запроса).
 """
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
@@ -24,6 +25,18 @@ def load(name: str) -> str:
     """
     text = (QUERIES_DIR / name).read_text(encoding="utf-8")
     return "\n".join(line for line in text.splitlines() if not line.strip().startswith("--")).strip()
+
+
+def markers(sql: str) -> List[str]:
+    """Имена маркеров списков в тексте запроса (``{ids}``, ``{ids2}``, ``{urls}`` …).
+
+    Args:
+        sql: Текст запроса.
+
+    Returns:
+        List[str]: Имена без повторов в порядке появления.
+    """
+    return list(dict.fromkeys(re.findall(r"\{(\w+)\}", sql)))
 
 
 def render(name: str, head: Sequence[Any] = (), **lists: Sequence[Any]) -> Tuple[str, List[Any]]:
@@ -48,7 +61,7 @@ def render(name: str, head: Sequence[Any] = (), **lists: Sequence[Any]) -> Tuple
     sql = load(name)
     bindings: List[Any] = list(head)
     order = sorted(((sql.find("{" + k + "}"), k) for k in lists if "{" + k + "}" in sql))
-    missing = [k for k in ("ids", "urls", "nums") if "{" + k + "}" in sql and k not in lists]
+    missing = [k for k in markers(sql) if k not in lists]
     if missing:
         raise ValueError(f"{name}: не переданы списки {missing}")
     fmt: Dict[str, str] = {}

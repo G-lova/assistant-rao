@@ -201,7 +201,7 @@ class HelpersTests(unittest.TestCase):
         """Все запросы ``queries/rm`` загружаются и раскрываются."""
         for path in rm_sql.QUERIES_DIR.glob("*.sql"):
             text = rm_sql.load(path.name)
-            lists = {k: [1] for k in ("ids", "urls", "nums") if "{" + k + "}" in text}
+            lists = {k: [1] for k in rm_sql.markers(text)}
             sql, _ = rm_sql.render(path.name, **lists)
             self.assertNotIn("{", sql.replace("{ids}", ""), path.name)
 

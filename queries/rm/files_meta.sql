@@ -1,4 +1,4 @@
--- Метаданные файлов риск-мониторинга и паспорт закупки для анализа (AIFileAnalyzer).
+-- Метаданные файлов риск-мониторинга, паспорт закупки и тег XML-источника (для печатных форм) для AIFileAnalyzer.
 -- Биндинги: storage_path, затем id файлов (плейсхолдеры {ids}).
 SELECT
     f.id,
@@ -12,6 +12,9 @@ SELECT
     f.file_type,
     f.file_size,
     f.download_status,
+    f.source_url,
+    x.xml_source_type AS source_xml_type,
+    SUBSTRING_INDEX(x.entry_name, '_', 1) AS source_xml_tag,
     CASE WHEN f.path IS NOT NULL THEN CONCAT(?, f.path) ELSE f.source_url END AS url,
     CASE WHEN f.file_name LIKE CONCAT('%.', f.file_type) THEN f.file_name
          WHEN f.file_type IS NULL THEN f.file_name
@@ -30,4 +33,5 @@ SELECT
     JSON_UNQUOTE(JSON_EXTRACT(c.dataset, '$.supplier.post_name_krat')) AS supplier_name
 FROM risk_monitoring_files f
 LEFT JOIN risk_monitoring_contracts c ON c.id = f.risk_monitoring_contract_id
+LEFT JOIN risk_monitoring_eis_xml_sources x ON x.id = f.xml_source_id
 WHERE f.id IN ({ids})

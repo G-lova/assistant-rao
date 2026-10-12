@@ -20,6 +20,45 @@ HEADING_RE = re.compile(
 )
 
 
+JUNK_SECTION_RE = re.compile(r"^\s*0[\d.,]*\s|^\s*\d+\s+(закона|ст\.|статьи|федерального)\b|№\s*\d+-фз\.?\s*$", re.IGNORECASE)
+WORD_RE = re.compile(r"[А-Яа-яЁё]{3,}")
+STANDARD_RE = re.compile(r"\b(ГОСТ|СП|СанПиН|СНиП|ТР\s?(ТС|ЕАЭС)|ТУ|ОСТ|ISO|ИСО|IEC|МЭК|EN|DIN|ASTM)\b", re.IGNORECASE)
+
+
+def is_heading(line: str) -> bool:
+    """Похожа ли строка на заголовок раздела, а не на строку таблицы или ссылку на закон.
+
+    Отсекаются строки с номером, начинающимся с 0 («0.00 Итого»), «95 Закона № 44-ФЗ.» и строки
+    меньше чем из двух слов по 3+ буквы.
+
+    Args:
+        line: Строка-кандидат.
+
+    Returns:
+        bool: ``True`` для правдоподобного заголовка.
+    """
+    return not JUNK_SECTION_RE.search(line) and len(WORD_RE.findall(line)) >= 2
+
+
+def sanitize_profile(profile: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Чистит ответ модели: мусорные разделы, нетехнические «стандарты», повторы.
+
+    Args:
+        profile: Ответ ``DocumentProfiler``.
+
+    Returns:
+        Optional[Dict[str, Any]]: Очищенная копия (``None`` остаётся ``None``).
+    """
+    if not isinstance(profile, dict):
+        return profile
+    p = dict(profile)
+    p["main_sections"] = list(dict.fromkeys(s for s in (p.get("main_sections") or []) if isinstance(s, str) and is_heading(s)))
+    tech = dict(p.get("technical_objects") or {})
+    tech["standards"] = [s for s in (tech.get("standards") or []) if isinstance(s, str) and STANDARD_RE.search(s)]
+    p["technical_objects"] = tech
+    return p
+
+
 def find_headings(text: str, limit: int = 40) -> List[str]:
     """Заголовки разделов по всему тексту (нумерованные строки и «Раздел / Глава / Приложение …»).
 
@@ -33,7 +72,7 @@ def find_headings(text: str, limit: int = 40) -> List[str]:
     seen, out = set(), []
     for m in HEADING_RE.finditer(text or ""):
         h = re.sub(r"\s+", " ", m.group(0)).strip()
-        if len(h) > 140 or h.lower() in seen:
+        if len(h) > 140 or h.lower() in seen or not is_heading(h):
             continue
         seen.add(h.lower())
         out.append(h)
@@ -89,7 +128,7 @@ class DocumentProfiler:
             f"Текст{' (начало документа, полный текст длиннее)' if truncated else ''}:\n\n{head}"
         )
         try:
-            return await self.llm.ask(self.prompt, user, self.schema, max_tokens=3000)
+            return sanitize_profile(await self.llm.ask(self.prompt, user, self.schema, max_tokens=3000))
         except Exception as e:  # noqa: BLE001 — паспорт без профиля всё равно записывается
             logger.error(f"DocumentProfiler: {file_name}: {type(e).__name__}: {e}")
             return None

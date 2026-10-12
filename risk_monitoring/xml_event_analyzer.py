@@ -137,7 +137,10 @@ class XmlEventAnalyzer:
         self.storage_path = db.storage_path
         self.data_fetcher = DataFetcher(db.url, db.headers, http_manager)
         self.archives = ArchiveCache(CloudStorageParser(http_manager, None))
-        client, self.model = get_llm()
+        from risk_monitoring.llm_json import reasoning_llm
+
+        # события разбирает модель для смысловых задач (RM_REASONING_MODEL), по умолчанию — get_llm()
+        client, self.model = reasoning_llm(*get_llm())
         self.event_analyzer = EventAnalyzer(client, self.model) if use_llm else None
         self.risk_api = RiskMonitoringAPI(http_manager, environment)
         self.push_results = push_results

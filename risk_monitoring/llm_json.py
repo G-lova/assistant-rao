@@ -3,12 +3,22 @@
 Общая обвязка: ограничение частоты запросов, повторы при сбоях, разбор JSON с починкой
 (``json_repair``), версия промпта как хэш промпта и схемы — смена промпта сама инвалидирует кэш
 анализа в ``ai_document_analysis``.
+
+Модели. Распознавание и извлечение данных выполняет модель из ``get_llm()`` (``M_MODEL_NAME``,
+мультимодальная). Смысловые задачи риск-мониторинга — паспорт документа, риски, сравнение редакций,
+анализ событий — может выполнять другая, более сильная модель: ``RM_REASONING_MODEL``
+(например, ``prod_big_llm``) на том же сервере или на ``RM_REASONING_API_URL``. Если переменная
+не задана, используется модель ``get_llm()``.
+
+Если сервер модели не поддерживает ``guided_json`` (ошибка 400 на ``extra_body``), обёртка
+переключается на запрос без него: схема передаётся в системном промпте, ответ разбирается и чинится.
 """
 import asyncio
 import hashlib
 import json
+import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from configs.logger import get_logger
 
@@ -62,6 +72,40 @@ def parse_json(raw: str) -> Any:
     raise ValueError("В ответе модели нет JSON")
 
 
+def reasoning_llm(default_client: Any = None, default_model: Optional[str] = None) -> Tuple[Any, str]:
+    """Клиент и модель для смысловых задач риск-мониторинга.
+
+    Args:
+        default_client: Клиент из ``get_llm()`` — используется, если отдельная модель не задана
+            или задана на том же сервере.
+        default_model: Модель из ``get_llm()``.
+
+    Returns:
+        Tuple[Any, str]: ``(клиент, модель)``.
+    """
+    model = (os.getenv("RM_REASONING_MODEL") or "").strip()
+    url = (os.getenv("RM_REASONING_API_URL") or "").strip()
+    if default_client is None or default_model is None:
+        from configs.llm_client import get_llm
+        default_client, default_model = get_llm()
+    if not model:
+        return default_client, default_model
+    if not url:
+        return default_client, model
+    from openai import AsyncOpenAI
+
+    from configs.config import Config
+    key = os.getenv("RM_REASONING_API_KEY") or Config.OPENAI_API_KEY
+    return AsyncOpenAI(base_url=url.rstrip("/"), api_key=key, timeout=300), model
+
+
+def _guided_unsupported(error: BaseException) -> bool:
+    """Похоже ли, что сервер отверг ``guided_json`` (HTTP 400 / упоминание guided в ошибке)."""
+    status = getattr(error, "status_code", None)
+    text = str(error).lower()
+    return status == 400 and ("guided" in text or "extra" in text or "json" in text or "schema" in text)
+
+
 class LLMJson:
     """Обёртка над OpenAI-совместимым клиентом: один метод ``ask`` → словарь.
 
@@ -82,6 +126,7 @@ class LLMJson:
         self.rate_limiter = TokenBucket(rate=rate)
         self.semaphore = asyncio.Semaphore(concurrency)
         self.retries = max(1, retries)
+        self.guided = True
 
     async def ask(self, system: str, user: str, schema: Optional[Dict[str, Any]] = None,
                   max_tokens: int = 3000, temperature: float = 0.1) -> Dict[str, Any]:
@@ -100,22 +145,28 @@ class LLMJson:
         Raises:
             Exception: Последняя ошибка после исчерпания повторов.
         """
-        messages: List[Dict[str, str]] = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-        extra = {"guided_json": schema} if schema else {}
         last: Optional[BaseException] = None
         for attempt in range(self.retries):
+            guided = bool(schema) and self.guided
+            sys_text = system if guided or not schema else (
+                system + "\n\nОтвет — строго один JSON-объект по схеме:\n" + json.dumps(schema, ensure_ascii=False))
+            messages: List[Dict[str, str]] = [{"role": "system", "content": sys_text}, {"role": "user", "content": user}]
             try:
                 async with self.semaphore:
                     await self.rate_limiter.acquire()
                     resp = await self.client.chat.completions.create(
                         model=self.model, messages=messages, max_tokens=max_tokens,
-                        temperature=temperature, extra_body=extra)
+                        temperature=temperature, extra_body={"guided_json": schema} if guided else {})
                 data = parse_json(resp.choices[0].message.content)
                 if not isinstance(data, dict):
                     raise ValueError("Ответ модели не является объектом")
                 return data
             except Exception as e:  # noqa: BLE001 — сеть, таймаут, битый JSON: повторяем
                 last = e
+                if guided and _guided_unsupported(e):
+                    logger.warning(f"LLM {self.model}: guided_json не поддерживается, перехожу на схему в промпте")
+                    self.guided = False
+                    continue
                 if attempt < self.retries - 1:
                     wait = 2 * (2 ** attempt)
                     logger.warning(f"LLM: попытка {attempt + 1}/{self.retries} не удалась ({type(e).__name__}: {e}), ждём {wait} с")

@@ -1,8 +1,11 @@
 """Поиск признаков риска в тексте документа (LLM + проверка цитат кодом).
 
 LLM только находит признаки и цитирует текст. Код:
+  * ограничивает коды каталогом и типом документа (``doc_kind.allowed_codes``): например, в печатной
+    форме извещения не ищутся риски обеспечения и аванса — их считают правила внешней системы;
   * отбрасывает риски, цитаты которых нет в тексте (галлюцинации), и риски с уверенностью ниже порога;
-  * ограничивает коды каталогом ``risk_monitoring/risk_catalog.py`` (``DOCUMENT_RISK_CODES``);
+  * отбрасывает риски, противоречащие сами себе («… соответствует законодательству»),
+    и DOC-002 без признаков товарного знака, модели или производителя в цитате;
   * считает балл риска формулой, а не берёт его у модели.
 """
 import asyncio
@@ -13,21 +16,64 @@ from typing import Any, Dict, List, Optional
 
 
 from configs.logger import get_logger
-from configs.rate_limiter import TokenBucket
-from configs.retry_utils import LLM_RETRY_CONFIG, async_retry
-from configs.utils import split_large_text
 from risk_monitoring import risk_catalog
+from risk_monitoring.llm_json import LLMJson
 
 logger = get_logger(__name__)
 
 PROMPT_PATH = "prompts/risk_analysis_prompt.txt"
 SCHEMA_PATH = "schemas/risk_analysis_schema.json"
 CHUNK_TOKENS = 10000
-MIN_CONFIDENCE = 0.7
+MIN_CONFIDENCE = 0.8
 FUZZY_THRESHOLD = 90
 SEVERITY_WEIGHT = {"low": 10, "medium": 25, "high": 40}
 CATEGORY_NAMES = {"DOC": "Документные", "FIN": "Финансовые", "PROC": "Процедурные", "CTR": "Контрактные",
                   "BEH": "Поведенческие", "AI": "AI"}
+
+
+# Описание риска, в котором модель сама говорит, что нарушения нет
+SELF_DENIAL_RE = re.compile(
+    r"соответству\w*\s+(требованиям\s+)?(законодательств|закон|44-фз|223-фз|норм)"
+    r"|не\s+(выявлен|обнаружен|установлен|содерж\w*\s+ограничени)"
+    r"|отсутству\w*\s+(конкретные\s+|какие-либо\s+|дополнительные\s+)?(ограничени|нарушени|признак)"
+    r"|в\s+пределах\s+(допустим|установленн|норм)"
+    r"|нарушени\w*\s+нет",
+    re.IGNORECASE,
+)
+# Признаки товарного знака, модели, артикула или производителя в цитате (для DOC-002)
+BRAND_RE = re.compile(
+    r"[®™]|\b[A-Za-z][A-Za-z0-9\-]{1,}\b|«[^»]{2,40}»|\"[^\"]{2,40}\""
+    r"|модел|артикул|марк[аиу]\b|товарн\w+\s+знак|производств\w+\s|производител|фирм\w*\s|бренд|торгов\w+\s+наименован",
+    re.IGNORECASE,
+)
+EIS_ID_RE = re.compile(r"идентификатор\s*:?\s*\d+|\bктру\b|\bокпд", re.IGNORECASE)
+
+
+def self_denial(risk: Dict[str, Any]) -> bool:
+    """Модель описывает риск словами «соответствует законодательству», «ограничений нет» и т. п.
+
+    Args:
+        risk: Риск из ответа модели (``title``, ``explanation``).
+
+    Returns:
+        bool: ``True`` — описание противоречит самому риску, риск отбрасывается.
+    """
+    return bool(SELF_DENIAL_RE.search(f"{risk.get('title') or ''} {risk.get('explanation') or ''}"))
+
+
+def brand_like(fragment: str) -> bool:
+    """Есть ли в цитате признаки товарного знака, модели, артикула или производителя.
+
+    Идентификаторы позиций ЕИС, коды КТРУ и ОКПД2 признаком не считаются.
+
+    Args:
+        fragment: Цитата.
+
+    Returns:
+        bool: ``True``, если цитата может подтверждать DOC-002.
+    """
+    text = EIS_ID_RE.sub(" ", fragment or "")
+    return bool(BRAND_RE.search(text))
 
 
 def _norm(s: str) -> str:
@@ -54,7 +100,7 @@ class DocumentRiskAnalyzer:
         """
         self.client = llm_client
         self.model = model
-        self.rate_limiter = TokenBucket(rate=1.5)
+        self.llm = LLMJson(llm_client, model, rate=1.5, concurrency=3)
         self.semaphore = asyncio.Semaphore(3)
 
         self.codes = list(risk_catalog.DOCUMENT_RISK_CODES)
@@ -71,13 +117,15 @@ class DocumentRiskAnalyzer:
 
     # ------------------------------------------------------------------ public
 
-    async def analyze(self, text: str, file_name: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    async def analyze(self, text: str, file_name: str, context: Optional[Dict[str, Any]] = None,
+                      codes: Optional[List[str]] = None) -> Dict[str, Any]:
         """Анализирует документ по чанкам и объединяет найденные риски.
 
         Args:
             text: Полный текст документа.
             file_name: Имя файла (в промпт и логи).
-            context: Контекст: тип документа, краткое содержание, паспорт закупки.
+            context: Контекст: тип документа, краткое содержание, паспорт закупки, закон.
+            codes: Коды, которые разрешено выставлять для документа этого типа (по умолчанию — все коды документа).
 
         Returns:
             Dict[str, Any]: ``risk_score`` (0–100), ``risk_level``, ``summary``, ``risks``, ``partial``
@@ -86,13 +134,20 @@ class DocumentRiskAnalyzer:
         Raises:
             RuntimeError: Если не проанализирован ни один чанк.
         """
+        from configs.utils import split_large_text  # ленивый импорт: тянет aiofiles, magic, tiktoken
+
+        allowed = [c for c in (codes if codes is not None else self.codes) if c in self.codes]
         chunks = split_large_text(text, max_chunk_size=CHUNK_TOKENS)
         if not chunks:
             return self._empty(partial=True)
+        if not allowed:
+            result = self._empty(partial=False)
+            result["summary"] = "Для документа этого типа поиск рисков в тексте не проводится."
+            return result
 
         async def _one(i: int, chunk: str):
             async with self.semaphore:
-                return await self._analyze_chunk(chunk, file_name, context or {}, i + 1, len(chunks))
+                return await self._analyze_chunk(chunk, file_name, context or {}, i + 1, len(chunks), allowed)
 
         results = await asyncio.gather(*(_one(i, c) for i, c in enumerate(chunks)), return_exceptions=True)
 
@@ -106,6 +161,7 @@ class DocumentRiskAnalyzer:
         risks = self._merge([risk for r in ok for risk in r["risks"]])
         score = self._score(risks)
         dropped = sum(r["dropped"] for r in ok)
+        rejected = sum(r.get("rejected", 0) for r in ok)
 
         summary = ok[0]["summary"] if len(ok) == 1 else self._build_summary(risks)
         return {
@@ -115,6 +171,8 @@ class DocumentRiskAnalyzer:
             "risks": risks,
             "partial": len(ok) < len(chunks),          # часть чанков не проанализирована
             "dropped_unverified": dropped,             # цитаты, которых нет в тексте
+            "rejected_inconsistent": rejected,         # риски, противоречащие сами себе или цитате
+            "allowed_codes": allowed,
             "prompt_version": self.prompt_version,
         }
 
@@ -154,9 +212,9 @@ class DocumentRiskAnalyzer:
 
     # ----------------------------------------------------------------- private
 
-    @async_retry(LLM_RETRY_CONFIG)
-    async def _analyze_chunk(self, chunk: str, file_name: str, context: Dict[str, Any], n: int, total: int) -> Dict[str, Any]:
-        """Анализ одного чанка: запрос к LLM, проверка кодов, уверенности и цитат.
+    async def _analyze_chunk(self, chunk: str, file_name: str, context: Dict[str, Any], n: int, total: int,
+                             allowed: List[str]) -> Dict[str, Any]:
+        """Анализ одного чанка: запрос к LLM, проверка кодов, уверенности, цитат и непротиворечивости.
 
         Args:
             chunk: Текст чанка.
@@ -164,36 +222,24 @@ class DocumentRiskAnalyzer:
             context: Контекст документа.
             n: Номер чанка.
             total: Всего чанков.
+            allowed: Разрешённые коды.
 
         Returns:
-            Dict[str, Any]: ``summary``, ``risks`` (только подтверждённые), ``dropped``.
+            Dict[str, Any]: ``summary``, ``risks`` (только подтверждённые), ``dropped``, ``rejected``.
         """
-        await self.rate_limiter.acquire()
-
         hint = json.dumps(context, ensure_ascii=False, default=str)[:2500] if context else "нет"
         user = (
             f"Документ: {file_name} (часть {n} из {total}).\n"
-            f"Контекст извлечения (тип, краткое содержание): {hint}\n\n"
+            f"Контекст (тип документа, краткое содержание, закупка, закон): {hint}\n"
+            f"Для этого документа ищи ТОЛЬКО риски с кодами: {', '.join(allowed)}. Другие коды не используй.\n\n"
             f"Текст:\n\n{chunk}"
         )
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "system", "content": self.prompt}, {"role": "user", "content": user}],
-            max_tokens=3000,
-            temperature=0.1,
-            extra_body={"guided_json": self.schema},
-        )
-        raw = response.choices[0].message.content.strip()
-
-        from risk_monitoring.llm_json import parse_json
-        data = parse_json(raw)   # ValueError -> сработает retry
-        if not isinstance(data, dict):
-            raise ValueError("Ответ LLM не является объектом")
+        data = await self.llm.ask(self.prompt, user, self.schema, max_tokens=3000)
 
         norm_chunk = _norm(chunk)
-        verified, dropped = [], 0
+        verified, dropped, rejected = [], 0, 0
         for r in data.get("risks", []):
-            if r.get("code") not in self.codes:
+            if not isinstance(r, dict) or r.get("code") not in allowed:
                 continue
             ev = r.get("evidence") or {}
             frag = ev.get("fragment", "")
@@ -202,11 +248,14 @@ class DocumentRiskAnalyzer:
             if not self._fragment_in_text(frag, norm_chunk):
                 dropped += 1
                 continue
+            if self_denial(r) or (r["code"] == "DOC-002" and not brand_like(frag)):
+                rejected += 1
+                continue
             r["category"] = risk_catalog.category(r["code"])
             ev["quote_verified"] = True
             verified.append(r)
 
-        return {"summary": data.get("summary", ""), "risks": verified, "dropped": dropped}
+        return {"summary": data.get("summary", ""), "risks": verified, "dropped": dropped, "rejected": rejected}
 
     @staticmethod
     def _fragment_in_text(fragment: str, norm_chunk: str) -> bool:

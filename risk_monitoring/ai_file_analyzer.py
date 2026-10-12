@@ -5,16 +5,23 @@
 1. скачивание → SHA-256 → документ в ``ai_documents`` (дедупликация одинаковых файлов разных закупок);
 2. текст (``FileReader``, OCR при необходимости) — один раз на содержимое;
 3. чанки и эмбеддинги в pgvector → похожие документы (база знаний документов, гл. 18.13);
+   + контроль качества текста (``text_quality``): циклы повторов OCR схлопываются, негодный текст
+   не анализируется (``pipeline.result = ocr_bad``);
 4. извлечение данных с доказательной базой (``DataExtractor``: организации, суммы, даты, нормы, ТРУ …);
-5. тип документа (``TypeDetector`` + запасной вариант по названию);
+   реквизиты (ИНН, КПП, ОГРН, номера), которых нет в тексте, снимаются;
+5. тип документа (``doc_kind``): печатная форма ЕИС — по тегу XML-источника; иначе ``TypeDetector``
+   с подсказкой по имени файла (при неуверенном детекторе выигрывает имя);
 6. AI-паспорт: заключение, назначение, структура, ключевые условия, тематика, технические объекты,
    итоговая оценка и рекомендации (``DocumentProfiler``);
-7. признаки рисков по тексту с проверкой цитат (``DocumentRiskAnalyzer``);
+7. признаки рисков по тексту с проверкой цитат (``DocumentRiskAnalyzer``) — только коды, допустимые
+   для типа документа (``doc_kind.allowed_codes``);
 8. сравнение с предыдущей редакцией: текстовый и смысловой diff, риски изменений, сопоставление рисков
    (что сохранилось, что появилось, что не выявлено в новой версии);
 9. запись ``ai_analysis`` через ``PATCH /api/risk-monitoring/ai-analysis``.
 
 Каждый шаг LLM кэшируется в ``ai_document_analysis`` по (документ, тип анализа, версия промпта, модель).
+Распознавание и извлечение выполняет модель ``get_llm()``; паспорт, риски и сравнение редакций —
+модель ``RM_REASONING_MODEL`` (см. ``llm_json.reasoning_llm``).
 
 **Повторного анализа нет.** Файл, у которого во внешней БД уже ``pipeline.status = completed``,
 пропускается. Повторно анализируются только новые версии документов (это новые строки файлов).
@@ -29,7 +36,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from configs.config import Config
 from configs.logger import get_logger
-from risk_monitoring import passport, risk_catalog, rm_sql, version_diff
+from risk_monitoring import doc_kind, passport, risk_catalog, rm_sql, text_quality, version_diff
 from risk_monitoring.llm_json import prompt_version as _hash_version
 
 logger = get_logger(__name__)
@@ -158,14 +165,17 @@ class AIFileAnalyzer:
         self.recompute = recompute
         self.data_fetcher = DataFetcher(db.url, db.headers, http_manager)
 
-        client, self.model = get_llm()
+        from risk_monitoring.llm_json import reasoning_llm
+
+        client, self.extraction_model = get_llm()
+        r_client, self.model = reasoning_llm(client, self.extraction_model)
         self.parser = CloudStorageParser(http_manager, None)
-        self.file_reader = FileReader(client, self.model)
-        self.type_detector = TypeDetector(client, self.model)
-        self.extractor = DataExtractor(client, self.model)
-        self.profiler = DocumentProfiler(client, self.model)
-        self.risk_analyzer = DocumentRiskAnalyzer(client, self.model)
-        self.differ = version_diff.DocumentDiffAnalyzer(client, self.model)
+        self.file_reader = FileReader(client, self.extraction_model)
+        self.type_detector = TypeDetector(client, self.extraction_model)
+        self.extractor = DataExtractor(client, self.extraction_model)
+        self.profiler = DocumentProfiler(r_client, self.model)
+        self.risk_analyzer = DocumentRiskAnalyzer(r_client, self.model)
+        self.differ = version_diff.DocumentDiffAnalyzer(r_client, self.model)
         self.risk_api = RiskMonitoringAPI(http_manager, environment)
 
         emb = cfg.get_embedding_config()
@@ -197,7 +207,8 @@ class AIFileAnalyzer:
         return [{k: _none(v) for k, v in r.items()} for r in df.to_dict("records")] if not df.empty else []
 
     async def fetch_previous_versions(self, file_ids: List[int]) -> Dict[int, Dict[str, Any]]:
-        """Предыдущие версии файлов (тот же файл той же закупки с меньшей версией XML).
+        """Предыдущие версии файлов: тот же файл той же закупки с меньшей версией XML, а для печатных
+        форм — печатная форма предыдущей версии того же XML-документа.
 
         Args:
             file_ids: id файлов.
@@ -205,7 +216,7 @@ class AIFileAnalyzer:
         Returns:
             Dict[int, Dict[str, Any]]: ``current_id → строка предыдущей версии`` (максимальная версия).
         """
-        sql, bindings = rm_sql.render("files_previous.sql", head=[self.storage_path], ids=file_ids)
+        sql, bindings = rm_sql.render("files_previous.sql", ids=file_ids, ids2=file_ids)
         try:
             df = await self.data_fetcher.fetch_async_expertise_data(sql, bindings=bindings)
         except Exception as e:  # noqa: BLE001 — без предыдущей версии анализ всё равно возможен
@@ -214,6 +225,7 @@ class AIFileAnalyzer:
         best: Dict[int, Dict[str, Any]] = {}
         for r in (df.to_dict("records") if not df.empty else []):
             r = {k: _none(v) for k, v in r.items()}
+            r["url"] = f"{self.storage_path}{r['path']}" if r.get("path") else r.get("source_url")
             cur = int(r["current_id"])
             if cur not in best or (r.get("eis_version") or 0) > (best[cur].get("eis_version") or 0):
                 best[cur] = r
@@ -299,6 +311,13 @@ class AIFileAnalyzer:
             ai = passport.no_text_analysis(row, "Не удалось извлечь текст документа", pipeline, self.model, sha)
             return await self._finalize(file_id, document_id, ai)
 
+        quality = text_quality.assess(text)
+        print_kind = doc_kind.print_form_kind(row) if doc_kind.is_print_form(row) else None
+        if quality["status"] == "bad":
+            return await self._finalize(file_id, document_id, self._bad_text_analysis(
+                row, quality, print_kind, prev_id, attempt, sha))
+        text = quality["text"]
+
         from configs.utils import split_large_text
         from knowledge_store.pages import PAGE_MARKER_RE
 
@@ -311,19 +330,25 @@ class AIFileAnalyzer:
                                         keep=lambda r: isinstance(r, dict) and bool(r.get("raw_data")))
         if isinstance(extraction, str):
             extraction = json.loads(extraction)
-        type_info, type_decode = await self._doc_type(document_id, chunks, file_name, extraction, row)
-        summary = ((extraction or {}).get("raw_data") or {}).get("summary")
+        extraction = dict(extraction or {})
+        raw_data, removed_ids = text_quality.verify_identifiers(extraction.get("raw_data") or {}, text)
+        extraction["raw_data"] = text_quality.clean_value(raw_data)
+        type_info, type_decode = await self._doc_type(document_id, chunks, file_name, extraction, row, print_kind)
+        summary = (extraction.get("raw_data") or {}).get("summary")
+        allowed = doc_kind.allowed_codes(type_info["detected_type"], print_kind["group"] if print_kind else None)
 
         profile = await self._cached(document_id, "document_profile",
-                                     lambda: self.profiler.profile(text, file_name, type_decode, summary, purchase))
+                                     lambda: self.profiler.profile(text, file_name, type_decode, summary, purchase),
+                                     model=self.model)
         fz = risk_catalog.normalize_fz(row.get("fz_type"))
         risk_context = {"detected_type": type_info.get("detected_type"), "type_decode": type_decode,
                         "summary": summary, "purchase": purchase,
                         "law": f"{fz}-ФЗ" if fz else "закон не определён"}
         risk = await self._cached(document_id, "risk_analysis",
-                                  lambda: self.risk_analyzer.analyze(text, file_name, risk_context),
+                                  lambda: self.risk_analyzer.analyze(text, file_name, risk_context, codes=allowed),
                                   compact=self.risk_analyzer.to_compact,
-                                  keep=lambda r: not r.get("partial"))
+                                  keep=lambda r: not r.get("partial"),
+                                  version=f"{self.versions['risk_analysis']}:{_hash_version(allowed)}", model=self.model)
         risk_compact = self.risk_analyzer.to_compact(risk) if risk else {}
 
         version_changes, version_risks = None, []
@@ -333,7 +358,9 @@ class AIFileAnalyzer:
 
         pages = len({m.group(1) for m in PAGE_MARKER_RE.finditer(text)}) or None
         ocr_used = "(OCR)" in text
-        pipeline = passport.pipeline_block(STAGE, "completed", self.model, self.versions, prev_id, self.force, attempt)
+        pipeline = passport.pipeline_block(STAGE, "completed", self.model, self.versions, prev_id, self.force, attempt,
+                                           result="ocr_suspect" if quality["status"] == "suspect" else None)
+        pipeline["models"] = {"extraction": self.extraction_model, "reasoning": self.model}
         ai = passport.build_file_analysis(
             file_meta=row, type_info=type_info, type_decode=type_decode, extraction=extraction, profile=profile,
             risk_compact=risk_compact, extra_risks=version_risks, similar=similar, version_changes=version_changes,
@@ -341,7 +368,63 @@ class AIFileAnalyzer:
             text_chars=len(text), ocr_used=ocr_used, purchase=purchase, pipeline=pipeline, model=self.model,
             content_sha256=sha,
         )
+        self._annotate(ai, quality, removed_ids, allowed, (risk or {}).get("rejected_inconsistent"))
         return await self._finalize(file_id, document_id, ai)
+
+    def _bad_text_analysis(self, row: Dict[str, Any], quality: Dict[str, Any], print_kind: Optional[Dict[str, Any]],
+                           prev_id: Optional[int], attempt: int, sha: str) -> Dict[str, Any]:
+        """``ai_analysis`` для негодного текста (сбой OCR): без запросов к модели и без рисков.
+
+        Тип документа берётся из печатной формы или имени файла.
+
+        Args:
+            row: Строка ``files_meta.sql``.
+            quality: Результат ``text_quality.assess``.
+            print_kind: Вид печатной формы или ``None``.
+            prev_id: id предыдущей версии файла.
+            attempt: Номер попытки.
+            sha: SHA-256 содержимого.
+
+        Returns:
+            Dict[str, Any]: ``ai_analysis`` (``pipeline.result = ocr_bad``).
+        """
+        from evaluate_documents.type_data_extractor import DOCUMENT_TYPE_MAPPING
+
+        reason = "Текст документа распознан с ошибками, анализ ИИ не проводился: " + "; ".join(quality["issues"])
+        pipeline = passport.pipeline_block(STAGE, "completed", self.model, self.versions, prev_id,
+                                           self.force, attempt, result="ocr_bad")
+        pipeline["models"] = {"extraction": self.extraction_model, "reasoning": self.model}
+        ai = passport.no_text_analysis(row, reason, pipeline, self.model, sha)
+        if print_kind:
+            ai["doc_type"] = {"detected_type": print_kind["detected_type"], "type_decode": print_kind["type_decode"],
+                              "confidence": 1.0, "issues": [], "type_source": "print_form", "print_form": print_kind}
+        else:
+            by_name = doc_kind.type_by_name(row.get("file_name"))
+            if by_name:
+                ai["doc_type"] = {"detected_type": by_name, "type_decode": DOCUMENT_TYPE_MAPPING.get(by_name),
+                                  "confidence": None, "issues": [], "type_source": "file_name"}
+        ai["readability"]["text_quality"] = {k: quality[k] for k in ("status", "loops", "loop_share", "letters")}
+        return ai
+
+    @staticmethod
+    def _annotate(ai: Dict[str, Any], quality: Dict[str, Any], removed_ids: List[str], allowed: List[str],
+                  rejected: Optional[int]) -> None:
+        """Дописывает в ``ai_analysis`` результаты контроля качества: текст, реквизиты, отбор рисков.
+
+        Args:
+            ai: ``ai_analysis`` файла (меняется на месте).
+            quality: Результат ``text_quality.assess``.
+            removed_ids: Снятые реквизиты, которых нет в тексте.
+            allowed: Коды рисков, которые искались в документе.
+            rejected: Сколько рисков модели отброшено как противоречивые.
+        """
+        rd = ai.setdefault("readability", {})
+        noise = "не предоставила явную оценку"
+        rd["issues"] = [i for i in (rd.get("issues") or []) if noise not in str(i)] + quality["issues"]
+        rd["text_quality"] = {k: quality[k] for k in ("status", "loops", "loop_share", "letters")}
+        if removed_ids:
+            ai["raw_data_issues"] = [f"Снят реквизит, которого нет в тексте: {x}" for x in removed_ids]
+        ai["risk_scope"] = {"allowed_codes": allowed, "rejected_inconsistent": rejected or 0}
 
     async def _load_document(self, file_id: int, url: str, file_name: str):
         """Скачивает файл, находит или создаёт документ по хэшу содержимого и связывает его с файлом.
@@ -350,6 +433,9 @@ class AIFileAnalyzer:
             file_id: id внешнего файла.
             url: Ссылка на файл (хранилище внешней системы или ЕИС).
             file_name: Имя файла.
+
+        Текст с признаками сбоя OCR (циклы повторов) сохраняется со статусом ``suspect``: при обычном
+        прогоне он берётся из кэша, при отладочном (``force``) файл читается заново.
 
         Returns:
             tuple: ``(document_id, text | None, sha256, size)``; ``text = None`` — текст не извлечён.
@@ -367,7 +453,9 @@ class AIFileAnalyzer:
             size = os.path.getsize(tmp_path)
             ext = os.path.splitext(file_name)[1].lower() or res.get("file_extension") or ".bin"
             doc = await self.repo.get_document_by_sha(sha)
-            if doc and doc["ocr_status"] == "done" and doc["text"] and not self.recompute:
+            reuse = doc and doc["text"] and not self.recompute and (
+                doc["ocr_status"] == "done" or (doc["ocr_status"] == "suspect" and not self.force))
+            if reuse:
                 document_id, text = doc["id"], doc["text"]
             else:
                 text = await self.file_reader.read_file(tmp_path, file_name)
@@ -377,7 +465,9 @@ class AIFileAnalyzer:
                     await self.repo.link_file(self.env, file_id, document_id)
                     return document_id, None, sha, size
                 text_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
-                document_id = await self.repo.upsert_document(sha, text_sha, ext, size, text)
+                # «suspect» — текст с циклами OCR: в режиме отладки (force) файл будет прочитан заново
+                status = "done" if text_quality.assess(text)["status"] == "ok" else "suspect"
+                document_id = await self.repo.upsert_document(sha, text_sha, ext, size, text, ocr_status=status)
             await self.repo.link_file(self.env, file_id, document_id)
             return document_id, text, sha, size
         finally:
@@ -386,7 +476,8 @@ class AIFileAnalyzer:
 
     async def _cached(self, document_id: int, analysis_type: str, produce: Callable[[], Awaitable[Any]],
                       compact: Optional[Callable[[Any], Any]] = None,
-                      keep: Optional[Callable[[Any], bool]] = None, version_key: Optional[str] = None) -> Any:
+                      keep: Optional[Callable[[Any], bool]] = None, version_key: Optional[str] = None,
+                      version: Optional[str] = None, model: Optional[str] = None) -> Any:
         """Результат анализа из кэша ``ai_document_analysis`` или новый (с сохранением).
 
         Args:
@@ -396,45 +487,62 @@ class AIFileAnalyzer:
             compact: Функция компактного вида (по умолчанию — сам результат).
             keep: Условие сохранения в кэш (например, не кэшировать неполный риск-анализ).
             version_key: Ключ версии промпта в ``self.versions`` (по умолчанию — ``analysis_type``).
+            version: Явная версия (например, версия промпта + набор допустимых кодов).
+            model: Модель, выполняющая анализ (ключ кэша; по умолчанию — модель извлечения).
 
         Returns:
             Any: Результат (``None``, если анализ не дал результата).
         """
-        version = self.versions[version_key or analysis_type]
+        version = version or self.versions[version_key or analysis_type]
+        model = model or self.extraction_model
         if not self.recompute:
-            cached = await self.repo.get_analysis(document_id, analysis_type, version, self.model)
+            cached = await self.repo.get_analysis(document_id, analysis_type, version, model)
             if cached:
                 return cached["result"]
         result = await produce()
         if result and (keep is None or keep(result)):
-            await self.repo.save_analysis(document_id, analysis_type, version, self.model, result,
+            await self.repo.save_analysis(document_id, analysis_type, version, model, result,
                                           compact(result) if compact else result,
                                           result.get("confidence") if isinstance(result, dict) and isinstance(result.get("confidence"), (int, float)) else None)
         return result
 
     async def _doc_type(self, document_id: int, chunks: List[str], file_name: str,
-                        extraction: Optional[Dict[str, Any]], row: Dict[str, Any]):
-        """Тип документа: ``TypeDetector`` по первому чанку, запасной вариант — по названию из извлечения.
+                        extraction: Optional[Dict[str, Any]], row: Dict[str, Any],
+                        print_kind: Optional[Dict[str, Any]] = None):
+        """Тип документа (``doc_kind``).
 
-        Проект контракта в составе извещения (владелец не контракт) приводится к ``docProjContractFiles``.
+        * печатная форма ЕИС — по тегу XML-источника, без запроса к модели;
+        * иначе ``TypeDetector`` по первому чанку с подсказкой по имени файла: если детектор не уверен
+          (< 0,85) и расходится с именем, берётся тип по имени («Обоснование НМЦК.pdf»);
+        * проект контракта в составе извещения (владелец не контракт) приводится к ``docProjContractFiles``.
 
         Returns:
-            tuple: ``(type_info, type_decode)``.
+            tuple: ``(type_info, type_decode)``; в ``type_info`` — ``type_source`` и ``print_form``.
         """
         from evaluate_documents.type_data_extractor import ALLOWED_DOC_TYPES, DOCUMENT_TYPE_MAPPING
 
+        if print_kind:
+            info = {"detected_type": print_kind["detected_type"], "confidence": 1.0, "issues": [],
+                    "key_indicators": [], "type_source": "print_form", "print_form": print_kind}
+            return info, print_kind["type_decode"]
+
         info = await self._cached(document_id, "doc_type",
-                                  lambda: self.type_detector.detect_document_type(content=chunks[0], filename=file_name))
+                                  lambda: self.type_detector.detect_document_type(content=chunks[0], filename=file_name),
+                                  model=self.extraction_model)
         info = dict(info or {})
-        detected = info.get("detected_type") or ""
-        if detected not in ALLOWED_DOC_TYPES:
-            name = ((extraction or {}).get("raw_data") or {}).get("document_name") or ""
-            if isinstance(name, dict):
-                name = name.get("value") or ""
-            detected = self.type_detector.detect_document_type_by_name(name or file_name) or "docDopMaterialsFiles"
+        name = ((extraction or {}).get("raw_data") or {}).get("document_name") or ""
+        if isinstance(name, dict):
+            name = name.get("value") or ""
+        fallback = self.type_detector.detect_document_type_by_name(name or file_name) or "docDopMaterialsFiles"
+        detected, source = doc_kind.resolve_type(info, doc_kind.type_by_name(file_name), ALLOWED_DOC_TYPES, fallback)
         if (row.get("owner_type") or "") != "contract" and detected in CONTRACT_DOC_TYPES:
             detected = "docProjContractFiles"
+        if source == "file_name" and info.get("detected_type") and info.get("detected_type") != detected:
+            info.setdefault("issues", []).append(
+                f"Модель определила тип «{info.get('detected_type')}» (уверенность {info.get('confidence')}), "
+                f"принят тип по имени файла")
         info["detected_type"] = detected
+        info["type_source"] = source
         return info, DOCUMENT_TYPE_MAPPING.get(detected)
 
     async def _compare_versions(self, previous: Dict[str, Any], document_id: int, sha: str, text: str,
