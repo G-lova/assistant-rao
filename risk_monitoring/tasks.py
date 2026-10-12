@@ -8,13 +8,20 @@ from configs.logger import get_logger
 logger = get_logger(__name__)
 
 
-def _summary(results: List[Dict[str, Any]]) -> Dict[str, int]:
+def _summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Счётчики результатов по статусам."""
     counts: Dict[str, int] = {}
     for r in results:
         counts[r.get("status", "unknown")] = counts.get(r.get("status", "unknown"), 0) + 1
     counts["pushed"] = sum(1 for r in results if r.get("pushed"))
     return counts
+
+
+def _llm_summary(before: Dict[str, int], stats: Dict[str, Any]) -> Dict[str, Any]:
+    """Сводка нагрузки на модель: запросы ``call_llm`` за задачу и статистика анализатора."""
+    from risk_monitoring.llm_json import CALLS
+
+    return {"requests": CALLS["requests"] - before["requests"], "failed": CALLS["failed"] - before["failed"], **(stats or {})}
 
 
 def _strip(results: List[Dict[str, Any]], include_analysis: bool) -> List[Dict[str, Any]]:
@@ -44,14 +51,25 @@ def rm_analyze_files_task(self, file_ids: List[int], environment: str, force: bo
     from configs.http_client_manager import HTTPClientManager
     from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
 
+    from risk_monitoring.llm_json import CALLS
+
+    before = dict(CALLS)
+    stats: Dict[str, Any] = {}
+
     async def run() -> List[Dict[str, Any]]:
         """Создаёт HTTP-менеджер и пул Postgres внутри event loop задачи и запускает анализ."""
         async with HTTPClientManager(timeout=180.0) as mgr, AIRepo() as repo:
             analyzer = AIFileAnalyzer(mgr, environment, repo, push_results=push, force=force, recompute=recompute)
-            return await analyzer.analyze_ids(file_ids)
+            try:
+                return await analyzer.analyze_ids(file_ids)
+            finally:
+                stats.update(analyzer.stats)
 
     results = asyncio.run(run())
-    return {"summary": _summary(results), "results": _strip(results, include_analysis)}
+    summary = _summary(results)
+    summary["llm"] = _llm_summary(before, stats)
+    logger.info(f"Риск-мониторинг, файлы: {summary}")
+    return {"summary": summary, "results": _strip(results, include_analysis)}
 
 
 @celery_app.task(bind=True, name="rm_analyze_xml_task", soft_time_limit=3300, time_limit=3600)
@@ -73,11 +91,22 @@ def rm_analyze_xml_task(self, xml_ids: List[int], environment: str, force: bool 
     from configs.http_client_manager import HTTPClientManager
     from risk_monitoring.xml_event_analyzer import XmlEventAnalyzer
 
+    from risk_monitoring.llm_json import CALLS
+
+    before = dict(CALLS)
+    stats: Dict[str, Any] = {}
+
     async def run() -> List[Dict[str, Any]]:
         """Создаёт HTTP-менеджер внутри event loop задачи и запускает анализ."""
         async with HTTPClientManager(timeout=180.0) as mgr:
             analyzer = XmlEventAnalyzer(mgr, environment, push_results=push, force=force, use_llm=use_llm)
-            return await analyzer.analyze_ids(xml_ids)
+            try:
+                return await analyzer.analyze_ids(xml_ids)
+            finally:
+                stats.update(getattr(analyzer, "stats", {}) or {})
 
     results = asyncio.run(run())
-    return {"summary": _summary(results), "results": _strip(results, include_analysis)}
+    summary = _summary(results)
+    summary["llm"] = _llm_summary(before, stats)
+    logger.info(f"Риск-мониторинг, XML: {summary}")
+    return {"summary": summary, "results": _strip(results, include_analysis)}

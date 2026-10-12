@@ -36,8 +36,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from configs.config import Config
 from configs.logger import get_logger
-from risk_monitoring import (doc_kind, file_versions, passport, pdf_text, risk_catalog, rm_sql, text_quality,
-                             version_diff, xml_events)
+from risk_monitoring import (doc_kind, file_versions, passport, pdf_text, printform_passport, risk_catalog, rm_sql,
+                             text_quality, version_diff, xml_events)
 from risk_monitoring.llm_json import prompt_version as _hash_version
 
 logger = get_logger(__name__)
@@ -194,6 +194,8 @@ class AIFileAnalyzer:
             "version_diff": self.differ.prompt_version,
         }
         self.semaphore = asyncio.Semaphore(concurrency)
+        # Сколько анализов выполнено заново и сколько взято из прошлой редакции (сводка задачи)
+        self.stats: Dict[str, Dict[str, int]] = {"produced": {}, "reused_previous": {}, "modes": {}}
 
     # ------------------------------------------------------------------ вход
 
@@ -437,43 +439,99 @@ class AIFileAnalyzer:
         embeddings_ok = await self._ensure_embeddings(document_id, text)
         similar = await self._find_similar(document_id) if embeddings_ok else []
 
-        chunks = split_large_text(text, max_chunk_size=LLM_CHUNK_TOKENS) or [text]
-        extraction = await self._cached(document_id, "data_extraction",
-                                        lambda: self.extractor.extract_data_from_document(chunks, file_name),
-                                        keep=lambda r: isinstance(r, dict) and bool(r.get("raw_data")))
-        if isinstance(extraction, str):
-            extraction = json.loads(extraction)
-        extraction = dict(extraction or {})
-        raw_data, removed_ids = text_quality.verify_identifiers(extraction.get("raw_data") or {}, text)
-        extraction["raw_data"] = text_quality.clean_value(raw_data)
-        type_info, type_decode = await self._doc_type(document_id, chunks, file_name, extraction, row, print_kind)
-        summary = (extraction.get("raw_data") or {}).get("summary")
-        allowed = doc_kind.allowed_codes(type_info["detected_type"], print_kind["group"] if print_kind else None)
-
-        profile = await self._cached(document_id, "document_profile",
-                                     lambda: self.profiler.profile(text, file_name, type_decode, summary, purchase),
-                                     model=self.model)
         fz = risk_catalog.normalize_fz(row.get("fz_type"))
-        risk_context = {"detected_type": type_info.get("detected_type"), "type_decode": type_decode,
-                        "summary": summary, "purchase": purchase,
-                        "law": f"{fz}-ФЗ" if fz else "закон не определён"}
-        risk = await self._cached(document_id, "risk_analysis",
-                                  lambda: self.risk_analyzer.analyze(text, file_name, risk_context, codes=allowed),
-                                  compact=self.risk_analyzer.to_compact,
-                                  keep=lambda r: not r.get("partial"),
-                                  version=f"{self.versions['risk_analysis']}:{_hash_version(allowed)}", model=self.model)
-        risk_compact = self.risk_analyzer.to_compact(risk) if risk else {}
+        law = f"{fz}-ФЗ" if fz else "закон не определён"
 
-        version_changes, version_risks = None, []
-        if previous:
-            version_changes, version_risks = await self._compare_versions(
-                previous, document_id, sha, text, file_name, type_decode)
+        # Прошлая редакция: текст и diff нужны до анализа — от них зависит режим
+        prev_ctx = await self._load_previous(previous, sha, file_name) if previous else None
+        diff = None
+        if prev_ctx and prev_ctx.get("text") is not None:
+            diff = version_diff.text_diff(prev_ctx["text"], text)
+
+        if print_kind:
+            mode = "print_form"
+            extraction, profile, candidates = printform_passport.build(text, print_kind, row)
+            type_info = {"detected_type": print_kind["detected_type"], "confidence": 1.0, "issues": [],
+                         "key_indicators": [], "type_source": "print_form", "print_form": print_kind}
+            type_decode = print_kind["type_decode"]
+            allowed = doc_kind.allowed_codes(type_info["detected_type"], print_kind["group"])
+            summary = extraction["raw_data"].get("summary")
+            risk = None
+            if candidates and allowed:
+                brand_text = "\n".join(candidates)
+                ctx = {"detected_type": type_info["detected_type"], "type_decode": type_decode, "summary": summary,
+                       "purchase": purchase, "law": law,
+                       "note": "Переданы только строки описания объекта закупки с признаками товарного знака"}
+                risk = await self._cached(document_id, "risk_analysis_print_form",
+                                          lambda: self.risk_analyzer.analyze(brand_text, file_name, ctx, codes=allowed),
+                                          compact=self.risk_analyzer.to_compact, keep=lambda r: not r.get("partial"),
+                                          version=f"{self.versions['risk_analysis']}:{_hash_version(allowed, candidates)}",
+                                          model=self.model)
+            if risk is None:
+                risk = self.risk_analyzer.merge_results([], None, allowed)
+                risk["summary"] = ("Товарных знаков в описании объекта закупки не найдено." if allowed
+                                   else "Для документа этого типа поиск рисков в тексте не проводится.")
+            removed_ids = []
+            version_changes, version_risks = (await self._version_changes(previous, prev_ctx, diff, document_id,
+                                                                          file_name, type_decode, use_llm=False)
+                                              if previous else (None, []))
+        else:
+            reuse_doc = None
+            if diff and prev_ctx.get("doc_id") and (diff["identical"] or diff["similarity"] >= version_diff.INCREMENTAL_SIMILARITY):
+                reuse_doc = prev_ctx["doc_id"]
+            chunks = split_large_text(text, max_chunk_size=LLM_CHUNK_TOKENS) or [text]
+            extraction = await self._cached(document_id, "data_extraction",
+                                            lambda: self.extractor.extract_data_from_document(chunks, file_name),
+                                            keep=lambda r: isinstance(r, dict) and bool(r.get("raw_data")),
+                                            fallback_doc=reuse_doc)
+            if isinstance(extraction, str):
+                extraction = json.loads(extraction)
+            extraction = dict(extraction or {})
+            raw_data, removed_ids = text_quality.verify_identifiers(extraction.get("raw_data") or {}, text)
+            if reuse_doc:
+                raw_data, stale = version_diff.drop_stale_evidence(raw_data, text)
+                removed_ids += [f"сведение прошлой редакции, которого нет в новой: {x}" for x in stale]
+            extraction["raw_data"] = text_quality.clean_value(raw_data)
+            type_info, type_decode = await self._doc_type(document_id, chunks, file_name, extraction, row, None,
+                                                          fallback_doc=reuse_doc)
+            summary = (extraction.get("raw_data") or {}).get("summary")
+            allowed = doc_kind.allowed_codes(type_info["detected_type"], None)
+            profile = await self._cached(document_id, "document_profile",
+                                         lambda: self.profiler.profile(text, file_name, type_decode, summary, purchase),
+                                         model=self.model, fallback_doc=reuse_doc)
+            risk_context = {"detected_type": type_info.get("detected_type"), "type_decode": type_decode,
+                            "summary": summary, "purchase": purchase, "law": law}
+            risk_version = f"{self.versions['risk_analysis']}:{_hash_version(allowed)}"
+            prev_risk = (await self._get_cached(reuse_doc, "risk_analysis", risk_version, self.model)) if reuse_doc else None
+            if prev_risk is not None:
+                mode = "incremental"
+                risk = await self._cached(
+                    document_id, "risk_analysis",
+                    lambda: self._incremental_risks(prev_risk, prev_ctx["text"], text, file_name, risk_context, allowed),
+                    compact=self.risk_analyzer.to_compact, keep=lambda r: not r.get("partial"),
+                    version=risk_version, model=self.model)
+            else:
+                mode = "full"
+                risk = await self._cached(document_id, "risk_analysis",
+                                          lambda: self.risk_analyzer.analyze(text, file_name, risk_context, codes=allowed),
+                                          compact=self.risk_analyzer.to_compact,
+                                          keep=lambda r: not r.get("partial"),
+                                          version=risk_version, model=self.model)
+            version_changes, version_risks = (await self._version_changes(previous, prev_ctx, diff, document_id,
+                                                                          file_name, type_decode, use_llm=True)
+                                              if previous else (None, []))
+        risk_compact = self.risk_analyzer.to_compact(risk) if risk else {}
 
         pages = len({m.group(1) for m in PAGE_MARKER_RE.finditer(text)}) or None
         ocr_used = "(OCR)" in text
         pipeline = passport.pipeline_block(STAGE, "completed", self.model, self.versions, prev_id, self.force, attempt,
                                            result="ocr_suspect" if quality["status"] == "suspect" else None)
         pipeline["models"] = {"extraction": self.extraction_model, "reasoning": self.model}
+        pipeline["mode"] = mode
+        if getattr(self, "stats", None) is not None:
+            self.stats["modes"][mode] = self.stats["modes"].get(mode, 0) + 1
+        if mode == "incremental":
+            pipeline["incremental"] = {k: (risk or {}).get(k) for k in ("carried_over", "found_in_changes", "changed_share")}
         ai = passport.build_file_analysis(
             file_meta=row, type_info=type_info, type_decode=type_decode, extraction=extraction, profile=profile,
             risk_compact=risk_compact, extra_risks=version_risks, similar=similar, version_changes=version_changes,
@@ -610,8 +668,13 @@ class AIFileAnalyzer:
     async def _cached(self, document_id: int, analysis_type: str, produce: Callable[[], Awaitable[Any]],
                       compact: Optional[Callable[[Any], Any]] = None,
                       keep: Optional[Callable[[Any], bool]] = None, version_key: Optional[str] = None,
-                      version: Optional[str] = None, model: Optional[str] = None) -> Any:
+                      version: Optional[str] = None, model: Optional[str] = None,
+                      fallback_doc: Optional[int] = None) -> Any:
         """Результат анализа из кэша ``ai_document_analysis`` или новый (с сохранением).
+
+        ``fallback_doc`` — документ прошлой редакции: при анализе изменений его результат (если он есть
+        для той же версии промпта и модели) берётся вместо нового запроса к модели и сохраняется для
+        текущего документа.
 
         Args:
             document_id: ``ai_documents.id``.
@@ -622,6 +685,7 @@ class AIFileAnalyzer:
             version_key: Ключ версии промпта в ``self.versions`` (по умолчанию — ``analysis_type``).
             version: Явная версия (например, версия промпта + набор допустимых кодов).
             model: Модель, выполняющая анализ (ключ кэша; по умолчанию — модель извлечения).
+            fallback_doc: ``ai_documents.id`` прошлой редакции (анализ изменений).
 
         Returns:
             Any: Результат (``None``, если анализ не дал результата).
@@ -632,16 +696,32 @@ class AIFileAnalyzer:
             cached = await self.repo.get_analysis(document_id, analysis_type, version, model)
             if cached:
                 return cached["result"]
-        result = await produce()
+        result = None
+        stats = getattr(self, "stats", None)
+        if fallback_doc and not self.recompute:
+            result = await self._get_cached(fallback_doc, analysis_type, version, model)
+            if result is not None and stats is not None:
+                stats["reused_previous"][analysis_type.split(":")[0]] = stats["reused_previous"].get(analysis_type.split(":")[0], 0) + 1
+        if result is None:
+            if stats is not None:
+                stats["produced"][analysis_type.split(":")[0]] = stats["produced"].get(analysis_type.split(":")[0], 0) + 1
+            result = await produce()
         if result and (keep is None or keep(result)):
             await self.repo.save_analysis(document_id, analysis_type, version, model, result,
                                           compact(result) if compact else result,
                                           result.get("confidence") if isinstance(result, dict) and isinstance(result.get("confidence"), (int, float)) else None)
         return result
 
+    async def _get_cached(self, document_id: Optional[int], analysis_type: str, version: str, model: str) -> Any:
+        """Результат анализа документа из кэша или ``None``."""
+        if not document_id:
+            return None
+        cached = await self.repo.get_analysis(document_id, analysis_type, version, model)
+        return cached["result"] if cached else None
+
     async def _doc_type(self, document_id: int, chunks: List[str], file_name: str,
                         extraction: Optional[Dict[str, Any]], row: Dict[str, Any],
-                        print_kind: Optional[Dict[str, Any]] = None):
+                        print_kind: Optional[Dict[str, Any]] = None, fallback_doc: Optional[int] = None):
         """Тип документа (``doc_kind``).
 
         * печатная форма ЕИС — по тегу XML-источника, без запроса к модели;
@@ -661,7 +741,7 @@ class AIFileAnalyzer:
 
         info = await self._cached(document_id, "doc_type",
                                   lambda: self.type_detector.detect_document_type(content=chunks[0], filename=file_name),
-                                  model=self.extraction_model)
+                                  model=self.extraction_model, fallback_doc=fallback_doc)
         info = dict(info or {})
         name = ((extraction or {}).get("raw_data") or {}).get("document_name") or ""
         if isinstance(name, dict):
@@ -678,58 +758,107 @@ class AIFileAnalyzer:
         info["type_source"] = source
         return info, DOCUMENT_TYPE_MAPPING.get(detected)
 
-    async def _compare_versions(self, previous: Dict[str, Any], document_id: int, sha: str, text: str,
-                                file_name: str, type_decode: Optional[str]):
-        """Сравнение с предыдущей редакцией: текстовый diff + смысловой diff LLM + риск DOC-011.
+    async def _load_previous(self, previous: Dict[str, Any], sha: str, file_name: str) -> Dict[str, Any]:
+        """Текст прошлой редакции: из ``ai_documents`` (если она анализировалась), иначе файл скачивается и читается.
 
-        Текст предыдущей версии берётся из ``ai_documents`` (она уже анализировалась); если связи нет —
-        файл скачивается и читается без LLM-анализа.
+        Args:
+            previous: Строка предыдущей версии файла.
+            sha: SHA-256 текущего файла.
+            file_name: Имя файла.
 
         Returns:
-            tuple: ``(version_changes, risks)``.
+            Dict[str, Any]: ``base`` (поля ``version_changes``), ``doc_id``, ``text`` (``None`` — нет текста),
+            ``identical`` (тот же файл), ``error``.
         """
         prev_id = int(previous["id"])
         base = {"previous_file_id": prev_id, "previous_eis_version": previous.get("eis_version"),
                 "matched_by": previous.get("match"), "previous_xml_id": previous.get("previous_xml_id")}
+        out: Dict[str, Any] = {"base": base, "doc_id": None, "text": None, "identical": False, "error": None}
         if previous.get("content_sha256") and previous["content_sha256"] == sha:
-            return {**base, "identical": True, "similarity": 1.0}, []
-        prev_doc_id, prev_text = None, None
+            out["identical"] = True
+            return out
         link = await self.repo.get_link(self.env, prev_id)
         if link:
-            prev_doc_id = link["document_id"]
+            out["doc_id"] = link["document_id"]
             if link["content_sha256"] == sha:
-                return {**base, "identical": True, "similarity": 1.0}, []
-            doc = await self.repo.get_document(prev_doc_id)
-            prev_text = doc["text"] if doc else None
+                out["identical"] = True
+                return out
+            doc = await self.repo.get_document(link["document_id"])
+            out["text"] = doc["text"] if doc else None
         elif previous.get("url"):
             try:
-                prev_doc_id, prev_text, prev_sha, _ = await self._load_document(prev_id, previous["url"],
-                                                                                previous.get("file_name") or file_name)
-                if prev_sha == sha:
-                    return {**base, "identical": True, "similarity": 1.0}, []
+                doc_id, prev_text, prev_sha, _ = await self._load_document(prev_id, previous["url"],
+                                                                           previous.get("file_name") or file_name)
+                out.update(doc_id=doc_id, text=prev_text, identical=prev_sha == sha)
             except FileUnavailable as e:
-                return {**base, "error": f"Предыдущая версия недоступна: {e}"}, []
-        if not prev_text:
-            return {**base, "error": "Нет текста предыдущей версии"}, []
+                out["error"] = f"Предыдущая версия недоступна: {e}"
+        if out["text"] is None and not out["identical"] and not out["error"]:
+            out["error"] = "Нет текста предыдущей версии"
+        return out
 
-        diff = version_diff.text_diff(prev_text, text)
-        result = {**base, "identical": diff["identical"], "similarity": diff["similarity"], "stats": diff["stats"],
+    async def _version_changes(self, previous: Dict[str, Any], prev_ctx: Dict[str, Any], diff: Optional[Dict[str, Any]],
+                               document_id: int, file_name: str, type_decode: Optional[str], use_llm: bool = True):
+        """Сравнение с прошлой редакцией: текстовый diff + смысловой diff модели + риски DOC-011 / DOC-012 / AI-004.
+
+        Для печатных форм (``use_llm=False``) — только текстовый diff: изменения разбирает анализ XML-события.
+
+        Returns:
+            tuple: ``(version_changes, risks)``.
+        """
+        base = prev_ctx["base"]
+        if prev_ctx.get("identical") or (diff and diff["identical"]):
+            return {**base, "identical": True, "similarity": 1.0}, []
+        if prev_ctx.get("error") or diff is None:
+            return {**base, "error": prev_ctx.get("error") or "Нет текста предыдущей версии"}, []
+        result = {**base, "identical": False, "similarity": diff["similarity"], "stats": diff["stats"],
                   "fragments_total": diff.get("fragments_total", 0)}
-        if diff["identical"]:
-            return result, []
-        try:
-            llm = await self._cached(document_id, f"version_diff:{prev_doc_id}",
-                                     lambda: self.differ.analyze(diff, file_name, type_decode),
-                                     version_key="version_diff")
-        except Exception as e:  # noqa: BLE001 — без смыслового diff остаётся текстовый
-            logger.error(f"Смысловое сравнение редакций файла не удалось: {e}")
-            llm = None
+        llm = None
+        if use_llm:
+            try:
+                llm = await self._cached(document_id, f"version_diff:{prev_ctx.get('doc_id')}",
+                                         lambda: self.differ.analyze(diff, file_name, type_decode),
+                                         version_key="version_diff", model=self.model)
+            except Exception as e:  # noqa: BLE001 — без смыслового diff остаётся текстовый
+                logger.error(f"Смысловое сравнение редакций файла не удалось: {e}")
         if llm:
             result.update({"summary": llm.get("summary"), "risk_relevant": bool(llm.get("risk_relevant")),
                            "changes": llm.get("changes") or []})
         else:
             result["fragments"] = diff["fragments"][:10]
-        return result, version_diff.version_risks(llm, prev_id, diff.get("similarity"))
+        return result, version_diff.version_risks(llm, int(previous["id"]), diff.get("similarity"))
+
+    async def _incremental_risks(self, prev_risk: Dict[str, Any], prev_text: str, text: str, file_name: str,
+                                 context: Dict[str, Any], allowed: List[str]) -> Dict[str, Any]:
+        """Риски новой редакции по изменениям: перенос рисков с сохранившимися цитатами + поиск в изменённых абзацах.
+
+        Args:
+            prev_risk: Полный риск-анализ прошлой редакции.
+            prev_text: Текст прошлой редакции.
+            text: Текст новой редакции.
+            file_name: Имя файла.
+            context: Контекст риск-анализа.
+            allowed: Допустимые коды.
+
+        Returns:
+            Dict[str, Any]: Результат в формате ``DocumentRiskAnalyzer.analyze`` (``incremental = True``).
+        """
+        kept, dropped = self.risk_analyzer.carry_over(prev_risk, text)
+        changed = version_diff.changed_text(prev_text, text)
+        fresh = None
+        if len(changed["text"]) > version_diff.MAX_CHANGED_CHARS:
+            # изменений слишком много — анализируем документ целиком, перенос не нужен
+            kept, dropped = [], list((prev_risk or {}).get("risks") or [])
+            fresh = await self.risk_analyzer.analyze(text, file_name, context, codes=allowed)
+        elif changed["text"].strip() and allowed:
+            ctx = {**context, "note": "Передан не весь документ, а только изменённые в новой редакции абзацы "
+                                      "(с соседними абзацами для контекста)"}
+            fresh = await self.risk_analyzer.analyze(changed["text"], file_name, ctx, codes=allowed)
+        result = self.risk_analyzer.merge_results(kept, fresh, allowed)
+        result["changed_share"] = changed["share"]
+        result["not_found_in_new_version"] = [r.get("code") for r in dropped]
+        logger.info(f"{file_name}: анализ изменений — перенесено {len(kept)}, снято {len(dropped)}, "
+                    f"найдено в изменениях {result['found_in_changes']} (изменено {changed['share']:.0%})")
+        return result
 
     # --------------------------------------------------------------- эмбеддинги
 

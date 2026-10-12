@@ -12,7 +12,7 @@ import asyncio
 import hashlib
 import json
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 from configs.logger import get_logger
@@ -43,6 +43,7 @@ SELF_DENIAL_RE = re.compile(
 # Признаки товарного знака, модели, артикула или производителя в цитате (для DOC-002)
 BRAND_RE = re.compile(
     r"[®™]|\b[A-Za-z][A-Za-z0-9\-]{1,}\b|«[^»]{2,40}»|\"[^\"]{2,40}\""
+    r"|\b[А-ЯЁ][а-яё]+[А-ЯЁ][а-яёА-ЯЁ]*\b"   # слитное написание с заглавной внутри: «КлериГель»
     r"|модел|артикул|марк[аиу]\b|товарн\w+\s+знак|производств\w+\s|производител|фирм\w*\s|бренд|торгов\w+\s+наименован",
     re.IGNORECASE,
 )
@@ -174,6 +175,57 @@ class DocumentRiskAnalyzer:
             "rejected_inconsistent": rejected,         # риски, противоречащие сами себе или цитате
             "allowed_codes": allowed,
             "prompt_version": self.prompt_version,
+        }
+
+    def carry_over(self, previous: Optional[Dict[str, Any]], text: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Риски прошлой редакции, цитаты которых остались в новой (анализ только изменений).
+
+        Риск, цитата которого исчезла или изменилась, не переносится: по правилу риск-мониторинга он
+        «не выявлен в новой версии» и считается снятым (``risks_comparison.not_found_in_new_version``),
+        если не найден заново в изменённых фрагментах.
+
+        Args:
+            previous: Полный результат :meth:`analyze` прошлой редакции.
+            text: Текст новой редакции.
+
+        Returns:
+            Tuple[List, List]: ``(перенесённые, снятые)`` риски в формате :meth:`analyze`.
+        """
+        norm_text = _norm(text)
+        kept, dropped = [], []
+        for r in (previous or {}).get("risks") or []:
+            frag = ((r.get("evidence") or {}).get("fragment")) or ""
+            (kept if self._fragment_in_text(frag, norm_text) else dropped).append(r)
+        return kept, dropped
+
+    def merge_results(self, kept: List[Dict[str, Any]], fresh: Optional[Dict[str, Any]],
+                      allowed: List[str]) -> Dict[str, Any]:
+        """Объединяет перенесённые риски и риски, найденные в изменённых фрагментах.
+
+        Args:
+            kept: Перенесённые риски (:meth:`carry_over`).
+            fresh: Результат :meth:`analyze` по изменённым фрагментам (``None`` — изменений для анализа нет).
+            allowed: Допустимые коды.
+
+        Returns:
+            Dict[str, Any]: Результат в формате :meth:`analyze` с ``incremental = True``.
+        """
+        fresh = fresh or {}
+        risks = self._merge(list(kept) + list(fresh.get("risks") or []))
+        score = self._score(risks)
+        return {
+            "risk_score": score,
+            "risk_level": self._level(score),
+            "summary": self._build_summary(risks) if risks else (fresh.get("summary") or "Признаков рисков не выявлено."),
+            "risks": risks,
+            "partial": bool(fresh.get("partial")),
+            "dropped_unverified": fresh.get("dropped_unverified", 0),
+            "rejected_inconsistent": fresh.get("rejected_inconsistent", 0),
+            "allowed_codes": allowed,
+            "prompt_version": self.prompt_version,
+            "incremental": True,
+            "carried_over": len(kept),
+            "found_in_changes": len(fresh.get("risks") or []),
         }
 
     @staticmethod

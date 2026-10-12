@@ -124,6 +124,7 @@ RETRY_DELAYS = (5.0, 15.0, 45.0)    # паузы между попытками �
 BREAKER_FAILS = 3                    # подряд сбоев до срабатывания предохранителя
 BREAKER_PAUSE = (30.0, 300.0)        # пауза предохранителя: начальная и предельная, с
 _gates: Dict[Tuple[int, str], asyncio.Semaphore] = {}
+CALLS: Dict[str, int] = {"requests": 0, "failed": 0}   # счётчик запросов к модели в процессе (для сводки задачи)
 _breaker: Dict[str, Dict[str, float]] = {}
 
 
@@ -220,6 +221,7 @@ async def call_llm(client: Any, retries: int = len(RETRY_DELAYS) + 1, **kwargs: 
     last: Optional[BaseException] = None
     for attempt in range(max(1, retries)):
         await _breaker_wait(key)
+        CALLS["requests"] += 1
         try:
             async with _gate(key):
                 text = await _create(client, stream, kwargs)
@@ -230,6 +232,7 @@ async def call_llm(client: Any, retries: int = len(RETRY_DELAYS) + 1, **kwargs: 
                 logger.warning(f"LLM {key}: поток не поддерживается, перехожу на обычный ответ")
                 stream = False
                 continue
+            CALLS["failed"] += 1
             if not transient(e):
                 raise
             last = e

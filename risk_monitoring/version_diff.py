@@ -7,7 +7,7 @@
 import difflib
 import hashlib
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from risk_monitoring import risk_catalog
 
@@ -81,6 +81,96 @@ def text_diff(old_text: str, new_text: str, max_fragments: int = MAX_FRAGMENTS) 
         "fragments": fragments[:max_fragments],
         "fragments_total": len(fragments),
     }
+
+
+INCREMENTAL_SIMILARITY = 0.9      # от этой схожести новая редакция анализируется по изменениям
+MAX_CHANGED_CHARS = 40000         # больше изменённого текста — анализ целиком
+
+
+def changed_text(old_text: str, new_text: str, context: int = 1) -> Dict[str, Any]:
+    """Изменённые и добавленные абзацы новой редакции целиком, с соседними абзацами для контекста.
+
+    Используется для анализа только изменений: риски ищутся в этих абзацах, остальные риски
+    переносятся из прошлой редакции.
+
+    Args:
+        old_text: Текст прошлой редакции.
+        new_text: Текст новой редакции.
+        context: Сколько соседних абзацев до и после изменения добавить.
+
+    Returns:
+        Dict[str, Any]: ``text`` (блоки через пустую строку), ``paragraphs`` (изменённых абзацев новой
+        редакции), ``removed`` (удалённых абзацев прошлой), ``share`` (доля изменённого объёма новой редакции).
+    """
+    a, b = paragraphs(old_text), paragraphs(new_text)
+    sm = difflib.SequenceMatcher(a=a, b=b, autojunk=False)
+    idx: set = set()
+    changed, removed = 0, 0
+    for op, i1, i2, j1, j2 in sm.get_opcodes():
+        if op == "equal":
+            continue
+        removed += i2 - i1
+        if j2 > j1:
+            changed += j2 - j1
+            idx.update(range(max(0, j1 - context), min(len(b), j2 + context)))
+    blocks, cur, last = [], [], None
+    for j in sorted(idx):
+        if last is not None and j != last + 1:
+            blocks.append("\n".join(cur))
+            cur = []
+        cur.append(b[j])
+        last = j
+    if cur:
+        blocks.append("\n".join(cur))
+    total = sum(len(x) for x in b) or 1
+    size = sum(len(b[j]) for j in idx)
+    return {"text": "\n\n".join(blocks), "paragraphs": changed, "removed": removed, "share": round(size / total, 4)}
+
+
+def _flat(s: str) -> str:
+    """Текст для сверки цитат: нижний регистр, одинарные пробелы, без маркеров страниц."""
+    return re.sub(r"\s+", " ", PAGE_MARKER_RE.sub(" ", s or "")).strip().lower()
+
+
+def drop_stale_evidence(raw_data: Dict[str, Any], new_text: str) -> Tuple[Dict[str, Any], List[str]]:
+    """Убирает из данных прошлой редакции сведения, цитаты которых в новой редакции нет.
+
+    Данные извлечения переносятся из прошлой редакции (анализ изменений); значение, подтверждённое
+    фрагментом, который изменился (например, новая дата окончания подачи заявок), устарело — оно
+    снимается, а новое значение описывает смысловой diff (``version_changes``).
+
+    Args:
+        raw_data: ``raw_data`` прошлой редакции.
+        new_text: Текст новой редакции.
+
+    Returns:
+        Tuple[Dict[str, Any], List[str]]: Копия ``raw_data`` и описания снятых сведений.
+    """
+    flat = _flat(new_text)
+    removed: List[str] = []
+
+    def fragments(ev: Any) -> List[str]:
+        """Цитаты из ``evidence`` (словарь или список словарей)."""
+        items = ev if isinstance(ev, list) else [ev]
+        return [str(e.get("fragment")) for e in items if isinstance(e, dict) and e.get("fragment")]
+
+    def alive(item: Any) -> bool:
+        """Есть ли хоть одна цитата сведения в новой редакции (без цитат — сведение остаётся)."""
+        frs = fragments(item.get("evidence")) if isinstance(item, dict) else []
+        return not frs or any(_flat(f)[:200] in flat for f in frs)
+
+    out = dict(raw_data or {})
+    for key, value in list(out.items()):
+        if isinstance(value, list):
+            keep = [v for v in value if alive(v)]
+            for v in value:
+                if not alive(v):
+                    removed.append(f"{key}: {(v.get('context') or v.get('name') or v.get('value'))}")
+            out[key] = keep
+        elif isinstance(value, dict) and "evidence" in value and not alive(value):
+            removed.append(f"{key}: {value.get('value')}")
+            out[key] = {**value, "value": None}
+    return out, removed
 
 
 MEANINGFUL_SIGNIFICANCE = 0.5     # порог «содержательного» изменения (DOC-011)

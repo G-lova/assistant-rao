@@ -172,7 +172,18 @@ class XmlEventAnalyzer:
             rows = await self._query("xml_meta.sql", head=[self.storage_path], ids=ids)
             found = {int(r["id"]): r for r in rows}
             previous = await self._previous(list(found)) if found else {}
-            results = await asyncio.gather(*(self._guarded(found[i], previous.get(i)) for i in ids if i in found))
+            # 1) разбор XML, diff, правила — без модели
+            prepared = await asyncio.gather(*(self._guarded(found[i], previous.get(i)) for i in ids if i in found))
+            ctxs = [p for p in prepared if p.get("status") == "prepared"]
+            # 2) модель — одним запросом на закупку (контракт) для событий, где она нужна
+            llm = await self._llm_by_purchase([c for c in ctxs if c["needs_llm"]])
+            # 3) сборка ai_analysis и запись
+            finished = {c["xml_id"]: await self._finish_guarded(c, llm.get(c["xml_id"])) for c in ctxs}
+            reasons: Dict[str, int] = {}
+            for c in ctxs:
+                reasons[c["llm_reason"]] = reasons.get(c["llm_reason"], 0) + 1
+            self.stats = {"events": len(ctxs), "with_llm": sum(1 for c in ctxs if c["needs_llm"]), "reasons": reasons}
+            results = [finished.get(p["xml_id"], p) for p in prepared]
             return list(results) + [{"xml_id": i, "status": "not_found"} for i in ids if i not in found]
         finally:
             self.archives.close()
@@ -202,24 +213,67 @@ class XmlEventAnalyzer:
                 return {"xml_id": xml_id, "status": "skipped", "reason": "max_attempts"}
         async with self.semaphore:
             try:
-                return await self.analyze_one(row, previous, attempt)
+                return await self._prepare(row, previous, attempt)
             except Exception as e:  # noqa: BLE001 — сбой одного XML не останавливает остальные
-                logger.error(f"Ошибка анализа XML {xml_id}: {e}", exc_info=True)
-                result = {"xml_id": xml_id, "status": "error", "error": f"{type(e).__name__}: {e}", "pushed": False}
-                if self.push_results and not self.force:
-                    block = {"pipeline": passport.pipeline_block(STAGE, "failed", self.model, self.versions,
-                                                                 attempt=attempt, error=result["error"])}
-                    try:
-                        await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, xml_id, block)
-                        result["pushed"] = True
-                    except Exception as pe:  # noqa: BLE001
-                        logger.error(f"Не удалось записать статус ошибки XML {xml_id}: {pe}")
-                return result
+                return await self._failure(xml_id, attempt, e)
+
+    async def _failure(self, xml_id: int, attempt: int, e: BaseException) -> Dict[str, Any]:
+        """Результат с ошибкой и запись ``pipeline.status = failed`` (кроме режима отладки)."""
+        logger.error(f"Ошибка анализа XML {xml_id}: {e}", exc_info=True)
+        result = {"xml_id": xml_id, "status": "error", "error": f"{type(e).__name__}: {e}", "pushed": False}
+        if self.push_results and not self.force:
+            block = {"pipeline": passport.pipeline_block(STAGE, "failed", self.model, self.versions,
+                                                         attempt=attempt, error=result["error"])}
+            try:
+                await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, xml_id, block)
+                result["pushed"] = True
+            except Exception as pe:  # noqa: BLE001
+                logger.error(f"Не удалось записать статус ошибки XML {xml_id}: {pe}")
+        return result
+
+    async def _finish_guarded(self, ctx: Dict[str, Any], llm: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Сборка и запись события с обработкой ошибок."""
+        try:
+            return await self._finish(ctx, llm)
+        except Exception as e:  # noqa: BLE001
+            return await self._failure(ctx["xml_id"], ctx["attempt"], e)
+
+    async def _llm_by_purchase(self, ctxs: List[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
+        """Анализ моделью событий, сгруппированных по закупке (контракту): один запрос на пакет.
+
+        Args:
+            ctxs: Подготовленные события, которым нужна модель.
+
+        Returns:
+            Dict[int, Dict[str, Any]]: ``xml_id → ответ модели``.
+        """
+        if not self.event_analyzer or not ctxs:
+            return {}
+        groups: Dict[str, List[Dict[str, Any]]] = {}
+        for c in ctxs:
+            row = c["row"]
+            key = (f"c{row['risk_monitoring_contract_id']}" if row.get("risk_monitoring_contract_id") is not None
+                   else f"n{row.get('purchase_number') or row.get('contract_number') or c['xml_id']}")
+            groups.setdefault(key, []).append(c)
+        out: Dict[int, Dict[str, Any]] = {}
+
+        async def run(key: str, group: List[Dict[str, Any]]) -> None:
+            """Пакеты событий одной закупки по порядку версий."""
+            group.sort(key=lambda c: (_int(c["row"].get("eis_version")) or 0, c["xml_id"]))
+            items = [{"event_id": c["xml_id"], "payload": c["payload"]} for c in group]
+            name = group[0]["row"].get("purchase_number") or group[0]["row"].get("contract_number") or key
+            for batch in self.event_analyzer.batches(items):
+                out.update(await self.event_analyzer.analyze_batch(batch, str(name)))
+
+        await asyncio.gather(*(run(k, g) for k, g in groups.items()))
+        calls = sum(len(self.event_analyzer.batches([{"event_id": 0, "payload": c["payload"]} for c in g])) for g in groups.values())
+        logger.info(f"События XML: модель нужна {len(ctxs)} событиям, закупок {len(groups)}, пакетов ≈{calls}")
+        return out
 
     # ------------------------------------------------------------- один XML
 
     async def analyze_one(self, row: Dict[str, Any], previous: Optional[Dict[str, Any]], attempt: int = 1) -> Dict[str, Any]:
-        """Полный анализ одного XML и запись события.
+        """Полный анализ одного XML и запись события (без объединения с другими событиями закупки).
 
         Args:
             row: Строка ``xml_meta.sql``.
@@ -228,6 +282,24 @@ class XmlEventAnalyzer:
 
         Returns:
             Dict[str, Any]: ``xml_id``, ``status``, ``pushed``, ``ai_analysis``.
+        """
+        ctx = await self._prepare(row, previous, attempt)
+        llm = None
+        if ctx["needs_llm"] and self.event_analyzer:
+            llm = await self.event_analyzer.analyze(ctx["payload"], row.get("entry_name") or str(ctx["xml_id"]))
+        return await self._finish(ctx, llm)
+
+    async def _prepare(self, row: Dict[str, Any], previous: Optional[Dict[str, Any]], attempt: int = 1) -> Dict[str, Any]:
+        """Разбор XML без модели: diff с предыдущей версией, вложения, файлы, тип события, правила,
+        привязка «сироты», решение о вызове модели и пакет для неё.
+
+        Args:
+            row: Строка ``xml_meta.sql``.
+            previous: Предыдущая версия или ``None``.
+            attempt: Номер попытки.
+
+        Returns:
+            Dict[str, Any]: Контекст события (``status = prepared``, ``needs_llm``, ``llm_reason``, ``payload``).
         """
         xml_id = int(row["id"])
         raw = await self.archives.read(row["archive_url"], row["entry_name"])
@@ -259,20 +331,38 @@ class XmlEventAnalyzer:
             link = await self._link_orphan(facts, row)
 
         rules = xml_events.rule_risks(event, changes, facts)
-        llm = None
-        if self.event_analyzer and self._needs_llm(event, changes):
+        needs_llm, reason = xml_events.llm_decision(event, changes, rules)
+        payload = None
+        if needs_llm:
             payload = xml_events.build_llm_payload(event, facts, changes, doc_changes, files)
             payload["law"] = f"{fz}-ФЗ" if fz else "закон не определён"
-            llm = await self.event_analyzer.analyze(payload, row.get("entry_name") or str(xml_id))
+        return {"status": "prepared", "xml_id": xml_id, "row": row, "attempt": attempt, "previous": previous,
+                "facts": facts, "fz": fz, "changes": changes, "doc_changes": doc_changes, "files": files,
+                "all_files": all_files, "event": event, "link": link, "rules": rules,
+                "needs_llm": bool(needs_llm and self.event_analyzer), "llm_reason": reason, "payload": payload}
 
+    async def _finish(self, ctx: Dict[str, Any], llm: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Собирает ``ai_analysis`` события и записывает его во внешнюю БД.
+
+        Args:
+            ctx: Контекст из :meth:`_prepare`.
+            llm: Ответ модели или ``None`` (событие описано шаблоном).
+
+        Returns:
+            Dict[str, Any]: ``xml_id``, ``status``, ``pushed``, ``ai_analysis``.
+        """
+        row, previous, xml_id = ctx["row"], ctx["previous"], ctx["xml_id"]
         pipeline = passport.pipeline_block(STAGE, "completed", self.model, self.versions,
-                                           _int(previous["id"]) if previous else None, self.force, attempt,
+                                           _int(previous["id"]) if previous else None, self.force, ctx["attempt"],
                                            export_date=str(row.get("exact_date"))[:10] if row.get("exact_date") else None)
-        ai = xml_events.build_xml_analysis(event=event, facts=facts, changes=changes, doc_changes=doc_changes,
-                                           files=files, link=link, rule_risk_list=rules, llm=llm,
+        pipeline["llm"] = {"used": llm is not None, "reason": ctx["llm_reason"]}
+        ai = xml_events.build_xml_analysis(event=ctx["event"], facts=ctx["facts"], changes=ctx["changes"],
+                                           doc_changes=ctx["doc_changes"], files=ctx["files"], link=ctx["link"],
+                                           rule_risk_list=ctx["rules"], llm=llm,
                                            previous={"id": previous["id"], "eis_version": _int(previous.get("eis_version"))} if previous else None,
                                            pipeline=pipeline, model=self.model if llm else None,
-                                           all_files=all_files, fz=fz)
+                                           all_files=ctx["all_files"], fz=ctx["fz"])
+        ai["significant_changes_total"] = len(xml_events.significant_changes(ctx["changes"]))
         response = {"xml_id": xml_id, "status": "done", "pushed": False, "ai_analysis": ai}
         if self.push_results:
             try:
@@ -282,11 +372,6 @@ class XmlEventAnalyzer:
                 logger.error(f"Не удалось записать ai_analysis XML {xml_id}: {e}")
                 response["push_error"] = str(e)
         return response
-
-    @staticmethod
-    def _needs_llm(event: Dict[str, Any], changes: List[Dict[str, Any]]) -> bool:
-        """LLM нужна, если событие не служебное: есть изменения, первая версия или важность выше низкой."""
-        return bool(changes) or event.get("first_version") or event.get("importance") != "low"
 
     async def _files(self, xml_id: int, previous: Optional[Dict[str, Any]], atts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Файлы текущей и предыдущей версии XML (по ``xml_source_id`` и по ссылкам), с кратким результатом анализа."""

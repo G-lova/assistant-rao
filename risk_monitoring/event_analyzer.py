@@ -5,9 +5,13 @@
 Анализ комплекта документов закупки сюда не входит — он делается на уровне закупки.
 
 Коды рисков берутся из единого каталога ``risk_monitoring/risk_catalog.py``.
+
+Пакетный режим (``analyze_batch``): события одной закупки (контракта) за выгрузку разбираются одним
+запросом — меньше вызовов модели, и модель видит последовательность событий. Ответ — массив
+``events`` с ``event_id``; событие, которого нет в ответе, разбирается отдельным запросом.
 """
 import json
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from configs.logger import get_logger
 from risk_monitoring import risk_catalog
@@ -18,6 +22,15 @@ logger = get_logger(__name__)
 PROMPT_PATH = "prompts/event_analyzer_prompt.txt"
 SCHEMA_PATH = "schemas/event_analyzer_schema.json"
 MAX_PAYLOAD_CHARS = 24000
+BATCH_MAX_EVENTS = 6         # событий в одном запросе
+BATCH_MAX_CHARS = 30000      # суммарный размер пакетов событий в одном запросе
+BATCH_PROMPT = """
+
+## НЕСКОЛЬКО СОБЫТИЙ
+Передано несколько событий одной закупки (контракта) в порядке версий: массив `events`, у каждого `event_id`.
+Разбери каждое событие отдельно по правилам выше, учитывая контекст соседних событий (например, серию
+изменений сроков). Верни `{"events": [...]}`: по одному объекту на каждое переданное событие, с тем же `event_id`.
+"""
 
 # Совместимость: справочник кодов событийных рисков «код → название» (раньше был задан здесь)
 EVENT_RISKS_KEYS = {code: risk_catalog.title(code) for code in risk_catalog.EVENT_RISK_CODES}
@@ -44,6 +57,77 @@ class EventAnalyzer:
         self.schema = json.loads(raw_schema.replace('"EVENT_RISKS_KEYS"', json.dumps(codes)))
         self.prompt_version = prompt_version(self.prompt, self.schema)
 
+    def _clean(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Оставляет риски только с кодами каталога, подставляет название риска, добавляет версию промпта."""
+        allowed = set(risk_catalog.EVENT_RISK_CODES)
+        risks = []
+        for r in data.get("risks") or []:
+            if not isinstance(r, dict) or r.get("rule_id") not in allowed:
+                continue
+            r.setdefault("title", risk_catalog.title(r["rule_id"]))
+            risks.append(r)
+        data["risks"] = risks
+        data["prompt_version"] = self.prompt_version
+        return data
+
+    @staticmethod
+    def batches(items: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+        """Делит события одной закупки на пакеты по ``BATCH_MAX_EVENTS`` и ``BATCH_MAX_CHARS``.
+
+        Args:
+            items: ``{"event_id", "payload"}`` в порядке версий.
+
+        Returns:
+            List[List[Dict[str, Any]]]: Пакеты.
+        """
+        out: List[List[Dict[str, Any]]] = []
+        cur: List[Dict[str, Any]] = []
+        size = 0
+        for it in items:
+            n = len(json.dumps(it["payload"], ensure_ascii=False, default=str))
+            if cur and (len(cur) >= BATCH_MAX_EVENTS or size + n > BATCH_MAX_CHARS):
+                out.append(cur)
+                cur, size = [], 0
+            cur.append(it)
+            size += n
+        if cur:
+            out.append(cur)
+        return out
+
+    async def analyze_batch(self, items: List[Dict[str, Any]], name: str) -> Dict[Any, Dict[str, Any]]:
+        """Разбирает несколько событий одной закупки одним запросом.
+
+        Args:
+            items: ``{"event_id", "payload"}``.
+            name: Подпись для логов (номер закупки).
+
+        Returns:
+            Dict[Any, Dict[str, Any]]: ``event_id → ответ`` (как у :meth:`analyze`). Если пакет из одного
+            события или модель пропустила событие — оно разбирается отдельным запросом.
+        """
+        if len(items) == 1:
+            return {items[0]["event_id"]: await self.analyze(items[0]["payload"], name)}
+        schema = {"type": "object", "required": ["events"], "properties": {"events": {"type": "array", "items": {
+            **self.schema, "required": ["event_id"] + list(self.schema.get("required", [])),
+            "properties": {"event_id": {"type": "integer"}, **self.schema.get("properties", {})}}}}}
+        content = json.dumps({"events": [{"event_id": it["event_id"], **it["payload"]} for it in items]},
+                             ensure_ascii=False, default=str)
+        out: Dict[Any, Dict[str, Any]] = {}
+        try:
+            data = await self.llm.ask(self.prompt + BATCH_PROMPT,
+                                      f"Проанализируй события ЕИС ({name}, {len(items)} шт.):\n\n{content}",
+                                      schema, max_tokens=min(8000, 1500 * len(items) + 1000))
+            ids = {it["event_id"] for it in items}
+            for ev in data.get("events") or []:
+                if isinstance(ev, dict) and ev.get("event_id") in ids and ev["event_id"] not in out:
+                    out[ev["event_id"]] = self._clean(ev)
+        except Exception as e:  # noqa: BLE001 — разбираем по одному
+            logger.error(f"EventAnalyzer: пакет {name} ({len(items)} соб.) не разобран: {type(e).__name__}: {e}")
+        for it in items:
+            if it["event_id"] not in out:
+                out[it["event_id"]] = await self.analyze(it["payload"], name)
+        return out
+
     async def analyze(self, payload: Dict[str, Any], xml_name: str) -> Dict[str, Any]:
         """Анализирует событие.
 
@@ -67,16 +151,7 @@ class EventAnalyzer:
             return {"event_summary": None, "changes": [], "risks": [], "error": f"{type(e).__name__}: {e}",
                     "prompt_version": self.prompt_version}
 
-        allowed = set(risk_catalog.EVENT_RISK_CODES)
-        risks = []
-        for r in data.get("risks") or []:
-            if not isinstance(r, dict) or r.get("rule_id") not in allowed:
-                continue
-            r.setdefault("title", risk_catalog.title(r["rule_id"]))
-            risks.append(r)
-        data["risks"] = risks
-        data["prompt_version"] = self.prompt_version
-        return data
+        return self._clean(data)
 
     async def check_event_risks(self, content: str, xml_name: str) -> Dict[str, Any]:
         """Совместимость со старым интерфейсом: строка JSON на входе.

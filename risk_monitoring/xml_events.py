@@ -24,6 +24,7 @@ IGNORED_KEYS = {
     "uploadDate", "exportDate", "schemaVersion", "schemeVersion", "guid", "uuid", "versionGUID", "cryptoSigns",
     "fileHash", "signature", "serviceSigns", "printFormInfo", "extPrintFormInfo", "printForm", "extPrintForm",
     "docPublishDTInEIS", "publishDTInEIS", "publishDate", "docPublishDate", "href", "contentId",
+    "docDate", "plannedPublishDate", "docRegDate",
 }
 # Поля, по которым элементы повторяющихся блоков сопоставляются между версиями
 LIST_KEY_FIELDS = ("sid", "externalSid", "ordinalNumber", "stageOrdinalNumber", "regNum", "code", "fileName", "url")
@@ -55,6 +56,71 @@ CONTRACT_SUBTYPES: List[Tuple[str, str]] = [
     (r"(executionperiod|enddate|startdate|executiondate|stages?\b|stage\[)", "CON-003"),
     (r"(supplier|participant)", "CON-008"),
 ]
+
+# Значимые для риск-мониторинга изменения (путь в нижнем регистре): деньги, сроки, требования,
+# объект закупки, условия и исполнение контракта. Только они требуют анализа моделью.
+SIGNIFICANT_PATH_RE = re.compile(
+    r"price|maxprice|\bsum|amount|advance|guarantee|\bpart$|percent"
+    r"|enddt|startdt|biddingdate|summarizingdate|firstpartsdate|secondpartsdate|collectinginfo"
+    r"|executionperiod|executionterm|relativeterms|termdaytype|stagesinfo|stageinfo|enddate|startdate|executiondate"
+    r"|requirement|preferense|preference|restriction|prohibition|nationalregime"
+    r"|purchaseobject|okpd|ktru|kvr|quantity|characteristic|contractsubject|purchasesubject"
+    r"|modification|termination|penalt|claim|refusal|cancel|supplier|participant|winner|subcontract"
+)
+# Служебные и справочные сведения: реквизиты счетов, контакты, подписи, сведения о вложениях
+# (вложения сравниваются отдельно — document_changes)
+SERVICE_PATH_RE = re.compile(
+    r"account|creditorg|corraccount|\bbik\b|bik$|contactinfo|contactperson|phone|email|fax|\bfio\b|lastname|firstname"
+    r"|middlename|postaddress|factaddress|attachment|filename|docdescription|\.url$|signature|responsiblerole"
+    r"|responsibleinfo\.(orginfo|contact)"
+)
+
+
+def significant_changes(changes: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Изменения, значимые для риск-мониторинга (``SIGNIFICANT_PATH_RE``), без служебных (``SERVICE_PATH_RE``).
+
+    Args:
+        changes: Изменения (:func:`diff`).
+
+    Returns:
+        List[Dict[str, Any]]: Значимые изменения.
+    """
+    out = []
+    for c in changes:
+        p = c["path"].lower()
+        if SERVICE_PATH_RE.search(p):
+            continue
+        if SIGNIFICANT_PATH_RE.search(p):
+            out.append(c)
+    return out
+
+
+def llm_decision(event: Dict[str, Any], changes: Sequence[Dict[str, Any]], rules: Sequence[Dict[str, Any]]) -> Tuple[bool, str]:
+    """Нужен ли анализ события моделью.
+
+    Модель вызывается, если правила кода нашли риск, событие важное (``high`` / ``critical``: расторжение,
+    жалоба, отмена, уклонение …) или есть значимые изменения. Первая версия документа и служебные
+    изменения (даты публикации, ссылки и даты вложений, реквизиты счетов, контакты) описываются
+    шаблоном (:func:`default_summary`).
+
+    Args:
+        event: Тип события (:func:`classify`).
+        changes: Изменения.
+        rules: Риски правил (:func:`rule_risks`).
+
+    Returns:
+        Tuple[bool, str]: ``(нужна ли модель, причина)`` — причина пишется в ``pipeline.llm``.
+    """
+    if rules:
+        return True, "rule_risks"
+    if event.get("importance") in ("high", "critical"):
+        return True, "importance"
+    if significant_changes(changes):
+        return True, "significant_changes"
+    if event.get("first_version"):
+        return False, "first_version_template"
+    return False, "service_changes_only" if changes else "no_changes"
+
 
 KEY_RE = re.compile(r"^(?:\d{19}|\d{18,20})$")
 
@@ -739,7 +805,7 @@ def build_llm_payload(event: Dict[str, Any], facts: Dict[str, Any], changes: Seq
     Args:
         event: Тип события.
         facts: Сведения.
-        changes: Изменения (в пакет — до ``MAX_CHANGES_LLM``, сначала поля с названиями).
+        changes: Изменения (в пакет — значимые, до ``MAX_CHANGES_LLM``; если значимых нет — все).
         doc_changes: Изменения вложений.
         files: Файлы события с кратким анализом (``file_id``, ``file_name``, ``detected_type``, ``resume``).
 
@@ -750,7 +816,7 @@ def build_llm_payload(event: Dict[str, Any], facts: Dict[str, Any], changes: Seq
         "event": {k: event.get(k) for k in ("code", "title", "subtypes", "first_version", "previous_missing", "xml_tag", "eis_version")},
         "facts": {k: _short(v) for k, v in facts.items() if k != "ikz_parts"},
         "changes": [{k: _short(c.get(k)) for k in ("label", "path", "old", "new", "change", "delta_pct") if c.get(k) is not None}
-                    for c in list(changes)[:MAX_CHANGES_LLM]],
+                    for c in (significant_changes(changes) or list(changes))[:MAX_CHANGES_LLM]],
         "changes_total": len(changes),
         "documents": {k: [{"file_name": (d.get("after") or d).get("file_name") if isinstance(d, dict) else None,
                            "description": (d.get("after") or d).get("description") if isinstance(d, dict) else None}
@@ -878,7 +944,8 @@ def default_summary(event: Dict[str, Any], facts: Dict[str, Any], changes: Seque
     num = facts.get("purchase_number") or facts.get("contract_reg_number")
     if num:
         parts[0] += f" № {num}"
-    labeled = [c for c in changes if c.get("label")][:3]
+    sig = significant_changes(changes)
+    labeled = ([c for c in sig if c.get("label")] or [c for c in changes if c.get("label")])[:3]
     if labeled:
         parts.append("Изменения: " + "; ".join(
             f"{c['label']}: {c.get('old')} → {c.get('new')}" + (f" ({c['delta_pct']:+.1f} %)" if c.get("delta_pct") is not None else "")
