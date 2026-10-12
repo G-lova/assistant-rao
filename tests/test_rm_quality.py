@@ -388,5 +388,85 @@ class RenamedAttachmentTest(unittest.TestCase):
         self.assertEqual(len(ch["replaced"]), 0)
 
 
+class LLMTimeoutTest(unittest.TestCase):
+    """``call_llm``: 504 шлюза — паузы, предохранитель, без повторов SDK; поток собирается из чанков."""
+
+    def setUp(self):
+        """Сбрасывает состояние предохранителя и подменяет ``asyncio.sleep`` (паузы — без ожидания)."""
+        from risk_monitoring import llm_json
+
+        self.llm_json = llm_json
+        llm_json._breaker.clear()
+        llm_json._gates.clear()
+        self.sleeps = []
+        self._sleep = llm_json.asyncio.sleep
+
+        async def fake_sleep(sec):
+            """Запоминает паузу вместо ожидания."""
+            self.sleeps.append(sec)
+
+        llm_json.asyncio.sleep = fake_sleep
+
+    def tearDown(self):
+        """Возвращает ``asyncio.sleep``."""
+        self.llm_json.asyncio.sleep = self._sleep
+
+    @staticmethod
+    def client(script):
+        """Клиент: ``script`` — список ответов (строка — текст потоком, int — HTTP-ошибка)."""
+        class Err(Exception):
+            """HTTP-ошибка сервера."""
+            def __init__(self, code):
+                super().__init__(f"HTTP {code}")
+                self.status_code = code
+
+        class Stream:
+            """Поток чанков ответа."""
+            def __init__(self, text):
+                self.chunks = [types.SimpleNamespace(choices=[types.SimpleNamespace(delta=types.SimpleNamespace(content=t))])
+                               for t in (text[:3], text[3:])]
+
+            def __aiter__(self):
+                return self._gen()
+
+            async def _gen(self):
+                for c in self.chunks:
+                    yield c
+
+        calls = []
+
+        async def create(**kw):
+            """Очередной ответ сценария."""
+            calls.append(kw)
+            item = script.pop(0)
+            if isinstance(item, int):
+                raise Err(item)
+            return Stream(item)
+
+        c = types.SimpleNamespace(base_url="http://llm", chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create)))
+        c.with_options = lambda **kw: (calls.append({"options": kw}), c)[1]
+        return c, calls
+
+    def test_retry_after_504(self):
+        """Два 504 → пауза 5 и 15 с (± разброс) → ответ потоком; SDK-повторы отключены."""
+        c, calls = self.client([504, 504, '{"ok": 1}'])
+        text = asyncio.run(self.llm_json.call_llm(c, model="m", messages=[]))
+        self.assertEqual(text, '{"ok": 1}')
+        self.assertEqual(len(self.sleeps), 2)
+        self.assertTrue(4 <= self.sleeps[0] <= 6.5 and 12 <= self.sleeps[1] <= 19.5)
+        self.assertIn({"options": {"max_retries": 0}}, calls)
+        self.assertTrue(all(k.get("stream") for k in calls if "model" in k))
+
+    def test_breaker_and_permanent_error(self):
+        """Три сбоя подряд открывают паузу 30 с; 400 не повторяется."""
+        c, _ = self.client([504, 504, 504, "ok"])
+        self.assertEqual(asyncio.run(self.llm_json.call_llm(c, model="m", messages=[])), "ok")
+        self.assertTrue(any(25 <= s <= 30 for s in self.sleeps))
+        c, calls = self.client([400, "ok"])
+        with self.assertRaises(Exception):
+            asyncio.run(self.llm_json.call_llm(c, model="m", messages=[]))
+        self.assertEqual(len([k for k in calls if "model" in k]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -171,9 +171,12 @@ class AIFileAnalyzer:
         client, self.extraction_model = get_llm()
         r_client, self.model = reasoning_llm(client, self.extraction_model)
         self.parser = CloudStorageParser(http_manager, None)
-        self.file_reader = FileReader(client, self.extraction_model)
-        self.type_detector = TypeDetector(client, self.extraction_model)
-        self.extractor = DataExtractor(client, self.extraction_model)
+        # Компоненты экспертизы сами повторяют запрос (async_retry: 2→4→8→16 с); встроенные повторы SDK
+        # (ещё 2 через ~1 с) на 504 шлюза только умножают нагрузку — для риск-мониторинга отключены.
+        ex_client = client.with_options(max_retries=0) if hasattr(client, "with_options") else client
+        self.file_reader = FileReader(ex_client, self.extraction_model)
+        self.type_detector = TypeDetector(ex_client, self.extraction_model)
+        self.extractor = DataExtractor(ex_client, self.extraction_model)
         self.profiler = DocumentProfiler(r_client, self.model)
         self.risk_analyzer = DocumentRiskAnalyzer(r_client, self.model)
         self.differ = version_diff.DocumentDiffAnalyzer(r_client, self.model)

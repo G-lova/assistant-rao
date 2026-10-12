@@ -135,8 +135,10 @@ async def ocr_image(processor: Any, image_path: str, file_name: str, penalty: fl
     try:
         if getattr(processor, "rate_limiter", None):
             await processor.rate_limiter.acquire()
-        resp = await processor.client.chat.completions.create(
-            model=processor.model,
+        from risk_monitoring.llm_json import call_llm
+
+        content = await call_llm(
+            processor.client, model=processor.model,
             messages=[{"role": "user", "content": [
                 {"type": "text", "text": processor.ocr_prompt},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
@@ -144,7 +146,7 @@ async def ocr_image(processor: Any, image_path: str, file_name: str, penalty: fl
             extra_body={"guided_json": ocr_schema(processor), "repetition_penalty": penalty},
             max_tokens=OCR_MAX_TOKENS, temperature=0.0,
         )
-        return ocr_text(resp.choices[0].message.content or "")
+        return ocr_text(content)
     except Exception as e:  # noqa: BLE001 — страница остаётся пустой, документ читается дальше
         logger.error(f"pdf_text: OCR {file_name}/{os.path.basename(image_path)}: {type(e).__name__}: {e}")
         return ""
