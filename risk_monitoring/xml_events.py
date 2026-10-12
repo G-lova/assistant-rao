@@ -378,7 +378,8 @@ def attachments(body: Dict[str, Any]) -> List[Dict[str, Any]]:
         body: Нормализованное тело.
 
     Returns:
-        List[Dict[str, Any]]: ``url``, ``file_name``, ``description``, ``content_id``, ``path``.
+        List[Dict[str, Any]]: ``url``, ``file_name``, ``description``, ``content_id``, ``path``,
+        ``index`` (порядковый номер вложения в XML).
     """
     out, seen = [], set()
 
@@ -390,7 +391,7 @@ def attachments(body: Dict[str, Any]) -> List[Dict[str, Any]]:
                 if url not in seen:
                     seen.add(url)
                     out.append({"url": url, "file_name": node.get("fileName"), "description": node.get("docDescription"),
-                                "content_id": node.get("publishedContentId"), "path": path})
+                                "content_id": node.get("publishedContentId"), "path": path, "index": len(out)})
             for k, v in node.items():
                 visit(v, f"{path}.{k}" if path else k)
         elif isinstance(node, list):
@@ -401,17 +402,75 @@ def attachments(body: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
+REPLACE_MIN_SCORE = 0.5
+_NUM_RE = re.compile(r"^\s*(\d+(?:\.\d+)*)[.)]?\s*")
+
+
+def _att_name(att: Dict[str, Any]) -> str:
+    """Имя вложения для сравнения: описание или имя файла без расширения, нумерации и регистра."""
+    name = att.get("description") or re.sub(r"\.[A-Za-z0-9]{2,5}$", "", att.get("file_name") or "")
+    return re.sub(r"\s+", " ", _NUM_RE.sub("", name)).strip().lower()
+
+
+def _att_number(att: Dict[str, Any]) -> Optional[str]:
+    """Номер вложения в начале имени («3.», «3)», «2.1») или ``None``."""
+    m = _NUM_RE.match(att.get("description") or att.get("file_name") or "")
+    return m.group(1) if m else None
+
+
+def replacement_score(old: Dict[str, Any], new: Dict[str, Any]) -> float:
+    """Насколько вероятно, что вложение ``new`` — новая редакция ``old``, если сменились ссылка и имя.
+
+    Признаки: одинаковый тип документа по имени (``doc_kind.type_by_name``) — 0,5; одинаковый номер
+    в начале имени («3.») — 0,3 (разный — минус 0,3); похожесть имён (``SequenceMatcher``) — до 0,5; та же позиция в списке
+    вложений — 0,2. Разные типы по имени — минус 0,5. Одинаковые имена с разными номерами
+    («1. Приложение», «2. Приложение») — не замена.
+
+    Args:
+        old: Вложение предыдущей версии.
+        new: Вложение новой версии.
+
+    Returns:
+        float: Оценка (замена — от ``REPLACE_MIN_SCORE``).
+    """
+    from difflib import SequenceMatcher
+
+    from risk_monitoring import doc_kind
+
+    score = 0.0
+    t_old = doc_kind.type_by_name(old.get("description") or old.get("file_name"))
+    t_new = doc_kind.type_by_name(new.get("description") or new.get("file_name"))
+    if t_old and t_new:
+        score += 0.5 if t_old == t_new else -0.5
+    n_old, n_new = _att_number(old), _att_number(new)
+    if n_old and n_new:
+        score += 0.3 if n_old == n_new else -0.3
+    a, b = _att_name(old), _att_name(new)
+    ratio = SequenceMatcher(None, a, b).ratio() if a and b else 0.0
+    if n_old and n_new and n_old != n_new and ratio >= 0.95:
+        return 0.0  # «1. Приложение …» и «2. Приложение …» — разные документы одной серии
+    score += 0.5 * ratio
+    if old.get("index") is not None and old.get("index") == new.get("index"):
+        score += 0.2
+    return round(score, 3)
+
+
 def document_changes(old: Optional[List[Dict[str, Any]]], new: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     """Изменения приложенных файлов между версиями: добавлены, удалены, заменены.
 
-    Замена — удалённый и добавленный файл с тем же именем или описанием.
+    Замена — удалённый и добавленный файл:
+
+    1. с тем же именем файла или описанием (``matched_by = name``);
+    2. иначе — с наибольшей оценкой ``replacement_score`` не ниже 0,5 (``matched_by = similar``): у новой
+       редакции могут смениться и ссылка, и имя («3.Требование к содер., составу заявки….docx» →
+       «3. Требования к содержанию, составу заявки и инструкция….doc»).
 
     Args:
         old: Вложения предыдущей версии (``None`` — предыдущей версии нет: все файлы новые).
         new: Вложения новой версии.
 
     Returns:
-        Dict[str, List]: ``added``, ``removed``, ``replaced`` (``{"before", "after"}``).
+        Dict[str, List]: ``added``, ``removed``, ``replaced`` (``{"before", "after", "matched_by", "score"}``).
     """
     old = old or []
     old_urls, new_urls = {a["url"] for a in old}, {a["url"] for a in new}
@@ -422,10 +481,23 @@ def document_changes(old: Optional[List[Dict[str, Any]]], new: List[Dict[str, An
         key = (r.get("file_name") or "").lower(), (r.get("description") or "").lower()
         for a in list(added):
             if (key[0] and key[0] == (a.get("file_name") or "").lower()) or (key[1] and key[1] == (a.get("description") or "").lower()):
-                replaced.append({"before": r, "after": a})
+                replaced.append({"before": r, "after": a, "matched_by": "name", "score": 1.0})
                 removed.remove(r)
                 added.remove(a)
                 break
+    pairs = sorted(((replacement_score(r, a), i, j) for i, r in enumerate(removed) for j, a in enumerate(added)),
+                   key=lambda t: -t[0])
+    used_r, used_a = set(), set()
+    for score, i, j in pairs:
+        if score < REPLACE_MIN_SCORE:
+            break
+        if i in used_r or j in used_a:
+            continue
+        used_r.add(i)
+        used_a.add(j)
+        replaced.append({"before": removed[i], "after": added[j], "matched_by": "similar", "score": score})
+    removed = [r for i, r in enumerate(removed) if i not in used_r]
+    added = [a for j, a in enumerate(added) if j not in used_a]
     return {"added": added, "removed": removed, "replaced": replaced}
 
 
@@ -759,7 +831,9 @@ def build_xml_analysis(*, event: Dict[str, Any], facts: Dict[str, Any], changes:
         "removed": [{"file_id": _file_id(a), "file_name": a.get("file_name"), "description": a.get("description"), "url": a["url"]}
                     for a in doc_changes.get("removed", [])],
         "replaced": [{"before_file_id": _file_id(r["before"]), "after_file_id": _file_id(r["after"]),
-                      "file_name": r["after"].get("file_name"), "before_url": r["before"]["url"], "after_url": r["after"]["url"]}
+                      "file_name": r["after"].get("file_name"), "before_file_name": r["before"].get("file_name"),
+                      "before_url": r["before"]["url"], "after_url": r["after"]["url"],
+                      "matched_by": r.get("matched_by"), "score": r.get("score")}
                      for r in doc_changes.get("replaced", [])],
     }
     result = {

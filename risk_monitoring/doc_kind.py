@@ -28,7 +28,7 @@ NAME_TYPES: List[Tuple[re.Pattern, str]] = [(re.compile(p, re.IGNORECASE), t) fo
     (r"описани\w*\s+объекта\s+закупки|техническ\w*\s+задани|(^|[^а-яё])тз([^а-яё]|$)|спецификаци", "docOpusObjectZacupFiles"),
     (r"проект\w*\s+(государственного\s+|муниципального\s+)?(контракта|договора)", "docProjContractFiles"),
     (r"дополнительн\w*\s+соглашени|доп\.?\s*соглашени", "docDopConsentContractFiles"),
-    (r"требовани\w*\s+к\s+(содержани|состав)[^.]{0,40}заявк|инструкци\w*\s+по\s+заполнени", "docTrebContentRequestFiles"),
+    (r"требовани\w*\s+к\s+(содер|состав)[^\n]{0,40}заявк|инструкци\w*\s+по\s+(ее\s+|её\s+)?заполнени", "docTrebContentRequestFiles"),
     (r"порядок\s+рассмотрения\s+и\s+оценки|критери\w*\s+оценки", "docPorViewOcenkFiles"),
     (r"акт\w*\s+(сдачи|при[её]мки|выполненных|оказанных)", "docDocPriemActSdachFiles"),
     (r"(^|[^а-яё])упд([^а-яё]|$)|товарн\w+\s+накладн|торг-12", "docPriemTovSchetFiles"),

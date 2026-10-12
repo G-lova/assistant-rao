@@ -345,5 +345,48 @@ class FetchPreviousTest(unittest.TestCase):
         self.assertNotIn(40, res)
 
 
+class RenamedAttachmentTest(unittest.TestCase):
+    """Новая редакция вложения со сменой ссылки и имени (пример извещения 12.11.2024)."""
+
+    def test_renamed_is_replaced(self):
+        """«3.Требование к содер., составу заявки….docx» → «3. Требования к содержанию… .doc» — замена."""
+        from risk_monitoring import file_versions as fv
+        from risk_monitoring import xml_events
+
+        u = "https://zakupki.gov.ru/44fz/filestore/public/1.0/download/priz/file.html?uid="
+        def att(name, uid):
+            """Вложение XML ЕИС."""
+            return {"fileName": name, "docDescription": name.rsplit(".", 1)[0], "url": u + uid}
+        old = {"attachmentsInfo": {"attachmentInfo": [
+            att("1. Обоснование НМЦК.xlsx", "N0"), att("2. Описание объекта закупки.docx", "44D1"),
+            att("Проект контракта.docx", "8890"), att("3.Требование к содер., составу заявки на участие в закупке.docx", "E61E")]}}
+        new = {"attachmentsInfo": {"attachmentInfo": [
+            att("1. Обоснование НМЦК.xlsx", "N0"), att("2. Описание объекта закупки.docx", "1DD7"),
+            att("Проект контракта.docx", "84FD"),
+            att("3. Требования к содержанию, составу заявки и инструкция по ее заполнению.doc", "10A6")]}}
+        ch = xml_events.document_changes(xml_events.attachments(old), xml_events.attachments(new))
+        self.assertEqual((len(ch["added"]), len(ch["removed"]), len(ch["replaced"])), (0, 0, 3))
+        renamed = next(r for r in ch["replaced"] if r["after"]["url"].endswith("10A6"))
+        self.assertEqual(renamed["before"]["url"], u + "E61E")
+        self.assertEqual(renamed["matched_by"], "similar")
+
+        cur = {"id": 7, "file_name": "3. Требования к содержанию, составу заявки и инструкция по ее заполнению.doc",
+               "source_url": u + "10A6"}
+        ref = fv.previous_ref(cur, new, old)
+        self.assertEqual((ref["match"], ref["urls"]), ("replaced", [u + "E61E"]))
+
+    def test_different_documents_not_paired(self):
+        """Удалили ТЗ и добавили проект контракта; «Приложение 1» → «Приложение 2» — это не замены."""
+        from risk_monitoring import xml_events
+
+        old = [{"url": "a", "file_name": "Техническое задание.docx", "index": 0}]
+        new = [{"url": "b", "file_name": "Проект контракта.docx", "index": 0}]
+        ch = xml_events.document_changes(old, new)
+        self.assertEqual((len(ch["added"]), len(ch["removed"]), len(ch["replaced"])), (1, 1, 0))
+        ch = xml_events.document_changes([{"url": "a", "file_name": "1. Приложение к извещению.docx", "index": 3}],
+                                         [{"url": "b", "file_name": "2. Приложение к извещению.docx", "index": 3}])
+        self.assertEqual(len(ch["replaced"]), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
