@@ -46,7 +46,9 @@ _NMCK = ["DOC-007", "DOC-010", "FIN-015"]
 _REQUEST = ["DOC-004", "DOC-005", "DOC-006", "DOC-007", "AI-003", "AI-005", "PROC-012"]
 _NOTICE = ["DOC-002", "DOC-003", "DOC-004", "DOC-005", "DOC-006", "DOC-007", "DOC-010", "AI-001", "AI-003",
            "AI-005", "FIN-004", "FIN-005", "FIN-006", "FIN-007", "FIN-008", "FIN-009", "PROC-004", "PROC-012"]
-_NOTICE_PRINT = ["DOC-002", "DOC-003", "DOC-005", "DOC-006", "AI-001", "AI-003", "AI-005"]
+# В печатной форме извещения характеристики объекта — обычно позиции КТРУ; «редкость» и «неоднозначность»
+# характеристик по ним модель оценить не может (ложные DOC-003 / AI-003 в прогоне 1096) — их ищут в ТЗ.
+_NOTICE_PRINT = ["DOC-002", "DOC-005", "DOC-006", "AI-001", "AI-005"]
 _ACT = ["DOC-007", "DOC-010"]
 _DEFAULT = ["DOC-001", "DOC-002", "DOC-003", "DOC-004", "DOC-005", "DOC-006", "DOC-007", "DOC-010",
             "AI-001", "AI-002", "AI-003", "AI-005", "CTR-002"]
@@ -64,8 +66,11 @@ ALLOWED_BY_TYPE: Dict[str, List[str]] = {
 PRINT_FORM_ALLOWED = {"notice": _NOTICE_PRINT}
 
 
+PRINT_NAME_RE = re.compile(r"^\s*(print[_ ]?form|печатн\w*\s+форм)", re.IGNORECASE)
+
+
 def is_print_form(row: Dict[str, Any]) -> bool:
-    """Печатная форма ЕИС: имя ``print_form*`` или ссылка на ``printForm``.
+    """Печатная форма ЕИС: имя ``print_form*`` / «Печатная форма …» или ссылка на ``printForm``.
 
     Args:
         row: Строка ``risk_monitoring_files`` (``file_name``, ``source_url``).
@@ -73,16 +78,41 @@ def is_print_form(row: Dict[str, Any]) -> bool:
     Returns:
         bool: ``True`` для печатной формы.
     """
-    name = (row.get("file_name") or "").lower()
     url = (row.get("source_url") or row.get("url") or "").lower()
-    return name.startswith(("print_form", "printform")) or "printform" in url
+    return bool(PRINT_NAME_RE.search(row.get("file_name") or "")) or "printform" in url
+
+
+def xml_group(tag: Optional[str], owner_type: Optional[str] = None) -> str:
+    """Группа XML-документа ЕИС по тегу корня (в т. ч. без суффикса версии: ``epNotification``).
+
+    Args:
+        tag: Тег корня XML или ``xml_source_type``.
+        owner_type: Тип владельца файла (``notice`` / ``contract``) — если тег неизвестен.
+
+    Returns:
+        str: ``notice`` / ``protocol`` / ``execution`` / ``contract`` / ``other``.
+    """
+    tag = tag or ""
+    t = tag.lower()
+    owner = (owner_type or "").lower()
+    if "protocol" in t or tag in ("fcsPlacementResult", "fcsProposalsResult"):
+        return "protocol"
+    if t.startswith(("contractprocedure", "pprf615contractprocedure", "performancecontract")):
+        return "execution"
+    if tag in risk_catalog.CONTRACT_TAGS or t.startswith("contract"):
+        return "contract"
+    if tag in risk_catalog.NOTICE_TAGS or re.match(r"(ep|fcs|pprf615)?notification|purchasenotice|notice", t):
+        return "notice"
+    if owner in ("notice", "contract"):
+        return owner
+    return "other"
 
 
 def print_form_kind(row: Dict[str, Any]) -> Dict[str, Any]:
     """Тип печатной формы по тегу XML-источника.
 
-    Тег берётся из XML, к которому привязан файл (``source_xml_tag``), затем из ``xml_source_type``.
-    Если тега нет — по владельцу (``owner_type``: notice / contract).
+    Тег берётся из XML, к которому привязан файл (``source_xml_tag``, ``source_xml_type``), затем из
+    ``xml_source_type`` файла; если тег неизвестен — по владельцу (``owner_type``).
 
     Args:
         row: Строка ``files_meta.sql``.
@@ -91,22 +121,14 @@ def print_form_kind(row: Dict[str, Any]) -> Dict[str, Any]:
         Dict[str, Any]: ``detected_type``, ``type_decode``, ``group`` (notice / protocol / contract /
         execution / other), ``xml_tag``.
     """
-    tag = row.get("source_xml_tag") or row.get("xml_source_type") or ""
-    owner = (row.get("owner_type") or "").lower()
-    if tag in risk_catalog.NOTICE_TAGS or (not tag and owner == "notice"):
-        group = "notice"
-    elif tag in risk_catalog.CONTRACT_TAGS or (not tag and owner == "contract"):
-        group = "contract"
-    elif tag.startswith(("contractProcedure", "pprf615ContractProcedure", "performanceContract")):
-        group = "execution"
-    elif "protocol" in tag.lower() or tag in ("fcsPlacementResult", "fcsProposalsResult"):
-        group = "protocol"
-    else:
-        group = "other"
+    tag = row.get("source_xml_tag") or row.get("source_xml_type") or row.get("xml_source_type") or ""
+    group = xml_group(tag, row.get("owner_type"))
     titles = {"notice": "извещение о закупке", "contract": "сведения о контракте (договоре)",
-              "execution": "сведения об исполнении контракта"}
-    title = titles.get(group) or (risk_catalog.event_card(risk_catalog.TAG_EVENTS[tag])["title"].lower()
-                                  if tag in risk_catalog.TAG_EVENTS else (tag or "документ ЕИС"))
+              "execution": "сведения об исполнении контракта", "protocol": "протокол"}
+    if tag in risk_catalog.TAG_EVENTS and group in ("protocol", "other"):
+        title = risk_catalog.event_card(risk_catalog.TAG_EVENTS[tag])["title"].lower()
+    else:
+        title = titles.get(group) or tag or "документ ЕИС"
     version = row.get("eis_version")
     changed = group == "notice" and version not in (None, "", 0, "0")
     return {

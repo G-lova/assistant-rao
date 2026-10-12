@@ -340,7 +340,8 @@ def doc_type_block(type_info: Optional[Dict[str, Any]], type_decode: Optional[st
     """Блок ``doc_type``: код типа, расшифровка, уверенность, признаки.
 
     Args:
-        type_info: Ответ ``TypeDetector`` (``detected_type``, ``confidence``, ``issues``, ``key_indicators``).
+        type_info: Ответ ``TypeDetector`` (``detected_type``, ``confidence``, ``issues``, ``key_indicators``)
+            и, если есть, ``type_source`` и ``print_form`` из ``doc_kind``.
         type_decode: Название типа по справочнику.
 
     Returns:
@@ -353,6 +354,7 @@ def doc_type_block(type_info: Optional[Dict[str, Any]], type_decode: Optional[st
         "confidence": clamp01(ti.get("confidence")),
         "issues": ti.get("issues") or [],
         "key_indicators": ti.get("key_indicators") or [],
+        **{k: ti[k] for k in ("type_source", "print_form") if ti.get(k) is not None},
     }
 
 

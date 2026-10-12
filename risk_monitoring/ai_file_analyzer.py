@@ -36,7 +36,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from configs.config import Config
 from configs.logger import get_logger
-from risk_monitoring import doc_kind, passport, risk_catalog, rm_sql, text_quality, version_diff
+from risk_monitoring import doc_kind, passport, pdf_text, risk_catalog, rm_sql, text_quality, version_diff
 from risk_monitoring.llm_json import prompt_version as _hash_version
 
 logger = get_logger(__name__)
@@ -371,6 +371,26 @@ class AIFileAnalyzer:
         self._annotate(ai, quality, removed_ids, allowed, (risk or {}).get("rejected_inconsistent"))
         return await self._finalize(file_id, document_id, ai)
 
+    async def _read_text(self, path: str, file_name: str, ext: str) -> Optional[str]:
+        """Текст файла: для PDF — текстовый слой и OCR только страниц-сканов (``pdf_text``), иначе ``FileReader``.
+
+        Args:
+            path: Путь к скачанному файлу.
+            file_name: Имя файла.
+            ext: Расширение.
+
+        Returns:
+            Optional[str]: Текст.
+        """
+        if ext == ".pdf":
+            try:
+                res = await pdf_text.read_pdf(path, file_name, getattr(self.file_reader, "ocr_processor", None))
+                if res and res["text"].strip():
+                    return res["text"]
+            except Exception as e:  # noqa: BLE001 — переходим на общий FileReader
+                logger.warning(f"pdf_text: {file_name}: {type(e).__name__}: {e}; читаю через FileReader")
+        return await self.file_reader.read_file(path, file_name)
+
     def _bad_text_analysis(self, row: Dict[str, Any], quality: Dict[str, Any], print_kind: Optional[Dict[str, Any]],
                            prev_id: Optional[int], attempt: int, sha: str) -> Dict[str, Any]:
         """``ai_analysis`` для негодного текста (сбой OCR): без запросов к модели и без рисков.
@@ -458,7 +478,7 @@ class AIFileAnalyzer:
             if reuse:
                 document_id, text = doc["id"], doc["text"]
             else:
-                text = await self.file_reader.read_file(tmp_path, file_name)
+                text = await self._read_text(tmp_path, file_name, ext)
                 if not text or not text.strip() or NO_TEXT_MARK in text:
                     document_id = await self.repo.upsert_document(sha, None, ext, size, None, ocr_status="failed",
                                                                   ocr_error="Не удалось извлечь текст")

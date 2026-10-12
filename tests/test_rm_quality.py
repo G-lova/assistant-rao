@@ -3,6 +3,7 @@
 переход на схему в промпте, если сервер не поддерживает guided_json.
 """
 import asyncio
+import json
 import types
 import unittest
 
@@ -94,6 +95,31 @@ class DocKindTest(unittest.TestCase):
         notice_print = doc_kind.allowed_codes("docIzvejenieFiles", "notice")
         self.assertIn("DOC-002", notice_print)
         self.assertNotIn("FIN-004", notice_print)
+        self.assertNotIn("DOC-003", notice_print)
+
+    def test_print_form_by_russian_name(self):
+        """«Печатная форма извещения № … (версия 1).html» с типом ``epNotification`` — извещение (файл 37043)."""
+        row = {"file_name": "Печатная форма извещения № 0373100029526000124 (версия 1).html",
+               "xml_source_type": "epNotification", "owner_type": "notice", "eis_version": 3}
+        self.assertTrue(doc_kind.is_print_form(row))
+        kind = doc_kind.print_form_kind(row)
+        self.assertEqual(kind["group"], "notice")
+        self.assertEqual(kind["type_decode"], "Печатная форма ЕИС: извещение о закупке (изменение)")
+        self.assertTrue(doc_kind.allowed_codes(kind["detected_type"], kind["group"]))
+
+    def test_xml_group_fallback(self):
+        """Неизвестный тег — группа по владельцу файла."""
+        self.assertEqual(doc_kind.xml_group("", "contract"), "contract")
+        self.assertEqual(doc_kind.xml_group("somethingNew", None), "other")
+
+    def test_doc_type_block_keeps_source(self):
+        """``doc_type`` в паспорте сохраняет ``type_source`` и ``print_form``."""
+        from risk_monitoring.passport import doc_type_block
+
+        block = doc_type_block({"detected_type": "docIzvejenieFiles", "type_source": "print_form",
+                                "print_form": {"group": "notice"}}, "Печатная форма")
+        self.assertEqual(block["type_source"], "print_form")
+        self.assertEqual(block["print_form"]["group"], "notice")
 
 
 class ProfileSanitizeTest(unittest.TestCase):
@@ -155,6 +181,70 @@ class GuidedFallbackTest(unittest.TestCase):
         self.assertEqual(out, {"ok": True})
         self.assertFalse(llm.guided)
         self.assertIn("строго один JSON", calls[-1]["messages"][0]["content"])
+
+
+class PdfTextTest(unittest.TestCase):
+    """``pdf_text``: текстовый слой вместо OCR, OCR только для страниц без слоя, повтор при цикле."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Готовит PDF: страница с текстом (кириллица) и пустая страница (как скан)."""
+        try:
+            from reportlab.pdfbase import pdfmetrics
+            from reportlab.pdfbase.ttfonts import TTFont
+            from reportlab.pdfgen import canvas
+            import pdf2image  # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("нет reportlab / pdf2image")
+        import os
+        import tempfile
+
+        font = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        if not os.path.exists(font):
+            raise unittest.SkipTest("нет шрифта DejaVuSans")
+        pdfmetrics.registerFont(TTFont("DejaVu", font))
+        cls.tmp = tempfile.mkdtemp()
+        cls.path = os.path.join(cls.tmp, "nmck.pdf")
+        c = canvas.Canvas(cls.path)
+        c.setFont("DejaVu", 11)
+        for i, line in enumerate(["Обоснование начальной (максимальной) цены контракта",
+                                  "Метод сопоставимых рыночных цен (анализа рынка)",
+                                  "Коммерческое предложение № 1: 2,44 руб. за единицу товара"]):
+            c.drawString(50, 800 - 20 * i, line)
+        c.showPage()
+        c.showPage()  # пустая страница — «скан» без текстового слоя
+        c.save()
+
+    def test_layer_page_ok(self):
+        """Кракозябры и (cid:NN) — слой непригоден."""
+        from risk_monitoring.pdf_text import layer_page_ok
+
+        self.assertTrue(layer_page_ok("Обоснование начальной максимальной цены контракта методом анализа рынка"))
+        self.assertFalse(layer_page_ok("(cid:12)(cid:15) " * 20))
+        self.assertFalse(layer_page_ok("ÐžÐ±Ð¾ÑÐ½Ð¾Ð²Ð°Ð½Ð¸Ðµ ÐÐœÐ¦Ðš " * 5))
+
+    def test_layer_and_ocr_retry(self):
+        """Страница 1 — из слоя; страница 2 — OCR: первый ответ зациклен, повтор со штрафом даёт текст."""
+        from risk_monitoring import pdf_text
+
+        calls = []
+
+        async def create(**kw):
+            """Имитация модели OCR: цикл при слабом штрафе, нормальный текст при сильном."""
+            calls.append(kw["extra_body"]["repetition_penalty"])
+            text = "2,44 " * 300 if kw["extra_body"]["repetition_penalty"] < 1.1 else "Подпись заказчика, печать"
+            msg = types.SimpleNamespace(content=json.dumps({"raw_text": text}))
+            return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg)])
+
+        proc = types.SimpleNamespace(
+            client=types.SimpleNamespace(chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create))),
+            model="vl", ocr_prompt="OCR", OCR_SCHEMA={"properties": {"raw_text": {}}, "required": ["readability"]})
+        res = asyncio.run(pdf_text.read_pdf(self.path, "nmck.pdf", proc))
+        self.assertEqual((res["layer_pages"], res["ocr_pages"]), (1, 1))
+        self.assertIn("Страница 1:\nОбоснование начальной", res["text"])
+        self.assertIn("Страница 2 (OCR):\nПодпись заказчика", res["text"])
+        self.assertEqual(calls, [1.05, 1.15])
+        self.assertEqual(pdf_text.ocr_schema(proc)["required"], ["raw_text"])
 
 
 if __name__ == "__main__":
