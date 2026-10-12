@@ -42,7 +42,31 @@ def evaluate_documents_task(self, expertise_id: int, environment: str):
             task_result = await tasks_piplene.run_pipeline()
             return task_result
         
-    return run_async(async_retry(CLOUD_PARSING_RETRY_CONFIG)(run_with_manager)())
+    async def run_with_retry():
+        """Повтор конвейера при сбоях загрузки, но не при перегрузке модели.
+
+        Раньше весь конвейер (скачивание, OCR, извлечение, все запросы к модели) запускался заново до 3 раз
+        и на 504 шлюза модели — это утраивало нагрузку на перегруженный сервер. Теперь сбой сервера модели
+        (5xx, таймаут) повторяется точечно внутри вызова (``configs.llm_resilience``), а конвейер целиком — нет.
+        """
+        from configs.llm_resilience import transient
+
+        cfg = CLOUD_PARSING_RETRY_CONFIG
+        for attempt in range(cfg.max_retries + 1):
+            try:
+                return await run_with_manager()
+            except Exception as e:  # noqa: BLE001
+                # openai.InternalServerError (status_code 504) или переобёрнутый OpenAIError с HTML страницы 504
+                llm_overload = "openai" in type(e).__module__ and (
+                    transient(e) or any(k in str(e) for k in ("504", "502", "503", "Gateway", "Timeout", "timed out")))
+                if llm_overload or attempt == cfg.max_retries:
+                    raise
+                delay = cfg.delay * (cfg.backoff ** attempt)
+                logger.warning(f"evaluate_documents_task: попытка {attempt + 1} не удалась ({type(e).__name__}), "
+                               f"повтор через {delay:.0f} с")
+                await asyncio.sleep(delay)
+
+    return run_async(run_with_retry())
     # return asyncio.run(run_with_manager)
 
 
