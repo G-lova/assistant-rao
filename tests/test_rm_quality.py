@@ -468,5 +468,35 @@ class LLMTimeoutTest(unittest.TestCase):
         self.assertEqual(len([k for k in calls if "model" in k]), 1)
 
 
+class ResilientClientTest(LLMTimeoutTest):
+    """``ResilientClient``: обёртка общего клиента — пауза вместо повторов SDK, поток без вложенных повторов."""
+
+    def test_proxy_retry_and_passthrough(self):
+        """504 → пауза ~5 с → ответ; повторы SDK отключены; call_llm не повторяет поверх обёртки."""
+        from configs.llm_resilience import ResilientClient, call_llm
+
+        raw, calls = self.client([504, "ok"])
+
+        async def plain(**kw):
+            """Обычный (не потоковый) ответ поверх сценария."""
+            r = await raw_create(**kw)
+            text = "".join(c.choices[0].delta.content for c in r.chunks)
+            return types.SimpleNamespace(choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=text))])
+
+        raw_create = raw.chat.completions.create
+        raw.chat.completions.create = plain
+        rc = ResilientClient(raw)
+        resp = asyncio.run(rc.chat.completions.create(model="m", messages=[]))
+        self.assertEqual(resp.choices[0].message.content, "ok")
+        self.assertEqual(len(self.sleeps), 1)
+        self.assertIn({"options": {"max_retries": 0}}, calls)
+        self.assertIs(rc.base_url, raw.base_url)
+
+        raw2, calls2 = self.client([504, 504, "ok"])
+        rc2 = ResilientClient(raw2)
+        self.assertEqual(asyncio.run(call_llm(rc2, model="m", messages=[])), "ok")
+        self.assertEqual(len([k for k in calls2 if "model" in k]), 3)   # 1 + 2 повтора call_llm, без умножения
+
+
 if __name__ == "__main__":
     unittest.main()

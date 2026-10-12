@@ -123,6 +123,7 @@ async def call_llm(client: Any, retries: int = len(RETRY_DELAYS) + 1, **kwargs: 
     Raises:
         Exception: Постоянная ошибка или последняя временная после исчерпания попыток.
     """
+    client = getattr(client, "raw_client", client)   # ResilientClient: без вложенных повторов
     key = _server_key(client)
     stream = _env("STREAM", "true").lower() not in ("0", "false", "no")
     last: Optional[BaseException] = None
@@ -150,3 +151,80 @@ async def call_llm(client: Any, retries: int = len(RETRY_DELAYS) + 1, **kwargs: 
                                f"попытка {attempt + 1}/{retries}, ждём {delay:.0f} с")
                 await asyncio.sleep(delay)
     raise last  # type: ignore[misc]
+
+
+class _Completions:
+    """``chat.completions`` с устойчивым ``create``: лимит, предохранитель, паузы между попытками."""
+
+    def __init__(self, raw: Any):
+        """Запоминает исходный клиент (без повторов SDK)."""
+        self._raw = raw
+
+    async def create(self, **kwargs: Any) -> Any:
+        """Как ``AsyncOpenAI.chat.completions.create``, но 504 / 5xx / таймауты повторяются с паузой (по умолчанию
+        одна повторная попытка через ~5 с, ``LLM_PROXY_RETRIES``), не больше ``LLM_MAX_INFLIGHT`` запросов
+        одновременно, при серии сбоев — общая пауза всех запросов процесса.
+
+        Потоковый запрос (``stream=True``) передаётся как есть (повторяет его вызывающий, например ``call_llm``).
+
+        Returns:
+            Any: Ответ SDK (тот же тип, что у исходного клиента).
+        """
+        if kwargs.get("stream"):
+            return await self._raw.chat.completions.create(**kwargs)
+        key = _server_key(self._raw)
+        # Многие вызовы экспертизы уже обёрнуты своими повторами (async_retry): здесь по умолчанию одна
+        # повторная попытка через ~5 с, чтобы повторы не перемножались (LLM_PROXY_RETRIES)
+        retries = max(1, int(_env("PROXY_RETRIES", "2")))
+        last: Optional[BaseException] = None
+        for attempt in range(retries):
+            await _breaker_wait(key)
+            CALLS["requests"] += 1
+            try:
+                async with _gate(key):
+                    resp = await self._raw.chat.completions.create(**kwargs)
+                _breaker_record(key, True)
+                return resp
+            except Exception as e:  # noqa: BLE001
+                CALLS["failed"] += 1
+                if not transient(e):
+                    raise
+                last = e
+                _breaker_record(key, False)
+                if attempt < retries - 1:
+                    delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)] * random.uniform(0.8, 1.3)
+                    logger.warning(f"LLM {key}: {type(e).__name__} ({getattr(e, 'status_code', '')}), "
+                                   f"попытка {attempt + 1}/{retries}, ждём {delay:.0f} с")
+                    await asyncio.sleep(delay)
+        raise last  # type: ignore[misc]
+
+
+class ResilientClient:
+    """Обёртка ``AsyncOpenAI`` для всего сервиса: ``chat.completions.create`` устойчив к перегрузке шлюза,
+    встроенные повторы SDK (через ~0,5–1 с) отключены. Остальные атрибуты — от исходного клиента.
+
+    Args:
+        raw: ``AsyncOpenAI``.
+    """
+
+    def __init__(self, raw: Any):
+        """Отключает повторы SDK и подменяет ``chat.completions``."""
+        self.raw_client = raw.with_options(max_retries=0) if hasattr(raw, "with_options") else raw
+        self.chat = type("Chat", (), {})()
+        self.chat.completions = _Completions(self.raw_client)
+
+    def with_options(self, **kwargs: Any) -> "ResilientClient":
+        """Копия с другими параметрами SDK (повторы SDK остаются выключенными)."""
+        kwargs["max_retries"] = 0
+        return ResilientClient(self.raw_client.with_options(**kwargs))
+
+    def __getattr__(self, name: str) -> Any:
+        """Прочие атрибуты (``base_url``, ``models`` …) — от исходного клиента."""
+        return getattr(self.raw_client, name)
+
+
+def resilient(client: Any) -> Any:
+    """Оборачивает клиент в ``ResilientClient`` (если ``LLM_RESILIENT`` не ``false``)."""
+    if isinstance(client, ResilientClient) or _env("RESILIENT", "true").lower() in ("0", "false", "no"):
+        return client
+    return ResilientClient(client)
