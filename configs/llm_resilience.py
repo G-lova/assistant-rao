@@ -35,8 +35,19 @@ CALLS: Dict[str, int] = {"requests": 0, "failed": 0}   # счётчик запр
 _breaker: Dict[str, Dict[str, float]] = {}
 
 
+UNAVAILABLE_RE = __import__("re").compile(
+    r"\b(404|500|502|503|504)\b|Gateway|Service Unavailable|Internal Server Error|timed out|Timeout", __import__("re").I)
+
+
+def unavailable_text(text: str) -> bool:
+    """Похожа ли текстовая причина отказа на недоступность сервера модели (для сводок без исключения)."""
+    return bool(UNAVAILABLE_RE.search(text or ""))
+
+
 def transient(error: BaseException) -> bool:
-    """Временный сбой сервера: 5xx, 408/409/429, таймаут, обрыв соединения.
+    """Временный сбой сервера: 5xx, 408/409/429, таймаут, обрыв соединения, а также 404 шлюза на
+    ``/chat/completions`` — модель снята с шлюза на время перезапуска (в логах 12.10.2026: 504 → 500 → 503 → 404,
+    после чего модель вернулась).
 
     Args:
         error: Исключение клиента.
@@ -46,7 +57,7 @@ def transient(error: BaseException) -> bool:
     """
     status = getattr(error, "status_code", None) or getattr(getattr(error, "response", None), "status_code", None)
     if isinstance(status, int):
-        return status >= 500 or status in (408, 409, 429)
+        return status >= 500 or status in (404, 408, 409, 429)
     name = type(error).__name__.lower()
     return isinstance(error, (asyncio.TimeoutError, ConnectionError)) or any(
         k in name for k in ("timeout", "connection", "remoteprotocol", "readerror"))

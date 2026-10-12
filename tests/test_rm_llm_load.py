@@ -308,3 +308,17 @@ class FileModesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FactsUnavailableTest(unittest.TestCase):
+    """Факты экспертизы: если модель недоступна для всех полей, прежние факты модели не затираются."""
+
+    def test_all_unavailable(self):
+        """404 / 503 / 504 — недоступность; «невалидный ответ» — нет."""
+        from knowledge_store.facts import _all_unavailable
+
+        down = [{"value": {"error": "NotFoundError: Error code: 404 - {'detail': 'Not Found'}"}},
+                {"value": {"error": "InternalServerError: <html>504 Gateway Time-out</html>"}}]
+        self.assertTrue(_all_unavailable(down))
+        self.assertFalse(_all_unavailable(down + [{"value": {"error": "невалидный ответ модели: {}"}}]))
+        self.assertFalse(_all_unavailable([]))

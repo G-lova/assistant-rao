@@ -22,7 +22,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
+from configs.logger import get_logger
 from knowledge_store import eis_notice, eis_printform, form_keys, repository as repo
+
+logger = get_logger(__name__)
 
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "fact_extractor_prompt.txt"
 SOURCE_EIS = "eis_xml"
@@ -461,9 +464,24 @@ async def extract_facts(conn, expertise_id: int, form_code: str, extractor: Opti
                                         "model_quote": res.get("model_quote"), "fragment": res.get("fragment")},
                               "document_id": res["document_id"], "page": res["page"], "quote": res["quote"],
                               "confidence": 0.8 if res["verified"] else 0.3})
-    await repo.replace_facts(conn, expertise_id, SOURCE_LLM, llm_facts)
     stats["llm"] = len(llm_facts) - stats["rejected"]
+    if todo and stats["llm"] == 0 and _all_unavailable(llm_facts):
+        # Модель недоступна для всех полей (перезапуск, перегрузка): прежние факты модели не затираем
+        # пустыми — заключение соберётся по ним или факты будут перестроены повторно (rebuild_facts).
+        stats["llm_unavailable"] = True
+        logger.error(f"knowledge_store: факты экспертизы {expertise_id}: модель недоступна для всех "
+                     f"{len(todo)} полей, факты модели не обновлены")
+        return stats
+    await repo.replace_facts(conn, expertise_id, SOURCE_LLM, llm_facts)
     return stats
+
+
+def _all_unavailable(llm_facts: List[dict]) -> bool:
+    """Все ли отказы — из-за недоступности сервера модели (а не из-за содержания документов)."""
+    from configs.llm_resilience import unavailable_text
+
+    errors = [((f.get("value") or {}).get("error") or "") for f in llm_facts]
+    return bool(errors) and all(e and unavailable_text(e) for e in errors)
 
 
 def make_llm_call(client: Any, model: str, rate: float = 1.5, max_tokens: int = 1600) -> LlmCall:
@@ -485,11 +503,16 @@ def make_llm_call(client: Any, model: str, rate: float = 1.5, max_tokens: int = 
     bucket = TokenBucket(rate=rate)
 
     async def call(messages: List[dict], schema: dict) -> str:
-        """Один запрос к модели с ограничением частоты; возвращает текст ответа."""
+        """Один запрос к модели с ограничением частоты; возвращает текст ответа.
+
+        Через ``configs.llm_resilience.call_llm``: при 5xx / 404 перезапуска модели — паузы и предохранитель,
+        а не 42 мгновенных отказа подряд.
+        """
+        from configs.llm_resilience import call_llm
+
         await bucket.acquire()
-        response = await client.chat.completions.create(
-            model=model, messages=messages, extra_body={"guided_json": schema},
-            max_tokens=max_tokens, temperature=0.1)
-        return (response.choices[0].message.content or "").strip()
+        text = await call_llm(client, model=model, messages=messages, extra_body={"guided_json": schema},
+                              max_tokens=max_tokens, temperature=0.1)
+        return (text or "").strip()
 
     return call
