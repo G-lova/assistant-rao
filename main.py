@@ -133,13 +133,18 @@ async def generate_summary_opinion(
 async def get_task_status(task_id: str):
     task = AsyncResult(task_id)
     if task.state == 'PENDING':
-        logger.info(f"Обработка документов в процессе: status: pending")
+        logger.info(f"Обработка документов в процессе: task={task_id}, status: pending")
         return {"status": "pending"}
     elif task.state == 'FAILURE':
         logger.info(f"Ошибка обработки документов: status: failed, error: {str(task.info)}")
         return {"status": "failed", "error": str(task.info)}
     elif task.state == 'SUCCESS':
-        logger.info(f"Обработка документов завершена: status: completed, result: {task.result}")
+        # Результат целиком не логируем: внешняя система опрашивает задачу повторно, а результат экспертизы —
+        # сотни КБ (строка лога 13.10.2026 — 340 КБ на каждый опрос). Ответ эндпоинта не меняется.
+        res = task.result
+        brief = (f"overall_status={res.get('overall_status')}, documents={len(res.get('documents') or [])}"
+                 if isinstance(res, dict) else f"{type(res).__name__}")
+        logger.info(f"Обработка документов завершена: task={task_id}, status: completed, {brief}")
         return {"status": "completed", "result": task.result}
     else:
         logger.info(f"Обработка документов: status: {task.state}")
