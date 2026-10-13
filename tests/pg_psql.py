@@ -17,6 +17,8 @@ def literal(value) -> str:
         return "TRUE" if value else "FALSE"
     if isinstance(value, (int, float)):
         return str(value)
+    if isinstance(value, (list, tuple)):
+        return "ARRAY[" + ",".join(literal(v) for v in value) + "]" if value else "'{}'"
     return "'" + str(value).replace("'", "''") + "'"
 
 
@@ -28,7 +30,11 @@ class PsqlConn:
         self.args = ["psql", "-h", host, "-p", str(port), "-U", user, "-d", db, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-A", "-t"]
 
     def _render(self, sql: str, params) -> str:
-        """Подставляет параметры ``$n`` (от больших номеров к меньшим, чтобы ``$1`` не ломал ``$10``)."""
+        """Подставляет параметры ``$n`` (от больших номеров к меньшим, чтобы ``$1`` не ломал ``$10``).
+
+        Литерал pgvector ``$n::vector`` (``'[0.1,0.2]'``) переводится в массив ``real[]`` тестовой схемы.
+        """
+        sql = re.sub(r"(\$\d+)::vector", r"translate(\1, '[]', '{}')::real[]", sql)
         for i in range(len(params), 0, -1):
             sql = re.sub(r"\$%d(?!\d)" % i, lambda _m, v=params[i - 1]: literal(v), sql)
         return sql

@@ -7,17 +7,17 @@ from typing import Any, Optional
 
 from configs.config import Config
 from configs.logger import get_logger
-from knowledge_store import eis_notice, repository as repo
+from knowledge_store import db, eis_notice, repository as repo
 from knowledge_store.pages import split_pages
 from knowledge_store.safe import is_enabled, safe_call_async
+from knowledge_store.scope import Scope
 
 logger = get_logger(__name__)
 
 
 def _db():
-    """Возвращает менеджер соединения с БД (ленивый импорт: ``configs.working_with_db`` тянет asyncpg/psycopg2)."""
-    from configs.working_with_db import get_async_db_connection
-    return get_async_db_connection()
+    """Возвращает менеджер соединения с БД: из пула задачи (:func:`knowledge_store.db.task_pool`) или временный."""
+    return db.connection()
 
 
 def _none_if_nan(value: Any) -> Any:
@@ -30,38 +30,39 @@ def _none_if_nan(value: Any) -> Any:
     return value.item() if hasattr(value, "item") else value
 
 
-async def _on_run_start(df) -> None:
+async def _on_run_start(df, env: str) -> None:
     """Реализация :func:`on_run_start` (без защиты)."""
     row = df.iloc[0]
-    expertise_id = int(row["id"])
+    scope = Scope.of(env, row["id"])
     passport = {k: _none_if_nan(row.get(k)) for k in ("organization", "expertise_object", "expertise_details")}
     async with _db() as conn:
         async with conn.transaction():
-            await repo.clear_expertise(conn, expertise_id)
-            await repo.save_procurement(conn, expertise_id, _none_if_nan(row.get("law_reference")),
+            await repo.clear_expertise(conn, scope)
+            await repo.save_procurement(conn, scope, _none_if_nan(row.get("law_reference")),
                                         _none_if_nan(row.get("procurement_method")), _none_if_nan(row.get("object")),
                                         _none_if_nan(row.get("checkType2")), passport)
 
 
-async def on_run_start(df) -> None:
+async def on_run_start(df, env: str) -> None:
     """Начало прогона: очищает прежние данные экспертизы в ``pe_*`` и сохраняет паспорт закупки.
 
     Вызывать после нормализации кодов документов и до обработки ссылок.
 
     Args:
         df: Датафрейм экспертизы из ``evaluate_docs_script.sql``.
+        env: Окружение (``X-API-Database``).
     """
-    await safe_call_async(_on_run_start, df)
+    await safe_call_async(_on_run_start, df, env)
 
 
-async def _on_document_text(expertise_id: int, doc_code: Optional[str], filename: str, url: Optional[str],
+async def _on_document_text(scope: Scope, doc_code: Optional[str], filename: str, url: Optional[str],
                             file_path: str, text: str) -> int:
     """Реализация :func:`on_document_text` (без защиты)."""
     pages = split_pages(text)
     sha = repo.file_sha256(file_path)
     eis_patch = _eis_notice_patch(file_path, filename)
     async with _db() as conn:
-        doc_id = await repo.upsert_document(conn, expertise_id, doc_code, filename, url, sha, text,
+        doc_id = await repo.upsert_document(conn, scope, doc_code, filename, url, sha, text,
                                             len(pages), Config.PE_TEXT_RETENTION_DAYS)
         if eis_patch:
             await repo.merge_document_extraction(conn, doc_id, {"eis_notice": eis_patch})
@@ -91,12 +92,12 @@ def _eis_notice_patch(file_path: str, filename: str) -> Optional[dict]:
         return None
 
 
-async def on_document_text(expertise_id: int, doc_code: Optional[str], filename: str, url: Optional[str],
+async def on_document_text(scope: Scope, doc_code: Optional[str], filename: str, url: Optional[str],
                            file_path: str, text: str) -> Optional[int]:
     """Сохраняет извлечённый текст документа (со сроком хранения по политике).
 
     Args:
-        expertise_id: ID экспертизы.
+        scope: Экспертиза в окружении.
         doc_code: Код типа документа.
         filename: Имя файла.
         url: Исходная ссылка.
@@ -106,7 +107,9 @@ async def on_document_text(expertise_id: int, doc_code: Optional[str], filename:
     Returns:
         Optional[int]: ``pe_documents.id`` или ``None`` (флаг выключен / ошибка).
     """
-    return await safe_call_async(_on_document_text, expertise_id, doc_code, filename, url, file_path, text, default=None)
+    if scope is None:
+        return None
+    return await safe_call_async(_on_document_text, scope, doc_code, filename, url, file_path, text, default=None)
 
 
 async def _on_document_extracted(document_id: int, extracted: dict) -> None:
@@ -129,21 +132,22 @@ async def on_document_extracted(document_id: Optional[int], extracted: Any) -> N
     await safe_call_async(_on_document_extracted, document_id, extracted)
 
 
-def _enqueue_indexing(expertise_id: int) -> None:
+def _enqueue_indexing(scope: Scope) -> None:
     """Ставит в очередь Celery задачу индексации (ленивый импорт, чтобы не создавать циклов)."""
     from celery_app import celery_app
-    celery_app.send_task("index_documents_task", args=[int(expertise_id)], queue="evaluation")
+    celery_app.send_task("index_documents_task", args=[scope.expertise_id, scope.env], queue="evaluation")
 
 
-async def _on_run_finished(expertise_id: int) -> None:
+async def _on_run_finished(scope: Scope) -> None:
     """Реализация :func:`on_run_finished` (без защиты)."""
-    _enqueue_indexing(expertise_id)
+    _enqueue_indexing(scope)
 
 
-async def on_run_finished(expertise_id: int) -> None:
+async def on_run_finished(scope: Scope) -> None:
     """Конец прогона: запускает фоновую задачу Celery: индексация (чанки + эмбеддинги), затем построение фактов.
 
     Args:
-        expertise_id: ID экспертизы.
+        scope: Экспертиза в окружении.
     """
-    await safe_call_async(_on_run_finished, expertise_id)
+    if scope is not None:
+        await safe_call_async(_on_run_finished, scope)

@@ -42,7 +42,10 @@ def evaluate_documents_task(self, expertise_id: int, environment: str):
 
     # @async_retry(CLOUD_PARSING_RETRY_CONFIG)
     async def run_with_manager():
-        async with HTTPClientManager(timeout=90.0) as mgr:
+        from knowledge_store.db import task_pool
+
+        # один пул Postgres на задачу для хранилища знаний (создаётся лениво, только если оно включено)
+        async with HTTPClientManager(timeout=90.0) as mgr, task_pool():
             tasks_piplene = TasksPipeline(mgr, expertise_id, environment)
             task_result = await tasks_piplene.run_pipeline()
             return task_result
@@ -76,7 +79,7 @@ def evaluate_documents_task(self, expertise_id: int, environment: str):
 
 
 @celery_app.task(bind=True, name="index_documents_task")
-def index_documents_task(self, expertise_id: int):
+def index_documents_task(self, expertise_id: int, environment: str = None):
     """Фоновая индексация документов экспертизы и сразу за ней построение фактов.
 
     Запускается из :func:`knowledge_store.hooks.on_run_finished` после завершения
@@ -86,12 +89,18 @@ def index_documents_task(self, expertise_id: int):
 
     Args:
         expertise_id: ID экспертизы.
+        environment: Окружение (``X-API-Database``). Сообщения, поставленные до появления параметра, относятся
+            к ``PE_LEGACY_ENV`` (по умолчанию ``dev``).
 
     Returns:
         dict: ``{"index": ..., "facts": ...}`` либо ``{"skipped": True}``.
     """
+    import os
+
+    from knowledge_store.db import task_pool
     from knowledge_store.runner import facts_enabled, index_and_build_facts
     from knowledge_store.safe import is_enabled
+    from knowledge_store.scope import Scope
 
     if not is_enabled():
         return {"skipped": True}
@@ -102,8 +111,9 @@ def index_documents_task(self, expertise_id: int):
         if facts_enabled():
             from configs.llm_client import get_llm
             client, model = get_llm()
-        async with HTTPClientManager(timeout=120.0) as mgr:
-            return await index_and_build_facts(int(expertise_id), mgr, client, model)
+        scope = Scope.of(environment or os.getenv("PE_LEGACY_ENV", "dev"), expertise_id)
+        async with HTTPClientManager(timeout=120.0) as mgr, task_pool():
+            return await index_and_build_facts(scope, mgr, client, model)
 
     return run_async(run())
 
@@ -142,9 +152,9 @@ def generate_summary_opinion_task(self, expertise_id: int, environment: str, sen
         а также ``draft_sent`` (если запрошена отправка) либо ``{"error", "http_status"}``, если сборка невозможна.
     """
     from configs.llm_client import get_llm
-    from configs.working_with_db import get_async_db_connection
-    from knowledge_store import export, facts as facts_mod, indexer, runner, summary
+    from knowledge_store import db, export, facts as facts_mod, indexer, runner, summary
     from knowledge_store.safe import is_enabled
+    from knowledge_store.scope import Scope
 
     if not is_enabled():
         return {"error": "Хранилище знаний выключено (KNOWLEDGE_STORE_ENABLED=false)", "http_status": 503}
@@ -153,15 +163,16 @@ def generate_summary_opinion_task(self, expertise_id: int, environment: str, sen
         """Собирает заключение внутри event loop задачи."""
         client, model = get_llm()
         llm_call = facts_mod.make_llm_call(client, model, max_tokens=2000)   # блоки III–IV: короткий структурированный JSON
-        async with HTTPClientManager(timeout=120.0) as mgr:
+        scope = Scope.of(environment, expertise_id)
+        async with HTTPClientManager(timeout=120.0) as mgr, db.task_pool():
             async def build_facts():
                 """Строит факты, если их ещё нет (после индексации они обычно уже есть)."""
                 if runner.facts_enabled():
-                    await runner.build_facts(int(expertise_id), indexer.build_embedder(mgr), client, model)
+                    await runner.build_facts(scope, indexer.build_embedder(mgr), client, model)
 
             try:
-                async with get_async_db_connection() as conn:
-                    result = await summary.generate_summary(conn, int(expertise_id), llm_call, build_facts, rebuild_facts)
+                async with db.connection() as conn:
+                    result = await summary.generate_summary(conn, scope, llm_call, build_facts, rebuild_facts)
             except summary.SummaryError as e:
                 return {"error": e.message, "http_status": e.http_status}
             if send_draft:

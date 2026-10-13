@@ -23,6 +23,13 @@ except ImportError:
     sys.modules["configs.http_client_manager"] = _hcm
 
 from knowledge_store import assessment, export, facts, repository as repo, summary
+from knowledge_store.scope import Scope
+from tests import pg_schema
+
+
+def S(expertise_id: int) -> Scope:
+    """Ключ тестовой экспертизы в окружении ``dev``."""
+    return Scope("dev", expertise_id)
 from tests.pg_psql import PsqlConn
 
 PG = os.getenv("PE_TEST_PG")
@@ -285,12 +292,7 @@ class SummaryDbTests(unittest.TestCase):
         """Создаёт схему pe_* (миграции 001 и 002, vector → real[])."""
         host, port = PG.split(":")
         cls.conn = PsqlConn(host, int(port))
-        sql = (MIGRATIONS / "001_knowledge_store.sql").read_text(encoding="utf-8")
-        sql = re.sub(r"CREATE EXTENSION[^\n]*\n", "", sql)
-        sql = re.sub(r"[^\n]*USING hnsw[^\n]*\n", "", sql).replace("vector(1024)", "real[]")
-        cls.conn._run("DROP TABLE IF EXISTS pe_summary_opinions, pe_facts, pe_chunks, pe_documents, pe_form_fields, pe_procurements CASCADE;")
-        cls.conn._run(sql)
-        cls.conn._run((MIGRATIONS / "002_form_fields_derived.sql").read_text(encoding="utf-8"))
+        pg_schema.build(cls.conn)
 
     def run_async(self, coro):
         """Запускает корутину."""
@@ -308,23 +310,23 @@ class SummaryDbTests(unittest.TestCase):
                    f"VALUES ('{form}', '{key}', {n}, '{label}', '{kind}')")
         # 1) документов нет
         with self.assertRaises(summary.NoDataError):
-            self.run_async(summary.precheck(c, 8101))
+            self.run_async(summary.precheck(c, S(8101)))
         # 2) тексты очищены
         c._run("INSERT INTO pe_procurements (expertise_id, law, method, object_code, check_type2) VALUES (8101, '44-ФЗ', 'Конкурс', 6, 1)")
         c._run("INSERT INTO pe_documents (expertise_id, doc_code, filename, sha256, text_full, text_purged_at) "
                "VALUES (8101, 'docIzvejenieFiles', 'n.docx', 'h1', NULL, NOW())")
         with self.assertRaises(summary.TextPurgedError):
-            self.run_async(summary.precheck(c, 8101))
+            self.run_async(summary.precheck(c, S(8101)))
         # 3) тексты есть, форма не поддерживается (223-ФЗ)
         c._run("UPDATE pe_documents SET text_full = 'Адрес: Москва', text_purged_at = NULL WHERE expertise_id = 8101")
         c._run("UPDATE pe_procurements SET law = '223-ФЗ' WHERE expertise_id = 8101")
         with self.assertRaises(summary.UnsupportedFormError) as ctx:
-            self.run_async(summary.precheck(c, 8101))
+            self.run_async(summary.precheck(c, S(8101)))
         self.assertEqual(ctx.exception.http_status, 422)
         c._run("UPDATE pe_procurements SET law = '44-ФЗ' WHERE expertise_id = 8101")
         # 4) фактов нет и построить нечем
         with self.assertRaises(summary.NoFactsError):
-            self.run_async(summary.generate_summary(c, 8101, None))
+            self.run_async(summary.generate_summary(c, S(8101), None))
         # 5) факты строятся колбэком, сборка сохраняет data и trace
         doc_id = c._run("SELECT id FROM pe_documents WHERE expertise_id = 8101").strip()
 
@@ -341,7 +343,7 @@ class SummaryDbTests(unittest.TestCase):
             return json.dumps({"text": "Вывод по замечанию."})
 
         with mock.patch.object(summary.Config, "PE_MODEL_ZEROS", "value"):
-            res = self.run_async(summary.generate_summary(c, 8101, llm, build_facts))
+            res = self.run_async(summary.generate_summary(c, S(8101), llm, build_facts))
         self.assertEqual(res["form_code"], form)
         self.assertEqual(res["status"], "draft")
         self.assertEqual(res["data"], {"k_name": 1, "k_cmp": 0, "field3": "Вывод по замечанию."})
@@ -364,7 +366,7 @@ class SummaryDbTests(unittest.TestCase):
         c._run("INSERT INTO pe_procurements (expertise_id, law, method, object_code, check_type2) VALUES (8201, '44-ФЗ', 'Конкурс', 6, 1)")
         c._run("INSERT INTO pe_documents (expertise_id, doc_code, filename, sha256, text_full) VALUES "
                f"(8201, 'docIzvejenieFiles', 'Печатная-форма-извещения-(версия-1).html', 'pf1', $t${notice}$t$)")
-        res = self.run_async(summary.generate_summary(c, 8201, None, None))
+        res = self.run_async(summary.generate_summary(c, S(8201), None, None))
         self.assertEqual((res["data"]["k_email"], res["data"]["k_spec"]), (1, 2))
         self.assertEqual(res["trace"]["k_email"]["origin"], "print_form")
         self.assertEqual(res["trace"]["k_email"]["status"], "verified")

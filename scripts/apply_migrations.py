@@ -16,17 +16,23 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 FILE_RE = re.compile(r"^(\d{3})_.+\.sql$")
 
 
-def render_sql(sql: str, embedding_dim: int) -> str:
+def render_sql(sql: str, embedding_dim: int, legacy_env: str = "dev") -> str:
     """Подставляет параметры в текст миграции.
 
     Args:
-        sql: Исходный SQL с плейсхолдером ``{{EMBEDDING_DIM}}``.
+        sql: Исходный SQL с плейсхолдерами ``{{EMBEDDING_DIM}}`` и ``{{PE_LEGACY_ENV}}``.
         embedding_dim: Размерность вектора эмбеддинга.
+        legacy_env: Окружение, к которому относятся строки ``pe_*``, записанные до миграции 004.
 
     Returns:
         str: SQL с подставленными значениями.
+
+    Raises:
+        ValueError: Недопустимое имя окружения (защита от подстановки в SQL).
     """
-    return sql.replace("{{EMBEDDING_DIM}}", str(int(embedding_dim)))
+    if not re.match(r"^[a-z0-9_-]{1,32}$", legacy_env or ""):
+        raise ValueError(f"Недопустимое PE_LEGACY_ENV: {legacy_env!r}")
+    return sql.replace("{{EMBEDDING_DIM}}", str(int(embedding_dim))).replace("{{PE_LEGACY_ENV}}", legacy_env)
 
 
 def list_migrations(directory: Path = MIGRATIONS_DIR) -> list:
@@ -53,6 +59,7 @@ async def apply_all() -> list:
     import asyncpg  # локальный импорт: вспомогательные функции модуля тестируются без asyncpg
 
     dim = 1024  # значение для необязательного плейсхолдера {{EMBEDDING_DIM}} (в 001 размерность задана прямо)
+    legacy_env = os.getenv("PE_LEGACY_ENV", "dev").strip().lower()
     conn = await asyncpg.connect(
         host=os.getenv("DB_HOST"), port=int(os.getenv("DB_PORT", "5432")),
         database=os.getenv("DB_NAME"), user=os.getenv("DB_USER"), password=os.getenv("DB_PASSWORD"),
@@ -65,8 +72,10 @@ async def apply_all() -> list:
         )
         done = {r["name"]: r["checksum"] for r in await conn.fetch("SELECT name, checksum FROM schema_migrations")}
         for path in list_migrations():
-            sql = render_sql(path.read_text(encoding="utf-8"), dim)
-            checksum = hashlib.sha256(sql.encode()).hexdigest()
+            raw = path.read_text(encoding="utf-8")
+            sql = render_sql(raw, dim, legacy_env)
+            # контрольная сумма — по исходному файлу: смена PE_LEGACY_ENV после применения не считается правкой миграции
+            checksum = hashlib.sha256(raw.encode()).hexdigest()
             if path.name in done:
                 if done[path.name] != checksum:
                     raise RuntimeError(f"Миграция {path.name} изменена после применения")

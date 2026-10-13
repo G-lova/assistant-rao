@@ -5,6 +5,7 @@ from configs.config import Config
 from configs.logger import get_logger
 from knowledge_store import repository as repo
 from knowledge_store.pages import chunk_pages, split_pages
+from knowledge_store.scope import Scope
 
 logger = get_logger(__name__)
 
@@ -24,12 +25,12 @@ def build_embedder(http_manager):
 
 
 def _db():
-    """Возвращает менеджер соединения с БД (ленивый импорт тяжёлых зависимостей)."""
-    from configs.working_with_db import get_async_db_connection
-    return get_async_db_connection()
+    """Возвращает менеджер соединения с БД: из пула задачи (:func:`knowledge_store.db.task_pool`) или временный."""
+    from knowledge_store import db
+    return db.connection()
 
 
-async def index_expertise(expertise_id: int, embedder: Any, max_chars: int = 1500, overlap: int = 150) -> Dict[str, int]:
+async def index_expertise(scope: Scope, embedder: Any, max_chars: int = 1500, overlap: int = 150) -> Dict[str, int]:
     """Строит чанки и эмбеддинги для всех ещё не проиндексированных документов экспертизы.
 
     Документ индексируется «всё или ничего»: если сервис эмбеддингов вернул не все векторы
@@ -37,7 +38,7 @@ async def index_expertise(expertise_id: int, embedder: Any, max_chars: int = 150
     повторно обработан при следующем запуске.
 
     Args:
-        expertise_id: ID экспертизы.
+        scope: Экспертиза в окружении.
         embedder: Объект с ``async get_embeddings(list[str])``.
         max_chars: Размер чанка в символах.
         overlap: Перекрытие чанков в символах.
@@ -47,7 +48,7 @@ async def index_expertise(expertise_id: int, embedder: Any, max_chars: int = 150
     """
     stats = {"documents": 0, "chunks": 0, "failed": 0}
     async with _db() as conn:
-        docs = await repo.documents_for_indexing(conn, expertise_id)
+        docs = await repo.documents_for_indexing(conn, scope)
         for doc in docs:
             try:
                 chunks = chunk_pages(split_pages(doc["text_full"]), max_chars=max_chars, overlap=overlap)
@@ -57,12 +58,12 @@ async def index_expertise(expertise_id: int, embedder: Any, max_chars: int = 150
                 if len(vectors) != len(chunks):
                     raise RuntimeError(f"получено {len(vectors)} эмбеддингов из {len(chunks)}")
                 async with conn.transaction():
-                    stats["chunks"] += await repo.replace_chunks(conn, doc["id"], expertise_id, chunks, [list(v) for v in vectors])
+                    stats["chunks"] += await repo.replace_chunks(conn, doc["id"], scope, chunks, [list(v) for v in vectors])
                 stats["documents"] += 1
             except Exception as e:  # noqa: BLE001 — один плохой документ не должен останавливать остальные
                 stats["failed"] += 1
                 logger.error(f"knowledge_store: индексация документа {doc['id']} не удалась: {type(e).__name__}: {e}")
-    logger.info(f"knowledge_store: индексация экспертизы {expertise_id}: {stats}")
+    logger.info(f"knowledge_store: индексация экспертизы {scope}: {stats}")
     return stats
 
 

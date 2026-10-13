@@ -19,6 +19,7 @@ from evaluate_documents.send_subject_service import SendSubjectService
 from evaluate_documents.type_data_extractor import DOCUMENT_TYPE_MAPPING, TypeDataExtractor
 from src.subject_detector import SubjectDetector
 from knowledge_store import hooks as ks_hooks
+from knowledge_store.scope import Scope
 from evaluate_documents.package_view import completeness_input
 
 
@@ -44,6 +45,11 @@ class TasksPipeline:
         self.config = Config()
         self.http_manager = http_manager
         self.x_api_database = environment
+        try:
+            # ключ экспертизы в хранилище знаний: окружение + id (один Postgres на все окружения)
+            self.ks_scope = Scope.of(environment, expertise_id)
+        except ValueError:
+            self.ks_scope = None
         
         # Инициализация компонентов с конфигурацией
         db_config = self.config.get_database_config(environment)
@@ -191,7 +197,7 @@ class TasksPipeline:
 
         # Хранилище знаний «РАО Эксперт»: сохраняем текст документа (при выключенном флаге — no-op)
         ks_doc_id = await ks_hooks.on_document_text(
-            int(self.df['id'].iloc[0]), link.doc_code, filename, getattr(link, 'media_links', None), file_path, extracted_text)
+            self.ks_scope, link.doc_code, filename, getattr(link, 'media_links', None), file_path, extracted_text)
 
         chunks = split_large_text(extracted_text, max_chunk_size=10000)
         if not chunks:
@@ -267,7 +273,7 @@ class TasksPipeline:
             self.df['documents_results'] = [[] for _ in range(len(self.df))]
 
             # Хранилище знаний: очистка прошлого прогона и сохранение паспорта закупки (при выключенном флаге — no-op)
-            await ks_hooks.on_run_start(self.df)
+            await ks_hooks.on_run_start(self.df, self.x_api_database)
 
             # === Парсинг ссылок ===
             media_links = self.df[self.df['media_links'].notna()]
@@ -364,7 +370,7 @@ class TasksPipeline:
             await save_summary_report(procurement_id=self.df['id'].iloc[0], summary_data=final_evaluation_result)
 
             # Хранилище знаний: фоновая индексация текстов (при выключенном флаге — no-op)
-            await ks_hooks.on_run_finished(int(self.df['id'].iloc[0]))
+            await ks_hooks.on_run_finished(self.ks_scope)
 
             # заполнение поля subjectContract в БД
             if pd.isna(self.df["subjectContract"][0]):

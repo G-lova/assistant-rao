@@ -112,12 +112,17 @@ async def generate_summary_opinion(
     from configs.working_with_db import get_async_db_connection
     from knowledge_store import summary
     from knowledge_store.safe import is_enabled
+    from knowledge_store.scope import Scope
 
     if not is_enabled():
         raise HTTPException(status_code=503, detail="Хранилище знаний выключено (KNOWLEDGE_STORE_ENABLED=false)")
     try:
+        scope = Scope.of(x_api_database, request.expertise_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
         async with get_async_db_connection() as conn:
-            await summary.precheck(conn, request.expertise_id)
+            await summary.precheck(conn, scope)
     except summary.SummaryError as e:
         raise HTTPException(status_code=e.http_status, detail=e.message)
     except Exception as e:

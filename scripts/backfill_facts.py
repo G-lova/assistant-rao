@@ -5,38 +5,39 @@ XML извещения и (если не задан ``--xml-only``) факты �
 
 Запуск (внутри контейнера приложения)::
 
-    python -m scripts.backfill_facts 5885 5887           # конкретные экспертизы
-    python -m scripts.backfill_facts --all --xml-only    # все экспертизы с текстами, без LLM
+    python -m scripts.backfill_facts --env prod 5885 5887   # конкретные экспертизы окружения prod
+    python -m scripts.backfill_facts --env dev --all --xml-only   # все экспертизы dev с текстами, без LLM
 """
 import argparse
 import asyncio
 import sys
 
 from knowledge_store import facts, forms, repository as repo
+from knowledge_store.scope import Scope
 
 
-async def process(conn, expertise_id: int, extractor) -> str:
+async def process(conn, scope: Scope, extractor) -> str:
     """Строит факты одной экспертизы.
 
     Args:
         conn: Соединение ``asyncpg``.
-        expertise_id: ID экспертизы.
+        scope: Экспертиза в окружении.
         extractor: :class:`knowledge_store.facts.FactExtractor` или ``None`` (только XML).
 
     Returns:
         str: Строка отчёта по экспертизе.
     """
-    passport = await repo.get_procurement(conn, expertise_id)
+    passport = await repo.get_procurement(conn, scope)
     if not passport:
-        return f"{expertise_id}: нет паспорта закупки (экспертиза не проходила через /evaluate-documents)"
+        return f"{scope}: нет паспорта закупки (экспертиза не проходила через /evaluate-documents)"
     code = forms.get_form_code(passport["law"], passport["check_type2"], passport["object_code"],
                                available=await repo.list_form_codes(conn))
-    await repo.set_form_code(conn, expertise_id, code)
+    await repo.set_form_code(conn, scope, code)
     if not code:
-        return (f"{expertise_id}: форма не поддерживается "
+        return (f"{scope}: форма не поддерживается "
                 f"({passport['law']}, checkType2={passport['check_type2']}, объект {passport['object_code']})")
-    stats = await facts.extract_facts(conn, expertise_id, code, extractor)
-    return f"{expertise_id}: {code} → {stats}"
+    stats = await facts.extract_facts(conn, scope, code, extractor)
+    return f"{scope}: {code} → {stats}"
 
 
 async def main(argv=None) -> int:
@@ -50,6 +51,7 @@ async def main(argv=None) -> int:
     """
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("ids", nargs="*", type=int, help="ID экспертиз")
+    parser.add_argument("--env", required=True, help="окружение (X-API-Database): dev / stage / prod")
     parser.add_argument("--all", action="store_true", help="все экспертизы с сохранёнными текстами")
     parser.add_argument("--xml-only", action="store_true", help="только факты из XML, без LLM и эмбеддингов")
     args = parser.parse_args(argv)
@@ -67,10 +69,12 @@ async def main(argv=None) -> int:
             client, model = get_llm()
             extractor = facts.FactExtractor(facts.make_llm_call(client, model), build_embedder(mgr))
         async with get_async_db_connection() as conn:
-            ids = args.ids or await repo.list_expertises_with_texts(conn)
-            for expertise_id in ids:
+            env = Scope.of(args.env, 0).env
+            scopes = ([Scope(env, int(i)) for i in args.ids] if args.ids
+                      else await repo.list_expertises_with_texts(conn, env))
+            for scope in scopes:
                 async with conn.transaction():
-                    print(await process(conn, expertise_id, extractor))
+                    print(await process(conn, scope, extractor))
     return 0
 
 

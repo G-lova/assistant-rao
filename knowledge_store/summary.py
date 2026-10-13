@@ -19,6 +19,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tup
 from configs.config import Config
 from configs.logger import get_logger
 from knowledge_store import assessment, contract_check, doc_titles, eis_notice, facts as facts_mod, form_keys, forms, repository as repo
+from knowledge_store.scope import Scope
 
 logger = get_logger(__name__)
 
@@ -1283,12 +1284,12 @@ def validate(data: Dict[str, Any], fields: Sequence[dict]) -> List[str]:
     return problems
 
 
-async def precheck(conn, expertise_id: int) -> Dict[str, Any]:
+async def precheck(conn, scope: Scope) -> Dict[str, Any]:
     """Проверяет, что сводное ЭЗ можно строить: есть документы, тексты не очищены, форма поддерживается.
 
     Args:
         conn: Соединение ``asyncpg``.
-        expertise_id: ID экспертизы.
+        scope: Экспертиза в окружении.
 
     Returns:
         dict: ``{"form_code", "passport", "documents"}``.
@@ -1298,12 +1299,12 @@ async def precheck(conn, expertise_id: int) -> Dict[str, Any]:
         TextPurgedError: Все тексты очищены политикой хранения («перезапустите /evaluate-documents»).
         UnsupportedFormError: Для экспертизы нет формы в справочнике.
     """
-    docs = await repo.get_documents_brief(conn, expertise_id)
+    docs = await repo.get_documents_brief(conn, scope)
     if not docs:
         raise NoDataError("По экспертизе нет данных в хранилище знаний — сначала выполните /evaluate-documents")
     if not any(d["has_text"] for d in docs):
         raise TextPurgedError("Тексты документов удалены по сроку хранения — перезапустите /evaluate-documents")
-    passport = await repo.get_procurement(conn, expertise_id)
+    passport = await repo.get_procurement(conn, scope)
     if not passport:
         raise NoDataError("Нет паспорта закупки — сначала выполните /evaluate-documents")
     code = forms.get_form_code(passport["law"], passport["check_type2"], passport["object_code"],
@@ -1312,17 +1313,17 @@ async def precheck(conn, expertise_id: int) -> Dict[str, Any]:
         raise UnsupportedFormError(
             f"Форма заключения не поддерживается ({passport['law']}, checkType2={passport['check_type2']}, "
             f"объект {passport['object_code']})")
-    await repo.set_form_code(conn, expertise_id, code)
+    await repo.set_form_code(conn, scope, code)
     return {"form_code": code, "passport": passport, "documents": docs}
 
 
-async def generate_summary(conn, expertise_id: int, llm_call: Optional[LlmCall],
+async def generate_summary(conn, scope: Scope, llm_call: Optional[LlmCall],
                            build_facts: Optional[FactsBuilder] = None, rebuild_facts: bool = False) -> Dict[str, Any]:
     """Собирает и сохраняет сводное ЭЗ экспертизы.
 
     Args:
         conn: Соединение ``asyncpg``.
-        expertise_id: ID экспертизы.
+        scope: Экспертиза в окружении.
         llm_call: Функция вызова LLM для блоков III–IV (``None`` — только шаблонные тексты).
         build_facts: Корутина-фабрика построения фактов; вызывается, если фактов ещё нет (или ``rebuild_facts``).
         rebuild_facts: Пересчитать факты перед сборкой, даже если они уже есть.
@@ -1334,15 +1335,15 @@ async def generate_summary(conn, expertise_id: int, llm_call: Optional[LlmCall],
     Raises:
         SummaryError: См. :func:`precheck`; :class:`NoFactsError`, если фактов нет и построить их нечем.
     """
-    ready = await precheck(conn, expertise_id)
+    ready = await precheck(conn, scope)
     code = ready["form_code"]
     # факты раздела 1 из XML/печатной формы дёшевы и детерминированы — обновляются при каждой сборке
-    eis_stats = await facts_mod.extract_facts(conn, expertise_id, code, None)
-    fact_rows = [dict(r) for r in await repo.get_facts(conn, expertise_id)]
+    eis_stats = await facts_mod.extract_facts(conn, scope, code, None)
+    fact_rows = [dict(r) for r in await repo.get_facts(conn, scope)]
     has_llm = any(r["source"] == facts_mod.SOURCE_LLM for r in fact_rows)
     if (not has_llm or rebuild_facts) and build_facts is not None:
         await build_facts()
-        fact_rows = [dict(r) for r in await repo.get_facts(conn, expertise_id)]
+        fact_rows = [dict(r) for r in await repo.get_facts(conn, scope)]
     if not fact_rows:
         raise NoFactsError("Факты по экспертизе ещё не построены — повторите запрос позже")
 
@@ -1368,7 +1369,7 @@ async def generate_summary(conn, expertise_id: int, llm_call: Optional[LlmCall],
     stats = await write_blocks(fields, data, trace, llm_call, code)
     problems = validate(data, fields)
     if problems:
-        logger.error(f"knowledge_store: сводное ЭЗ {expertise_id} не соответствует форме: {problems[:5]}")
+        logger.error(f"knowledge_store: сводное ЭЗ {scope} не соответствует форме: {problems[:5]}")
     unresolved = [f["field_key"] for f in fields
                   if f["value_kind"] in RESULT_KINDS and data.get(f["field_key"]) is None]
     proposed = [k for k, v in trace.items() if isinstance(v, dict) and v.get("status") == "proposed"]
@@ -1378,8 +1379,8 @@ async def generate_summary(conn, expertise_id: int, llm_call: Optional[LlmCall],
                   "eis_xml": eis_stats.get("eis_xml", 0), "eis_print_form": eis_stats.get("eis_print_form", 0)})
     trace["_summary"] = {"unresolved": unresolved, "proposed": proposed, "suspected": suspected, "problems": problems}
     async with conn.transaction():
-        summary_id = await repo.insert_summary(conn, expertise_id, code, data, trace, status)
-        await repo.touch_expiry(conn, expertise_id, Config.PE_TEXT_RETENTION_DAYS)
-    logger.info(f"knowledge_store: сводное ЭЗ {expertise_id} ({code}): {status}, {stats}")
+        summary_id = await repo.insert_summary(conn, scope, code, data, trace, status)
+        await repo.touch_expiry(conn, scope, Config.PE_TEXT_RETENTION_DAYS)
+    logger.info(f"knowledge_store: сводное ЭЗ {scope} ({code}): {status}, {stats}")
     return {"summary_id": summary_id, "form_code": code, "status": status, "data": data, "trace": trace,
             "stats": stats, "problems": problems}

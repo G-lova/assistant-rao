@@ -16,6 +16,13 @@ from unittest import mock
 import numpy as np
 
 from knowledge_store import eis_notice, facts, hooks, repository as repo, runner
+from knowledge_store.scope import Scope
+from tests import pg_schema
+
+
+def S(expertise_id: int) -> Scope:
+    """Ключ тестовой экспертизы в окружении ``dev``."""
+    return Scope("dev", expertise_id)
 from tests.pg_psql import PsqlConn
 
 PG = os.getenv("PE_TEST_PG")
@@ -297,12 +304,7 @@ class FactsDbTests(unittest.TestCase):
         """Создаёт схему pe_* (миграции 001 и 002, vector → real[])."""
         host, port = PG.split(":")
         cls.conn = PsqlConn(host, int(port))
-        sql = (MIGRATIONS / "001_knowledge_store.sql").read_text(encoding="utf-8")
-        sql = re.sub(r"CREATE EXTENSION[^\n]*\n", "", sql)
-        sql = re.sub(r"[^\n]*USING hnsw[^\n]*\n", "", sql).replace("vector(1024)", "real[]")
-        cls.conn._run("DROP TABLE IF EXISTS pe_summary_opinions, pe_facts, pe_chunks, pe_documents, pe_form_fields, pe_procurements CASCADE;")
-        cls.conn._run(sql)
-        cls.conn._run((MIGRATIONS / "002_form_fields_derived.sql").read_text(encoding="utf-8"))
+        pg_schema.build(cls.conn)
 
     def q(self, sql):
         """Выполняет SELECT и возвращает stdout."""
@@ -330,7 +332,7 @@ class FactsDbTests(unittest.TestCase):
             f.write(make_xml(version=2).encode("utf-8"))
         try:
             with mock.patch.object(hooks, "_db", fake_db), mock.patch.dict(os.environ, {"KNOWLEDGE_STORE_ENABLED": "true"}):
-                doc = asyncio.run(hooks.on_document_text(7001, "docIzvejenieFiles", "epNotification_1.xml", None, f.name, "flat text"))
+                doc = asyncio.run(hooks.on_document_text(S(7001), "docIzvejenieFiles", "epNotification_1.xml", None, f.name, "flat text"))
                 asyncio.run(hooks.on_document_extracted(doc, {"readability": {"status": "allow"}, "raw_data": {}}))
         finally:
             os.unlink(f.name)
@@ -353,7 +355,7 @@ class FactsDbTests(unittest.TestCase):
             return [facts.Fragment(1, int(txt), 4, "Описание. Наименование товара: сервер, 2 шт.", "opisanie.docx")]
 
         ex = facts.FactExtractor(llm, FakeEmbedder(), search=search, system_prompt="SYS")
-        stats = asyncio.run(facts.extract_facts(self.conn, 7001, form, ex))
+        stats = asyncio.run(facts.extract_facts(self.conn, S(7001), form, ex))
         self.assertEqual(stats["eis"], 1)       # только 1.1; 1.38 XML не решает
         self.assertEqual(stats["fields"], 2)    # k_kvr и k_cmp ушли в LLM, k_name и k_txt — нет
         self.assertEqual(len(calls), 2)
@@ -362,10 +364,10 @@ class FactsDbTests(unittest.TestCase):
         self.assertEqual(self.q("SELECT page||'|'||document_id FROM pe_facts WHERE expertise_id=7001 AND fact_key='k_cmp'"),
                          f"4|{txt}")
         # идемпотентность: повторный прогон не плодит факты
-        asyncio.run(facts.extract_facts(self.conn, 7001, form, ex))
+        asyncio.run(facts.extract_facts(self.conn, S(7001), form, ex))
         self.assertEqual(self.q("SELECT count(*) FROM pe_facts WHERE expertise_id=7001"), "3")
         # без экстрактора обновляются только XML-факты, ранее найденные факты LLM остаются
-        stats = asyncio.run(facts.extract_facts(self.conn, 7001, form, None))
+        stats = asyncio.run(facts.extract_facts(self.conn, S(7001), form, None))
         self.assertEqual((stats["eis"], stats["llm"]), (1, 0))
         self.assertEqual(self.q("SELECT count(*) FROM pe_facts WHERE expertise_id=7001 AND source='fact_extractor'"), "2")
 
@@ -378,11 +380,11 @@ class FactsDbTests(unittest.TestCase):
                        "ON CONFLICT DO NOTHING")
         self.conn._run("INSERT INTO pe_procurements (expertise_id, law, method, object_code, check_type2) VALUES "
                        "(7101, '44-ФЗ', 'Конкурс', 6, 1), (7102, '44-ФЗ', 'Запрос предложений', 6, 9)")
-        ok = asyncio.run(backfill_facts.process(self.conn, 7101, None))
+        ok = asyncio.run(backfill_facts.process(self.conn, S(7101), None))
         self.assertIn("44fz_competition_obj6", ok)
         self.assertEqual(self.q("SELECT form_code FROM pe_procurements WHERE expertise_id=7101"), "44fz_competition_obj6")
-        self.assertIn("не поддерживается", asyncio.run(backfill_facts.process(self.conn, 7102, None)))
-        self.assertIn("нет паспорта", asyncio.run(backfill_facts.process(self.conn, 7999, None)))
+        self.assertIn("не поддерживается", asyncio.run(backfill_facts.process(self.conn, S(7102), None)))
+        self.assertIn("нет паспорта", asyncio.run(backfill_facts.process(self.conn, S(7999), None)))
         self.conn._run("DELETE FROM pe_form_fields WHERE form_code = '44fz_competition_obj6' AND field_key = 'bf_key'")
 
     def test_print_form_facts_without_xml(self):
@@ -397,7 +399,7 @@ class FactsDbTests(unittest.TestCase):
         self.conn._run("DELETE FROM pe_documents WHERE expertise_id = 7201")
         doc = self.conn._run("INSERT INTO pe_documents (expertise_id, doc_code, filename, sha256, text_full) VALUES "
                              f"(7201, 'docIzvejenieFiles', 'Печатная-форма-извещения-(версия-1).html', 'p1', $t${notice}$t$) RETURNING id").splitlines()[0]
-        stats = asyncio.run(facts.extract_facts(self.conn, 7201, form, None))
+        stats = asyncio.run(facts.extract_facts(self.conn, S(7201), form, None))
         self.assertEqual((stats["eis"], stats["eis_xml"], stats["eis_print_form"]), (2, 0, 2))
         self.assertEqual(self.q("SELECT (value->>'value')||'|'||(value->>'origin')||'|'||document_id||'|'||quote FROM pe_facts "
                                 "WHERE expertise_id=7201 AND fact_key='p_email'"),
@@ -434,7 +436,7 @@ class RunnerFlagTests(unittest.TestCase):
                 mock.patch.object(runner.indexer, "build_embedder", lambda mgr: object()), \
                 mock.patch.object(runner.indexer, "index_expertise", fake_index), \
                 mock.patch.object(runner, "build_facts", side_effect=AssertionError("не должно вызываться")):
-            res = asyncio.run(runner.index_and_build_facts(1, object()))
+            res = asyncio.run(runner.index_and_build_facts(S(1), object()))
         self.assertEqual(res["index"]["chunks"], 2)
         self.assertIn("skipped", res["facts"])
 
@@ -458,7 +460,7 @@ class RunnerFlagTests(unittest.TestCase):
                 mock.patch.object(runner.indexer, "index_expertise", fake_index):
             for func, name in ((slow, "TimeoutError"), (boom, "RuntimeError")):
                 with mock.patch.object(runner, "build_facts", func):
-                    res = asyncio.run(runner.index_and_build_facts(1, object(), object(), "m"))
+                    res = asyncio.run(runner.index_and_build_facts(S(1), object(), object(), "m"))
                 self.assertEqual(res["index"]["documents"], 1)
                 self.assertEqual(res["facts"], {"error": name})
 
@@ -472,12 +474,7 @@ class RunnerDbTests(unittest.TestCase):
         """Создаёт схему pe_* (миграции 001 и 002, vector → real[])."""
         host, port = PG.split(":")
         cls.conn = PsqlConn(host, int(port))
-        sql = (MIGRATIONS / "001_knowledge_store.sql").read_text(encoding="utf-8")
-        sql = re.sub(r"CREATE EXTENSION[^\n]*\n", "", sql)
-        sql = re.sub(r"[^\n]*USING hnsw[^\n]*\n", "", sql).replace("vector(1024)", "real[]")
-        cls.conn._run("DROP TABLE IF EXISTS pe_summary_opinions, pe_facts, pe_chunks, pe_documents, pe_form_fields, pe_procurements CASCADE;")
-        cls.conn._run(sql)
-        cls.conn._run((MIGRATIONS / "002_form_fields_derived.sql").read_text(encoding="utf-8"))
+        pg_schema.build(cls.conn)
 
     def test_build_facts_end_to_end(self):
         """Форма по паспорту, факты XML + LLM, повтор идемпотентен; без паспорта и с неподдерживаемой формой — skipped."""
@@ -509,13 +506,13 @@ class RunnerDbTests(unittest.TestCase):
         with mock.patch.object(runner, "_db", fake_db), \
                 mock.patch.object(facts, "make_llm_call", lambda client, model: fake_llm), \
                 mock.patch.object(facts, "search_fragments", fake_search):
-            res = asyncio.run(runner.build_facts(7301, FakeEmbedder(), object(), "model"))
+            res = asyncio.run(runner.build_facts(S(7301), FakeEmbedder(), object(), "model"))
             self.assertEqual(res["form"], form)
             self.assertEqual(self.conn._run("SELECT form_code FROM pe_procurements WHERE expertise_id=7301"), form)
             self.assertEqual(self.conn._run("SELECT count(*) FROM pe_facts WHERE expertise_id=7301"), "2")
-            asyncio.run(runner.build_facts(7301, FakeEmbedder(), object(), "model"))
+            asyncio.run(runner.build_facts(S(7301), FakeEmbedder(), object(), "model"))
             self.assertEqual(self.conn._run("SELECT count(*) FROM pe_facts WHERE expertise_id=7301"), "2")
-            self.assertIn("skipped", asyncio.run(runner.build_facts(7999, FakeEmbedder(), object(), "model")))
+            self.assertIn("skipped", asyncio.run(runner.build_facts(S(7999), FakeEmbedder(), object(), "model")))
         self.conn._run(f"DELETE FROM pe_form_fields WHERE form_code = '{form}'")
 
 

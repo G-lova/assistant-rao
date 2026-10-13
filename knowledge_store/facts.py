@@ -24,6 +24,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
 from configs.logger import get_logger
 from knowledge_store import eis_notice, eis_printform, form_keys, repository as repo
+from knowledge_store.scope import Scope
 
 logger = get_logger(__name__)
 
@@ -248,7 +249,7 @@ class FactExtractor:
         Args:
             llm_call: Асинхронная функция ``(messages, json_schema) -> str`` (ответ модели).
             embedder: Клиент эмбеддингов с методом ``get_embeddings(texts)``.
-            search: Функция поиска ``(conn, expertise_id, vector, k) -> list[Fragment]``;
+            search: Функция поиска ``(conn, scope, vector, k) -> list[Fragment]``;
                 по умолчанию — :func:`search_fragments` (pgvector).
             top_k: Сколько фрагментов показывать модели (по умолчанию ``PE_FACTS_TOP_K``, 8).
             concurrency: Максимум одновременных запросов к LLM.
@@ -256,7 +257,7 @@ class FactExtractor:
             recheck_k: Если модель ответила «0» или «3» без цитаты, критерий проверяется повторно по такому числу
                 фрагментов (по умолчанию ``PE_FACTS_RECHECK_K``, 16; ``0`` — без повторной проверки):
                 «не нашли» среди первых фрагментов ещё не значит «отсутствует».
-            notice_search: Поиск только по документам извещения (``(conn, expertise_id, vector, k)``); для
+            notice_search: Поиск только по документам извещения (``(conn, scope, vector, k)``); для
                 критериев раздела 1 («Наличие информации…» об извещении) его фрагменты ставятся первыми.
                 По умолчанию включён только вместе со стандартным поиском pgvector.
             notice_k: Сколько фрагментов извещения добавлять.
@@ -273,12 +274,12 @@ class FactExtractor:
         self.semaphore = asyncio.Semaphore(concurrency)
         self.system_prompt = system_prompt or PROMPT_PATH.read_text(encoding="utf-8")
 
-    async def extract_field(self, conn, expertise_id: int, field: dict) -> Optional[dict]:
+    async def extract_field(self, conn, scope: Scope, field: dict) -> Optional[dict]:
         """Определяет значение одного критерия.
 
         Args:
             conn: Соединение ``asyncpg``.
-            expertise_id: ID экспертизы.
+            scope: Экспертиза в окружении.
             field: Поле формы (``field_key``, ``label``, ``value_kind``).
 
         Returns:
@@ -290,9 +291,9 @@ class FactExtractor:
         if vectors is None or len(vectors) == 0:
             self.errors[field["field_key"]] = "эмбеддинг запроса не получен"
             return None
-        fragments = await self._db(self.search, conn, expertise_id, vectors[0], self.top_k)
+        fragments = await self._db(self.search, conn, scope, vectors[0], self.top_k)
         if self.notice_search and re.match(r"\s*1\.\d", field["label"] or ""):
-            notice = await self._db(self.notice_search, conn, expertise_id, vectors[0], self.notice_k)
+            notice = await self._db(self.notice_search, conn, scope, vectors[0], self.notice_k)
             ids = {f.chunk_id for f in notice}
             fragments = list(notice) + [f for f in fragments if f.chunk_id not in ids]
         if not fragments:
@@ -300,7 +301,7 @@ class FactExtractor:
             return None
         fact = await self._ask(field, fragments)
         if fact and fact["value"] in (0, 3) and not fact["verified"] and self.recheck_k > len(fragments):
-            wider = await self._db(self.search, conn, expertise_id, vectors[0], self.recheck_k)
+            wider = await self._db(self.search, conn, scope, vectors[0], self.recheck_k)
             if len(wider) > len(fragments):
                 again = await self._ask(field, wider)
                 fact = again or fact
@@ -327,37 +328,37 @@ class FactExtractor:
         return None
 
 
-async def search_notice_fragments(conn, expertise_id: int, vector, k: int) -> List[Fragment]:
+async def search_notice_fragments(conn, scope: Scope, vector, k: int) -> List[Fragment]:
     """Ищет ближайшие чанки только среди документов извещения (``docIzvejenieFiles``, ``linkDocs``).
 
     Args:
         conn: Соединение ``asyncpg``.
-        expertise_id: ID экспертизы.
+        scope: Экспертиза в окружении.
         vector: Вектор запроса.
         k: Сколько фрагментов вернуть.
 
     Returns:
         list[Fragment]: Фрагменты по возрастанию расстояния.
     """
-    rows = await conn.fetch(repo.SQL_SEARCH_NOTICE_CHUNKS, int(expertise_id), repo.vector_literal(vector), int(k),
+    rows = await conn.fetch(repo.SQL_SEARCH_NOTICE_CHUNKS, scope.env, scope.expertise_id, repo.vector_literal(vector), int(k),
                             ["docIzvejenieFiles", "linkDocs"])
     return [Fragment(r["chunk_id"], r["document_id"], r["page_from"], r["text"],
                      r["filename"] or r["doc_code"] or "") for r in rows]
 
 
-async def search_fragments(conn, expertise_id: int, vector, k: int) -> List[Fragment]:
+async def search_fragments(conn, scope: Scope, vector, k: int) -> List[Fragment]:
     """Ищет ближайшие чанки экспертизы по косинусному расстоянию (pgvector).
 
     Args:
         conn: Соединение ``asyncpg``.
-        expertise_id: ID экспертизы.
+        scope: Экспертиза в окружении.
         vector: Вектор запроса.
         k: Сколько фрагментов вернуть.
 
     Returns:
         list[Fragment]: Фрагменты по возрастанию расстояния.
     """
-    rows = await conn.fetch(repo.SQL_SEARCH_CHUNKS, int(expertise_id), repo.vector_literal(vector), int(k))
+    rows = await conn.fetch(repo.SQL_SEARCH_CHUNKS, scope.env, scope.expertise_id, repo.vector_literal(vector), int(k))
     return [Fragment(r["chunk_id"], r["document_id"], r["page_from"], r["text"],
                      r["filename"] or r["doc_code"] or "") for r in rows]
 
@@ -418,12 +419,12 @@ def build_printform_facts(documents: Sequence[dict], fields: Sequence[dict], sol
             for key, f in eis_notice.map_to_fields(data, fields).items() if key not in set(solved)]
 
 
-async def extract_facts(conn, expertise_id: int, form_code: str, extractor: Optional[FactExtractor]) -> Dict[str, int]:
+async def extract_facts(conn, scope: Scope, form_code: str, extractor: Optional[FactExtractor]) -> Dict[str, int]:
     """Строит и сохраняет факты экспертизы по полям формы.
 
     Args:
         conn: Соединение ``asyncpg``.
-        expertise_id: ID экспертизы.
+        scope: Экспертиза в окружении.
         form_code: Код формы из справочника (``44fz_competition_obj6``).
         extractor: :class:`FactExtractor`; ``None`` — только факты из XML.
 
@@ -432,11 +433,11 @@ async def extract_facts(conn, expertise_id: int, form_code: str, extractor: Opti
         или без текста), ``fields`` (полей проверялось).
     """
     fields = [dict(r) for r in await repo.get_form_fields(conn, form_code)]
-    eis_facts = build_eis_facts(await repo.get_eis_notices(conn, expertise_id), fields)
+    eis_facts = build_eis_facts(await repo.get_eis_notices(conn, scope), fields)
     xml_keys = [f["fact_key"] for f in eis_facts]
-    form_facts = build_printform_facts(await repo.get_print_form_documents(conn, expertise_id), fields, xml_keys)
+    form_facts = build_printform_facts(await repo.get_print_form_documents(conn, scope), fields, xml_keys)
     eis_facts = eis_facts + form_facts
-    await repo.replace_facts(conn, expertise_id, SOURCE_EIS, eis_facts)
+    await repo.replace_facts(conn, scope, SOURCE_EIS, eis_facts)
     stats = {"eis": len(eis_facts), "eis_xml": len(xml_keys), "eis_print_form": len(form_facts),
              "llm": 0, "rejected": 0, "fields": 0}
     if extractor is None:
@@ -445,7 +446,7 @@ async def extract_facts(conn, expertise_id: int, form_code: str, extractor: Opti
     todo = [f for f in fields if f["value_kind"] in LLM_KINDS and f["field_key"] not in solved
             and f["field_key"] not in form_keys.resolve(fields).assessed()]
     stats["fields"] = len(todo)
-    results = await asyncio.gather(*(extractor.extract_field(conn, expertise_id, f) for f in todo),
+    results = await asyncio.gather(*(extractor.extract_field(conn, scope, f) for f in todo),
                                    return_exceptions=True)
     llm_facts = []
     for field, res in zip(todo, results):
@@ -469,10 +470,10 @@ async def extract_facts(conn, expertise_id: int, form_code: str, extractor: Opti
         # Модель недоступна для всех полей (перезапуск, перегрузка): прежние факты модели не затираем
         # пустыми — заключение соберётся по ним или факты будут перестроены повторно (rebuild_facts).
         stats["llm_unavailable"] = True
-        logger.error(f"knowledge_store: факты экспертизы {expertise_id}: модель недоступна для всех "
+        logger.error(f"knowledge_store: факты экспертизы {scope}: модель недоступна для всех "
                      f"{len(todo)} полей, факты модели не обновлены")
         return stats
-    await repo.replace_facts(conn, expertise_id, SOURCE_LLM, llm_facts)
+    await repo.replace_facts(conn, scope, SOURCE_LLM, llm_facts)
     return stats
 
 
