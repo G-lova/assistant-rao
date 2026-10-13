@@ -147,6 +147,8 @@ class Config:
     # Кэш результата TypeDataExtractor в общем документе: тот же файл с тем же типом, объектом и именем повторно
     # модели не отправляется (нужен KNOWLEDGE_STORE_ENABLED). Параметр force в /evaluate-documents кэш обходит
     DOC_EXTRACTION_CACHE_ENABLED = os.getenv("DOC_EXTRACTION_CACHE_ENABLED", "false").lower() == "true"
+    # Сопоставление экспертизы с карточкой закупки риск-мониторинга после индексации (запросы к внешней БД)
+    PE_RM_LINK_ENABLED = os.getenv("PE_RM_LINK_ENABLED", "false").lower() == "true"
     # Срок ссылок риск-мониторинга на общий документ: закрытие закупки/контракта + RM_TEXT_AFTER_CLOSE_DAYS,
     # но не дольше RM_TEXT_MAX_RETENTION_DAYS от загрузки (решение 13.10.2026)
     RM_TEXT_AFTER_CLOSE_DAYS = int(os.getenv("RM_TEXT_AFTER_CLOSE_DAYS", "365"))

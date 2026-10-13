@@ -135,6 +135,35 @@ async def generate_summary_opinion(
     return {"task_id": task.id, "status": "processing", "message": "Задача запущена"}
 
 
+@app.get("/expertise/{expertise_id}/rm-findings")
+async def get_rm_findings(
+    expertise_id: int,
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
+):
+    """Находки риск-мониторинга по документам закупки экспертизы — подсказки эксперту.
+
+    Документы экспертизы и остальные документы той же закупки в риск-мониторинге (если экспертиза
+    сопоставлена с карточкой РМ): уровень риска, сводка и риски с цитатой и страницей. Значения
+    заключения находки не меняют. Требуется ``KNOWLEDGE_STORE_ENABLED``.
+    """
+    from knowledge_store import db, rm_link
+    from knowledge_store.safe import is_enabled
+    from knowledge_store.scope import Scope
+
+    if not is_enabled():
+        raise HTTPException(status_code=503, detail="Хранилище знаний выключено (KNOWLEDGE_STORE_ENABLED=false)")
+    try:
+        scope = Scope.of(x_api_database, expertise_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        async with db.connection() as conn:
+            return await rm_link.findings(conn, scope)
+    except Exception as e:
+        logger.error(f"Ошибка получения находок РМ для экспертизы {scope}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Не удалось получить находки риск-мониторинга")
+
+
 @app.get("/task/{task_id}")
 async def get_task_status(task_id: str):
     task = AsyncResult(task_id)

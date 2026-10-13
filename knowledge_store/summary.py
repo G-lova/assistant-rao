@@ -1284,6 +1284,26 @@ def validate(data: Dict[str, Any], fields: Sequence[dict]) -> List[str]:
     return problems
 
 
+async def rm_findings_safe(conn, scope: Scope) -> Dict[str, Any]:
+    """Находки риск-мониторинга по документам закупки для эксперта (подсказки, значения не меняют).
+
+    Ошибка (например, до миграции 007) не мешает сборке заключения.
+
+    Args:
+        conn: Соединение ``asyncpg``.
+        scope: Экспертиза в окружении.
+
+    Returns:
+        dict: Результат :func:`knowledge_store.rm_link.findings` или ``{"error": ...}``.
+    """
+    from knowledge_store import rm_link
+    try:
+        return await rm_link.findings(conn, scope)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"knowledge_store: находки РМ для {scope} не получены: {type(e).__name__}: {e}")
+        return {"error": type(e).__name__}
+
+
 async def precheck(conn, scope: Scope) -> Dict[str, Any]:
     """Проверяет, что сводное ЭЗ можно строить: есть документы, тексты не очищены, форма поддерживается.
 
@@ -1378,6 +1398,7 @@ async def generate_summary(conn, scope: Scope, llm_call: Optional[LlmCall],
     stats.update({"fields": len(fields), "unresolved": len(unresolved), "proposed": len(proposed),
                   "eis_xml": eis_stats.get("eis_xml", 0), "eis_print_form": eis_stats.get("eis_print_form", 0)})
     trace["_summary"] = {"unresolved": unresolved, "proposed": proposed, "suspected": suspected, "problems": problems}
+    trace["_rm_findings"] = await rm_findings_safe(conn, scope)
     async with conn.transaction():
         summary_id = await repo.insert_summary(conn, scope, code, data, trace, status)
         await repo.touch_expiry(conn, scope, Config.PE_TEXT_RETENTION_DAYS)

@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 from configs.config import Config
 from configs.logger import get_logger
-from knowledge_store import db, documents, eis_notice, repository as repo
+from knowledge_store import db, documents, eis_notice, repository as repo, rm_link
 from knowledge_store.pages import split_pages
 from knowledge_store.safe import is_enabled, safe_call_async
 from knowledge_store.scope import Scope
@@ -42,6 +42,8 @@ async def _on_run_start(df, env: str) -> None:
             await repo.save_procurement(conn, scope, _none_if_nan(row.get("law_reference")),
                                         _none_if_nan(row.get("procurement_method")), _none_if_nan(row.get("object")),
                                         _none_if_nan(row.get("checkType2")), passport)
+            # номер контракта из карточки экспертизы — для сопоставления с риск-мониторингом
+            await rm_link.save_identifiers(conn, scope, contract_number=_none_if_nan(row.get("contract")))
 
 
 async def on_run_start(df, env: str) -> None:
@@ -235,6 +237,23 @@ async def on_document_extracted(document_id: Optional[int], extracted: Any) -> N
     if document_id is None or not isinstance(extracted, dict) or not is_enabled():
         return
     await safe_call_async(_on_document_extracted, document_id, extracted)
+
+
+async def _on_identifiers(scope: Scope, eis_number: Any) -> None:
+    """Реализация :func:`on_identifiers` (без защиты)."""
+    async with _db() as conn:
+        await rm_link.save_identifiers(conn, scope, eis_number=eis_number)
+
+
+async def on_identifiers(scope: Optional[Scope], eis_number: Any = None) -> None:
+    """Запоминает реестровый номер закупки из ссылки ЕИС (для сопоставления с риск-мониторингом).
+
+    Args:
+        scope: Экспертиза в окружении (``None`` — ничего не делать).
+        eis_number: Номер, который вернул разбор ссылки ЕИС.
+    """
+    if scope is not None and eis_number:
+        await safe_call_async(_on_identifiers, scope, eis_number)
 
 
 def _enqueue_indexing(scope: Scope) -> None:

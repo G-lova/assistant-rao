@@ -118,6 +118,8 @@ class TasksPipeline:
             if link.doc_code == 'linkDocs':  
                 eis_procurement_number = parse_result.get("procurement_number")
                 eis_error = parse_result.get("error")
+                # Хранилище знаний: номер закупки — для сопоставления с риск-мониторингом (при выключенном флаге — no-op)
+                await ks_hooks.on_identifiers(self.ks_scope, eis_procurement_number)
 
                 eis_data = {
                     "document_name": "Ссылка на ЕИС",
