@@ -42,8 +42,12 @@ async def _on_run_start(df, env: str) -> None:
             await repo.save_procurement(conn, scope, _none_if_nan(row.get("law_reference")),
                                         _none_if_nan(row.get("procurement_method")), _none_if_nan(row.get("object")),
                                         _none_if_nan(row.get("checkType2")), passport)
-            # номер контракта из карточки экспертизы — для сопоставления с риск-мониторингом
+        try:
+            # номер контракта из карточки экспертизы — для сопоставления с риск-мониторингом; отдельно от
+            # транзакции паспорта, чтобы сбой (например, до миграции 007) не отменял запись паспорта
             await rm_link.save_identifiers(conn, scope, contract_number=_none_if_nan(row.get("contract")))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"knowledge_store: номер контракта {scope} не сохранён: {type(e).__name__}: {e}")
 
 
 async def on_run_start(df, env: str) -> None:

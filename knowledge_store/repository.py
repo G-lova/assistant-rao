@@ -67,7 +67,7 @@ LINK_ALIVE_RM = "(l.legal_hold OR l.expires_at IS NULL OR l.expires_at >= NOW())
 SQL_PURGE_EXPIRED = f"""
 WITH expired_links AS (
     UPDATE pe_documents SET text_full = NULL, text_purged_at = NOW()
-    WHERE expires_at < NOW() AND NOT legal_hold AND text_purged_at IS NULL
+    WHERE expires_at < NOW() AND NOT legal_hold AND text_purged_at IS NULL AND text_full IS NOT NULL
     RETURNING id
 ), legacy_chunks AS (
     DELETE FROM pe_chunks WHERE document_id IN (SELECT id FROM expired_links)
