@@ -18,20 +18,19 @@ def run_async(coro):
 
 
 @celery_app.task(bind=True, name="evaluate_documents_task")
-def evaluate_documents_task(self, expertise_id: int, environment: str):
-    """
-    Запускает полный конвейер оценки экспертов для заданной экспертизы.
+def evaluate_documents_task(self, expertise_id: int, environment: str, force: bool = False):
+    """Оценка комплекта документов экспертизы (``/evaluate-documents``).
 
-    Последовательно выполняет все этапы: загрузку данных, предобработку, расчёт сходства,
-    фильтрацию по конфликтам и вычисление рейтинга.
+    Скачивает и читает документы, определяет их тип, извлекает данные, оценивает полноту и согласованность
+    и сохраняет итог в ``raw_document_data``.
 
     Args:
-        sql_file_path (str): Имя файла с SQL-запросом для получения данных об экспертах.
-        expertise_id (str или int): Уникальный идентификатор экспертизы.
+        expertise_id: ID экспертизы.
+        environment: Окружение (``X-API-Database``).
+        force: Не использовать сохранённые текст и результат извлечения общего документа (перечитать файлы).
 
     Returns:
-        pandas.DataFrame: Датафрейм с отфильтрованными и ранжированными экспертами,
-        содержащий колонки 'expert_id' и 'rating'.
+        dict: Итоговый отчёт ``ConsistencyChecker`` (формат ответа ``/task/{id}`` не меняется).
     """
     from celery_app import already_succeeded
 
@@ -46,7 +45,7 @@ def evaluate_documents_task(self, expertise_id: int, environment: str):
 
         # один пул Postgres на задачу для хранилища знаний (создаётся лениво, только если оно включено)
         async with HTTPClientManager(timeout=90.0) as mgr, task_pool():
-            tasks_piplene = TasksPipeline(mgr, expertise_id, environment)
+            tasks_piplene = TasksPipeline(mgr, expertise_id, environment, force=force)
             task_result = await tasks_piplene.run_pipeline()
             return task_result
         

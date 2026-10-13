@@ -82,6 +82,8 @@ class EvaluateRequest(BaseModel):
         BaseModel (_type_): Базовый класс Pydantic для валидации и сериализации данных.
     """
     expertise_id: int
+    # Перечитать файлы и заново извлечь данные, не используя сохранённые текст и результат общего документа
+    force: bool = False
     
 
 class ExpertsScoringRequest(BaseModel):

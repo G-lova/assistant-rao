@@ -85,7 +85,8 @@ async def evaluate_documents_batch(
             raise HTTPException(status_code=400, detail="Поле 'expertise_id' обязательно")
         
         logger.info(f"Принят запрос на анализ документов для экспертизы: {expertise_id}, DB: {x_api_database}")
-        task = evaluate_documents_task.delay(expertise_id, x_api_database)
+        # force передаётся только когда задан: сообщение без него понимают и воркеры прежней версии
+        task = evaluate_documents_task.delay(expertise_id, x_api_database, **({"force": True} if request.force else {}))
 
         return {
             "task_id": task.id,

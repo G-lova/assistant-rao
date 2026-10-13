@@ -19,11 +19,14 @@ from evaluate_documents.send_subject_service import SendSubjectService
 from evaluate_documents.type_data_extractor import DOCUMENT_TYPE_MAPPING, TypeDataExtractor
 from src.subject_detector import SubjectDetector
 from knowledge_store import hooks as ks_hooks
+from knowledge_store.documents import extraction_version
 from knowledge_store.scope import Scope
 from evaluate_documents.package_view import completeness_input
 
 
 logger = get_logger(__name__)
+
+LLM_CHUNK_SIZE = 10000  # размер блока текста для TypeDataExtractor (входит в ключ кэша извлечения)
 
 
 class TasksPipeline:
@@ -217,7 +220,7 @@ class TasksPipeline:
             self.ks_scope, link.doc_code, filename, getattr(link, 'media_links', None), file_path, extracted_text,
             force=self.force)
 
-        chunks = split_large_text(extracted_text, max_chunk_size=10000)
+        chunks = split_large_text(extracted_text, max_chunk_size=LLM_CHUNK_SIZE)
         if not chunks:
             fallback = {
                 "type_compliance": {"status": "deny", "detected_type": "unknown", "issues": ["Пустой документ"]},
@@ -228,9 +231,17 @@ class TasksPipeline:
             return fallback
             
         # ====== Определение типа документа, оценка читаемости и извлечение ключевых данных ======        
-        extracted_data = await self.type_data_extractor.extract_data_from_document(chunks, filename, link.doc_code, link.object)
-        if isinstance(extracted_data, str):
-            extracted_data = json.loads(extracted_data)
+        # Кэш общего документа: тот же файл с тем же типом, объектом и именем модели повторно не отправляется
+        version = extraction_version(link.doc_code, link.object, filename, LLM_CHUNK_SIZE, extracted_text)
+        model = getattr(self.type_data_extractor, "model", None)
+        extracted_data = await ks_hooks.cached_extraction(ks_doc_id, version, model, force=self.force)
+        if extracted_data is not None:
+            logger.info(f"Извлечённые данные {filename} взяты из кэша общего документа")
+        else:
+            extracted_data = await self.type_data_extractor.extract_data_from_document(chunks, filename, link.doc_code, link.object)
+            if isinstance(extracted_data, str):
+                extracted_data = json.loads(extracted_data)
+            await ks_hooks.save_extraction(ks_doc_id, version, model, extracted_data)
 
         await ks_hooks.on_document_extracted(ks_doc_id, extracted_data)
 

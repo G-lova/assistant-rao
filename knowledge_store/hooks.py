@@ -160,6 +160,63 @@ async def on_document_text(scope: Scope, doc_code: Optional[str], filename: str,
                                  default=None)
 
 
+def extraction_cache_enabled() -> bool:
+    """Включён ли кэш результата ``TypeDataExtractor`` (``DOC_EXTRACTION_CACHE_ENABLED``, нужен и
+    ``KNOWLEDGE_STORE_ENABLED``). Читается при каждом вызове.
+
+    Returns:
+        bool: ``True``, если кэш можно читать и писать.
+    """
+    return is_enabled() and os.getenv("DOC_EXTRACTION_CACHE_ENABLED",
+                                      str(Config.DOC_EXTRACTION_CACHE_ENABLED)).lower() == "true"
+
+
+async def _cached_extraction(link_id: int, version: str, model: str) -> Optional[dict]:
+    """Реализация :func:`cached_extraction` (без защиты)."""
+    async with _db() as conn:
+        ai_id = await documents.ai_document_of_link(conn, link_id)
+        return await documents.get_extraction(conn, ai_id, version, model) if ai_id else None
+
+
+async def cached_extraction(link_id: Optional[int], version: str, model: str, force: bool = False) -> Optional[dict]:
+    """Готовый результат ``TypeDataExtractor`` для документа ссылки или ``None`` (тогда вызывается модель).
+
+    Args:
+        link_id: ``pe_documents.id`` из :func:`on_document_text` (``None`` — хранилище выключено).
+        version: :func:`knowledge_store.documents.extraction_version`.
+        model: Модель LLM.
+        force: Не использовать кэш.
+
+    Returns:
+        Optional[dict]: Результат извлечения.
+    """
+    if link_id is None or force or not extraction_cache_enabled():
+        return None
+    return await safe_call_async(_cached_extraction, link_id, version, model, default=None)
+
+
+async def _save_extraction(link_id: int, version: str, model: str, extracted: dict) -> None:
+    """Реализация :func:`save_extraction` (без защиты)."""
+    async with _db() as conn:
+        ai_id = await documents.ai_document_of_link(conn, link_id)
+        if ai_id:
+            await documents.save_extraction(conn, ai_id, version, model, extracted)
+
+
+async def save_extraction(link_id: Optional[int], version: str, model: str, extracted: Any) -> None:
+    """Сохраняет успешный результат ``TypeDataExtractor`` в кэш общего документа (запасные ответы не кэшируются).
+
+    Args:
+        link_id: ``pe_documents.id``.
+        version: :func:`knowledge_store.documents.extraction_version`.
+        model: Модель LLM.
+        extracted: Результат извлечения.
+    """
+    if link_id is None or not extraction_cache_enabled() or not documents.cacheable_extraction(extracted):
+        return
+    await safe_call_async(_save_extraction, link_id, version, model, extracted)
+
+
 async def _on_document_extracted(document_id: int, extracted: dict) -> None:
     """Реализация :func:`on_document_extracted` (без защиты)."""
     type_compliance = extracted.get("type_compliance")
