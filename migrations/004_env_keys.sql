@@ -14,6 +14,7 @@ ALTER TABLE pe_documents ADD COLUMN IF NOT EXISTS env TEXT;
 UPDATE pe_documents SET env = '{{PE_LEGACY_ENV}}' WHERE env IS NULL;
 ALTER TABLE pe_documents ALTER COLUMN env SET NOT NULL;
 ALTER TABLE pe_documents DROP CONSTRAINT IF EXISTS pe_documents_expertise_id_sha256_key;
+ALTER TABLE pe_documents DROP CONSTRAINT IF EXISTS pe_documents_env_expertise_sha_key;
 ALTER TABLE pe_documents ADD CONSTRAINT pe_documents_env_expertise_sha_key UNIQUE (env, expertise_id, sha256);
 DROP INDEX IF EXISTS ix_pe_documents_expertise;
 CREATE INDEX IF NOT EXISTS ix_pe_documents_env_expertise ON pe_documents (env, expertise_id);
