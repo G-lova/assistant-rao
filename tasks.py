@@ -33,6 +33,11 @@ def evaluate_documents_task(self, expertise_id: int, environment: str):
         pandas.DataFrame: Датафрейм с отфильтрованными и ранжированными экспертами,
         содержащий колонки 'expert_id' и 'rating'.
     """
+    from celery_app import already_succeeded
+
+    if already_succeeded(self):
+        return self.AsyncResult(self.request.id).result
+
     # ✅ Инициализируем менеджер внутри асинхронного контекста задачи
 
     # @async_retry(CLOUD_PARSING_RETRY_CONFIG)

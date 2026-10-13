@@ -97,6 +97,33 @@ celery_app.conf.task_time_limit = 1800
 celery_app.conf.task_soft_time_limit = 1500
 celery_app.conf.broker_connection_retry_on_startup = True
 
+# Redis-брокер с task_acks_late=True: сообщение подтверждается только после завершения задачи. Если задача
+# идёт дольше visibility_timeout (по умолчанию 1 ч), Redis считает её потерянной и снова кладёт в очередь —
+# после завершения она запускается повторно (evaluate_documents_task 13.10.2026: 3844 с > 3600 с).
+# Тайм-аут должен быть больше самой долгой задачи; одинаковый для API и всех воркеров.
+VISIBILITY_TIMEOUT = int(os.getenv("CELERY_VISIBILITY_TIMEOUT", str(6 * 3600)))
+celery_app.conf.broker_transport_options = {"visibility_timeout": VISIBILITY_TIMEOUT}
+celery_app.conf.result_backend_transport_options = {"visibility_timeout": VISIBILITY_TIMEOUT}
+
+
+def already_succeeded(task) -> bool:
+    """Задача с этим id уже успешно выполнена (повторная доставка того же сообщения брокером).
+
+    Args:
+        task: Привязанная задача (``bind=True``), ``self`` внутри задачи.
+
+    Returns:
+        bool: ``True`` — повтор, выполнять не нужно.
+    """
+    try:
+        if task.request.id and task.AsyncResult(task.request.id).state == "SUCCESS":
+            logger.warning(f"Задача {task.name}[{task.request.id}] уже выполнена — повторная доставка пропущена "
+                           f"(redelivered={bool((task.request.delivery_info or {}).get('redelivered'))})")
+            return True
+    except Exception as e:  # noqa: BLE001 — нет связи с backend: выполняем как обычно
+        logger.warning(f"Не удалось проверить статус задачи {task.request.id}: {e}")
+    return False
+
 
 if __name__ == '__main__':
     celery_app.start()

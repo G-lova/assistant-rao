@@ -47,6 +47,10 @@ def rm_analyze_files_task(self, file_ids: List[int], environment: str, force: bo
     Returns:
         Dict[str, Any]: ``summary`` (счётчики) и ``results`` по файлам.
     """
+    from celery_app import already_succeeded
+
+    if already_succeeded(self):
+        return self.AsyncResult(self.request.id).result
     from configs.ai_repo import AIRepo
     from configs.http_client_manager import HTTPClientManager
     from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
@@ -88,6 +92,10 @@ def rm_analyze_xml_task(self, xml_ids: List[int], environment: str, force: bool 
     Returns:
         Dict[str, Any]: ``summary`` (счётчики) и ``results`` по XML.
     """
+    from celery_app import already_succeeded
+
+    if already_succeeded(self):
+        return self.AsyncResult(self.request.id).result
     from configs.http_client_manager import HTTPClientManager
     from risk_monitoring.xml_event_analyzer import XmlEventAnalyzer
 
