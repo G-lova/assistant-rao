@@ -2135,6 +2135,8 @@ class CloudStorageParser:
         url: str,
         procurement_id: str,
     ):
+        if "storage" in url:
+            url = url.replace("storage", "api/media")
         api_url = "/".join((url.split("/"))[:-1])
         filename = self._extract_filename_from_url(url)
 
