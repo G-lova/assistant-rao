@@ -4,6 +4,7 @@
 (Postgres без pgvector допустим: тип ``vector`` в тестовой схеме подменяется на ``real[]``).
 """
 import asyncio
+import hashlib
 import os
 import re
 import tempfile
@@ -14,7 +15,7 @@ from unittest import mock
 
 import pandas as pd
 
-from knowledge_store import hooks, indexer, repository as repo
+from knowledge_store import documents, hooks, indexer, repository as repo
 from knowledge_store.pages import chunk_pages, split_pages
 from knowledge_store.scope import Scope
 from tests import pg_schema
@@ -72,18 +73,41 @@ class RepositoryIntegrationTests(unittest.TestCase):
         return self.conn._run(sql)
 
     def test_document_roundtrip_and_clear(self):
-        """Документ пишется, повторная запись того же файла обновляет строку, clear удаляет."""
+        """Ссылка пишется, повторная запись того же файла обновляет строку, clear удаляет ссылку, но не документ."""
         run = asyncio.run
         run(repo.clear_expertise(self.conn, S(901)))
-        doc = run(repo.upsert_document(self.conn, S(901), "docIzvejenieFiles", "О'Нил.docx", "http://x", "abc", "текст", 1, 365))
-        doc2 = run(repo.upsert_document(self.conn, S(901), "docIzvejenieFiles", "О'Нил.docx", "http://x", "abc", "текст 2", 2, 365))
+        sha = hashlib.sha256(b"901").hexdigest()
+        ai = run(documents.save_text(self.conn, sha, None, "О'Нил.docx", "текст", documents.READER_FILE, 1))
+        doc = run(repo.upsert_document(self.conn, S(901), "docIzvejenieFiles", "О'Нил.docx", "http://x", sha, ai, 1, 365))
+        doc2 = run(repo.upsert_document(self.conn, S(901), "docIzvejenieFiles", "О'Нил.docx", "http://x", sha, ai, 2, 365))
         self.assertEqual(doc, doc2)
         run(repo.set_document_extraction(self.conn, doc, "docIzvejenieFiles", {"status": "allow"}, {"raw_data": {"k": "значение"}}))
-        self.assertEqual(self.q("SELECT text_full||'|'||pages_count||'|'||detected_type FROM pe_documents WHERE id=%d" % doc), "текст 2|2|docIzvejenieFiles")
+        brief = run(repo.get_documents_brief(self.conn, S(901)))
+        self.assertEqual((brief[0]["text_full"], brief[0]["has_text"]), ("текст", True))
+        self.assertEqual(self.q("SELECT pages_count||'|'||detected_type||'|'||(text_full IS NULL)::text FROM pe_documents WHERE id=%d" % doc),
+                         "2|docIzvejenieFiles|true")
         self.assertEqual(self.q("SELECT extraction->'raw_data'->>'k' FROM pe_documents WHERE id=%d" % doc), "значение")
         self.assertEqual(self.q("SELECT (expires_at > NOW() + interval '364 days')::text FROM pe_documents WHERE id=%d" % doc), "true")
         run(repo.clear_expertise(self.conn, S(901)))
         self.assertEqual(self.q("SELECT count(*) FROM pe_documents WHERE expertise_id=901"), "0")
+        self.assertEqual(self.q("SELECT text FROM ai_documents WHERE id=%d" % ai), "текст")
+
+    def test_save_text_keeps_first_good_text(self):
+        """Годный текст общего документа не заменяется другим чтением; force заменяет текст того же способа."""
+        run = asyncio.run
+        sha = hashlib.sha256(b"keep").hexdigest()
+        rm = run(documents.save_text(self.conn, sha, None, "a.pdf", "текст РМ", documents.READER_RM_PDF, 1))
+        again = run(documents.save_text(self.conn, sha, None, "a.pdf", "текст экспертизы", documents.READER_FILE, 1))
+        self.assertEqual(rm, again)
+        self.assertEqual(run(documents.find_text(self.conn, sha))["text"], "текст РМ")
+        run(documents.save_text(self.conn, sha, None, "a.pdf", "текст экспертизы", documents.READER_FILE, 1, overwrite=True))
+        self.assertEqual(run(documents.find_text(self.conn, sha))["text"], "текст РМ")     # другой способ чтения — нет
+        run(documents.save_text(self.conn, sha, None, "a.pdf", "новый текст РМ", documents.READER_RM_PDF, 1, overwrite=True))
+        self.assertEqual(run(documents.find_text(self.conn, sha))["text"], "новый текст РМ")
+        self.q("UPDATE ai_documents SET ocr_status = 'suspect' WHERE content_sha256 = '%s'" % sha)
+        self.assertIsNone(run(documents.find_text(self.conn, sha)))                            # сомнительный OCR не берём
+        run(documents.save_text(self.conn, sha, None, "a.pdf", "перечитан", documents.READER_FILE, 1))
+        self.assertEqual(run(documents.find_text(self.conn, sha))["text"], "перечитан")
 
     def test_hooks_flow_and_flag(self):
         """Хуки пишут паспорт и документ при включённом флаге и ничего не делают при выключенном."""
@@ -110,8 +134,16 @@ class RepositoryIntegrationTests(unittest.TestCase):
                     asyncio.run(hooks.on_document_extracted(doc_id, {"type_compliance": {"detected_type": "docIzvejenieFiles"}, "readability": {"status": "allow"}, "raw_data": {}}))
                     self.assertEqual(self.q("SELECT law||'|'||method||'|'||object_code||'|'||check_type2 FROM pe_procurements WHERE expertise_id=902"), "44-ФЗ|Конкурс|6|1")
                     self.assertEqual(self.q("SELECT pages_count||'|'||detected_type FROM pe_documents WHERE id=%d" % doc_id), "2|docIzvejenieFiles")
-                    asyncio.run(hooks.on_run_start(df, "dev"))  # повторный прогон очищает документы
+                    self.assertIsNone(asyncio.run(hooks.find_cached_text(f.name)))       # DOC_DEDUP_ENABLED выключен
+                    with mock.patch.dict(os.environ, {"DOC_DEDUP_ENABLED": "true"}):
+                        cached = asyncio.run(hooks.find_cached_text(f.name))
+                        self.assertEqual(cached["text"], "Страница 1 (OCR): раз\nСтраница 2 (OCR): два")
+                        self.assertEqual(cached["sha256"], documents.file_sha256(f.name))
+                        self.assertIsNone(asyncio.run(hooks.find_cached_text(f.name, force=True)))
+                    asyncio.run(hooks.on_run_start(df, "dev"))  # повторный прогон очищает ссылки, документ остаётся
                     self.assertEqual(self.q("SELECT count(*) FROM pe_documents WHERE expertise_id=902"), "0")
+                    self.assertEqual(self.q("SELECT count(*) FROM ai_documents WHERE content_sha256 = '%s'"
+                                            % documents.file_sha256(f.name)), "1")
         finally:
             os.unlink(f.name)
 
@@ -160,43 +192,75 @@ class IndexingIntegrationTests(unittest.TestCase):
         """Выполняет SQL и возвращает stdout."""
         return self.conn._run(sql)
 
-    def _doc(self, eid, sha, text):
-        """Создаёт документ с заданным текстом."""
-        return asyncio.run(repo.upsert_document(self.conn, S(eid), "docIzvejenieFiles", "f.docx", None, sha, text, 2, 365))
+    def _doc(self, eid, name, text):
+        """Создаёт общий документ с текстом и ссылку экспертизы на него; возвращает (pe id, ai id)."""
+        sha = hashlib.sha256(f"{eid}:{name}".encode()).hexdigest()
+        ai = asyncio.run(documents.save_text(self.conn, sha, None, "f.docx", text, documents.READER_FILE, 2))
+        return asyncio.run(repo.upsert_document(self.conn, S(eid), "docIzvejenieFiles", "f.docx", None, sha, ai, 2, 365)), ai
 
     def test_index_and_idempotent(self):
-        """Чанки записываются с диапазоном страниц; повторный запуск ничего не делает."""
+        """Чанки pages_v2 записываются с диапазоном страниц; повторный запуск и другая экспертиза не переиндексируют."""
         asyncio.run(repo.clear_expertise(self.conn, S(910)))
-        doc = self._doc(910, "s1", "Страница 1 (OCR): " + "а" * 1800 + "\nСтраница 2 (OCR): " + "б" * 1800)
+        text = "Страница 1 (OCR): " + "Первое предложение. " * 90 + "\nСтраница 2 (OCR): " + "Второе предложение. " * 90
+        _, ai = self._doc(910, "s1", text)
         st = asyncio.run(indexer.index_expertise(S(910), FakeEmbedder()))
         self.assertEqual(st["failed"], 0)
-        self.assertGreaterEqual(st["chunks"], 3)
-        self.assertEqual(self.q("SELECT count(*) FROM pe_chunks WHERE document_id=%d" % doc), str(st["chunks"]))
-        self.assertEqual(self.q("SELECT min(page_from)||'-'||max(page_to) FROM pe_chunks WHERE document_id=%d" % doc), "1-2")
-        self.assertEqual(self.q("SELECT array_length(embedding,1) FROM pe_chunks WHERE document_id=%d LIMIT 1" % doc), "1024")
+        self.assertGreaterEqual(st["chunks"], 2)
+        where = "document_id=%d AND chunker='pages_v2'" % ai
+        self.assertEqual(self.q("SELECT count(*) FROM ai_document_chunks WHERE " + where), str(st["chunks"]))
+        self.assertEqual(self.q("SELECT min(page_from)||'-'||max(page_to) FROM ai_document_chunks WHERE " + where), "1-2")
+        self.assertEqual(self.q("SELECT array_length(embedding,1) FROM ai_document_chunks WHERE %s LIMIT 1" % where), "1024")
         self.assertEqual(asyncio.run(indexer.index_expertise(S(910), FakeEmbedder()))["documents"], 0)
+        # тот же файл в другой экспертизе и другом окружении: документ общий, индексация не нужна
+        asyncio.run(repo.upsert_document(self.conn, Scope("prod", 910), "docIzvejenieFiles", "f.docx", None,
+                                         hashlib.sha256(b"910:s1").hexdigest(), ai, 2, 365))
+        self.assertEqual(asyncio.run(indexer.index_expertise(Scope("prod", 910), FakeEmbedder()))["documents"], 0)
+
+    def test_search_finds_only_own_chunks(self):
+        """Поиск фактов видит только чанки своей экспертизы и нарезки pages_v2, ближайшие — первыми."""
+        from knowledge_store import facts
+        asyncio.run(repo.clear_expertise(self.conn, S(913)))
+        _, mine = self._doc(913, "m", "Страница 1:\nСрок поставки 30 дней")
+        _, other = self._doc(914, "o", "Страница 1:\nЧужая экспертиза")
+        dim = repo.EMBEDDING_DIM
+        near, far = [1.0] + [0.0] * (dim - 1), [0.0, 1.0] + [0.0] * (dim - 2)
+        chunk = type("C", (), dict(idx=0, page_from=1, page_to=1, text="Срок поставки 30 дней", heading="5. Сроки"))()
+        model = indexer.embedding_model_name()
+        asyncio.run(repo.replace_chunks(self.conn, mine, "pages_v2", model, [chunk], [far]))
+        asyncio.run(repo.replace_chunks(self.conn, other, "pages_v2", model, [chunk], [near]))
+        asyncio.run(repo.replace_chunks(self.conn, mine, "rm_tokens_800", model, [chunk], [near]))
+        found = asyncio.run(facts.search_fragments(self.conn, S(913), near, 5))
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].text, "Срок поставки 30 дней")
+        self.assertIn("5. Сроки", found[0].source)
+        self.assertEqual(found[0].document_id, int(self.q("SELECT id FROM pe_documents WHERE env='dev' AND expertise_id=913")))
 
     def test_partial_embeddings_not_saved(self):
         """Если эмбеддингов вернулось меньше, чем чанков, документ не сохраняется (failed=1)."""
         asyncio.run(repo.clear_expertise(self.conn, S(911)))
-        doc = self._doc(911, "s2", "Страница 1 (OCR): " + "в" * 3000)
+        _, ai = self._doc(911, "s2", "Страница 1 (OCR): " + "Строка текста.\n" * 400)
         st = asyncio.run(indexer.index_expertise(S(911), FakeEmbedder(drop=1)))
         self.assertEqual((st["documents"], st["failed"]), (0, 1))
-        self.assertEqual(self.q("SELECT count(*) FROM pe_chunks WHERE document_id=%d" % doc), "0")
+        self.assertEqual(self.q("SELECT count(*) FROM ai_document_chunks WHERE document_id=%d" % ai), "0")
 
-    def test_purge_respects_expiry_and_legal_hold(self):
-        """Очистка убирает текст и чанки просроченных документов, но не трогает legal_hold и свежие."""
+    def test_purge_by_live_links(self):
+        """Текст общего документа очищается, когда живых ссылок нет; legal_hold, свежие и ссылки РМ его держат."""
         asyncio.run(repo.clear_expertise(self.conn, S(912)))
-        old, held, fresh = self._doc(912, "o", "старый"), self._doc(912, "h", "удержан"), self._doc(912, "f", "свежий")
-        asyncio.run(repo.replace_chunks(self.conn, old, S(912), [type("C", (), dict(idx=0, page_from=1, page_to=1, text="t"))()], [[0.1] * 1024]))
-        self.q("UPDATE pe_documents SET expires_at = NOW() - interval '1 day' WHERE id IN (%d, %d)" % (old, held))
+        (old, a_old), (held, a_held), (fresh, a_fresh) = (self._doc(912, "o", "старый"), self._doc(912, "h", "удержан"),
+                                                          self._doc(912, "f", "свежий"))
+        (rm_pe, a_rm) = self._doc(912, "r", "у РМ")
+        chunk = type("C", (), dict(idx=0, page_from=1, page_to=1, text="t", heading=None))()
+        asyncio.run(repo.replace_chunks(self.conn, a_old, "pages_v2", "m", [chunk], [[0.1] * 1024]))
+        self.q("UPDATE pe_documents SET expires_at = NOW() - interval '1 day' WHERE id IN (%d, %d, %d)" % (old, held, rm_pe))
         self.q("UPDATE pe_documents SET legal_hold = TRUE WHERE id = %d" % held)
+        self.q("UPDATE ai_documents SET updated_at = NOW() - interval '2 days'")
+        self.q("INSERT INTO ai_file_links (env, external_file_id, document_id) VALUES ('dev', 912001, %d)" % a_rm)
         self.assertGreaterEqual(asyncio.run(indexer.purge_expired_texts()), 1)
-        self.assertEqual(self.q("SELECT (text_full IS NULL)::text||'|'||(text_purged_at IS NOT NULL)::text FROM pe_documents WHERE id=%d" % old), "true|true")
-        self.assertEqual(self.q("SELECT count(*) FROM pe_chunks WHERE document_id=%d" % old), "0")
-        self.assertEqual(self.q("SELECT text_full FROM pe_documents WHERE id=%d" % held), "удержан")
-        self.assertEqual(self.q("SELECT text_full FROM pe_documents WHERE id=%d" % fresh), "свежий")
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.assertEqual(self.q("SELECT (text IS NULL)::text||'|'||(text_purged_at IS NOT NULL)::text FROM ai_documents WHERE id=%d" % a_old), "true|true")
+        self.assertEqual(self.q("SELECT count(*) FROM ai_document_chunks WHERE document_id=%d" % a_old), "0")
+        self.assertEqual(self.q("SELECT text FROM ai_documents WHERE id=%d" % a_held), "удержан")
+        self.assertEqual(self.q("SELECT text FROM ai_documents WHERE id=%d" % a_fresh), "свежий")
+        self.assertEqual(self.q("SELECT text FROM ai_documents WHERE id=%d" % a_rm), "у РМ")
+        brief = {d["id"]: d for d in asyncio.run(repo.get_documents_brief(self.conn, S(912)))}
+        self.assertFalse(brief[old]["has_text"])
+        self.assertIsNotNone(brief[old]["text_purged_at"])

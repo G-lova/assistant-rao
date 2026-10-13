@@ -4,7 +4,6 @@
 ``execute``/``fetchval``) и не знают о флаге ``KNOWLEDGE_STORE_ENABLED`` — флаг проверяется
 выше, в :mod:`knowledge_store.hooks`.
 """
-import hashlib
 import json
 from typing import Any, List, Optional, Sequence
 
@@ -19,11 +18,11 @@ ON CONFLICT (env, expertise_id) DO UPDATE SET
 """
 
 SQL_UPSERT_DOCUMENT = """
-INSERT INTO pe_documents (env, expertise_id, doc_code, filename, url, sha256, text_full, pages_count, expires_at)
+INSERT INTO pe_documents (env, expertise_id, doc_code, filename, url, sha256, ai_document_id, pages_count, expires_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW() + make_interval(days => $9))
 ON CONFLICT (env, expertise_id, sha256) DO UPDATE SET
     doc_code = EXCLUDED.doc_code, filename = EXCLUDED.filename, url = EXCLUDED.url,
-    text_full = EXCLUDED.text_full, pages_count = EXCLUDED.pages_count,
+    ai_document_id = EXCLUDED.ai_document_id, text_full = NULL, pages_count = EXCLUDED.pages_count,
     expires_at = EXCLUDED.expires_at, text_purged_at = NULL
 RETURNING id
 """
@@ -35,36 +34,61 @@ SET detected_type = $2, readability = $3::jsonb,
 WHERE id = $1
 """
 
-EMBEDDING_DIM = 1024  # должно совпадать с vector(1024) в миграции 001
+EMBEDDING_DIM = 1024  # должно совпадать с vector(1024) в миграциях 001/003
 
+# Текст документа экспертизы: общий документ (ai_documents), а для строк до миграции 005 — pe_documents.text_full
+TEXT_EXPR = "COALESCE(a.text, d.text_full)"
+DOC_JOIN = "pe_documents d LEFT JOIN ai_documents a ON a.id = d.ai_document_id"
+
+# Общие документы экспертизы, у которых ещё нет чанков нужной нарезки и модели эмбеддингов
 SQL_DOCS_FOR_INDEXING = """
-SELECT d.id, d.text_full FROM pe_documents d
-WHERE d.env = $1 AND d.expertise_id = $2 AND d.text_full IS NOT NULL
-  AND NOT EXISTS (SELECT 1 FROM pe_chunks c WHERE c.document_id = d.id)
-ORDER BY d.id
+SELECT DISTINCT a.id, a.text AS text_full FROM pe_documents d JOIN ai_documents a ON a.id = d.ai_document_id
+WHERE d.env = $1 AND d.expertise_id = $2 AND a.text IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM ai_document_chunks c
+                  WHERE c.document_id = a.id AND c.chunker = $3 AND c.embedding_model = $4)
+ORDER BY a.id
 """
 
-SQL_DELETE_CHUNKS = "DELETE FROM pe_chunks WHERE document_id = $1"
+SQL_DELETE_CHUNKS = "DELETE FROM ai_document_chunks WHERE document_id = $1 AND chunker = $2 AND embedding_model = $3"
 
 SQL_INSERT_CHUNK = """
-INSERT INTO pe_chunks (document_id, env, expertise_id, idx, page_from, page_to, text, embedding)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector)
+INSERT INTO ai_document_chunks (document_id, chunker, embedding_model, chunk_no, page_from, page_to, heading, text, embedding)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector)
 """
 
-SQL_PURGE_EXPIRED = """
-WITH expired AS (
+# Политика хранения по ссылкам: текст и чанки общего документа удаляются, когда у него не осталось живых ссылок —
+# ни ссылок экспертиз (pe_documents: срок не истёк или legal_hold), ни ссылок риск-мониторинга (ai_file_links, см.
+# LINK_ALIVE_RM). Документы, изменённые меньше суток назад, не трогаются: ссылка на только что записанный текст
+# создаётся следующим запросом. Факты, цитаты, извлечённые данные и кэш анализов остаются.
+# Для строк до миграции 005 очищается и pe_documents.text_full.
+LINK_ALIVE_PE = "(d.legal_hold OR d.expires_at IS NULL OR d.expires_at >= NOW())"
+LINK_ALIVE_RM = "TRUE"   # срок ссылок РМ появляется в миграции 006
+
+SQL_PURGE_EXPIRED = f"""
+WITH expired_links AS (
     UPDATE pe_documents SET text_full = NULL, text_purged_at = NOW()
     WHERE expires_at < NOW() AND NOT legal_hold AND text_purged_at IS NULL
     RETURNING id
+), legacy_chunks AS (
+    DELETE FROM pe_chunks WHERE document_id IN (SELECT id FROM expired_links)
+), dead AS (
+    SELECT a.id FROM ai_documents a
+    WHERE a.text IS NOT NULL AND a.updated_at < NOW() - interval '1 day'
+      AND NOT EXISTS (SELECT 1 FROM pe_documents d WHERE d.ai_document_id = a.id AND {{LINK_ALIVE_PE}})
+      AND NOT EXISTS (SELECT 1 FROM ai_file_links l WHERE l.document_id = a.id AND {{LINK_ALIVE_RM}})
+), purged AS (
+    UPDATE ai_documents SET text = NULL, text_purged_at = NOW(), updated_at = NOW()
+    WHERE id IN (SELECT id FROM dead)
+    RETURNING id
 ), removed AS (
-    DELETE FROM pe_chunks WHERE document_id IN (SELECT id FROM expired)
+    DELETE FROM ai_document_chunks WHERE document_id IN (SELECT id FROM purged)
 )
-SELECT count(*) FROM expired
+SELECT (SELECT count(*) FROM purged) + (SELECT count(*) FROM expired_links)
 """
 
 SQL_CLEAR = [
     "DELETE FROM pe_facts WHERE env = $1 AND expertise_id = $2",
-    "DELETE FROM pe_documents WHERE env = $1 AND expertise_id = $2",  # pe_chunks удаляются каскадно
+    "DELETE FROM pe_documents WHERE env = $1 AND expertise_id = $2",  # только ссылки: общий документ, чанки и кэш остаются
 ]
 
 
@@ -89,11 +113,8 @@ def file_sha256(path: str) -> str:
     Returns:
         str: Шестнадцатеричная контрольная сумма.
     """
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for block in iter(lambda: f.read(1 << 20), b""):
-            h.update(block)
-    return h.hexdigest()
+    from knowledge_store.documents import file_sha256 as _sha
+    return _sha(path)
 
 
 async def save_procurement(conn, scope: Scope, law: Optional[str], method: Optional[str],
@@ -115,8 +136,11 @@ async def save_procurement(conn, scope: Scope, law: Optional[str], method: Optio
 
 
 async def upsert_document(conn, scope: Scope, doc_code: Optional[str], filename: Optional[str], url: Optional[str],
-                          sha256: str, text_full: str, pages_count: int, retention_days: int) -> int:
-    """Сохраняет документ с полным текстом; повторная загрузка того же файла обновляет запись.
+                          sha256: str, ai_document_id: int, pages_count: int, retention_days: int) -> int:
+    """Сохраняет ссылку экспертизы на общий документ; повторная загрузка того же файла обновляет запись.
+
+    Текст хранится в ``ai_documents`` (:mod:`knowledge_store.documents`), здесь — только ссылка, тип,
+    извлечённые данные и срок хранения ссылки.
 
     Args:
         conn: Соединение ``asyncpg``.
@@ -125,15 +149,15 @@ async def upsert_document(conn, scope: Scope, doc_code: Optional[str], filename:
         filename: Имя файла.
         url: Исходная ссылка.
         sha256: Контрольная сумма файла.
-        text_full: Извлечённый текст.
+        ai_document_id: ``ai_documents.id`` общего документа.
         pages_count: Число страниц.
-        retention_days: Срок хранения текста (дней) — для ``expires_at``.
+        retention_days: Срок хранения ссылки (дней) — для ``expires_at``.
 
     Returns:
         int: ``pe_documents.id``.
     """
     return await conn.fetchval(SQL_UPSERT_DOCUMENT, scope.env, scope.expertise_id, doc_code, filename, url, sha256,
-                               text_full, int(pages_count), int(retention_days))
+                               int(ai_document_id), int(pages_count), int(retention_days))
 
 
 async def set_document_extraction(conn, document_id: int, detected_type: Optional[str],
@@ -180,26 +204,34 @@ def vector_literal(vec: Sequence[float]) -> str:
     return "[" + ",".join(repr(float(x)) for x in vec) + "]"
 
 
-async def documents_for_indexing(conn, scope: Scope) -> List[Any]:
-    """Возвращает документы экспертизы, у которых есть текст, но ещё нет чанков.
+async def documents_for_indexing(conn, scope: Scope, chunker: str, embedding_model: str) -> List[Any]:
+    """Возвращает общие документы экспертизы, у которых есть текст, но ещё нет чанков этой нарезки и модели.
+
+    Документ, уже проиндексированный для другой экспертизы, повторно не индексируется.
 
     Args:
         conn: Соединение ``asyncpg``.
         scope: Экспертиза в окружении.
+        chunker: Схема нарезки (``pages_v2``).
+        embedding_model: Модель эмбеддингов.
 
     Returns:
-        list: Записи с полями ``id`` и ``text_full``.
+        list: Записи с полями ``id`` (``ai_documents.id``) и ``text_full``.
     """
-    return await conn.fetch(SQL_DOCS_FOR_INDEXING, scope.env, scope.expertise_id)
+    return await conn.fetch(SQL_DOCS_FOR_INDEXING, scope.env, scope.expertise_id, chunker, embedding_model)
 
 
-async def replace_chunks(conn, document_id: int, scope: Scope, chunks: Sequence[Any], vectors: Sequence[Sequence[float]]) -> int:
-    """Заменяет чанки документа новыми (вместе с эмбеддингами).
+async def replace_chunks(conn, document_id: int, chunker: str, embedding_model: str, chunks: Sequence[Any],
+                         vectors: Sequence[Sequence[float]]) -> int:
+    """Заменяет чанки общего документа для схемы нарезки и модели эмбеддингов.
+
+    Чанки других нарезок (например, риск-мониторинга) не затрагиваются.
 
     Args:
         conn: Соединение ``asyncpg``.
-        document_id: ``pe_documents.id``.
-        scope: Экспертиза в окружении.
+        document_id: ``ai_documents.id``.
+        chunker: Схема нарезки.
+        embedding_model: Модель эмбеддингов.
         chunks: Объекты :class:`knowledge_store.pages.Chunk`.
         vectors: Эмбеддинги, по одному на чанк (в том же порядке).
 
@@ -211,25 +243,35 @@ async def replace_chunks(conn, document_id: int, scope: Scope, chunks: Sequence[
     """
     if len(chunks) != len(vectors):
         raise ValueError(f"Чанков {len(chunks)}, эмбеддингов {len(vectors)}")
-    rows = [(int(document_id), scope.env, scope.expertise_id, c.idx, c.page_from, c.page_to, c.text, vector_literal(v))
-            for c, v in zip(chunks, vectors)]
-    await conn.execute(SQL_DELETE_CHUNKS, int(document_id))
+    rows = [(int(document_id), chunker, embedding_model, c.idx, c.page_from, c.page_to, getattr(c, "heading", None),
+             c.text, vector_literal(v)) for c, v in zip(chunks, vectors)]
+    await conn.execute(SQL_DELETE_CHUNKS, int(document_id), chunker, embedding_model)
     await conn.executemany(SQL_INSERT_CHUNK, rows)
     return len(rows)
 
 
-async def purge_expired(conn) -> int:
-    """Очищает тексты и чанки документов с истёкшим сроком хранения (политика 05.10.2026).
+def purge_sql() -> str:
+    """SQL очистки с текущими условиями «живой» ссылки (подставляются при вызове, чтобы их можно было уточнять).
 
-    Документы с ``legal_hold`` не затрагиваются. Факты, цитаты и извлечённые данные остаются.
+    Returns:
+        str: Текст запроса.
+    """
+    return SQL_PURGE_EXPIRED.replace("{LINK_ALIVE_PE}", LINK_ALIVE_PE).replace("{LINK_ALIVE_RM}", LINK_ALIVE_RM)
+
+
+async def purge_expired(conn) -> int:
+    """Очищает тексты и чанки документов, на которые не осталось живых ссылок (политика хранения).
+
+    Ссылка экспертизы живёт ``PE_TEXT_RETENTION_DAYS`` после последнего прогона или сводного ЭЗ либо пока
+    стоит ``legal_hold``. Факты, цитаты, извлечённые данные и кэш анализов не удаляются.
 
     Args:
         conn: Соединение ``asyncpg``.
 
     Returns:
-        int: Число очищенных документов.
+        int: Число очищенных документов (общих и, для строк до миграции 005, ссылок с текстом).
     """
-    return int(await conn.fetchval(SQL_PURGE_EXPIRED) or 0)
+    return int(await conn.fetchval(purge_sql()) or 0)
 
 
 SQL_DELETE_FORM_FIELDS = "DELETE FROM pe_form_fields WHERE form_code = $1"
@@ -306,12 +348,12 @@ FROM pe_documents
 WHERE env = $1 AND expertise_id = $2 AND extraction ? 'eis_notice'
 """
 
-SQL_PRINT_FORM_DOCUMENTS = """
-SELECT id, filename, text_full
-FROM pe_documents
-WHERE env = $1 AND expertise_id = $2 AND text_full IS NOT NULL
-  AND left(text_full, 600) LIKE '%Печатная форма%' AND left(text_full, 600) LIKE '%Извещение о проведении%'
-ORDER BY id
+SQL_PRINT_FORM_DOCUMENTS = f"""
+SELECT d.id, d.filename, {TEXT_EXPR} AS text_full
+FROM {DOC_JOIN}
+WHERE d.env = $1 AND d.expertise_id = $2 AND {TEXT_EXPR} IS NOT NULL
+  AND left({TEXT_EXPR}, 600) LIKE '%Печатная форма%' AND left({TEXT_EXPR}, 600) LIKE '%Извещение о проведении%'
+ORDER BY d.id
 """
 
 SQL_DELETE_FACTS_BY_SOURCE = "DELETE FROM pe_facts WHERE env = $1 AND expertise_id = $2 AND source = $3"
@@ -400,19 +442,29 @@ async def get_facts(conn, scope: Scope) -> list:
     """
     return list(await conn.fetch(SQL_GET_FACTS, scope.env, scope.expertise_id))
 
+# Поиск по чанкам экспертизы: точный (без индекса) перебор её чанков. Общая таблица ai_document_chunks содержит
+# чанки всех документов, и HNSW с фильтром по экспертизе отбрасывал бы соседей после поиска — фрагменты терялись бы.
+# MATERIALIZED не даёт планировщику применить индекс к отфильтрованному набору. document_id — pe_documents.id.
 SQL_SEARCH_CHUNKS = """
-SELECT c.id AS chunk_id, c.document_id, c.page_from, c.text, d.filename, d.doc_code
-FROM pe_chunks c JOIN pe_documents d ON d.id = c.document_id
-WHERE c.env = $1 AND c.expertise_id = $2 AND c.embedding IS NOT NULL
-ORDER BY c.embedding <=> $3::vector
+WITH cand AS MATERIALIZED (
+    SELECT c.id AS chunk_id, d.id AS document_id, c.page_from, c.heading, c.text, d.filename, d.doc_code, c.embedding
+    FROM pe_documents d JOIN ai_document_chunks c ON c.document_id = d.ai_document_id
+    WHERE d.env = $1 AND d.expertise_id = $2 AND c.chunker = $5 AND c.embedding_model = $6 AND c.embedding IS NOT NULL
+)
+SELECT chunk_id, document_id, page_from, heading, text, filename, doc_code FROM cand
+ORDER BY embedding <=> $3::vector, chunk_id
 LIMIT $4
 """
 
 SQL_SEARCH_NOTICE_CHUNKS = """
-SELECT c.id AS chunk_id, c.document_id, c.page_from, c.text, d.filename, d.doc_code
-FROM pe_chunks c JOIN pe_documents d ON d.id = c.document_id
-WHERE c.env = $1 AND c.expertise_id = $2 AND c.embedding IS NOT NULL AND d.doc_code = ANY($5::text[])
-ORDER BY c.embedding <=> $3::vector
+WITH cand AS MATERIALIZED (
+    SELECT c.id AS chunk_id, d.id AS document_id, c.page_from, c.heading, c.text, d.filename, d.doc_code, c.embedding
+    FROM pe_documents d JOIN ai_document_chunks c ON c.document_id = d.ai_document_id
+    WHERE d.env = $1 AND d.expertise_id = $2 AND c.chunker = $5 AND c.embedding_model = $6 AND c.embedding IS NOT NULL
+      AND d.doc_code = ANY($7::text[])
+)
+SELECT chunk_id, document_id, page_from, heading, text, filename, doc_code FROM cand
+ORDER BY embedding <=> $3::vector, chunk_id
 LIMIT $4
 """
 
@@ -421,8 +473,8 @@ SQL_SET_FORM_CODE = "UPDATE pe_procurements SET form_code = $3, updated_at = NOW
 SQL_PROCUREMENT = ("SELECT law, method, object_code, check_type2, form_code, nmck, advance, funding, passport "
                     "FROM pe_procurements WHERE env = $1 AND expertise_id = $2")
 
-SQL_EXPERTISES_WITH_TEXTS = """
-SELECT DISTINCT env, expertise_id FROM pe_documents WHERE text_full IS NOT NULL ORDER BY env, expertise_id
+SQL_EXPERTISES_WITH_TEXTS = f"""
+SELECT DISTINCT d.env, d.expertise_id FROM {DOC_JOIN} WHERE {TEXT_EXPR} IS NOT NULL ORDER BY d.env, d.expertise_id
 """
 
 
@@ -465,9 +517,10 @@ async def list_expertises_with_texts(conn, env: Optional[str] = None) -> List[Sc
     return [s for s in rows if env is None or s.env == env]
 
 
-SQL_DOCUMENTS_BRIEF = """
-SELECT id, doc_code, filename, text_full, text_purged_at, extraction, (text_full IS NOT NULL) AS has_text
-FROM pe_documents WHERE env = $1 AND expertise_id = $2 ORDER BY id
+SQL_DOCUMENTS_BRIEF = f"""
+SELECT d.id, d.doc_code, d.filename, {TEXT_EXPR} AS text_full, COALESCE(a.text_purged_at, d.text_purged_at) AS text_purged_at,
+       d.extraction, ({TEXT_EXPR} IS NOT NULL) AS has_text
+FROM {DOC_JOIN} WHERE d.env = $1 AND d.expertise_id = $2 ORDER BY d.id
 """
 SQL_INSERT_SUMMARY = """
 INSERT INTO pe_summary_opinions (env, expertise_id, form_code, data, trace, status)

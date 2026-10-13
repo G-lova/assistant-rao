@@ -3,11 +3,12 @@
 Каждая функция сама проверяет флаг ``KNOWLEDGE_STORE_ENABLED`` и никогда не бросает исключений,
 поэтому в пайплайне достаточно ``await``-вызова без try/except.
 """
+import os
 from typing import Any, Optional
 
 from configs.config import Config
 from configs.logger import get_logger
-from knowledge_store import db, eis_notice, repository as repo
+from knowledge_store import db, documents, eis_notice, repository as repo
 from knowledge_store.pages import split_pages
 from knowledge_store.safe import is_enabled, safe_call_async
 from knowledge_store.scope import Scope
@@ -55,14 +56,56 @@ async def on_run_start(df, env: str) -> None:
     await safe_call_async(_on_run_start, df, env)
 
 
+def dedup_enabled() -> bool:
+    """Включено ли повторное использование текста общего документа (``DOC_DEDUP_ENABLED``).
+
+    Читается при каждом вызове, чтобы флаг можно было менять без пересборки; нужен и
+    ``KNOWLEDGE_STORE_ENABLED``.
+
+    Returns:
+        bool: ``True``, если готовый текст можно брать из ``ai_documents``.
+    """
+    return is_enabled() and os.getenv("DOC_DEDUP_ENABLED", str(Config.DOC_DEDUP_ENABLED)).lower() == "true"
+
+
+async def _find_cached_text(file_path: str) -> Optional[dict]:
+    """Реализация :func:`find_cached_text` (без защиты)."""
+    sha = documents.file_sha256(file_path)
+    async with _db() as conn:
+        found = await documents.find_text(conn, sha)
+    if found:
+        found["sha256"] = sha
+    return found
+
+
+async def find_cached_text(file_path: str, force: bool = False) -> Optional[dict]:
+    """Готовый текст файла по SHA-256 содержимого — до чтения и OCR.
+
+    Ничего не делает (``None``), если выключено хранилище знаний или ``DOC_DEDUP_ENABLED``, а также при
+    ``force`` (принудительное перечитывание). Любая ошибка — тоже ``None``: файл будет прочитан как обычно.
+
+    Args:
+        file_path: Локальный путь к скачанному файлу.
+        force: Не использовать сохранённый текст.
+
+    Returns:
+        Optional[dict]: ``{"id", "text", "reader", "sha256"}`` или ``None``.
+    """
+    if force or not dedup_enabled():
+        return None
+    return await safe_call_async(_find_cached_text, file_path, default=None)
+
+
 async def _on_document_text(scope: Scope, doc_code: Optional[str], filename: str, url: Optional[str],
-                            file_path: str, text: str) -> int:
+                            file_path: str, text: str, force: bool = False) -> int:
     """Реализация :func:`on_document_text` (без защиты)."""
     pages = split_pages(text)
-    sha = repo.file_sha256(file_path)
+    sha = documents.file_sha256(file_path)
     eis_patch = _eis_notice_patch(file_path, filename)
     async with _db() as conn:
-        doc_id = await repo.upsert_document(conn, scope, doc_code, filename, url, sha, text,
+        ai_id = await documents.save_text(conn, sha, file_path, filename, text, documents.READER_FILE,
+                                          len(pages), overwrite=force)
+        doc_id = await repo.upsert_document(conn, scope, doc_code, filename, url, sha, ai_id,
                                             len(pages), Config.PE_TEXT_RETENTION_DAYS)
         if eis_patch:
             await repo.merge_document_extraction(conn, doc_id, {"eis_notice": eis_patch})
@@ -93,8 +136,11 @@ def _eis_notice_patch(file_path: str, filename: str) -> Optional[dict]:
 
 
 async def on_document_text(scope: Scope, doc_code: Optional[str], filename: str, url: Optional[str],
-                           file_path: str, text: str) -> Optional[int]:
-    """Сохраняет извлечённый текст документа (со сроком хранения по политике).
+                           file_path: str, text: str, force: bool = False) -> Optional[int]:
+    """Сохраняет текст в общий документ (по SHA-256 файла) и ссылку экспертизы на него.
+
+    Если у документа уже есть годный текст (его прочитал риск-мониторинг или прошлый прогон), он не
+    заменяется; при ``force`` текст, прочитанный тем же способом, перезаписывается.
 
     Args:
         scope: Экспертиза в окружении.
@@ -102,14 +148,16 @@ async def on_document_text(scope: Scope, doc_code: Optional[str], filename: str,
         filename: Имя файла.
         url: Исходная ссылка.
         file_path: Локальный путь к файлу (для контрольной суммы).
-        text: Текст из ``FileReader.read_file``.
+        text: Текст из ``FileReader.read_file`` (или повторно использованный текст общего документа).
+        force: Принудительное перечитывание.
 
     Returns:
         Optional[int]: ``pe_documents.id`` или ``None`` (флаг выключен / ошибка).
     """
     if scope is None:
         return None
-    return await safe_call_async(_on_document_text, scope, doc_code, filename, url, file_path, text, default=None)
+    return await safe_call_async(_on_document_text, scope, doc_code, filename, url, file_path, text, force,
+                                 default=None)
 
 
 async def _on_document_extracted(document_id: int, extracted: dict) -> None:

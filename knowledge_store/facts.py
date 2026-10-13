@@ -5,7 +5,7 @@
 1. Поля раздела 1, которые решаются по структуре XML извещения, берутся из ``pe_documents.extraction``
    (результат :mod:`knowledge_store.eis_notice`, источник ``eis_xml``).
 2. Для остальных полей типов ``presence``/``compliance`` :class:`FactExtractor` находит в
-   ``pe_chunks`` релевантные фрагменты (pgvector), спрашивает LLM (``guided_json``) и **проверяет
+   ``ai_document_chunks`` (нарезка ``pages_v2``) релевантные фрагменты (pgvector), спрашивает LLM (``guided_json``) и **проверяет
    цитату**: она должна присутствовать в одном из показанных фрагментов. Ответ «1» без подтверждённой
    цитаты сохраняется как неподтверждённый и попадает в заключение как предложение модели (источник
    ``fact_extractor``); ответ «3» («определить нельзя») оставляет критерий эксперту.
@@ -55,7 +55,7 @@ class Fragment:
     """Фрагмент документа, показанный модели.
 
     Attributes:
-        chunk_id: ``pe_chunks.id``.
+        chunk_id: ``ai_document_chunks.id``.
         document_id: ``pe_documents.id``.
         page: Первая страница чанка (``None``, если страниц нет).
         text: Текст чанка.
@@ -340,10 +340,12 @@ async def search_notice_fragments(conn, scope: Scope, vector, k: int) -> List[Fr
     Returns:
         list[Fragment]: Фрагменты по возрастанию расстояния.
     """
+    from knowledge_store.indexer import embedding_model_name
+    from knowledge_store.pages import CHUNKER_PAGES_V2
+
     rows = await conn.fetch(repo.SQL_SEARCH_NOTICE_CHUNKS, scope.env, scope.expertise_id, repo.vector_literal(vector), int(k),
-                            ["docIzvejenieFiles", "linkDocs"])
-    return [Fragment(r["chunk_id"], r["document_id"], r["page_from"], r["text"],
-                     r["filename"] or r["doc_code"] or "") for r in rows]
+                            CHUNKER_PAGES_V2, embedding_model_name(), ["docIzvejenieFiles", "linkDocs"])
+    return [_fragment(r) for r in rows]
 
 
 async def search_fragments(conn, scope: Scope, vector, k: int) -> List[Fragment]:
@@ -358,9 +360,21 @@ async def search_fragments(conn, scope: Scope, vector, k: int) -> List[Fragment]
     Returns:
         list[Fragment]: Фрагменты по возрастанию расстояния.
     """
-    rows = await conn.fetch(repo.SQL_SEARCH_CHUNKS, scope.env, scope.expertise_id, repo.vector_literal(vector), int(k))
-    return [Fragment(r["chunk_id"], r["document_id"], r["page_from"], r["text"],
-                     r["filename"] or r["doc_code"] or "") for r in rows]
+    from knowledge_store.indexer import embedding_model_name
+    from knowledge_store.pages import CHUNKER_PAGES_V2
+
+    rows = await conn.fetch(repo.SQL_SEARCH_CHUNKS, scope.env, scope.expertise_id, repo.vector_literal(vector), int(k),
+                            CHUNKER_PAGES_V2, embedding_model_name())
+    return [_fragment(r) for r in rows]
+
+
+def _fragment(row: Any) -> Fragment:
+    """Фрагмент из строки поиска: подпись — имя файла (или тип документа) и заголовок раздела чанка."""
+    source = row["filename"] or row["doc_code"] or ""
+    heading = (row.get("heading") if hasattr(row, "get") else None) or ""
+    if heading:
+        source = f"{source} — {heading[:120]}" if source else heading[:120]
+    return Fragment(row["chunk_id"], row["document_id"], row["page_from"], row["text"], source)
 
 
 def build_eis_facts(notices: Sequence[dict], fields: Sequence[dict]) -> List[dict]:

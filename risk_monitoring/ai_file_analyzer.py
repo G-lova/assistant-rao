@@ -658,7 +658,10 @@ class AIFileAnalyzer:
                 text_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
                 # «suspect» — текст с циклами OCR: в режиме отладки (force) файл будет прочитан заново
                 status = "done" if text_quality.assess(text)["status"] == "ok" else "suspect"
-                document_id = await self.repo.upsert_document(sha, text_sha, ext, size, text, ocr_status=status)
+                # способ чтения — общий документ с экспертизами (knowledge_store.documents.READER_*)
+                reader = "rm_pdf_text" if ext == ".pdf" else "file_reader"
+                document_id = await self.repo.upsert_document(sha, text_sha, ext, size, text, ocr_status=status,
+                                                              reader=reader)
             await self.repo.link_file(self.env, file_id, document_id)
             return document_id, text, sha, size
         finally:

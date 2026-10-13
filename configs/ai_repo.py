@@ -6,6 +6,12 @@ import asyncpg
 from configs.config import Config
 from configs.logger import get_logger
 
+# Схема нарезки чанков риск-мониторинга (split_large_text, 800 токенов). Чанки экспертизы того же документа
+# лежат в той же таблице с chunker = 'pages_v2'. Условие пишется литералом: только так планировщик выбирает
+# частичный HNSW-индекс idx_ai_chunks_emb_rm (миграция 005).
+RM_CHUNKER = "rm_tokens_800"
+RM_CHUNKER_SQL = f"chunker = '{RM_CHUNKER}'"
+
 logger = get_logger(__name__)
 
 
@@ -131,8 +137,12 @@ class AIRepo:
         text: Optional[str],
         ocr_status: str = "done",
         ocr_error: Optional[str] = None,
+        reader: Optional[str] = None,
     ) -> int:
         """Создаёт или обновляет документ по хэшу содержимого.
+
+        Документ общий с экспертизами (``pe_documents.ai_document_id``): текст, записанный здесь, используется
+        и ``/evaluate-documents`` (при ``DOC_DEDUP_ENABLED``).
 
         Args:
             content_sha256: SHA-256 байтов файла.
@@ -142,6 +152,7 @@ class AIRepo:
             text: Извлечённый текст (``None``, если извлечь не удалось).
             ocr_status: ``done`` / ``failed``.
             ocr_error: Причина неудачи.
+            reader: Способ чтения (``rm_pdf_text`` / ``file_reader``).
 
         Returns:
             int: ``ai_documents.id``.
@@ -150,25 +161,27 @@ class AIRepo:
         return await self.pool.fetchval(
             """
             INSERT INTO ai_documents
-                (content_sha256, text_sha256, file_ext, size_bytes, text, ocr_status, ocr_error)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+                (content_sha256, text_sha256, file_ext, size_bytes, text, ocr_status, ocr_error, reader)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (content_sha256) DO UPDATE SET
                 text_sha256 = EXCLUDED.text_sha256,
                 text        = EXCLUDED.text,
                 ocr_status  = EXCLUDED.ocr_status,
                 ocr_error   = EXCLUDED.ocr_error,
+                reader      = EXCLUDED.reader,
+                text_purged_at = CASE WHEN EXCLUDED.text IS NOT NULL THEN NULL ELSE ai_documents.text_purged_at END,
                 updated_at  = NOW()
             RETURNING id
             """,
-            content_sha256, text_sha256, file_ext, size_bytes, text, ocr_status, ocr_error,
+            content_sha256, text_sha256, file_ext, size_bytes, text, ocr_status, ocr_error, reader,
         )
 
     # ---------- чанки и эмбеддинги ----------
 
     async def has_chunks(self, document_id: int, embedding_model: str) -> bool:
-        """Есть ли у документа чанки с эмбеддингами указанной модели."""
+        """Есть ли у документа чанки РМ (нарезка ``rm_tokens_800``) с эмбеддингами указанной модели."""
         return bool(await self.pool.fetchval(
-            "SELECT 1 FROM ai_document_chunks WHERE document_id=$1 AND embedding_model=$2 LIMIT 1",
+            f"SELECT 1 FROM ai_document_chunks WHERE document_id=$1 AND embedding_model=$2 AND {RM_CHUNKER_SQL} LIMIT 1",
             document_id, embedding_model,
         ))
 
@@ -179,7 +192,9 @@ class AIRepo:
         embeddings: Sequence[Sequence[float]],
         embedding_model: str,
     ) -> None:
-        """Заменяет чанки документа для модели эмбеддингов (в одной транзакции).
+        """Заменяет чанки РМ (нарезка ``rm_tokens_800``) документа для модели эмбеддингов (в одной транзакции).
+
+        Чанки экспертизы (``pages_v2``) того же документа не затрагиваются.
 
         Args:
             document_id: ``ai_documents.id``.
@@ -194,14 +209,14 @@ class AIRepo:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute(
-                    "DELETE FROM ai_document_chunks WHERE document_id=$1 AND embedding_model=$2",
+                    f"DELETE FROM ai_document_chunks WHERE document_id=$1 AND embedding_model=$2 AND {RM_CHUNKER_SQL}",
                     document_id, embedding_model,
                 )
                 await conn.executemany(
-                    """
+                    f"""
                     INSERT INTO ai_document_chunks
-                        (document_id, chunk_no, text, embedding, embedding_model)
-                    VALUES ($1, $2, $3, $4::vector, $5)
+                        (document_id, chunk_no, text, embedding, embedding_model, chunker)
+                    VALUES ($1, $2, $3, $4::vector, $5, '{RM_CHUNKER}')
                     """,
                     rows,
                 )
@@ -215,7 +230,7 @@ class AIRepo:
             SELECT document_id, chunk_no, text,
                    1 - (embedding <=> $1::vector) AS similarity
             FROM ai_document_chunks
-            WHERE embedding_model = $2
+            WHERE embedding_model = $2 AND chunker = 'rm_tokens_800'
             ORDER BY embedding <=> $1::vector
             LIMIT $3
             """,
@@ -240,7 +255,7 @@ class AIRepo:
             """
             WITH src AS (
                 SELECT chunk_no, embedding FROM ai_document_chunks
-                WHERE document_id = $1 AND embedding_model = $2
+                WHERE document_id = $1 AND embedding_model = $2 AND chunker = 'rm_tokens_800'
             ),
             nn AS (
                 SELECT s.chunk_no AS src_chunk, n.document_id,
@@ -249,7 +264,7 @@ class AIRepo:
                 CROSS JOIN LATERAL (
                     SELECT c.document_id, c.embedding
                     FROM ai_document_chunks c
-                    WHERE c.embedding_model = $2 AND c.document_id <> $1
+                    WHERE c.embedding_model = $2 AND c.document_id <> $1 AND c.chunker = 'rm_tokens_800'
                     ORDER BY c.embedding <=> s.embedding
                     LIMIT $6
                 ) n

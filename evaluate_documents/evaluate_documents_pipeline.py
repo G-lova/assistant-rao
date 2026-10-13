@@ -31,13 +31,14 @@ class TasksPipeline:
     Класс для обработки документов экспертизы, включая чтение файлов, определение типа документа, оценку полноты и согласованности, а также отправку данных во внешний API.
     """
 
-    def __init__(self, http_manager: HTTPClientManager, expertise_id: int, environment: str = None):
+    def __init__(self, http_manager: HTTPClientManager, expertise_id: int, environment: str = None, force: bool = False):
         """
         Инициализация TasksPipeline с указанием среды и ID экспертизы
         Args:
             http_manager (HTTPClientManager): Менеджер HTTP-клиентов
             expertise_id (int): ID экспертизы
             environment (str): Окружение ('dev', 'stage', 'prod')
+            force (bool): Не брать сохранённые текст и результат извлечения из общего документа (перечитать файлы)
         """
 
         # Загрузка конфигурации
@@ -45,6 +46,7 @@ class TasksPipeline:
         self.config = Config()
         self.http_manager = http_manager
         self.x_api_database = environment
+        self.force = bool(force)
         try:
             # ключ экспертизы в хранилище знаний: окружение + id (один Postgres на все окружения)
             self.ks_scope = Scope.of(environment, expertise_id)
@@ -188,16 +190,32 @@ class TasksPipeline:
 
 
     async def process_parse_result(self, file_path, filename, link):
+        """Читает один файл, определяет тип документа и извлекает ключевые данные.
+
+        Если включено повторное использование общего документа (``DOC_DEDUP_ENABLED``), текст файла с тем же
+        SHA-256 берётся из хранилища без повторного чтения и OCR.
+
+        Args:
+            file_path: Локальный путь к скачанному файлу.
+            filename: Имя файла.
+            link: Строка ссылки (``doc_code``, ``object``, ``media_links``).
+
+        Returns:
+            dict: Результат ``TypeDataExtractor`` (``type_compliance``, ``readability``, ``raw_data``).
         """
-        
-        """
-        extracted_text = await self.file_reader.read_file(file_path, filename)
+        cached = await ks_hooks.find_cached_text(file_path, force=self.force)
+        if cached:
+            logger.info(f"Текст {filename} взят из хранилища (документ {cached['id']}, {cached.get('reader')}), OCR не нужен")
+            extracted_text = cached["text"]
+        else:
+            extracted_text = await self.file_reader.read_file(file_path, filename)
         if not extracted_text or "[Нет читаемого текста]" in extracted_text:
             raise ValueError("Не удалось извлечь текст")
 
         # Хранилище знаний «РАО Эксперт»: сохраняем текст документа (при выключенном флаге — no-op)
         ks_doc_id = await ks_hooks.on_document_text(
-            self.ks_scope, link.doc_code, filename, getattr(link, 'media_links', None), file_path, extracted_text)
+            self.ks_scope, link.doc_code, filename, getattr(link, 'media_links', None), file_path, extracted_text,
+            force=self.force)
 
         chunks = split_large_text(extracted_text, max_chunk_size=10000)
         if not chunks:

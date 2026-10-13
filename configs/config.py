@@ -141,6 +141,9 @@ class Config:
     PE_FACTS_ENABLED = os.getenv("PE_FACTS_ENABLED", "false").lower() == "true"
     # Максимум времени на построение фактов (запросы к LLM), секунд; при превышении этап прерывается
     PE_FACTS_TIMEOUT_SEC = int(os.getenv("PE_FACTS_TIMEOUT_SEC", "900"))
+    # Общий документ по хэшу файла: /evaluate-documents берёт готовый текст из ai_documents вместо повторного
+    # чтения/OCR (нужен KNOWLEDGE_STORE_ENABLED). Читается при каждом вызове — см. knowledge_store.hooks.dedup_enabled
+    DOC_DEDUP_ENABLED = os.getenv("DOC_DEDUP_ENABLED", "false").lower() == "true"
 
     # Paths
     SQL_QUERIES_PATH = os.getenv("SQL_QUERIES_PATH", "queries/")

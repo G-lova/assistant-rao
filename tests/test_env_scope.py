@@ -6,7 +6,7 @@ import types
 import unittest
 from unittest import mock
 
-from knowledge_store import db, repository as repo
+from knowledge_store import db, documents, repository as repo
 from knowledge_store.scope import Scope, normalize_env
 from scripts.apply_migrations import render_sql
 from tests import pg_schema
@@ -126,8 +126,10 @@ class EnvIsolationDbTests(unittest.TestCase):
         run(repo.save_procurement(c, prod, "223-ФЗ", "Аукцион", 6, 4))
         self.assertEqual(run(repo.get_procurement(c, dev))["law"], "44-ФЗ")
         self.assertEqual(run(repo.get_procurement(c, prod))["law"], "223-ФЗ")
-        run(repo.upsert_document(c, dev, "docIzvejenieFiles", "a.docx", None, "same-sha", "dev text", 1, 365))
-        run(repo.upsert_document(c, prod, "docIzvejenieFiles", "a.docx", None, "same-sha", "prod text", 1, 365))
+        sha = "ab" * 32
+        ai = run(documents.save_text(c, sha, None, "a.docx", "общий текст", documents.READER_FILE, 1))
+        run(repo.upsert_document(c, dev, "docIzvejenieFiles", "a.docx", None, sha, ai, 1, 365))
+        run(repo.upsert_document(c, prod, "docIzvejenieFiles", "a.docx", None, sha, ai, 1, 365))
         run(repo.clear_expertise(c, dev))
         self.assertEqual(c._run("SELECT count(*) FROM pe_documents WHERE expertise_id = 4242 AND env = 'dev'"), "0")
         self.assertEqual(c._run("SELECT count(*) FROM pe_documents WHERE expertise_id = 4242 AND env = 'prod'"), "1")
