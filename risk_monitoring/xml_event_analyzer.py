@@ -28,6 +28,30 @@ logger = get_logger(__name__)
 
 STAGE = "S1a"
 EXTERNAL_TABLE = "risk_monitoring_eis_xml_sources"
+
+# Срок хранения текстов РМ (решение 13.10.2026): закрытие закупки/контракта + 12 месяцев
+CLOSING_EVENTS = frozenset({"CON-006", "CON-007", "PUR-008", "PUR-016"})   # исполнение, расторжение, отмены
+REOPEN_EVENTS = frozenset({"PUR-009"})                                        # закупка возобновлена
+
+
+def event_date(value: Any) -> datetime.datetime:
+    """Дата события для срока хранения: ``exact_date`` выгрузки или текущий момент (UTC).
+
+    Args:
+        value: ``date`` / ``datetime`` / строка ``YYYY-MM-DD…`` / ``None``.
+
+    Returns:
+        datetime.datetime: Момент с часовым поясом UTC.
+    """
+    if isinstance(value, datetime.datetime):
+        return value if value.tzinfo else value.replace(tzinfo=datetime.timezone.utc)
+    if isinstance(value, datetime.date):
+        return datetime.datetime(value.year, value.month, value.day, tzinfo=datetime.timezone.utc)
+    try:
+        d = datetime.date.fromisoformat(str(value)[:10])
+        return datetime.datetime(d.year, d.month, d.day, tzinfo=datetime.timezone.utc)
+    except (TypeError, ValueError):
+        return datetime.datetime.now(datetime.timezone.utc)
 MAX_ATTEMPTS = 3
 
 
@@ -124,8 +148,12 @@ class XmlEventAnalyzer:
     """
 
     def __init__(self, http_manager: Any, environment: str, push_results: bool = True, force: bool = False,
-                 use_llm: bool = True, concurrency: int = 3):
-        """Создаёт компоненты: доступ к внешней БД, загрузчик архивов, LLM, API записи."""
+                 use_llm: bool = True, concurrency: int = 3, repo: Any = None):
+        """Создаёт компоненты: доступ к внешней БД, загрузчик архивов, LLM, API записи.
+
+        ``repo`` (``configs.ai_repo.AIRepo``) нужен для срока хранения текстов: закрытие закупки/контракта
+        сокращает срок ссылок её файлов. Без него события разбираются как прежде.
+        """
         from configs.data_fetcher import DataFetcher
         from configs.llm_client import get_llm
         from configs.parsing import CloudStorageParser
@@ -134,6 +162,8 @@ class XmlEventAnalyzer:
 
         cfg = Config()
         db = cfg.get_database_config(environment)
+        self.env = (environment or cfg.APP_ENV).lower()
+        self.repo = repo
         self.storage_path = db.storage_path
         self.data_fetcher = DataFetcher(db.url, db.headers, http_manager)
         self.archives = ArchiveCache(CloudStorageParser(http_manager, None))
@@ -364,6 +394,9 @@ class XmlEventAnalyzer:
                                            all_files=ctx["all_files"], fz=ctx["fz"])
         ai["significant_changes_total"] = len(xml_events.significant_changes(ctx["changes"]))
         response = {"xml_id": xml_id, "status": "done", "pushed": False, "ai_analysis": ai}
+        retention = await self._update_retention(ctx)
+        if retention:
+            response["retention"] = retention
         if self.push_results:
             try:
                 await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, xml_id, ai)
@@ -372,6 +405,34 @@ class XmlEventAnalyzer:
                 logger.error(f"Не удалось записать ai_analysis XML {xml_id}: {e}")
                 response["push_error"] = str(e)
         return response
+
+    async def _update_retention(self, ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Срок хранения текстов файлов закупки по событию: закрытие сокращает, возобновление восстанавливает.
+
+        Ошибка не мешает записи события (только предупреждение в журнале).
+
+        Args:
+            ctx: Контекст события из :meth:`_prepare`.
+
+        Returns:
+            Optional[Dict[str, Any]]: ``{"action", "card_id", "links"}`` или ``None``, если событие не меняет срок.
+        """
+        code = (ctx.get("event") or {}).get("code")
+        if self.repo is None or code not in CLOSING_EVENTS | REOPEN_EVENTS:
+            return None
+        row = ctx.get("row") or {}
+        card = _int(row.get("risk_monitoring_contract_id")) or _int((ctx.get("link") or {}).get("risk_monitoring_contract_id"))
+        if not card:
+            return None
+        try:
+            if code in CLOSING_EVENTS:
+                n = await self.repo.close_card(self.env, card, event_date(row.get("exact_date")))
+                return {"action": "closed", "card_id": card, "links": n}
+            n = await self.repo.reopen_card(self.env, card)
+            return {"action": "reopened", "card_id": card, "links": n}
+        except Exception as e:  # noqa: BLE001 — срок хранения не должен ломать разбор события
+            logger.warning(f"Срок хранения файлов закупки {card} не обновлён ({code}): {type(e).__name__}: {e}")
+            return None
 
     async def _files(self, xml_id: int, previous: Optional[Dict[str, Any]], atts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Файлы текущей и предыдущей версии XML (по ``xml_source_id`` и по ссылкам), с кратким результатом анализа."""

@@ -223,7 +223,7 @@ class FileModesTest(unittest.TestCase):
         an.repo = Repo()
         self.text = self.BASE
 
-        async def load(file_id, url, name):
+        async def load(file_id, url, name, card_id=None):
             return 2, test.text, "new", 100
 
         async def no(*a, **k):

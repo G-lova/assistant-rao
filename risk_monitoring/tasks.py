@@ -105,9 +105,19 @@ def rm_analyze_xml_task(self, xml_ids: List[int], environment: str, force: bool 
     stats: Dict[str, Any] = {}
 
     async def run() -> List[Dict[str, Any]]:
-        """Создаёт HTTP-менеджер внутри event loop задачи и запускает анализ."""
-        async with HTTPClientManager(timeout=180.0) as mgr:
-            analyzer = XmlEventAnalyzer(mgr, environment, push_results=push, force=force, use_llm=use_llm)
+        """Создаёт HTTP-менеджер (и, если Postgres доступен, пул AIRepo для срока хранения) и запускает анализ."""
+        from contextlib import AsyncExitStack
+
+        from configs.ai_repo import AIRepo
+
+        async with AsyncExitStack() as stack:
+            mgr = await stack.enter_async_context(HTTPClientManager(timeout=180.0))
+            try:
+                repo = await stack.enter_async_context(AIRepo())
+            except Exception as e:  # noqa: BLE001 — без Postgres события разбираются, срок хранения не меняется
+                logger.warning(f"AIRepo недоступен, срок хранения текстов по событиям не обновляется: {e}")
+                repo = None
+            analyzer = XmlEventAnalyzer(mgr, environment, push_results=push, force=force, use_llm=use_llm, repo=repo)
             try:
                 return await analyzer.analyze_ids(xml_ids)
             finally:

@@ -144,6 +144,10 @@ class Config:
     # Общий документ по хэшу файла: /evaluate-documents берёт готовый текст из ai_documents вместо повторного
     # чтения/OCR (нужен KNOWLEDGE_STORE_ENABLED). Читается при каждом вызове — см. knowledge_store.hooks.dedup_enabled
     DOC_DEDUP_ENABLED = os.getenv("DOC_DEDUP_ENABLED", "false").lower() == "true"
+    # Срок ссылок риск-мониторинга на общий документ: закрытие закупки/контракта + RM_TEXT_AFTER_CLOSE_DAYS,
+    # но не дольше RM_TEXT_MAX_RETENTION_DAYS от загрузки (решение 13.10.2026)
+    RM_TEXT_AFTER_CLOSE_DAYS = int(os.getenv("RM_TEXT_AFTER_CLOSE_DAYS", "365"))
+    RM_TEXT_MAX_RETENTION_DAYS = int(os.getenv("RM_TEXT_MAX_RETENTION_DAYS", "1095"))
 
     # Paths
     SQL_QUERIES_PATH = os.getenv("SQL_QUERIES_PATH", "queries/")

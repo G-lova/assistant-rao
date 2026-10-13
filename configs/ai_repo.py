@@ -81,23 +81,77 @@ class AIRepo:
             env, external_file_id,
         )
 
-    async def link_file(self, env: str, external_file_id: int, document_id: int) -> None:
+    async def link_file(self, env: str, external_file_id: int, document_id: int,
+                        card_id: Optional[int] = None) -> None:
         """Связывает внешний файл с документом (повторная связь перезаписывается).
+
+        Новая ссылка живёт не дольше ``RM_TEXT_MAX_RETENTION_DAYS`` от загрузки; при закрытии закупки срок
+        сокращается (:meth:`close_card`). Повторная связь срок и закрытие не меняет.
 
         Args:
             env: Окружение внешней системы.
             external_file_id: ``risk_monitoring_files.id``.
             document_id: ``ai_documents.id``.
+            card_id: ``risk_monitoring_contracts.id`` — карточка закупки файла (для срока хранения).
         """
         await self.pool.execute(
             """
-            INSERT INTO ai_file_links (env, external_file_id, document_id)
-            VALUES ($1, $2, $3)
+            INSERT INTO ai_file_links (env, external_file_id, document_id, rm_card_id, expires_at)
+            VALUES ($1, $2, $3, $4, NOW() + make_interval(days => $5))
             ON CONFLICT (env, external_file_id)
-            DO UPDATE SET document_id = EXCLUDED.document_id, linked_at = NOW()
+            DO UPDATE SET document_id = EXCLUDED.document_id, linked_at = NOW(),
+                          rm_card_id = COALESCE(EXCLUDED.rm_card_id, ai_file_links.rm_card_id),
+                          expires_at = COALESCE(ai_file_links.expires_at, EXCLUDED.expires_at)
             """,
-            env, external_file_id, document_id,
+            env, external_file_id, document_id, card_id, Config.RM_TEXT_MAX_RETENTION_DAYS,
         )
+
+    async def close_card(self, env: str, card_id: int, closed_at: Any) -> int:
+        """Закупка/контракт закрыты: ссылки файлов карточки живут ещё ``RM_TEXT_AFTER_CLOSE_DAYS`` после закрытия.
+
+        Срок только сокращается (не дольше прежнего потолка); повторное закрытие не сдвигает дату.
+
+        Args:
+            env: Окружение внешней системы.
+            card_id: ``risk_monitoring_contracts.id``.
+            closed_at: Дата закрытия (``datetime``).
+
+        Returns:
+            int: Число ссылок, для которых зафиксировано закрытие.
+        """
+        rows = await self.pool.fetch(
+            """
+            UPDATE ai_file_links
+            SET closed_at = COALESCE(closed_at, $3),
+                expires_at = LEAST(COALESCE(expires_at, 'infinity'::timestamptz),
+                                   COALESCE(closed_at, $3) + make_interval(days => $4))
+            WHERE env = $1 AND rm_card_id = $2
+            RETURNING external_file_id
+            """,
+            env, int(card_id), closed_at, Config.RM_TEXT_AFTER_CLOSE_DAYS,
+        )
+        return len(rows)
+
+    async def reopen_card(self, env: str, card_id: int) -> int:
+        """Закупка возобновлена: закрытие снимается, срок — снова потолок от загрузки.
+
+        Args:
+            env: Окружение внешней системы.
+            card_id: ``risk_monitoring_contracts.id``.
+
+        Returns:
+            int: Число ссылок.
+        """
+        rows = await self.pool.fetch(
+            """
+            UPDATE ai_file_links
+            SET closed_at = NULL, expires_at = linked_at + make_interval(days => $3)
+            WHERE env = $1 AND rm_card_id = $2 AND closed_at IS NOT NULL
+            RETURNING external_file_id
+            """,
+            env, int(card_id), Config.RM_TEXT_MAX_RETENTION_DAYS,
+        )
+        return len(rows)
 
     # ---------- документы ----------
 
@@ -122,10 +176,10 @@ class AIRepo:
             document_id: ``ai_documents.id``.
 
         Returns:
-            Optional[asyncpg.Record]: ``id``, ``text``, ``ocr_status`` или ``None``.
+            Optional[asyncpg.Record]: ``id``, ``text``, ``ocr_status``, ``text_purged_at`` или ``None``.
         """
         return await self.pool.fetchrow(
-            "SELECT id, text, ocr_status FROM ai_documents WHERE id=$1", document_id
+            "SELECT id, text, ocr_status, text_purged_at FROM ai_documents WHERE id=$1", document_id
         )
 
     async def upsert_document(

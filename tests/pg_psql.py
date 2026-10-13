@@ -63,8 +63,17 @@ class PsqlConn:
 
     async def fetch(self, sql: str, *params):
         """Аналог ``asyncpg.Connection.fetch``: возвращает список словарей (через ``json_agg``)."""
-        wrapped = "SELECT COALESCE(json_agg(q), '[]'::json) FROM (" + self._render(sql, params) + ") q"
+        body = self._render(sql, params)
+        if body.lstrip().upper().startswith(("UPDATE", "INSERT", "DELETE")):   # DML ... RETURNING — только в CTE
+            wrapped = "WITH q AS (" + body + ") SELECT COALESCE(json_agg(q), '[]'::json) FROM q"
+        else:
+            wrapped = "SELECT COALESCE(json_agg(q), '[]'::json) FROM (" + body + ") q"
         return json.loads(self._run(wrapped))
+
+    async def fetchrow(self, sql: str, *params):
+        """Аналог ``asyncpg.Connection.fetchrow``: первая строка как словарь или ``None``."""
+        rows = await self.fetch(sql, *params)
+        return rows[0] if rows else None
 
     @asynccontextmanager
     async def transaction(self):

@@ -62,7 +62,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector)
 # создаётся следующим запросом. Факты, цитаты, извлечённые данные и кэш анализов остаются.
 # Для строк до миграции 005 очищается и pe_documents.text_full.
 LINK_ALIVE_PE = "(d.legal_hold OR d.expires_at IS NULL OR d.expires_at >= NOW())"
-LINK_ALIVE_RM = "TRUE"   # срок ссылок РМ появляется в миграции 006
+LINK_ALIVE_RM = "(l.legal_hold OR l.expires_at IS NULL OR l.expires_at >= NOW())"   # срок ссылок РМ — миграция 006
 
 SQL_PURGE_EXPIRED = f"""
 WITH expired_links AS (

@@ -89,6 +89,15 @@ def _file_version(*paths: str) -> str:
     return _hash_version(*parts)
 
 
+def _card(value: Any) -> Optional[int]:
+    """id карточки закупки из строки внешней БД (``None``, NaN и пустые значения — ``None``)."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
 def _json_list(value: Any) -> Optional[List[str]]:
     """Список кодов из ответа MySQL (``JSON_EXTRACT`` возвращает строку JSON или ``None``)."""
     if value is None:
@@ -419,7 +428,8 @@ class AIFileAnalyzer:
         purchase = purchase_context(row)
         prev_id = int(previous["id"]) if previous else None
 
-        document_id, text, sha, size = await self._load_document(file_id, row["url"], file_name)
+        document_id, text, sha, size = await self._load_document(file_id, row["url"], file_name,
+                                                                 card_id=row.get("risk_monitoring_contract_id"))
         if text is None:
             pipeline = passport.pipeline_block(STAGE, "completed", self.model, self.versions, prev_id,
                                                self.force, attempt, result="no_text")
@@ -617,13 +627,14 @@ class AIFileAnalyzer:
             ai["raw_data_issues"] = [f"Снят реквизит, которого нет в тексте: {x}" for x in removed_ids]
         ai["risk_scope"] = {"allowed_codes": allowed, "rejected_inconsistent": rejected or 0}
 
-    async def _load_document(self, file_id: int, url: str, file_name: str):
+    async def _load_document(self, file_id: int, url: str, file_name: str, card_id: Optional[int] = None):
         """Скачивает файл, находит или создаёт документ по хэшу содержимого и связывает его с файлом.
 
         Args:
             file_id: id внешнего файла.
             url: Ссылка на файл (хранилище внешней системы или ЕИС).
             file_name: Имя файла.
+            card_id: ``risk_monitoring_contracts.id`` — карточка закупки (срок хранения ссылки).
 
         Текст с признаками сбоя OCR (циклы повторов) сохраняется со статусом ``suspect``: при обычном
         прогоне он берётся из кэша, при отладочном (``force``) файл читается заново.
@@ -653,7 +664,7 @@ class AIFileAnalyzer:
                 if not text or not text.strip() or NO_TEXT_MARK in text:
                     document_id = await self.repo.upsert_document(sha, None, ext, size, None, ocr_status="failed",
                                                                   ocr_error="Не удалось извлечь текст")
-                    await self.repo.link_file(self.env, file_id, document_id)
+                    await self.repo.link_file(self.env, file_id, document_id, card_id=_card(card_id))
                     return document_id, None, sha, size
                 text_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
                 # «suspect» — текст с циклами OCR: в режиме отладки (force) файл будет прочитан заново
@@ -662,7 +673,7 @@ class AIFileAnalyzer:
                 reader = "rm_pdf_text" if ext == ".pdf" else "file_reader"
                 document_id = await self.repo.upsert_document(sha, text_sha, ext, size, text, ocr_status=status,
                                                               reader=reader)
-            await self.repo.link_file(self.env, file_id, document_id)
+            await self.repo.link_file(self.env, file_id, document_id, card_id=_card(card_id))
             return document_id, text, sha, size
         finally:
             if os.path.exists(tmp_path):
@@ -781,6 +792,7 @@ class AIFileAnalyzer:
             out["identical"] = True
             return out
         link = await self.repo.get_link(self.env, prev_id)
+        doc = None
         if link:
             out["doc_id"] = link["document_id"]
             if link["content_sha256"] == sha:
@@ -788,7 +800,9 @@ class AIFileAnalyzer:
                 return out
             doc = await self.repo.get_document(link["document_id"])
             out["text"] = doc["text"] if doc else None
-        elif previous.get("url"):
+        purged = bool(link) and out["text"] is None and bool(doc and doc.get("text_purged_at"))
+        if (not link or purged) and previous.get("url"):
+            # связи нет или текст прошлой редакции очищен по сроку хранения — читаем файл заново
             try:
                 doc_id, prev_text, prev_sha, _ = await self._load_document(prev_id, previous["url"],
                                                                            previous.get("file_name") or file_name)
