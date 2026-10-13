@@ -149,6 +149,11 @@ class Config:
     DOC_EXTRACTION_CACHE_ENABLED = os.getenv("DOC_EXTRACTION_CACHE_ENABLED", "false").lower() == "true"
     # Сопоставление экспертизы с карточкой закупки риск-мониторинга после индексации (запросы к внешней БД)
     PE_RM_LINK_ENABLED = os.getenv("PE_RM_LINK_ENABLED", "false").lower() == "true"
+    # Параллельность /evaluate-documents: запросы к LLM (блоки извлечения и проверки полноты), файлы (чтение/OCR +
+    # извлечение) и скачивание ссылок. Ограничение действует на каждый вызов
+    EVAL_LLM_CONCURRENCY = int(os.getenv("EVAL_LLM_CONCURRENCY", "3"))
+    EVAL_FILE_CONCURRENCY = int(os.getenv("EVAL_FILE_CONCURRENCY", "3"))
+    EVAL_LINK_CONCURRENCY = int(os.getenv("EVAL_LINK_CONCURRENCY", "2"))
     # Срок ссылок риск-мониторинга на общий документ: закрытие закупки/контракта + RM_TEXT_AFTER_CLOSE_DAYS,
     # но не дольше RM_TEXT_MAX_RETENTION_DAYS от загрузки (решение 13.10.2026)
     RM_TEXT_AFTER_CLOSE_DAYS = int(os.getenv("RM_TEXT_AFTER_CLOSE_DAYS", "365"))

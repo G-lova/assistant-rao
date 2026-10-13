@@ -150,9 +150,14 @@ class TypeDataExtractor:
             )
             tasks.append(task)
             
-        # Запускаем все задачи параллельно
-        async with self.semaphore:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Блоки идут к модели параллельно, но не больше, чем позволяет семафор: место занимает каждый блок
+        # (раньше семафор оборачивал gather целиком и не ограничивал число одновременных запросов)
+        async def limited(coro):
+            """Выполняет запрос по блоку, заняв место в семафоре."""
+            async with self.semaphore:
+                return await coro
+
+        results = await asyncio.gather(*(limited(t) for t in tasks), return_exceptions=True)
 
         # Обрабатываем результаты
         successful_results = []
