@@ -212,14 +212,15 @@ class IndexingIntegrationTests(unittest.TestCase):
         return asyncio.run(repo.upsert_document(self.conn, S(eid), "docIzvejenieFiles", "f.docx", None, sha, ai, 2, 365)), ai
 
     def test_index_and_idempotent(self):
-        """Чанки pages_v2 записываются с диапазоном страниц; повторный запуск и другая экспертиза не переиндексируют."""
+        """Чанки (нарезка по умолчанию pages_1500) записываются с диапазоном страниц; повторный запуск и другая
+        экспертиза не переиндексируют; PE_CHUNKER=pages_v2 строит вторую нарезку рядом."""
         asyncio.run(repo.clear_expertise(self.conn, S(910)))
         text = "Страница 1 (OCR): " + "Первое предложение. " * 90 + "\nСтраница 2 (OCR): " + "Второе предложение. " * 90
         _, ai = self._doc(910, "s1", text)
         st = asyncio.run(indexer.index_expertise(S(910), FakeEmbedder()))
         self.assertEqual(st["failed"], 0)
         self.assertGreaterEqual(st["chunks"], 2)
-        where = "document_id=%d AND chunker='pages_v2'" % ai
+        where = "document_id=%d AND chunker='pages_1500'" % ai
         self.assertEqual(self.q("SELECT count(*) FROM ai_document_chunks WHERE " + where), str(st["chunks"]))
         self.assertEqual(self.q("SELECT min(page_from)||'-'||max(page_to) FROM ai_document_chunks WHERE " + where), "1-2")
         self.assertEqual(self.q("SELECT array_length(embedding,1) FROM ai_document_chunks WHERE %s LIMIT 1" % where), "1024")
@@ -228,9 +229,15 @@ class IndexingIntegrationTests(unittest.TestCase):
         asyncio.run(repo.upsert_document(self.conn, Scope("prod", 910), "docIzvejenieFiles", "f.docx", None,
                                          hashlib.sha256(b"910:s1").hexdigest(), ai, 2, 365))
         self.assertEqual(asyncio.run(indexer.index_expertise(Scope("prod", 910), FakeEmbedder()))["documents"], 0)
+        with mock.patch.dict(os.environ, {"PE_CHUNKER": "pages_v2"}):
+            self.assertEqual(asyncio.run(indexer.index_expertise(S(910), FakeEmbedder()))["documents"], 1)
+        self.assertEqual(self.q("SELECT count(DISTINCT chunker) FROM ai_document_chunks WHERE document_id=%d" % ai), "2")
+        from knowledge_store.pages import current_chunker
+        with mock.patch.dict(os.environ, {"PE_CHUNKER": "unknown"}), self.assertRaises(ValueError):
+            current_chunker()
 
     def test_search_finds_only_own_chunks(self):
-        """Поиск фактов видит только чанки своей экспертизы и нарезки pages_v2, ближайшие — первыми."""
+        """Поиск фактов видит только чанки своей экспертизы и текущей нарезки (PE_CHUNKER), ближайшие — первыми."""
         from knowledge_store import facts
         asyncio.run(repo.clear_expertise(self.conn, S(913)))
         _, mine = self._doc(913, "m", "Страница 1:\nСрок поставки 30 дней")
@@ -239,8 +246,10 @@ class IndexingIntegrationTests(unittest.TestCase):
         near, far = [1.0] + [0.0] * (dim - 1), [0.0, 1.0] + [0.0] * (dim - 2)
         chunk = type("C", (), dict(idx=0, page_from=1, page_to=1, text="Срок поставки 30 дней", heading="5. Сроки"))()
         model = indexer.embedding_model_name()
-        asyncio.run(repo.replace_chunks(self.conn, mine, "pages_v2", model, [chunk], [far]))
-        asyncio.run(repo.replace_chunks(self.conn, other, "pages_v2", model, [chunk], [near]))
+        asyncio.run(repo.replace_chunks(self.conn, mine, "pages_1500", model, [chunk], [far]))
+        asyncio.run(repo.replace_chunks(self.conn, other, "pages_1500", model, [chunk], [near]))
+        chunk2 = type("C", (), dict(idx=1, page_from=1, page_to=1, text="другая нарезка", heading=None))()
+        asyncio.run(repo.replace_chunks(self.conn, mine, "pages_v2", model, [chunk, chunk2], [near, near]))
         asyncio.run(repo.replace_chunks(self.conn, mine, "rm_tokens_800", model, [chunk], [near]))
         found = asyncio.run(facts.search_fragments(self.conn, S(913), near, 5))
         self.assertEqual(len(found), 1)

@@ -5,7 +5,7 @@
 1. Поля раздела 1, которые решаются по структуре XML извещения, берутся из ``pe_documents.extraction``
    (результат :mod:`knowledge_store.eis_notice`, источник ``eis_xml``).
 2. Для остальных полей типов ``presence``/``compliance`` :class:`FactExtractor` находит в
-   ``ai_document_chunks`` (нарезка ``pages_v2``) релевантные фрагменты (pgvector), спрашивает LLM (``guided_json``) и **проверяет
+   ``ai_document_chunks`` (нарезка ``PE_CHUNKER``) релевантные фрагменты (pgvector), спрашивает LLM (``guided_json``) и **проверяет
    цитату**: она должна присутствовать в одном из показанных фрагментов. Ответ «1» без подтверждённой
    цитаты сохраняется как неподтверждённый и попадает в заключение как предложение модели (источник
    ``fact_extractor``); ответ «3» («определить нельзя») оставляет критерий эксперту.
@@ -341,10 +341,10 @@ async def search_notice_fragments(conn, scope: Scope, vector, k: int) -> List[Fr
         list[Fragment]: Фрагменты по возрастанию расстояния.
     """
     from knowledge_store.indexer import embedding_model_name
-    from knowledge_store.pages import CHUNKER_PAGES_V2
+    from knowledge_store.pages import current_chunker
 
     rows = await conn.fetch(repo.SQL_SEARCH_NOTICE_CHUNKS, scope.env, scope.expertise_id, repo.vector_literal(vector), int(k),
-                            CHUNKER_PAGES_V2, embedding_model_name(), ["docIzvejenieFiles", "linkDocs"])
+                            current_chunker(), embedding_model_name(), ["docIzvejenieFiles", "linkDocs"])
     return [_fragment(r) for r in rows]
 
 
@@ -361,10 +361,10 @@ async def search_fragments(conn, scope: Scope, vector, k: int) -> List[Fragment]
         list[Fragment]: Фрагменты по возрастанию расстояния.
     """
     from knowledge_store.indexer import embedding_model_name
-    from knowledge_store.pages import CHUNKER_PAGES_V2
+    from knowledge_store.pages import current_chunker
 
     rows = await conn.fetch(repo.SQL_SEARCH_CHUNKS, scope.env, scope.expertise_id, repo.vector_literal(vector), int(k),
-                            CHUNKER_PAGES_V2, embedding_model_name())
+                            current_chunker(), embedding_model_name())
     return [_fragment(r) for r in rows]
 
 

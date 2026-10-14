@@ -14,9 +14,16 @@
    Пороги РМ (0,85 / 0,9 / 0,95) подобраны на ``rm_tokens_800`` — для ``pages_v2`` их нужно подобрать заново
    по этому же отчёту.
 
+3. **Диагностика нарезок** (``variants``): те же факты, но чанки строятся в памяти из текстов общих документов
+   (в базу ничего не пишется) для нескольких вариантов: прежняя ``pages_1500`` и ``pages_v2`` с разным размером,
+   с заголовком раздела в эмбеддинге и без. По каждому варианту, кроме recall@k, — ``found_any``: доля цитат,
+   которые целиком лежат хотя бы в одном чанке (``1 - found_any`` — цитаты, разрезанные границами чанков,
+   их не найдёт никакое ранжирование). ``--dump`` — CSV по фактам с местом цитаты в каждом варианте.
+
 Запуск (внутри контейнера приложения, параметры БД — ``DB_*``)::
 
     python -m scripts.eval_chunkers recall --env dev --ids 5885,5887
+    python -m scripts.eval_chunkers variants --env dev --ids 5885,5887 [--only pages_1500,v2_1200] [--dump f.csv]
     python -m scripts.eval_chunkers pairs --out pairs.csv -n 50        # заготовка пар, related? — разметить
     python -m scripts.eval_chunkers similar --pairs pairs.csv [--build-missing]
 """
@@ -30,7 +37,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 
 from knowledge_store.facts import criterion_text, find_quote
-from knowledge_store.pages import CHUNKER_PAGES_V2, chunk_structured, embedding_text, split_pages
+from knowledge_store.pages import CHUNKER_PAGES_V2, chunk_pages, chunk_structured, embedding_text, split_pages
 
 RM_CHUNKER = "rm_tokens_800"
 KS = (4, 8, 16)
@@ -89,10 +96,11 @@ def recall_summary(ranks: Sequence[Optional[int]], ks: Iterable[int] = KS) -> Di
         ks: Значения ``k``.
 
     Returns:
-        dict: ``{"n", "recall@k"..., "mrr"}``.
+        dict: ``{"n", "found_any", "recall@k"..., "mrr"}``; ``found_any`` — доля цитат, целиком попавших хотя бы
+        в один чанк.
     """
     n = len(ranks)
-    out: Dict[str, float] = {"n": n}
+    out: Dict[str, float] = {"n": n, "found_any": round(sum(1 for r in ranks if r) / n, 3) if n else 0.0}
     for k in ks:
         out[f"recall@{k}"] = round(sum(1 for r in ranks if r and r <= k) / n, 3) if n else 0.0
     out["mrr"] = round(sum(1 / r for r in ranks if r) / n, 3) if n else 0.0
@@ -178,6 +186,123 @@ async def run_recall(conn, embedder, env: str, ids: Sequence[int]) -> Dict[str, 
                 order = np.argsort(-row)
                 ranks[name].append(rank_of_quote([rows[i]["text"] for i in order], fact["quote"]))
     return {name: recall_summary(r) for name, r in ranks.items()}
+
+
+# Варианты нарезки для диагностики: (функция нарезки страниц, добавлять ли заголовок раздела в текст эмбеддинга)
+VARIANTS = {
+    "pages_1500": (lambda pages: chunk_pages(pages, max_chars=1500, overlap=150), False),
+    "v2_1800": (lambda pages: chunk_structured(pages, max_chars=1800, overlap_chars=200), True),
+    "v2_1800_nohead": (lambda pages: chunk_structured(pages, max_chars=1800, overlap_chars=200), False),
+    "v2_1500": (lambda pages: chunk_structured(pages, max_chars=1500, overlap_chars=250, min_chars=500), True),
+    "v2_1200": (lambda pages: chunk_structured(pages, max_chars=1200, overlap_chars=200, min_chars=400), True),
+    "v2_1200_nohead": (lambda pages: chunk_structured(pages, max_chars=1200, overlap_chars=200, min_chars=400), False),
+}
+
+SQL_EXPERTISE_TEXTS = """
+SELECT DISTINCT a.id, a.text FROM pe_documents d JOIN ai_documents a ON a.id = d.ai_document_id
+WHERE d.env = $1 AND d.expertise_id = $2 AND a.text IS NOT NULL
+ORDER BY a.id
+"""
+
+
+class EmbeddingCache:
+    """Эмбеддинги текстов с кэшем: одинаковые чанки разных вариантов в сервис не отправляются повторно."""
+
+    def __init__(self, embedder):
+        """Запоминает клиент эмбеддингов."""
+        self.embedder = embedder
+        self.vectors: Dict[str, np.ndarray] = {}
+        self.requested = 0
+
+    async def get(self, texts: Sequence[str]) -> np.ndarray:
+        """Векторы текстов (матрица в порядке ``texts``).
+
+        Raises:
+            RuntimeError: Сервис вернул не все векторы.
+        """
+        missing = list(dict.fromkeys(t for t in texts if t not in self.vectors))
+        if missing:
+            got = await self.embedder.get_embeddings(missing)
+            if got is None or len(got) != len(missing):
+                raise RuntimeError(f"получено {0 if got is None else len(got)} эмбеддингов из {len(missing)}")
+            self.requested += len(missing)
+            for text, vec in zip(missing, got):
+                self.vectors[text] = np.asarray(vec, dtype=np.float32)
+        return np.vstack([self.vectors[t] for t in texts])
+
+
+def variant_chunks(texts: Sequence[str], name: str) -> Tuple[List[str], List[str]]:
+    """Чанки документов экспертизы для варианта нарезки.
+
+    Args:
+        texts: Тексты документов.
+        name: Ключ :data:`VARIANTS`.
+
+    Returns:
+        tuple: ``(тексты чанков — по ним ищется цитата, тексты для эмбеддинга)``.
+    """
+    split, with_heading = VARIANTS[name]
+    plain, embed = [], []
+    for text in texts:
+        for chunk in split(split_pages(text)):
+            plain.append(chunk.text)
+            embed.append(embedding_text(chunk) if with_heading else chunk.text)
+    return plain, embed
+
+
+async def run_variants(conn, embedder, env: str, ids: Sequence[int], names: Sequence[str],
+                       dump: Optional[str] = None) -> Dict[str, dict]:
+    """Диагностика: recall@k и ``found_any`` для вариантов нарезки, построенных в памяти из текущих текстов.
+
+    Вариант ``pages_1500`` повторяет прежнюю нарезку ``pe_chunks``: если его цифры близки к ``recall`` по
+    ``pe_chunks``, сравнение корректно (те же тексты и та же модель эмбеддингов).
+
+    Args:
+        conn: Соединение ``asyncpg``.
+        embedder: Клиент эмбеддингов.
+        env: Окружение.
+        ids: ID экспертиз.
+        names: Варианты из :data:`VARIANTS`.
+        dump: Путь CSV с местом цитаты по каждому факту и варианту (``None`` — не писать).
+
+    Returns:
+        dict: По варианту — :func:`recall_summary` и число чанков; ``embeddings_requested`` — расход.
+    """
+    cache = EmbeddingCache(embedder)
+    ranks: Dict[str, List[Optional[int]]] = {n: [] for n in names}
+    chunk_counts: Dict[str, int] = {n: 0 for n in names}
+    rows_out: List[List] = []
+    for expertise_id in ids:
+        facts = await conn.fetch(SQL_FACTS, env, int(expertise_id))
+        texts = [r["text"] for r in await conn.fetch(SQL_EXPERTISE_TEXTS, env, int(expertise_id))]
+        if not facts or not texts:
+            print(f"{env}:{expertise_id}: нет фактов с цитатами или текстов — пропущено", file=sys.stderr)
+            continue
+        queries = await cache.get([criterion_text(f["label"]) for f in facts])
+        per_fact = [[expertise_id, f["fact_key"], f["label"], (f["quote"] or "")[:200]] for f in facts]
+        for name in names:
+            plain, embed = variant_chunks(texts, name)
+            chunk_counts[name] += len(plain)
+            if not plain:
+                ranks[name].extend([None] * len(facts))
+                for row in per_fact:
+                    row.append("")
+                continue
+            sims = cosine_matrix(queries, await cache.get(embed))
+            for fact, sim, row in zip(facts, sims, per_fact):
+                rank = rank_of_quote([plain[i] for i in np.argsort(-sim)], fact["quote"])
+                ranks[name].append(rank)
+                row.append(rank or "")
+        rows_out.extend(per_fact)
+        print(f"{env}:{expertise_id}: фактов {len(facts)}, эмбеддингов запрошено {cache.requested}", file=sys.stderr)
+    if dump:
+        with open(dump, "w", encoding="utf-8", newline="") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["expertise_id", "fact_key", "label", "quote"] + list(names))
+            writer.writerows(rows_out)
+    result: Dict[str, dict] = {n: {**recall_summary(ranks[n]), "chunks": chunk_counts[n]} for n in names}
+    result["embeddings_requested"] = cache.requested
+    return result
 
 
 async def _vectors(conn, embedder, document_id: int, chunker: str, build_missing: bool) -> np.ndarray:
@@ -386,6 +511,11 @@ async def main(argv=None) -> int:
     r = sub.add_parser("recall", help="поиск фактов: pe_chunks против pages_v2")
     r.add_argument("--env", required=True)
     r.add_argument("--ids", required=True, help="ID экспертиз через запятую")
+    v = sub.add_parser("variants", help="диагностика: варианты нарезки в памяти (pages_1500, v2_*)")
+    v.add_argument("--env", required=True)
+    v.add_argument("--ids", required=True, help="ID экспертиз через запятую")
+    v.add_argument("--only", help=f"варианты через запятую (по умолчанию все: {','.join(VARIANTS)})")
+    v.add_argument("--dump", help="CSV с местом цитаты по каждому факту и варианту")
     s = sub.add_parser("similar", help="похожие документы: rm_tokens_800 против pages_v2")
     s.add_argument("--pairs", required=True, help="CSV doc_a,doc_b,label")
     s.add_argument("--build-missing", action="store_true", help="строить pages_v2 в памяти, если чанков нет")
@@ -405,6 +535,13 @@ async def main(argv=None) -> int:
             if args.mode == "recall":
                 ids = [int(x) for x in args.ids.split(",") if x.strip()]
                 result = await run_recall(conn, embedder, normalize_env(args.env), ids)
+            elif args.mode == "variants":
+                ids = [int(x) for x in args.ids.split(",") if x.strip()]
+                names = [n.strip() for n in (args.only or ",".join(VARIANTS)).split(",") if n.strip()]
+                unknown = [n for n in names if n not in VARIANTS]
+                if unknown:
+                    parser.error(f"неизвестные варианты: {unknown}")
+                result = await run_variants(conn, embedder, normalize_env(args.env), ids, names, args.dump)
             elif args.mode == "pairs":
                 rows = await make_pairs(conn, args.n)
                 with open(args.out, "w", encoding="utf-8", newline="") as fh:

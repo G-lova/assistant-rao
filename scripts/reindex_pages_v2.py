@@ -1,15 +1,15 @@
-"""Переиндексация экспертиз в нарезку ``pages_v2`` (``ai_document_chunks``) без повторного прогона и без фактов.
+"""Переиндексация экспертиз в ``ai_document_chunks`` (нарезка ``PE_CHUNKER`` или ``--chunker``) без прогона и фактов.
 
-Нужна после миграции 005: старые экспертизы проиндексированы в ``pe_chunks`` (1500/150 символов), а поиск фактов
-теперь работает по ``pages_v2``. Скрипт **не** вызывает ``/evaluate-documents`` (тот удалил бы ссылки экспертизы и
+Нужна после миграции 005: старые экспертизы проиндексированы в ``pe_chunks``, а поиск фактов теперь работает по
+``ai_document_chunks`` с нарезкой ``PE_CHUNKER`` (по умолчанию прежняя ``pages_1500``). Скрипт **не** вызывает ``/evaluate-documents`` (тот удалил бы ссылки экспертизы и
 старые ``pe_chunks``, нужные для сравнения нарезок) и **не** строит факты (факты, построенные по старой нарезке,
 остаются эталоном для ``scripts.eval_chunkers recall``). Документ, уже проиндексированный для другой экспертизы,
 повторно не индексируется.
 
 Запуск (внутри контейнера приложения, параметры БД — ``DB_*``, модель эмбеддингов — ``EMBEDDING_*``)::
 
-    python -m scripts.reindex_pages_v2 --env dev --ids 6189,6190
-    python -m scripts.reindex_pages_v2 --env dev --all
+    python -m scripts.reindex_pages_v2 --env prod --all                       # нарезка PE_CHUNKER (pages_1500)
+    python -m scripts.reindex_pages_v2 --env dev --ids 6189,6190 --chunker pages_v2
     python -m scripts.reindex_pages_v2 --env dev --all --with-facts   # и сразу перестроить факты (вызовы LLM)
 """
 import argparse
@@ -71,7 +71,15 @@ async def main(argv=None) -> int:
     parser.add_argument("--ids", help="ID экспертиз через запятую")
     parser.add_argument("--all", action="store_true", help="все экспертизы окружения с сохранёнными текстами")
     parser.add_argument("--with-facts", action="store_true", help="после индексации перестроить факты (LLM)")
+    parser.add_argument("--chunker", help="нарезка вместо PE_CHUNKER: pages_1500 | pages_v2")
     args = parser.parse_args(argv)
+    if args.chunker:
+        import os
+
+        from knowledge_store.pages import CHUNKERS
+        if args.chunker not in CHUNKERS:
+            parser.error(f"неизвестная нарезка {args.chunker}; допустимо: {', '.join(CHUNKERS)}")
+        os.environ["PE_CHUNKER"] = args.chunker
     if not args.ids and not args.all:
         parser.error("укажите --ids или --all")
 

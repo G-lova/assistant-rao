@@ -1,5 +1,6 @@
 """Общий документ по хэшу: нарезка pages_v2, перенос текстов миграцией 005, повторное использование текста в пайплайне."""
 import asyncio
+import csv
 import hashlib
 import os
 import tempfile
@@ -98,6 +99,67 @@ class EvalChunkersTests(unittest.TestCase):
         self.assertIsNone(ev.auc([], [0.1]))
         self.assertEqual(ev.parse_vector("[1,2]").tolist(), [1.0, 2.0])
         self.assertEqual(ev.parse_vector("{1,2}").tolist(), [1.0, 2.0])
+
+
+class FakeConn:
+    """Соединение-заглушка для диагностики: факты и тексты одной экспертизы."""
+
+    def __init__(self, facts, texts):
+        """Запоминает строки выборок."""
+        self.facts, self.texts = facts, texts
+
+    async def fetch(self, sql, *params):
+        """Возвращает факты или тексты по тексту запроса."""
+        return self.facts if "pe_facts" in sql else [{"id": i, "text": t} for i, t in enumerate(self.texts)]
+
+
+class HashEmbedder:
+    """Детерминированные эмбеддинги: мешок слов по хэшу (близкие тексты — близкие векторы)."""
+
+    def __init__(self):
+        """Считает запросы."""
+        self.calls = 0
+
+    async def get_embeddings(self, texts):
+        """Вектор частот слов по 64 корзинам."""
+        import numpy as np
+        self.calls += 1
+        out = []
+        for t in texts:
+            v = np.zeros(64, dtype=np.float32)
+            for w in t.lower().split():
+                v[int(hashlib.md5(w.encode()).hexdigest(), 16) % 64] += 1
+            out.append(v + 1e-3)
+        return out
+
+
+class VariantsTests(unittest.TestCase):
+    """Диагностика вариантов нарезки в памяти."""
+
+    def test_variants_report_and_dump(self):
+        """Цитата, разрезанная границей, снижает found_any; кэш не запрашивает одинаковые тексты повторно."""
+        from scripts import eval_chunkers as ev
+        body = "\n".join(f"{i}. Пункт номер {i}. " + "Текст пункта про поставку товара. " * 12 for i in range(1, 30))
+        text = "Страница 1:\n" + body
+        quote = "Пункт номер 15. Текст пункта про поставку товара."
+        facts = [{"fact_key": "k1", "label": "1.1. Наличие пункта номер 15", "quote": quote}]
+        emb = HashEmbedder()
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as fh:
+            dump = fh.name
+        try:
+            res = asyncio.run(ev.run_variants(FakeConn(facts, [text]), emb, "dev", [1],
+                                              ["pages_1500", "v2_1200", "v2_1200_nohead"], dump))
+            with open(dump, encoding="utf-8") as fh:
+                rows = list(csv.reader(fh))
+        finally:
+            os.unlink(dump)
+        self.assertEqual(rows[0], ["expertise_id", "fact_key", "label", "quote", "pages_1500", "v2_1200", "v2_1200_nohead"])
+        for name in ("pages_1500", "v2_1200", "v2_1200_nohead"):
+            self.assertEqual(res[name]["n"], 1)
+            self.assertEqual(res[name]["found_any"], 1.0)
+            self.assertGreater(res[name]["chunks"], 1)
+        self.assertGreater(res["embeddings_requested"], 0)
+        self.assertEqual(ev.recall_summary([None, 2])["found_any"], 0.5)
 
 
 class EvalSimilarityTests(unittest.TestCase):

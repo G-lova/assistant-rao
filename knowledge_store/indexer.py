@@ -1,4 +1,4 @@
-"""Индексация документов экспертизы: страницы -> чанки ``pages_v2`` -> эмбеддинги -> ``ai_document_chunks``.
+"""Индексация документов экспертизы: страницы -> чанки (нарезка ``PE_CHUNKER``) -> эмбеддинги -> ``ai_document_chunks``.
 
 Чанки принадлежат общему документу (``ai_documents``): документ, уже проиндексированный для другой
 экспертизы, повторно не индексируется.
@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 from configs.config import Config
 from configs.logger import get_logger
 from knowledge_store import repository as repo
-from knowledge_store.pages import CHUNKER_PAGES_V2, chunk_structured, embedding_text, split_pages
+from knowledge_store.pages import chunk_document, current_chunker, embedding_text
 from knowledge_store.scope import Scope
 
 logger = get_logger(__name__)
@@ -44,7 +44,7 @@ def embedding_model_name() -> str:
     return os.getenv("EMBEDDING_MODEL") or Config.EMBEDDING_MODEL or "default"
 
 
-async def index_expertise(scope: Scope, embedder: Any, max_chars: int = 1800, overlap: int = 200) -> Dict[str, int]:
+async def index_expertise(scope: Scope, embedder: Any) -> Dict[str, int]:
     """Строит чанки и эмбеддинги для всех ещё не проиндексированных документов экспертизы.
 
     Документ индексируется «всё или ничего»: если сервис эмбеддингов вернул не все векторы
@@ -54,8 +54,6 @@ async def index_expertise(scope: Scope, embedder: Any, max_chars: int = 1800, ov
     Args:
         scope: Экспертиза в окружении.
         embedder: Объект с ``async get_embeddings(list[str])``.
-        max_chars: Размер чанка в символах.
-        overlap: Перекрытие чанков в символах.
 
     Returns:
         dict: Статистика ``{"documents": N, "chunks": M, "failed": K}``.
@@ -63,17 +61,18 @@ async def index_expertise(scope: Scope, embedder: Any, max_chars: int = 1800, ov
     stats = {"documents": 0, "chunks": 0, "failed": 0}
     async with _db() as conn:
         model = embedding_model_name()
-        docs = await repo.documents_for_indexing(conn, scope, CHUNKER_PAGES_V2, model)
+        chunker = current_chunker()
+        docs = await repo.documents_for_indexing(conn, scope, chunker, model)
         for doc in docs:
             try:
-                chunks = chunk_structured(split_pages(doc["text_full"]), max_chars=max_chars, overlap_chars=overlap)
+                chunks = chunk_document(doc["text_full"], chunker)
                 if not chunks:
                     continue
                 vectors = await embedder.get_embeddings([embedding_text(c) for c in chunks])
                 if len(vectors) != len(chunks):
                     raise RuntimeError(f"получено {len(vectors)} эмбеддингов из {len(chunks)}")
                 async with conn.transaction():
-                    stats["chunks"] += await repo.replace_chunks(conn, doc["id"], CHUNKER_PAGES_V2, model, chunks,
+                    stats["chunks"] += await repo.replace_chunks(conn, doc["id"], chunker, model, chunks,
                                                                  [list(v) for v in vectors])
                 stats["documents"] += 1
             except Exception as e:  # noqa: BLE001 — один плохой документ не должен останавливать остальные

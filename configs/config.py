@@ -144,6 +144,9 @@ class Config:
     # Общий документ по хэшу файла: /evaluate-documents берёт готовый текст из ai_documents вместо повторного
     # чтения/OCR (нужен KNOWLEDGE_STORE_ENABLED). Читается при каждом вызове — см. knowledge_store.hooks.dedup_enabled
     DOC_DEDUP_ENABLED = os.getenv("DOC_DEDUP_ENABLED", "false").lower() == "true"
+    # Нарезка экспертизы для индексации и поиска фактов (knowledge_store.pages.current_chunker): pages_1500 (прежняя,
+    # по умолчанию) или pages_v2 (по структуре; переключать после диагностики scripts.eval_chunkers variants)
+    PE_CHUNKER = os.getenv("PE_CHUNKER", "pages_1500")
     # Кэш результата TypeDataExtractor в общем документе: тот же файл с тем же типом, объектом и именем повторно
     # модели не отправляется (нужен KNOWLEDGE_STORE_ENABLED). Параметр force в /evaluate-documents кэш обходит
     DOC_EXTRACTION_CACHE_ENABLED = os.getenv("DOC_EXTRACTION_CACHE_ENABLED", "false").lower() == "true"

@@ -329,3 +329,47 @@ def embedding_text(chunk: Chunk) -> str:
     if chunk.heading and not chunk.text.lstrip().startswith(chunk.heading):
         return f"{chunk.heading}\n{chunk.text}"
     return chunk.text
+
+
+# ---------------------------------------------------------------- выбор нарезки экспертизы
+
+CHUNKER_PAGES_1500 = "pages_1500"
+"""Прежняя нарезка экспертизы (``pe_chunks`` до миграции 005): 1500 символов, перекрытие 150, страницы сохраняются."""
+
+CHUNKERS = {
+    CHUNKER_PAGES_1500: lambda pages: chunk_pages(pages, max_chars=1500, overlap=150),
+    CHUNKER_PAGES_V2: lambda pages: chunk_structured(pages, max_chars=1800, overlap_chars=200),
+}
+
+
+def current_chunker() -> str:
+    """Нарезка экспертизы для индексации и поиска фактов (``PE_CHUNKER``).
+
+    По умолчанию — прежняя ``pages_1500``: замер 14.10.2026 (1511 фактов) показал, что ``pages_v2`` находит
+    фрагмент с цитатой реже (recall@8 0,79 против 0,96). Переключение — после диагностики
+    ``scripts.eval_chunkers variants`` и переиндексации (``scripts.reindex_pages_v2``).
+
+    Returns:
+        str: Имя нарезки из :data:`CHUNKERS`.
+
+    Raises:
+        ValueError: Неизвестная нарезка.
+    """
+    import os
+    name = os.getenv("PE_CHUNKER", CHUNKER_PAGES_1500).strip()
+    if name not in CHUNKERS:
+        raise ValueError(f"Неизвестная нарезка PE_CHUNKER={name!r}; допустимо: {', '.join(CHUNKERS)}")
+    return name
+
+
+def chunk_document(text: str, chunker: str) -> List[Chunk]:
+    """Режет текст документа выбранной нарезкой.
+
+    Args:
+        text: Текст документа.
+        chunker: Имя нарезки из :data:`CHUNKERS`.
+
+    Returns:
+        List[Chunk]: Чанки.
+    """
+    return CHUNKERS[chunker](split_pages(text))
