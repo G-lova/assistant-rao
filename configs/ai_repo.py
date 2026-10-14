@@ -5,6 +5,7 @@ import asyncpg
 
 from configs.config import Config
 from configs.logger import get_logger
+from knowledge_store.documents import strip_nul
 
 # Схема нарезки чанков риск-мониторинга (split_large_text, 800 токенов). Чанки экспертизы того же документа
 # лежат в той же таблице с chunker = 'pages_v2'. Условие пишется литералом: только так планировщик выбирает
@@ -227,7 +228,7 @@ class AIRepo:
                 updated_at  = NOW()
             RETURNING id
             """,
-            content_sha256, text_sha256, file_ext, size_bytes, text, ocr_status, ocr_error, reader,
+            content_sha256, text_sha256, file_ext, size_bytes, strip_nul(text), ocr_status, ocr_error, reader,
         )
 
     # ---------- чанки и эмбеддинги ----------
@@ -257,7 +258,7 @@ class AIRepo:
             embedding_model: Название модели эмбеддингов.
         """
         rows = [
-            (document_id, i, chunk, _vec(emb), embedding_model)
+            (document_id, i, strip_nul(chunk), _vec(emb), embedding_model)
             for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
         ]
         async with self.pool.acquire() as conn:
@@ -431,7 +432,7 @@ class AIRepo:
                 created_at = NOW()
             """,
             document_id, analysis_type, prompt_version, model,
-            json.dumps(result, ensure_ascii=False, default=str),
-            json.dumps(compact, ensure_ascii=False, default=str),
+            json.dumps(strip_nul(result), ensure_ascii=False, default=str),
+            json.dumps(strip_nul(compact), ensure_ascii=False, default=str),
             confidence,
         )

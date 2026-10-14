@@ -92,6 +92,19 @@ class RepositoryIntegrationTests(unittest.TestCase):
         self.assertEqual(self.q("SELECT count(*) FROM pe_documents WHERE expertise_id=901"), "0")
         self.assertEqual(self.q("SELECT text FROM ai_documents WHERE id=%d" % ai), "текст")
 
+    def test_nul_characters_are_stripped(self):
+        """Нулевой байт из XML/PDF не роняет запись текста, извлечения и кэша (Postgres не принимает 0x00)."""
+        run = asyncio.run
+        sha = hashlib.sha256(b"nul").hexdigest()
+        ai = run(documents.save_text(self.conn, sha, None, "p.xml", "Протокол\x00 подачи", documents.READER_FILE, 1))
+        self.assertEqual(run(documents.find_text(self.conn, sha))["text"], "Протокол подачи")
+        doc = run(repo.upsert_document(self.conn, S(905), "linkDocs", "p.xml", None, sha, ai, 1, 365))
+        run(repo.set_document_extraction(self.conn, doc, "x", {"issues": ["a\x00b"]}, {"raw_data": {"k\x00": "v\x00"}}))
+        self.assertEqual(self.q("SELECT extraction->'raw_data'->>'k' FROM pe_documents WHERE id=%d" % doc), "v")
+        run(documents.save_extraction(self.conn, ai, "v1", "m", {"raw_data": {"t": "x\x00y"}}))
+        self.assertEqual(run(documents.get_extraction(self.conn, ai, "v1", "m")), {"raw_data": {"t": "xy"}})
+        self.assertEqual(documents.strip_nul(("a\x00", 1, None)), ["a", 1, None])
+
     def test_save_text_keeps_first_good_text(self):
         """Годный текст общего документа не заменяется другим чтением; force заменяет текст того же способа."""
         run = asyncio.run

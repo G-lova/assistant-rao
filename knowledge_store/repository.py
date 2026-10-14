@@ -101,7 +101,8 @@ def to_json(value: Any) -> Optional[str]:
     Returns:
         Optional[str]: JSON-строка либо ``None``, если ``value`` равно ``None``.
     """
-    return None if value is None else json.dumps(value, ensure_ascii=False, default=str)
+    from knowledge_store.documents import strip_nul
+    return None if value is None else json.dumps(strip_nul(value), ensure_ascii=False, default=str)
 
 
 def file_sha256(path: str) -> str:

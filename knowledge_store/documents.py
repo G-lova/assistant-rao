@@ -50,6 +50,27 @@ LIMIT 1
 """
 
 
+def strip_nul(value: Any) -> Any:
+    """Убирает нулевые символы ``\\x00`` из строк (рекурсивно в словарях и списках).
+
+    Postgres не принимает ``\\x00`` ни в ``TEXT`` (``invalid byte sequence for encoding "UTF8": 0x00``), ни в
+    ``JSONB`` (``unsupported Unicode escape sequence``), а он встречается в тексте XML и PDF ЕИС.
+
+    Args:
+        value: Строка, словарь, список или другое значение.
+
+    Returns:
+        Any: То же значение без нулевых символов в строках.
+    """
+    if isinstance(value, str):
+        return value.replace("\x00", "") if "\x00" in value else value
+    if isinstance(value, dict):
+        return {strip_nul(k): strip_nul(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [strip_nul(v) for v in value]
+    return value
+
+
 def file_sha256(path: str) -> str:
     """SHA-256 содержимого файла (блоками, без загрузки целиком в память).
 
@@ -121,6 +142,7 @@ async def save_text(conn, content_sha256: str, file_path: Optional[str], filenam
     Returns:
         int: ``ai_documents.id``.
     """
+    text = strip_nul(text)
     ext = os.path.splitext(filename or file_path or "")[1].lower() or None
     size = os.path.getsize(file_path) if file_path and os.path.exists(file_path) else None
     return int(await conn.fetchval(SQL_SAVE_TEXT, content_sha256, text_sha256(text), ext, size, text, reader,
@@ -245,4 +267,4 @@ async def save_extraction(conn, document_id: int, version: str, model: str, resu
         result: Результат извлечения.
     """
     await conn.execute(SQL_SAVE_ANALYSIS, int(document_id), EXTRACTION_ANALYSIS, version, model or "",
-                       json.dumps(result, ensure_ascii=False, default=str))
+                       json.dumps(strip_nul(result), ensure_ascii=False, default=str))
