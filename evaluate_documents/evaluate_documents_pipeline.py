@@ -327,7 +327,7 @@ class TasksPipeline:
             await ks_hooks.on_run_start(self.df, self.x_api_database)
 
             # === Парсинг ссылок ===
-            media_links = self.df[self.df['media_links'].notna()]
+            media_links = self.df[self.df['media_links'].notna()].copy()   # копия: без SettingWithCopyWarning
             if len(media_links) > 0:
                 media_links['media_links'] = media_links['media_links'].apply(json.loads)
                 media_links_exploded = media_links.explode('media_links')

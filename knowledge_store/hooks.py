@@ -115,6 +115,11 @@ async def _on_document_text(scope: Scope, doc_code: Optional[str], filename: str
                                             len(pages), Config.PE_TEXT_RETENTION_DAYS)
         if eis_patch:
             await repo.merge_document_extraction(conn, doc_id, {"eis_notice": eis_patch})
+        try:
+            # номер извещения из имени и шапки документа — для сопоставления с РМ, если в ссылке ЕИС его нет
+            await rm_link.save_found_number(conn, scope, filename, text)
+        except Exception as e:  # noqa: BLE001 — не мешает записи документа (например, до миграции 007)
+            logger.warning(f"knowledge_store: номер закупки из {filename} не сохранён: {type(e).__name__}: {e}")
         return doc_id
 
 

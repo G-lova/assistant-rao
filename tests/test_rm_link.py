@@ -46,6 +46,18 @@ class FindCardTests(unittest.TestCase):
         self.assertEqual(asyncio.run(rm_link.find_card(fake_fetch(), [None, ""]))["candidates"], [])
 
 
+class NoticeNumberTests(unittest.TestCase):
+    """Номер извещения из имени и шапки документа."""
+
+    def test_numbers(self):
+        """19 цифр с ведущим нулём; номер контракта и длинные числа не берутся; текст — только начало."""
+        name = "Печатная-форма-протокола-подачи-предложений-№-0373100029526000247-(версия-1).xml"
+        self.assertEqual(rm_link.notice_numbers(name, None), ["0373100029526000247"])
+        text = "Извещение № 0373100029526000247\nКонтракт 1771234567826000001 и ИКЗ 263770012345677010100100010000000"
+        self.assertEqual(rm_link.notice_numbers("a.docx", text), ["0373100029526000247"])
+        self.assertEqual(rm_link.notice_numbers("a.docx", "x" * 4000 + " 0373100029526000247"), [])
+
+
 class RunnerLinkTests(unittest.TestCase):
     """Сопоставление с РМ после индексации включается флагом и не ломает задачу."""
 
@@ -138,6 +150,22 @@ class RmLinkDbTests(unittest.TestCase):
         self.assertEqual((second["external_file_ids"], second["risks"][0]["code"]), ([2], "FIN-002"))
         self.assertIn("подсказки", result["note"])
         self.assertEqual(run(summary.rm_findings_safe(c, scope))["rm_card_id"], 55)
+
+    def test_found_number_fills_only_empty(self):
+        """Номер из документа заполняет пустой номер закупки, но не заменяет номер из ссылки ЕИС."""
+        c, run = self.conn, asyncio.run
+        scope = Scope("prod", 8803)
+        name = "Печатная-форма-извещения-№-0373100029526000247-(версия-1).html"
+        self.assertEqual(run(rm_link.save_found_number(c, scope, name, "Извещение № 0373100029526000247")),
+                         "0373100029526000247")
+        self.assertIsNone(run(rm_link.save_found_number(c, scope, "tz.docx", "без номера")))
+        self.assertEqual(run(rm_link.get_identity(c, scope))["eis_number"], "0373100029526000247")
+        found = run(rm_link.match_card(c, scope, fake_fetch(purchase=[{"id": 77}])))
+        self.assertEqual(found["rm_card_id"], 77)
+        other = Scope("prod", 8804)
+        run(rm_link.save_identifiers(c, other, eis_number="0373100000000000001"))
+        run(rm_link.save_found_number(c, other, name, None))
+        self.assertEqual(run(rm_link.get_identity(c, other))["eis_number"], "0373100000000000001")
 
     def test_findings_without_identity(self):
         """Без сопоставления — только находки по документам экспертизы; ошибка не мешает сборке."""

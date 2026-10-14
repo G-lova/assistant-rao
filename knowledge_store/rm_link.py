@@ -10,6 +10,8 @@
    они не меняют.
 """
 import json
+import re
+from collections import Counter
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
 from configs.config import Config
@@ -29,6 +31,17 @@ ON CONFLICT (env, expertise_id) DO UPDATE SET
     contract_number = COALESCE(EXCLUDED.contract_number, procurement_identity.contract_number),
     updated_at = NOW()
 """
+# Номер, найденный в документах, не заменяет номер из ссылки ЕИС (он надёжнее) — только заполняет пустой
+SQL_SAVE_FOUND_NUMBER = """
+INSERT INTO procurement_identity (env, expertise_id, eis_number)
+VALUES ($1, $2, $3)
+ON CONFLICT (env, expertise_id) DO UPDATE SET
+    eis_number = COALESCE(procurement_identity.eis_number, EXCLUDED.eis_number), updated_at = NOW()
+"""
+# Реестровый номер извещения 44-ФЗ: 19 цифр, начинается с 0 (0373100029526000247)
+NOTICE_NUMBER_RE = re.compile(r"(?<!\d)(0\d{18})(?!\d)")
+TEXT_HEAD_CHARS = 3000
+
 SQL_GET_IDENTITY = """
 SELECT eis_number, contract_number, rm_card_id, match_method, candidates, matched_at
 FROM procurement_identity WHERE env = $1 AND expertise_id = $2
@@ -91,6 +104,45 @@ async def save_identifiers(conn, scope: Scope, eis_number: Any = None, contract_
     eis, contract = _clean_number(eis_number), _clean_number(contract_number)
     if eis or contract:
         await conn.execute(SQL_SAVE_IDENTIFIERS, scope.env, scope.expertise_id, eis, contract)
+
+
+def notice_numbers(filename: Optional[str], text: Optional[str]) -> List[str]:
+    """Реестровые номера извещений 44-ФЗ в имени файла и начале текста документа.
+
+    Нужны, когда ссылка ЕИС экспертизы не содержит номера закупки (например, печатная форма контракта
+    ``contractInfoId=…``), а номер карточки экспертизы пуст: номер есть в именах и шапках печатных форм
+    («Печатная-форма-извещения-№-0373100029526000247»).
+
+    Args:
+        filename: Имя файла.
+        text: Текст документа (просматриваются первые ``TEXT_HEAD_CHARS`` символов).
+
+    Returns:
+        list[str]: Найденные номера (с повторами — для выбора самого частого).
+    """
+    found = NOTICE_NUMBER_RE.findall(filename or "")
+    found += NOTICE_NUMBER_RE.findall((text or "")[:TEXT_HEAD_CHARS])
+    return found
+
+
+async def save_found_number(conn, scope: Scope, filename: Optional[str], text: Optional[str]) -> Optional[str]:
+    """Запоминает самый частый номер извещения из документа, если номера закупки у экспертизы ещё нет.
+
+    Args:
+        conn: Соединение ``asyncpg``.
+        scope: Экспертиза в окружении.
+        filename: Имя файла.
+        text: Текст документа.
+
+    Returns:
+        Optional[str]: Найденный номер или ``None``.
+    """
+    numbers = notice_numbers(filename, text)
+    if not numbers:
+        return None
+    number = Counter(numbers).most_common(1)[0][0]
+    await conn.execute(SQL_SAVE_FOUND_NUMBER, scope.env, scope.expertise_id, number)
+    return number
 
 
 async def get_identity(conn, scope: Scope) -> Optional[dict]:
