@@ -9,13 +9,15 @@
 2. **Похожие документы** (``similar``): по CSV пар документов ``doc_a,doc_b,label`` (``ai_documents.id``;
    ``label``: ``same`` — редакции одного документа, ``related`` — типовой документ у разных заказчиков,
    ``unrelated`` — несвязанные) считается ``coverage`` как в ``AIRepo.find_similar_documents`` для нарезки РМ
-   ``rm_tokens_800`` и для ``pages_v2``, и насколько хорошо она отделяет связанные пары от несвязанных (AUC).
+   ``rm_tokens_800`` и для ``pages_v2`` при порогах близости чанка 0,75–0,95, насколько хорошо он отделяет
+   связанные пары от несвязанных (AUC) и какое правило «почти копия» лучше всего находит редакции (F1).
    Пороги РМ (0,85 / 0,9 / 0,95) подобраны на ``rm_tokens_800`` — для ``pages_v2`` их нужно подобрать заново
    по этому же отчёту.
 
 Запуск (внутри контейнера приложения, параметры БД — ``DB_*``)::
 
     python -m scripts.eval_chunkers recall --env dev --ids 5885,5887
+    python -m scripts.eval_chunkers pairs --out pairs.csv -n 50        # заготовка пар, related? — разметить
     python -m scripts.eval_chunkers similar --pairs pairs.csv [--build-missing]
 """
 import argparse
@@ -192,34 +194,168 @@ async def _vectors(conn, embedder, document_id: int, chunker: str, build_missing
     return np.asarray(await embedder.get_embeddings([embedding_text(c) for c in chunks]), dtype=np.float32)
 
 
-async def run_similar(conn, embedder, pairs: Sequence[Tuple[int, int, str]], build_missing: bool,
-                      threshold: float = 0.85) -> Dict[str, dict]:
-    """Замер 2: ``coverage`` пар документов для нарезки РМ и ``pages_v2`` и AUC связанных против несвязанных.
+THRESHOLDS = (0.75, 0.8, 0.85, 0.9, 0.95)
+COVERAGE_CUTS = tuple(round(0.5 + 0.05 * i, 2) for i in range(10))      # 0.50 … 0.95
+AVG_CUTS = (0.85, 0.88, 0.9, 0.92, 0.95, 0.97)
+
+
+def best_same_rule(points: Sequence[Tuple[float, float, str]]) -> Optional[Dict[str, float]]:
+    """Лучшее правило «почти копия» (``coverage >= c`` и ``avg >= a``) по F1 для пар ``same`` против остальных.
+
+    Так подбираются ``NEAR_DUPLICATE_COVERAGE`` / ``NEAR_DUPLICATE_AVG_SIM`` риск-мониторинга.
+
+    Args:
+        points: ``(coverage, avg_similarity, label)`` по парам.
+
+    Returns:
+        Optional[dict]: ``{"coverage", "avg", "f1", "precision", "recall"}`` или ``None``, если нет пар ``same``.
+    """
+    positives = sum(1 for p in points if p[2] == "same")
+    if not positives:
+        return None
+    best = None
+    for c in COVERAGE_CUTS:
+        for a in AVG_CUTS:
+            hit = [p for p in points if p[0] >= c and p[1] >= a]
+            tp = sum(1 for p in hit if p[2] == "same")
+            if not tp:
+                continue
+            precision, recall = tp / len(hit), tp / positives
+            f1 = 2 * precision * recall / (precision + recall)
+            if best is None or f1 > best["f1"]:
+                best = {"coverage": c, "avg": a, "f1": round(f1, 3), "precision": round(precision, 3),
+                        "recall": round(recall, 3)}
+    return best
+
+
+def similarity_report(best_rows: Sequence[Tuple[np.ndarray, str]]) -> Dict[str, dict]:
+    """Отчёт по порогам близости чанка для одной нарезки.
+
+    Args:
+        best_rows: По паре — максимальное сходство каждого чанка ``doc_a`` с чанками ``doc_b`` и метка.
+
+    Returns:
+        dict: По порогу — средний ``coverage`` по меткам, AUC «связанные против несвязанных», AUC «редакции
+        против похожих» и лучшее правило «почти копия».
+    """
+    report: Dict[str, dict] = {}
+    for t in THRESHOLDS:
+        points = []
+        for best, label in best_rows:
+            hit = best[best >= t]
+            points.append((float(len(hit) / len(best)), float(hit.mean()) if len(hit) else 0.0, label))
+        by_label: Dict[str, List[float]] = {}
+        for cov, _, label in points:
+            by_label.setdefault(label, []).append(cov)
+        report[str(t)] = {
+            "mean_coverage": {k: round(sum(v) / len(v), 3) for k, v in by_label.items()},
+            "auc_linked_vs_unrelated": auc(by_label.get("same", []) + by_label.get("related", []),
+                                           by_label.get("unrelated", [])),
+            "auc_same_vs_related": auc(by_label.get("same", []), by_label.get("related", [])),
+            "near_duplicate_rule": best_same_rule(points),
+        }
+    return report
+
+
+async def run_similar(conn, embedder, pairs: Sequence[Tuple[int, int, str]], build_missing: bool) -> Dict[str, dict]:
+    """Замер 2: ``coverage`` пар документов для нарезки РМ и ``pages_v2`` при разных порогах близости чанка.
+
+    Векторы каждого документа читаются (или строятся) один раз на нарезку.
 
     Args:
         conn: Соединение ``asyncpg``.
         embedder: Клиент эмбеддингов (нужен при ``build_missing``).
         pairs: ``(doc_a, doc_b, label)``.
         build_missing: Строить чанки ``pages_v2`` в памяти, если их нет.
-        threshold: Порог близости чанка.
 
     Returns:
-        dict: По нарезке — средний ``coverage`` по меткам и ``auc``.
+        dict: По нарезке — число пар по меткам и :func:`similarity_report`.
     """
     report: Dict[str, dict] = {}
     for chunker in (RM_CHUNKER, CHUNKER_PAGES_V2):
-        by_label: Dict[str, List[float]] = {}
+        cache: Dict[int, np.ndarray] = {}
+        rows: List[Tuple[np.ndarray, str]] = []
         for a, b, label in pairs:
-            va = await _vectors(conn, embedder, a, chunker, build_missing)
-            vb = await _vectors(conn, embedder, b, chunker, build_missing)
-            if not len(va) or not len(vb):
-                continue
-            by_label.setdefault(label, []).append(coverage(va, vb, threshold)[0])
-        positive = by_label.get("same", []) + by_label.get("related", [])
-        report[chunker] = {"mean_coverage": {k: round(sum(v) / len(v), 3) for k, v in by_label.items()},
-                           "pairs": {k: len(v) for k, v in by_label.items()},
-                           "auc": auc(positive, by_label.get("unrelated", []))}
+            for doc in (a, b):
+                if doc not in cache:
+                    cache[doc] = await _vectors(conn, embedder, doc, chunker, build_missing)
+            va, vb = cache[a], cache[b]
+            if len(va) and len(vb):
+                rows.append((cosine_matrix(va, vb).max(axis=1), label))
+        counts: Dict[str, int] = {}
+        for _, label in rows:
+            counts[label] = counts.get(label, 0) + 1
+        report[chunker] = {"pairs": counts, "by_threshold": similarity_report(rows)}
     return report
+
+
+SQL_VERSION_PAIRS = """
+SELECT DISTINCT a.document_id AS doc_a, split_part(a.analysis_type, ':', 2)::bigint AS doc_b
+FROM ai_document_analysis a
+JOIN ai_documents d1 ON d1.id = a.document_id AND d1.text IS NOT NULL
+JOIN ai_documents d2 ON d2.id = split_part(a.analysis_type, ':', 2)::bigint AND d2.text IS NOT NULL
+WHERE a.analysis_type ~ '^version_diff:[0-9]+$' AND a.document_id <> split_part(a.analysis_type, ':', 2)::bigint
+LIMIT $1
+"""
+SQL_TYPED_SAMPLE = """
+SELECT t.document_id, t.detected_type FROM (
+    SELECT DISTINCT ON (a.document_id) a.document_id, a.result->>'detected_type' AS detected_type
+    FROM ai_document_analysis a JOIN ai_documents d ON d.id = a.document_id AND d.text IS NOT NULL
+    WHERE a.analysis_type = 'doc_type' AND a.result ? 'detected_type'
+    ORDER BY a.document_id, a.created_at DESC
+) t
+ORDER BY random()
+LIMIT $1
+"""
+
+
+def pair_sample(typed: Sequence[Tuple[int, str]], n: int, skip: set) -> Tuple[List[tuple], List[tuple]]:
+    """Пары из случайной выборки документов: разного типа — ``unrelated``, одного типа — кандидаты ``related?``.
+
+    Args:
+        typed: ``(document_id, detected_type)`` в случайном порядке.
+        n: Сколько пар каждого вида нужно.
+        skip: Пары, уже размеченные как ``same`` (не повторять).
+
+    Returns:
+        tuple: ``(unrelated, related_candidates)`` — списки ``(doc_a, doc_b, label, type_a, type_b)``.
+    """
+    unrelated, related = [], []
+    by_type: Dict[str, List[int]] = {}
+    for i in range(0, len(typed) - 1, 2):
+        (a, ta), (b, tb) = typed[i], typed[i + 1]
+        if ta != tb and len(unrelated) < n and (min(a, b), max(a, b)) not in skip:
+            unrelated.append((a, b, "unrelated", ta, tb))
+    for doc, t in typed:
+        by_type.setdefault(t, []).append(doc)
+    for t, docs in by_type.items():
+        for a, b in zip(docs[::2], docs[1::2]):
+            if len(related) < n and (min(a, b), max(a, b)) not in skip:
+                related.append((a, b, "related?", t, t))
+    return unrelated, related
+
+
+async def make_pairs(conn, n: int) -> List[tuple]:
+    """Заготовка CSV пар для замера 2.
+
+    * ``same`` — редакции одного документа: пары, для которых РМ уже строил сравнение редакций
+      (``ai_document_analysis.analysis_type = 'version_diff:<id прошлой редакции>'``);
+    * ``unrelated`` — случайные документы разного типа (по ``doc_type`` РМ);
+    * ``related?`` — документы одного типа: **разметить вручную** (``related`` — типовой документ с общим
+      текстом, ``unrelated`` — просто тот же тип, ``same`` — редакции); строки с ``?`` при замере пропускаются.
+
+    Args:
+        conn: Соединение ``asyncpg``.
+        n: Сколько пар каждого вида.
+
+    Returns:
+        list: Строки ``(doc_a, doc_b, label, type_a, type_b)``.
+    """
+    same = [(int(r["doc_a"]), int(r["doc_b"]), "same", "", "") for r in await conn.fetch(SQL_VERSION_PAIRS, int(n))]
+    skip = {(min(a, b), max(a, b)) for a, b, *_ in same}
+    typed = [(int(r["document_id"]), r["detected_type"]) for r in await conn.fetch(SQL_TYPED_SAMPLE, int(n) * 8)]
+    unrelated, related = pair_sample(typed, n, skip)
+    return same + unrelated + related
 
 
 def read_pairs(path: str) -> List[Tuple[int, int, str]]:
@@ -232,7 +368,8 @@ def read_pairs(path: str) -> List[Tuple[int, int, str]]:
         list: Пары.
     """
     with open(path, encoding="utf-8") as fh:
-        return [(int(r["doc_a"]), int(r["doc_b"]), r["label"].strip()) for r in csv.DictReader(fh)]
+        rows = [(int(r["doc_a"]), int(r["doc_b"]), (r.get("label") or "").strip()) for r in csv.DictReader(fh)]
+    return [r for r in rows if r[2] in ("same", "related", "unrelated")]   # «related?» не размечены — пропуск
 
 
 async def main(argv=None) -> int:
@@ -252,7 +389,9 @@ async def main(argv=None) -> int:
     s = sub.add_parser("similar", help="похожие документы: rm_tokens_800 против pages_v2")
     s.add_argument("--pairs", required=True, help="CSV doc_a,doc_b,label")
     s.add_argument("--build-missing", action="store_true", help="строить pages_v2 в памяти, если чанков нет")
-    s.add_argument("--threshold", type=float, default=0.85)
+    p = sub.add_parser("pairs", help="заготовка CSV пар для similar (same / unrelated / related? на разметку)")
+    p.add_argument("--out", required=True, help="куда записать CSV")
+    p.add_argument("-n", type=int, default=50, help="пар каждого вида")
     args = parser.parse_args(argv)
 
     from configs.http_client_manager import HTTPClientManager
@@ -266,8 +405,16 @@ async def main(argv=None) -> int:
             if args.mode == "recall":
                 ids = [int(x) for x in args.ids.split(",") if x.strip()]
                 result = await run_recall(conn, embedder, normalize_env(args.env), ids)
+            elif args.mode == "pairs":
+                rows = await make_pairs(conn, args.n)
+                with open(args.out, "w", encoding="utf-8", newline="") as fh:
+                    writer = csv.writer(fh)
+                    writer.writerow(["doc_a", "doc_b", "label", "type_a", "type_b"])
+                    writer.writerows(rows)
+                result = {"written": args.out, "rows": len(rows),
+                          "by_label": {k: sum(1 for r in rows if r[2] == k) for k in ("same", "unrelated", "related?")}}
             else:
-                result = await run_similar(conn, embedder, read_pairs(args.pairs), args.build_missing, args.threshold)
+                result = await run_similar(conn, embedder, read_pairs(args.pairs), args.build_missing)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

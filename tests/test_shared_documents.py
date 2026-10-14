@@ -100,6 +100,55 @@ class EvalChunkersTests(unittest.TestCase):
         self.assertEqual(ev.parse_vector("{1,2}").tolist(), [1.0, 2.0])
 
 
+class EvalSimilarityTests(unittest.TestCase):
+    """Подбор порогов похожих документов, заготовка пар, переиндексация."""
+
+    def test_rule_and_report(self):
+        """Правило «почти копия» находит редакции; отчёт по порогам считает AUC."""
+        from scripts import eval_chunkers as ev
+        import numpy as np
+        points = [(0.95, 0.97, "same"), (0.92, 0.96, "same"), (0.7, 0.9, "related"), (0.1, 0.86, "unrelated")]
+        rule = ev.best_same_rule(points)
+        self.assertEqual((rule["f1"], rule["precision"], rule["recall"]), (1.0, 1.0, 1.0))
+        self.assertIsNone(ev.best_same_rule([(0.5, 0.9, "related")]))
+        rows = [(np.array([0.99, 0.97]), "same"), (np.array([0.9, 0.5]), "related"), (np.array([0.3, 0.2]), "unrelated")]
+        report = ev.similarity_report(rows)
+        self.assertEqual(report["0.85"]["mean_coverage"], {"same": 1.0, "related": 0.5, "unrelated": 0.0})
+        self.assertEqual(report["0.85"]["auc_linked_vs_unrelated"], 1.0)
+        self.assertEqual(report["0.95"]["auc_same_vs_related"], 1.0)
+
+    def test_pair_sample_and_read(self):
+        """Разные типы — unrelated, один тип — related? (на разметку); неразмеченные строки не читаются."""
+        from scripts import eval_chunkers as ev
+        typed = [(1, "A"), (2, "B"), (3, "A"), (4, "A"), (5, "C"), (6, "C")]
+        unrelated, related = ev.pair_sample(typed, 10, skip={(3, 4)})
+        self.assertEqual([r[:3] for r in unrelated], [(1, 2, "unrelated")])
+        self.assertEqual({r[:3] for r in related}, {(1, 3, "related?"), (5, 6, "related?")})
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8") as fh:
+            fh.write("doc_a,doc_b,label,type_a,type_b\n1,2,same,,\n3,4,related?,A,A\n5,6,unrelated,C,D\n")
+        try:
+            self.assertEqual(ev.read_pairs(fh.name), [(1, 2, "same"), (5, 6, "unrelated")])
+        finally:
+            os.unlink(fh.name)
+
+    def test_reindex_continues_after_error(self):
+        """Переиндексация: сбой одной экспертизы не останавливает остальные, итог суммируется."""
+        from knowledge_store import indexer
+        from knowledge_store.scope import Scope
+        from scripts import reindex_pages_v2 as rx
+
+        async def fake_index(scope, embedder):
+            if scope.expertise_id == 2:
+                raise RuntimeError("сбой")
+            return {"documents": 1, "chunks": 3, "failed": 0}
+        with mock.patch.object(indexer, "build_embedder", lambda mgr: object()), \
+                mock.patch.object(indexer, "index_expertise", fake_index):
+            report = asyncio.run(rx.reindex([Scope("dev", 1), Scope("dev", 2), Scope("dev", 3)], object()))
+        self.assertEqual(report["total"], {"documents": 2, "chunks": 6, "failed": 0})
+        self.assertIn("error", report["dev:2"])
+
+
 class PipelineReuseTests(unittest.TestCase):
     """process_parse_result берёт текст общего документа вместо чтения файла."""
 
@@ -142,6 +191,34 @@ class PipelineReuseTests(unittest.TestCase):
             self.assertTrue(finder.call_args.kwargs["force"])
             self.assertTrue(saved.call_args.kwargs["force"])
             p.file_reader.read_file.assert_awaited_once()
+
+
+@unittest.skipUnless(PG, "нужен PE_TEST_PG=host:port")
+class MakePairsDbTests(unittest.TestCase):
+    """Заготовка пар по кэшу анализов РМ."""
+
+    def test_make_pairs(self):
+        """Редакции — из version_diff, типы — из doc_type; документы без текста пропускаются."""
+        from scripts import eval_chunkers as ev
+        host, port = PG.split(":")
+        c = PsqlConn(host, int(port))
+        pg_schema.build(c)
+        ids = []
+        for i in range(6):
+            sha = hashlib.sha256(f"p{i}".encode()).hexdigest()
+            text = "NULL" if i == 5 else f"'t{i}'"
+            ids.append(int(c._run(f"INSERT INTO ai_documents (content_sha256, text) VALUES ('{sha}', {text}) RETURNING id").split()[0]))
+        c._run(f"INSERT INTO ai_document_analysis (document_id, analysis_type, prompt_version, model, result) VALUES "
+               f"({ids[1]}, 'version_diff:{ids[0]}', 'v', 'm', '{{}}'), ({ids[2]}, 'version_diff:{ids[5]}', 'v', 'm', '{{}}')")
+        for i, t in enumerate(["A", "A", "B", "B", "C", "C"]):
+            c._run(f"INSERT INTO ai_document_analysis (document_id, analysis_type, prompt_version, model, result) "
+                   f"VALUES ({ids[i]}, 'doc_type', 'v', 'm', '{{\"detected_type\": \"{t}\"}}')")
+        rows = asyncio.run(ev.make_pairs(c, 10))
+        same = [r for r in rows if r[2] == "same"]
+        self.assertEqual([(r[0], r[1]) for r in same], [(ids[1], ids[0])])
+        self.assertTrue(all(ids[5] not in r[:2] for r in rows))
+        self.assertTrue(all(r[3] != r[4] for r in rows if r[2] == "unrelated"))
+        self.assertTrue(all(r[3] == r[4] for r in rows if r[2] == "related?"))
 
 
 @unittest.skipUnless(PG, "нужен PE_TEST_PG=host:port")
