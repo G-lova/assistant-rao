@@ -1,10 +1,7 @@
 services:
   postgres:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg15
     container_name: rao_postgres
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
     environment:
       POSTGRES_USER: ${DB_USER}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
@@ -28,9 +25,6 @@ services:
   is-rao-pgadmin:
     image: dpage/pgadmin4:latest
     container_name: is-rao-pgadmin
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
     restart: unless-stopped
     ports:
       - "2303:80"
@@ -68,9 +62,6 @@ services:
     env_file:
       - .env
     container_name: rao_api
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
     environment:
       DB_HOST: postgres
       DB_USER: ${DB_USER}
@@ -96,9 +87,6 @@ services:
   redis:
     image: redis:7-alpine
     container_name: rao_redis
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
     # ports:
     #   - "6379:6379"
     networks:
@@ -112,9 +100,6 @@ services:
     env_file:
       - .env
     container_name: rao_celery_worker
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
     volumes:
       - .:/app
       - /tmp:/tmp
@@ -131,14 +116,33 @@ services:
     command: celery -A celery_app worker -E --pool=solo --loglevel=info --concurrency=4 -Q evaluation,parsing,scoring
     restart: unless-stopped
 
+  celery_worker_rm:
+    build: .
+    env_file:
+      - .env
+    container_name: rao_celery_worker_rm
+    volumes:
+      - .:/app
+      - /tmp:/tmp
+    environment:
+      - REDIS_URL=redis://rao_redis:6379/0
+      - CELERY_BROKER_URL=redis://rao_redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://rao_redis:6379/0
+      - TZ=${TZ}
+      - API_KEY=${API_KEY}
+    depends_on:
+      - redis
+    networks:
+      - rao_network
+    # Риск-мониторинг: отдельная очередь, чтобы ночной анализ не блокировал /evaluate-documents
+    command: celery -A celery_app worker -E --pool=prefork --concurrency=2 --loglevel=info -Q risk_monitoring -n rm@%h
+    restart: unless-stopped
+
   celery_beat:
     build: .
     env_file:
       - .env
     container_name: rao_celery_beat
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
     command: celery -A celery_app beat --loglevel=info
     volumes:
       - .:/app
@@ -158,9 +162,6 @@ services:
   flower:
     build: .
     container_name: rao_flower
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
     command: celery -A celery_app flower --port=5555 --inspect-timeout=10000
     ports:
       - "5555:5555"

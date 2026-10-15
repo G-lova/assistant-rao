@@ -1,5 +1,7 @@
 import asyncio
+import copy
 import json
+from typing import Any
 import pandas as pd
 import asyncio
 import datetime
@@ -18,9 +20,15 @@ from configs.parsing import CloudStorageParser
 from evaluate_documents.send_subject_service import SendSubjectService
 from evaluate_documents.type_data_extractor import DOCUMENT_TYPE_MAPPING, TypeDataExtractor
 from src.subject_detector import SubjectDetector
+from knowledge_store import hooks as ks_hooks
+from knowledge_store.documents import extraction_version
+from knowledge_store.scope import Scope
+from evaluate_documents.package_view import completeness_input
 
 
 logger = get_logger(__name__)
+
+LLM_CHUNK_SIZE = 10000  # размер блока текста для TypeDataExtractor (входит в ключ кэша извлечения)
 
 
 class TasksPipeline:
@@ -28,13 +36,14 @@ class TasksPipeline:
     Класс для обработки документов экспертизы, включая чтение файлов, определение типа документа, оценку полноты и согласованности, а также отправку данных во внешний API.
     """
 
-    def __init__(self, http_manager: HTTPClientManager, expertise_id: int, environment: str = None):
+    def __init__(self, http_manager: HTTPClientManager, expertise_id: int, environment: str = None, force: bool = False):
         """
         Инициализация TasksPipeline с указанием среды и ID экспертизы
         Args:
             http_manager (HTTPClientManager): Менеджер HTTP-клиентов
             expertise_id (int): ID экспертизы
             environment (str): Окружение ('dev', 'stage', 'prod')
+            force (bool): Не брать сохранённые текст и результат извлечения из общего документа (перечитать файлы)
         """
 
         # Загрузка конфигурации
@@ -42,6 +51,12 @@ class TasksPipeline:
         self.config = Config()
         self.http_manager = http_manager
         self.x_api_database = environment
+        self.force = bool(force)
+        try:
+            # ключ экспертизы в хранилище знаний: окружение + id (один Postgres на все окружения)
+            self.ks_scope = Scope.of(environment, expertise_id)
+        except ValueError:
+            self.ks_scope = None
         
         # Инициализация компонентов с конфигурацией
         db_config = self.config.get_database_config(environment)
@@ -70,7 +85,13 @@ class TasksPipeline:
         self.completeness_checker = CompletenessChecker(client, model)
         self.consistency_checker = ConsistencyChecker(client, model)
         self.cloud_parser = CloudStorageParser(self.http_manager, self.df['object'].iloc[0])
-        self.llm_semaphore = asyncio.Semaphore(3)
+        # Ограничения параллельности действуют на каждый отдельный вызов. Раньше семафор захватывался вокруг
+        # asyncio.gather целиком и ничего не ограничивал: все файлы ссылки и все проверки полноты шли к модели
+        # одновременно (отсюда 504 шлюза модели на больших комплектах).
+        self.llm_semaphore = asyncio.Semaphore(self.config.EVAL_LLM_CONCURRENCY)     # запросы к LLM
+        self.file_semaphore = asyncio.Semaphore(self.config.EVAL_FILE_CONCURRENCY)   # чтение/OCR + извлечение файла
+        self.link_semaphore = asyncio.Semaphore(self.config.EVAL_LINK_CONCURRENCY)   # скачивание ссылок
+        self.type_data_extractor.semaphore = self.llm_semaphore                      # блоки текста — под общим лимитом
 
 
     async def process_link(self, link):
@@ -78,7 +99,8 @@ class TasksPipeline:
         Обрабатывает ссылку на облачное хранилище.
         """
         try:
-            parse_result = await self.cloud_parser.parse_cloud_storage_link(link.media_links, link.id)
+            async with self.link_semaphore:
+                parse_result = await self.cloud_parser.parse_cloud_storage_link(link.media_links, link.id)
             logger.info(f'Результат парсинга {link.media_links}: {parse_result}')
 
             tasks = []
@@ -87,9 +109,8 @@ class TasksPipeline:
                 if parse_result.get("status") == "success":
                     file_path = file_info.get("file_path")
                     filename = file_info.get("filename", f"doc_from_link_{file_info.get('original_url')}")
-                    tasks.append(self.process_parse_result(file_path, filename, link))
-            async with self.llm_semaphore:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
+                    tasks.append(self._limited(self.file_semaphore, self.process_parse_result(file_path, filename, link)))
+            results = await asyncio.gather(*tasks, return_exceptions=True)
             
             # Обрабатываем результаты
             successful_results = []
@@ -105,9 +126,11 @@ class TasksPipeline:
             if link.doc_code == 'linkDocs':  
                 eis_procurement_number = parse_result.get("procurement_number")
                 eis_error = parse_result.get("error")
+                # Хранилище знаний: номер закупки — для сопоставления с риск-мониторингом (при выключенном флаге — no-op)
+                await ks_hooks.on_identifiers(self.ks_scope, eis_procurement_number)
 
                 eis_data = {
-                    "document_name": "Ссылка на ЕИС",
+                    "document_name": {"value": "Ссылка на ЕИС", "confidence": 1.0},
                     "eis_procurement_number": str(eis_procurement_number) if eis_procurement_number else None,
                     "filename": link.media_links,
                     "url": link.media_links,
@@ -139,7 +162,7 @@ class TasksPipeline:
             # if "zakupki.gov.ru" in link.media_links:
                 logger.error(f"Ошибка обработки ЕИС-ссылки {link.media_links}: {e}")
                 eis_data = {
-                    "document_name": "Ссылка на ЕИС",
+                    "document_name": {"value": "Ссылка на ЕИС", "confidence": 1.0},
                     "filename": link.media_links,
                     "url": link.media_links,
                     "eis_status": "error",
@@ -179,15 +202,49 @@ class TasksPipeline:
             return fallback
 
 
+    @staticmethod
+    async def _limited(semaphore: asyncio.Semaphore, coro):
+        """Выполняет корутину, заняв место в семафоре (ограничение на каждый вызов, а не на gather целиком).
+
+        Args:
+            semaphore: Семафор.
+            coro: Корутина.
+
+        Returns:
+            Any: Результат корутины.
+        """
+        async with semaphore:
+            return await coro
+
     async def process_parse_result(self, file_path, filename, link):
+        """Читает один файл, определяет тип документа и извлекает ключевые данные.
+
+        Если включено повторное использование общего документа (``DOC_DEDUP_ENABLED``), текст файла с тем же
+        SHA-256 берётся из хранилища без повторного чтения и OCR.
+
+        Args:
+            file_path: Локальный путь к скачанному файлу.
+            filename: Имя файла.
+            link: Строка ссылки (``doc_code``, ``object``, ``media_links``).
+
+        Returns:
+            dict: Результат ``TypeDataExtractor`` (``type_compliance``, ``readability``, ``raw_data``).
         """
-        
-        """
-        extracted_text = await self.file_reader.read_file(file_path, filename)
+        cached = await ks_hooks.find_cached_text(file_path, force=self.force)
+        if cached:
+            logger.info(f"Текст {filename} взят из хранилища (документ {cached['id']}, {cached.get('reader')}), OCR не нужен")
+            extracted_text = cached["text"]
+        else:
+            extracted_text = await self.file_reader.read_file(file_path, filename)
         if not extracted_text or "[Нет читаемого текста]" in extracted_text:
             raise ValueError("Не удалось извлечь текст")
 
-        chunks = split_large_text(extracted_text, max_chunk_size=10000)
+        # Хранилище знаний «РАО Эксперт»: сохраняем текст документа (при выключенном флаге — no-op)
+        ks_doc_id = await ks_hooks.on_document_text(
+            self.ks_scope, link.doc_code, filename, getattr(link, 'media_links', None), file_path, extracted_text,
+            force=self.force)
+
+        chunks = split_large_text(extracted_text, max_chunk_size=LLM_CHUNK_SIZE)
         if not chunks:
             fallback = {
                 "type_compliance": {"status": "deny", "detected_type": "unknown", "issues": ["Пустой документ"]},
@@ -198,9 +255,19 @@ class TasksPipeline:
             return fallback
             
         # ====== Определение типа документа, оценка читаемости и извлечение ключевых данных ======        
-        extracted_data = await self.type_data_extractor.extract_data_from_document(chunks, filename, link.doc_code, link.object)
-        if isinstance(extracted_data, str):
-            extracted_data = json.loads(extracted_data)
+        # Кэш общего документа: тот же файл с тем же типом, объектом и именем модели повторно не отправляется
+        version = extraction_version(link.doc_code, link.object, filename, LLM_CHUNK_SIZE, extracted_text)
+        model = getattr(self.type_data_extractor, "model", None)
+        extracted_data = await ks_hooks.cached_extraction(ks_doc_id, version, model, force=self.force)
+        if extracted_data is not None:
+            logger.info(f"Извлечённые данные {filename} взяты из кэша общего документа")
+        else:
+            extracted_data = await self.type_data_extractor.extract_data_from_document(chunks, filename, link.doc_code, link.object)
+            if isinstance(extracted_data, str):
+                extracted_data = json.loads(extracted_data)
+            await ks_hooks.save_extraction(ks_doc_id, version, model, extracted_data)
+
+        await ks_hooks.on_document_extracted(ks_doc_id, extracted_data)
 
         return extracted_data
     
@@ -258,27 +325,32 @@ class TasksPipeline:
             # создание нового признака для сохранения результатов проверки документов по типам документов
             self.df['documents_results'] = [[] for _ in range(len(self.df))]
 
+            # Хранилище знаний: очистка прошлого прогона и сохранение паспорта закупки (при выключенном флаге — no-op)
+            await ks_hooks.on_run_start(self.df, self.x_api_database)
+
             # === Парсинг ссылок ===
-            media_links = self.df[self.df['media_links'].notna()]
+            media_links = self.df[self.df['media_links'].notna()].copy()   # копия: без SettingWithCopyWarning
             if len(media_links) > 0:
                 media_links['media_links'] = media_links['media_links'].apply(json.loads)
                 media_links_exploded = media_links.explode('media_links')
                 media_links_exploded = media_links_exploded[media_links_exploded['media_links'].notna()]
                 
-                async with self.llm_semaphore:
-                    extracted_results = await asyncio.gather(*(self.process_link(link) for link in media_links_exploded.itertuples()))
+                links = list(media_links_exploded.itertuples())
+                extracted_results = await asyncio.gather(*(self.process_link(link) for link in links),
+                                                         return_exceptions=True)
 
-                # Обрабатываем результаты
+                # Обрабатываем результаты: ссылка и её результат остаются в одной паре (раньше пары собирались
+                # заново после фильтрации, и пропуск одного результата сдвинул бы все последующие)
                 successful_extracted_results = []
-                for link, result in zip(media_links_exploded.itertuples(), extracted_results):
+                for link, result in zip(links, extracted_results):
                     if isinstance(result, Exception):
                         logger.error(f"Ошибка при анализе ссылки {link}: {result}")
                         continue
-                    if result != None:
-                        successful_extracted_results.append(result)
+                    if result is not None:
+                        successful_extracted_results.append((link, result))
 
                 # Заполняем данные о предоставленных документах и результаты анализа документов в датафрейме
-                for link, result in zip(media_links_exploded.itertuples(), successful_extracted_results):
+                for link, result in successful_extracted_results:
                     if not isinstance(result, list):
                         result = [result]
                     for res in result:
@@ -306,16 +378,16 @@ class TasksPipeline:
             # ====== Оценка полноты и соответствия данных в документе ======
             completeness_tasks = []
             for row in self.df[self.df['documents_results'].map(bool)].itertuples():
-                data_for_completeness = {
-                    **data_for_final_evaluation, 
-                    "doc_code": row.doc_code, 
-                    "doc_type": 'Ссылка на ЕИС' if row.doc_code == 'linkDocs' else DOCUMENT_TYPE_MAPPING.get(row.doc_code, "Неизвестный документ"),
-                    "documents": row.documents_results
-                }
+                # Полнота оценивается только по документам этого типа: отсутствие других типов на неё не влияет
+                data_for_completeness = completeness_input(
+                    data_for_final_evaluation,
+                    row.doc_code,
+                    'Ссылка на ЕИС' if row.doc_code == 'linkDocs' else DOCUMENT_TYPE_MAPPING.get(row.doc_code, "Неизвестный документ"),
+                    row.documents_results)
                 completeness_tasks.append(self.completeness_checker.check_doc_completeness(self.consistency_checker.remove_empty(data_for_completeness), row.doc_code))
 
-            async with self.llm_semaphore:
-                completeness_results = await asyncio.gather(*completeness_tasks, return_exceptions=True)
+            completeness_results = await asyncio.gather(
+                *(self._limited(self.llm_semaphore, t) for t in completeness_tasks), return_exceptions=True)
                 
             for completeness, row in zip(completeness_results, self.df[self.df['documents_results'].map(bool)].itertuples()):
                 if isinstance(completeness, Exception):
@@ -352,6 +424,9 @@ class TasksPipeline:
             final_evaluation_result = await self.consistency_checker.check_consistency(data_for_final_evaluation)
             await save_summary_report(procurement_id=self.df['id'].iloc[0], summary_data=final_evaluation_result)
 
+            # Хранилище знаний: фоновая индексация текстов (при выключенном флаге — no-op)
+            await ks_hooks.on_run_finished(self.ks_scope)
+
             # заполнение поля subjectContract в БД
             if pd.isna(self.df["subjectContract"][0]):
                 subject_detector = SubjectDetector(self.http_manager, self.x_api_database)
@@ -365,8 +440,42 @@ class TasksPipeline:
                 send_subject_service = SendSubjectService(self.http_manager, self.x_api_database)
                 await send_subject_service.send_subject(int(self.df.id.iloc[0]), subject_result.get("subject", None), True)
 
-            return final_evaluation_result
+            # return final_evaluation_result
+            return self.strip_raw_data(final_evaluation_result)
             
         except Exception as e:
             logger.error(f"Error in evaluator pipeline: {e}", exc_info=True)
             raise
+
+    
+    def strip_raw_data(self, response: dict[str, Any]) -> dict[str, Any]:
+        """
+        Возвращает копию ответа проверки документов с урезанным raw_data.
+
+        Все поля ответа сохраняются без изменений, кроме ``raw_data`` внутри
+        каждого элемента ``result.documents``. В каждой записи ``raw_data``
+        остаются только ключи ``document_name``, ``filename`` и ``url``
+        (если они есть в исходной записи). Исходный словарь не изменяется.
+
+        Args:
+            response: Распарсенный JSON-ответ сервиса (со ``status`` и ``result``).
+
+        Returns:
+            Новый словарь той же структуры с сокращённым ``raw_data``.
+        """
+        RAW_DATA_KEYS = ("document_name", "filename", "url")
+
+        result = copy.deepcopy(response)
+        documents = result.get("documents", [])
+
+        for document in documents:
+            raw_items = document.get("raw_data", [])
+            if not isinstance(raw_items, list):
+                continue
+            document["raw_data"] = [
+                {key: item[key] for key in RAW_DATA_KEYS if key in item}
+                for item in raw_items
+                if isinstance(item, dict)
+            ]
+
+        return result

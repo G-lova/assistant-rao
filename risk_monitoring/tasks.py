@@ -1,0 +1,130 @@
+"""Celery-задачи риск-мониторинга (очередь ``risk_monitoring``, отдельный воркер)."""
+import asyncio
+from typing import Any, Dict, List
+
+from celery_app import celery_app
+from configs.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+def _summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Счётчики результатов по статусам."""
+    counts: Dict[str, int] = {}
+    for r in results:
+        counts[r.get("status", "unknown")] = counts.get(r.get("status", "unknown"), 0) + 1
+    counts["pushed"] = sum(1 for r in results if r.get("pushed"))
+    return counts
+
+
+def _llm_summary(before: Dict[str, int], stats: Dict[str, Any]) -> Dict[str, Any]:
+    """Сводка нагрузки на модель: запросы ``call_llm`` за задачу и статистика анализатора."""
+    from risk_monitoring.llm_json import CALLS
+
+    return {"requests": CALLS["requests"] - before["requests"], "failed": CALLS["failed"] - before["failed"], **(stats or {})}
+
+
+def _strip(results: List[Dict[str, Any]], include_analysis: bool) -> List[Dict[str, Any]]:
+    """Убирает ``ai_analysis`` из ответа задачи (он уже записан во внешнюю БД), если не просили вернуть."""
+    if include_analysis:
+        return results
+    return [{k: v for k, v in r.items() if k != "ai_analysis"} for r in results]
+
+
+@celery_app.task(bind=True, name="rm_analyze_files_task", soft_time_limit=3300, time_limit=3600)
+def rm_analyze_files_task(self, file_ids: List[int], environment: str, force: bool = False, recompute: bool = False,
+                          push: bool = True, include_analysis: bool = False) -> Dict[str, Any]:
+    """Анализ файлов ``risk_monitoring_files`` и запись AI-паспорта.
+
+    Args:
+        file_ids: id файлов.
+        environment: Окружение внешней системы.
+        force: Повторный анализ уже проанализированных (режим отладки).
+        recompute: Игнорировать кэш LLM (режим отладки).
+        push: Записывать результат во внешнюю БД.
+        include_analysis: Вернуть ``ai_analysis`` в результате задачи.
+
+    Returns:
+        Dict[str, Any]: ``summary`` (счётчики) и ``results`` по файлам.
+    """
+    from celery_app import already_succeeded
+
+    if already_succeeded(self):
+        return self.AsyncResult(self.request.id).result
+    from configs.ai_repo import AIRepo
+    from configs.http_client_manager import HTTPClientManager
+    from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
+
+    from risk_monitoring.llm_json import CALLS
+
+    before = dict(CALLS)
+    stats: Dict[str, Any] = {}
+
+    async def run() -> List[Dict[str, Any]]:
+        """Создаёт HTTP-менеджер и пул Postgres внутри event loop задачи и запускает анализ."""
+        async with HTTPClientManager(timeout=180.0) as mgr, AIRepo() as repo:
+            analyzer = AIFileAnalyzer(mgr, environment, repo, push_results=push, force=force, recompute=recompute)
+            try:
+                return await analyzer.analyze_ids(file_ids)
+            finally:
+                stats.update(analyzer.stats)
+
+    results = asyncio.run(run())
+    summary = _summary(results)
+    summary["llm"] = _llm_summary(before, stats)
+    logger.info(f"Риск-мониторинг, файлы: {summary}")
+    return {"summary": summary, "results": _strip(results, include_analysis)}
+
+
+@celery_app.task(bind=True, name="rm_analyze_xml_task", soft_time_limit=3300, time_limit=3600)
+def rm_analyze_xml_task(self, xml_ids: List[int], environment: str, force: bool = False, push: bool = True,
+                        use_llm: bool = True, include_analysis: bool = False) -> Dict[str, Any]:
+    """Анализ XML ЕИС (``risk_monitoring_eis_xml_sources``) как событий и запись результата.
+
+    Args:
+        xml_ids: id XML.
+        environment: Окружение внешней системы.
+        force: Повторный анализ уже проанализированных (режим отладки).
+        push: Записывать результат во внешнюю БД.
+        use_llm: Вызывать ``EventAnalyzer``.
+        include_analysis: Вернуть ``ai_analysis`` в результате задачи.
+
+    Returns:
+        Dict[str, Any]: ``summary`` (счётчики) и ``results`` по XML.
+    """
+    from celery_app import already_succeeded
+
+    if already_succeeded(self):
+        return self.AsyncResult(self.request.id).result
+    from configs.http_client_manager import HTTPClientManager
+    from risk_monitoring.xml_event_analyzer import XmlEventAnalyzer
+
+    from risk_monitoring.llm_json import CALLS
+
+    before = dict(CALLS)
+    stats: Dict[str, Any] = {}
+
+    async def run() -> List[Dict[str, Any]]:
+        """Создаёт HTTP-менеджер (и, если Postgres доступен, пул AIRepo для срока хранения) и запускает анализ."""
+        from contextlib import AsyncExitStack
+
+        from configs.ai_repo import AIRepo
+
+        async with AsyncExitStack() as stack:
+            mgr = await stack.enter_async_context(HTTPClientManager(timeout=180.0))
+            try:
+                repo = await stack.enter_async_context(AIRepo())
+            except Exception as e:  # noqa: BLE001 — без Postgres события разбираются, срок хранения не меняется
+                logger.warning(f"AIRepo недоступен, срок хранения текстов по событиям не обновляется: {e}")
+                repo = None
+            analyzer = XmlEventAnalyzer(mgr, environment, push_results=push, force=force, use_llm=use_llm, repo=repo)
+            try:
+                return await analyzer.analyze_ids(xml_ids)
+            finally:
+                stats.update(getattr(analyzer, "stats", {}) or {})
+
+    results = asyncio.run(run())
+    summary = _summary(results)
+    summary["llm"] = _llm_summary(before, stats)
+    logger.info(f"Риск-мониторинг, XML: {summary}")
+    return {"summary": summary, "results": _strip(results, include_analysis)}

@@ -1,6 +1,6 @@
 {
   "type": "object",
-  "required": ["has_text", "raw_text", "visual_notes", "image_description", "readability"],
+  "required": ["has_text", "raw_text", "visual_notes", "image_description", "processing_quality"],
   "properties": {
     "has_text": {
       "type": "boolean",

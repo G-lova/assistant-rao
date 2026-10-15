@@ -1,0 +1,62 @@
+{
+    "type": "object",
+    "required": ["resume", "purpose", "main_sections", "key_conditions", "topics", "keywords",
+                 "technical_objects", "assessment", "recommendations", "confidence"],
+    "properties": {
+        "resume": {"type": "string"},
+        "purpose": {"type": "string"},
+        "main_sections": {"type": "array", "items": {"type": "string"}},
+        "key_conditions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["name", "value"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "value": {"type": "string"},
+                    "section": {"type": ["string", "null"]}
+                }
+            }
+        },
+        "topics": {"type": "array", "items": {"type": "string"}},
+        "keywords": {"type": "array", "items": {"type": "string"}},
+        "classification": {
+            "type": "object",
+            "properties": {
+                "subject_kind": {"type": "string", "enum": ["товары", "работы", "услуги", "смешанный", "не определено"]},
+                "industry": {"type": ["string", "null"]}
+            }
+        },
+        "technical_objects": {
+            "type": "object",
+            "required": ["brands", "models", "manufacturers", "standards"],
+            "properties": {
+                "brands": {"type": "array", "items": {"type": "string"}},
+                "models": {"type": "array", "items": {"type": "string"}},
+                "manufacturers": {"type": "array", "items": {"type": "string"}},
+                "standards": {"type": "array", "items": {"type": "string"}}
+            }
+        },
+        "structure": {
+            "type": "object",
+            "properties": {
+                "has_tables": {"type": "boolean"},
+                "has_appendices": {"type": "boolean"},
+                "appendices": {"type": "array", "items": {"type": "string"}}
+            }
+        },
+        "assessment": {
+            "type": "object",
+            "required": ["completeness", "structuredness", "document_quality", "legal_elaboration", "competition_restriction"],
+            "properties": {
+                "completeness": {"type": "number", "minimum": 0, "maximum": 1},
+                "structuredness": {"type": "number", "minimum": 0, "maximum": 1},
+                "document_quality": {"type": "number", "minimum": 0, "maximum": 1},
+                "legal_elaboration": {"type": "number", "minimum": 0, "maximum": 1},
+                "competition_restriction": {"type": "number", "minimum": 0, "maximum": 1}
+            }
+        },
+        "recommendations": {"type": "array", "items": {"type": "string"}},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+    }
+}

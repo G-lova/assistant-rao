@@ -1,0 +1,25 @@
+{
+    "type": "object",
+    "required": ["summary", "risk_relevant", "changes"],
+    "properties": {
+        "summary": {"type": "string"},
+        "risk_relevant": {"type": "boolean"},
+        "changes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["type", "subject", "impact", "risk_effect", "significance"],
+                "properties": {
+                    "type": {"type": "string", "enum": ["added", "removed", "modified", "editorial"]},
+                    "subject": {"type": "string"},
+                    "section": {"type": ["string", "null"]},
+                    "before": {"type": ["string", "null"]},
+                    "after": {"type": ["string", "null"]},
+                    "impact": {"type": "string"},
+                    "risk_effect": {"type": "string", "enum": ["increases", "decreases", "neutral"]},
+                    "significance": {"type": "number", "minimum": 0, "maximum": 1}
+                }
+            }
+        }
+    }
+}

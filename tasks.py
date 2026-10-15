@@ -18,29 +18,164 @@ def run_async(coro):
 
 
 @celery_app.task(bind=True, name="evaluate_documents_task")
-def evaluate_documents_task(self, expertise_id: int, environment: str):
-    """
-    Запускает полный конвейер оценки экспертов для заданной экспертизы.
+def evaluate_documents_task(self, expertise_id: int, environment: str, force: bool = False):
+    """Оценка комплекта документов экспертизы (``/evaluate-documents``).
 
-    Последовательно выполняет все этапы: загрузку данных, предобработку, расчёт сходства,
-    фильтрацию по конфликтам и вычисление рейтинга.
+    Скачивает и читает документы, определяет их тип, извлекает данные, оценивает полноту и согласованность
+    и сохраняет итог в ``raw_document_data``.
 
     Args:
-        sql_file_path (str): Имя файла с SQL-запросом для получения данных об экспертах.
-        expertise_id (str или int): Уникальный идентификатор экспертизы.
+        expertise_id: ID экспертизы.
+        environment: Окружение (``X-API-Database``).
+        force: Не использовать сохранённые текст и результат извлечения общего документа (перечитать файлы).
 
     Returns:
-        pandas.DataFrame: Датафрейм с отфильтрованными и ранжированными экспертами,
-        содержащий колонки 'expert_id' и 'rating'.
+        dict: Итоговый отчёт ``ConsistencyChecker`` (формат ответа ``/task/{id}`` не меняется).
     """
+    from celery_app import already_succeeded
+
+    if already_succeeded(self):
+        return self.AsyncResult(self.request.id).result
+
     # ✅ Инициализируем менеджер внутри асинхронного контекста задачи
 
     # @async_retry(CLOUD_PARSING_RETRY_CONFIG)
     async def run_with_manager():
-        async with HTTPClientManager(timeout=90.0) as mgr:
-            tasks_piplene = TasksPipeline(mgr, expertise_id, environment)
+        from knowledge_store.db import task_pool
+
+        # один пул Postgres на задачу для хранилища знаний (создаётся лениво, только если оно включено)
+        async with HTTPClientManager(timeout=90.0) as mgr, task_pool():
+            tasks_piplene = TasksPipeline(mgr, expertise_id, environment, force=force)
             task_result = await tasks_piplene.run_pipeline()
             return task_result
         
-    return run_async(async_retry(CLOUD_PARSING_RETRY_CONFIG)(run_with_manager)())
+    async def run_with_retry():
+        """Повтор конвейера при сбоях загрузки, но не при перегрузке модели.
+
+        Раньше весь конвейер (скачивание, OCR, извлечение, все запросы к модели) запускался заново до 3 раз
+        и на 504 шлюза модели — это утраивало нагрузку на перегруженный сервер. Теперь сбой сервера модели
+        (5xx, таймаут) повторяется точечно внутри вызова (``configs.llm_resilience``), а конвейер целиком — нет.
+        """
+        from configs.llm_resilience import transient
+
+        cfg = CLOUD_PARSING_RETRY_CONFIG
+        for attempt in range(cfg.max_retries + 1):
+            try:
+                return await run_with_manager()
+            except Exception as e:  # noqa: BLE001
+                # openai.InternalServerError (status_code 504) или переобёрнутый OpenAIError с HTML страницы 504
+                llm_overload = "openai" in type(e).__module__ and (
+                    transient(e) or any(k in str(e) for k in ("504", "502", "503", "Gateway", "Timeout", "timed out")))
+                if llm_overload or attempt == cfg.max_retries:
+                    raise
+                delay = cfg.delay * (cfg.backoff ** attempt)
+                logger.warning(f"evaluate_documents_task: попытка {attempt + 1} не удалась ({type(e).__name__}), "
+                               f"повтор через {delay:.0f} с")
+                await asyncio.sleep(delay)
+
+    return run_async(run_with_retry())
     # return asyncio.run(run_with_manager)
+
+
+@celery_app.task(bind=True, name="index_documents_task")
+def index_documents_task(self, expertise_id: int, environment: str = None):
+    """Фоновая индексация документов экспертизы и сразу за ней построение фактов.
+
+    Запускается из :func:`knowledge_store.hooks.on_run_finished` после завершения
+    ``/evaluate-documents``. Факты (при ``PE_FACTS_ENABLED=true``) строятся сразу после индексации,
+    так как следом обязательно запрашивается экспертное заключение. При выключенном
+    ``KNOWLEDGE_STORE_ENABLED`` ничего не делает.
+
+    Args:
+        expertise_id: ID экспертизы.
+        environment: Окружение (``X-API-Database``). Сообщения, поставленные до появления параметра, относятся
+            к ``PE_LEGACY_ENV`` (по умолчанию ``dev``).
+
+    Returns:
+        dict: ``{"index": ..., "facts": ...}`` либо ``{"skipped": True}``.
+    """
+    import os
+
+    from knowledge_store.db import task_pool
+    from knowledge_store.runner import facts_enabled, index_and_build_facts
+    from knowledge_store.safe import is_enabled
+    from knowledge_store.scope import Scope
+
+    if not is_enabled():
+        return {"skipped": True}
+
+    async def run():
+        """Создаёт HTTP-менеджер и LLM-клиент внутри event loop задачи и запускает индексацию и факты."""
+        client, model = (None, None)
+        if facts_enabled():
+            from configs.llm_client import get_llm
+            client, model = get_llm()
+        scope = Scope.of(environment or os.getenv("PE_LEGACY_ENV", "dev"), expertise_id)
+        async with HTTPClientManager(timeout=120.0) as mgr, task_pool():
+            return await index_and_build_facts(scope, mgr, client, model)
+
+    return run_async(run())
+
+
+@celery_app.task(name="purge_expired_texts_task")
+def purge_expired_texts_task():
+    """Ночная очистка текстов и чанков с истёкшим сроком хранения (``PE_TEXT_RETENTION_DAYS``).
+
+    Returns:
+        dict: ``{"purged": N}`` либо ``{"skipped": True}``, если хранилище выключено.
+    """
+    from knowledge_store.indexer import purge_expired_texts
+    from knowledge_store.safe import is_enabled
+
+    if not is_enabled():
+        return {"skipped": True}
+    return {"purged": run_async(purge_expired_texts())}
+
+
+@celery_app.task(bind=True, name="generate_summary_opinion_task")
+def generate_summary_opinion_task(self, expertise_id: int, environment: str, send_draft: bool = False,
+                                  rebuild_facts: bool = False):
+    """Генерирует сводное ЭЗ из хранилища знаний (факты → ``data`` по ключам формы, ``trace`` отдельно).
+
+    Если фактов ещё нет и они включены (``PE_FACTS_ENABLED``), строит их по сохранённым текстам.
+    При ``send_draft=True`` отправляет ``data`` в основную БД через ``ExternalAPIService`` (``Config.get_external_api_config``).
+
+    Args:
+        expertise_id: ID экспертизы.
+        environment: Окружение (``X-API-Database``).
+        send_draft: Отправлять ли черновик в основную БД.
+        rebuild_facts: Пересчитать факты по сохранённым текстам перед сборкой.
+
+    Returns:
+        dict: ``summary_id``, ``form_code``, ``status``, ``data``, ``trace``, ``stats``, ``problems``,
+        а также ``draft_sent`` (если запрошена отправка) либо ``{"error", "http_status"}``, если сборка невозможна.
+    """
+    from configs.llm_client import get_llm
+    from knowledge_store import db, export, facts as facts_mod, indexer, runner, summary
+    from knowledge_store.safe import is_enabled
+    from knowledge_store.scope import Scope
+
+    if not is_enabled():
+        return {"error": "Хранилище знаний выключено (KNOWLEDGE_STORE_ENABLED=false)", "http_status": 503}
+
+    async def run():
+        """Собирает заключение внутри event loop задачи."""
+        client, model = get_llm()
+        llm_call = facts_mod.make_llm_call(client, model, max_tokens=2000)   # блоки III–IV: короткий структурированный JSON
+        scope = Scope.of(environment, expertise_id)
+        async with HTTPClientManager(timeout=120.0) as mgr, db.task_pool():
+            async def build_facts():
+                """Строит факты, если их ещё нет (после индексации они обычно уже есть)."""
+                if runner.facts_enabled():
+                    await runner.build_facts(scope, indexer.build_embedder(mgr), client, model)
+
+            try:
+                async with db.connection() as conn:
+                    result = await summary.generate_summary(conn, scope, llm_call, build_facts, rebuild_facts)
+            except summary.SummaryError as e:
+                return {"error": e.message, "http_status": e.http_status}
+            if send_draft:
+                result["draft_sent"] = await export.send_draft(mgr, int(expertise_id), result["data"], environment)
+            return result
+
+    return run_async(run())
