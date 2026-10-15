@@ -47,6 +47,32 @@ BRAND_RE = re.compile(
     r"|модел|артикул|марк[аиу]\b|товарн\w+\s+знак|производств\w+\s|производител|фирм\w*\s|бренд|торгов\w+\s+наименован",
     re.IGNORECASE,
 )
+# Цитаты типовых норм закона: требования, установленные законом, — не риск (prompts/risk_analysis_prompt.txt, п. 12–13)
+STATUTORY_RE = re.compile(
+    r"19\.28\s*кодекса|\bст\w*\.?\s*19\.28|независимая гарантия должна быть безотзывной"
+    r"|указ\w*\s+президента\s+российской\s+федерации\s+от\s+03\.05\.2022|специальные экономические меры"
+    r"|в соответствии с (п\.|пунктом|ч\.|частью)\s*[\d.]+\s*(ч\.|части)?\s*[\d.]*\s*(ст\.|статьи)\s*31"
+    r"|«\s*или\s*»\s*,?\s*«\s*либо\s*»|«\s*не более\s*»|«\s*не менее\s*»|знак\w*\s*«?\s*[≥≤]"
+    r"|не было привлечено к административной ответственности",
+    re.IGNORECASE,
+)
+STATUTORY_CODES = {"DOC-004", "DOC-005", "DOC-006", "AI-003", "AI-005", "PROC-012", "DOC-007"}
+
+
+def statutory(risk: Dict[str, Any]) -> bool:
+    """Цитата риска — типовая норма закона или типовая формулировка инструкции (риск не выставляется).
+
+    Args:
+        risk: Риск модели (``code``, ``evidence.fragment``).
+
+    Returns:
+        bool: ``True`` — отбросить.
+    """
+    if risk.get("code") not in STATUTORY_CODES:
+        return False
+    return bool(STATUTORY_RE.search(((risk.get("evidence") or {}).get("fragment")) or ""))
+
+
 # Близкие по смыслу коды: на одну цитату остаётся один код группы
 SYNONYM_GROUPS = ({"DOC-006", "AI-003"}, {"DOC-005", "AI-005"}, {"DOC-002", "DOC-003"})
 MAX_CODES_PER_FRAGMENT = 2
@@ -303,7 +329,7 @@ class DocumentRiskAnalyzer:
             if not self._fragment_in_text(frag, norm_chunk):
                 dropped += 1
                 continue
-            if self_denial(r) or (r["code"] == "DOC-002" and not brand_like(frag)):
+            if self_denial(r) or statutory(r) or (r["code"] == "DOC-002" and not brand_like(frag)):
                 rejected += 1
                 continue
             r["category"] = risk_catalog.category(r["code"])

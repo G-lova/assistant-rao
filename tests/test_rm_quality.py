@@ -603,3 +603,49 @@ class PrintTitleTest(unittest.TestCase):
                          "для закупки №0372100039726000019\nОбщая информация\nНомер извещения\n0372100039726000019")
         self.assertEqual(_title(form), "Изменения извещения о проведении запроса котировок в электронной форме "
                                        "для закупки №0372100039726000019")
+
+
+class StatutoryFilterTest(unittest.TestCase):
+    """Требования, установленные законом, и типовые формулировки инструкции — не риск (файл 3205)."""
+
+    def test_statutory(self):
+        """19.28 КоАП, безотзывная гарантия, «или»/«либо» — отбрасываются; опыт сверх закона — нет."""
+        from risk_monitoring.document_risk_analyzer import statutory
+
+        drop = [("DOC-004", "не было привлечено к административной ответственности за совершение "
+                            "административного правонарушения, предусмотренного статьей 19.28"),
+                ("DOC-005", "Независимая гарантия должна быть безотзывной и должна содержать: 1) сумму"),
+                ("DOC-006", "«или», «либо» - участником предлагается одно или несколько характеристик товара"),
+                ("PROC-012", "«или», «либо» - участником предлагается одно или несколько характеристик")]
+        for code, frag in drop:
+            self.assertTrue(statutory({"code": code, "evidence": {"fragment": frag}}), code)
+        keep = {"code": "DOC-004", "evidence": {"fragment": "Опыт реставрации объектов в Москве не менее 5 лет"}}
+        self.assertFalse(statutory(keep))
+        self.assertFalse(statutory({"code": "DOC-002", "evidence": {"fragment": "статьей 19.28"}}))
+
+
+class SupersededSkipTest(unittest.TestCase):
+    """Файл прошлой редакции с известной заменой — паспорт без скачивания и без модели."""
+
+    def test_skip(self):
+        """3205 заменён файлом 3198 — pipeline.result = superseded; в режиме отладки — обычный анализ."""
+        import sys
+        from unittest import mock
+
+        tde = types.ModuleType("evaluate_documents.type_data_extractor")
+        tde.DOCUMENT_TYPE_MAPPING = {"docTrebContentRequestFiles": "Требования к содержанию заявки"}
+        with mock.patch.dict(sys.modules, {"evaluate_documents.type_data_extractor": tde}):
+            try:
+                from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
+            except ImportError as e:
+                raise unittest.SkipTest(f"нет зависимостей: {e}")
+            an = AIFileAnalyzer.__new__(AIFileAnalyzer)
+            an.force, an.model, an.versions = False, "m", {}
+            an.lookups = {3205: {"superseded_by": {"file_id": 3198, "xml_eis_version": 2, "file_name": "3. Треб.doc"}}}
+            row = {"id": 3205, "file_name": "3.Требование к содер., составу заявки на участие в закупке.docx"}
+            ai = an._superseded_analysis(row, None, 1)
+            self.assertEqual(ai["pipeline"]["result"], "superseded")
+            self.assertEqual(ai["superseded_by"]["file_id"], 3198)
+            self.assertEqual(ai["doc_type"]["detected_type"], "docTrebContentRequestFiles")
+            an.force = True
+            self.assertIsNone(an._superseded_analysis(row, None, 1))

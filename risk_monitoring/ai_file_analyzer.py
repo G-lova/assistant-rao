@@ -274,6 +274,9 @@ class AIFileAnalyzer:
                 fid = int(r["id"])
                 x = xml_of.get(fid)
                 if not x:
+                    self.lookups[fid] = {"match": "xml_not_found", "file_eis_version": r.get("eis_version"),
+                                         "note": "XML документа не найден ни по xml_source_id, ни по owner_number "
+                                                 "(среди вложений и печатных форм XML нет ссылки файла)"}
                     continue
                 px = prev_xml.get(int(x["id"]))
                 try:
@@ -452,6 +455,9 @@ class AIFileAnalyzer:
         """
         file_id = int(row["id"])
         file_name = row.get("file_name") or f"file_{file_id}"
+        superseded = self._superseded_analysis(row, previous, attempt)
+        if superseded is not None:
+            return await self._finalize(file_id, None, superseded)
         if not row.get("url"):
             raise FileUnavailable("нет пути к файлу и ссылки ЕИС")
         purchase = purchase_context(row)
@@ -581,6 +587,38 @@ class AIFileAnalyzer:
         self._annotate(ai, quality, removed_ids, allowed, (risk or {}).get("rejected_inconsistent"))
         self._add_lookup(ai, file_id)
         return await self._finalize(file_id, document_id, ai)
+
+    def _superseded_analysis(self, row: Dict[str, Any], previous: Optional[Dict[str, Any]],
+                             attempt: int) -> Optional[Dict[str, Any]]:
+        """Паспорт без анализа для редакции, уже заменённой новой (``superseded_by``).
+
+        Анализируются только актуальные редакции: файл прошлой редакции, пришедший в той же выгрузке, что и
+        новая, получает паспорт с отметкой о замене, без скачивания и без запросов к модели. В режиме
+        отладки (``force``) или при ``RM_ANALYZE_SUPERSEDED=true`` файл анализируется как обычно.
+
+        Returns:
+            Optional[Dict[str, Any]]: ``ai_analysis`` (``pipeline.result = superseded``) или ``None``.
+        """
+        lk = (getattr(self, "lookups", None) or {}).get(int(row["id"])) or {}
+        sup = lk.get("superseded_by") or {}
+        if not sup.get("file_id") or self.force or os.getenv("RM_ANALYZE_SUPERSEDED", "").lower() in ("1", "true", "yes"):
+            return None
+        from evaluate_documents.type_data_extractor import DOCUMENT_TYPE_MAPPING
+
+        reason = (f"Редакция заменена: в версии XML {sup.get('xml_eis_version')} вместо этого файла приложен "
+                  f"файл {sup['file_id']} («{sup.get('file_name')}»). Анализируется актуальная редакция.")
+        pipeline = passport.pipeline_block(STAGE, "completed", self.model, self.versions,
+                                           int(previous["id"]) if previous else None, self.force, attempt,
+                                           result="superseded")
+        ai = passport.no_text_analysis(row, reason, pipeline, None, None)
+        ai["readability"] = {"status": None, "issues": [], "readability_score": None, "pages": None, "text_chars": None}
+        by_name = doc_kind.type_by_name(row.get("file_name"))
+        if by_name:
+            ai["doc_type"] = {"detected_type": by_name, "type_decode": DOCUMENT_TYPE_MAPPING.get(by_name),
+                              "confidence": None, "issues": [], "type_source": "file_name"}
+        ai["superseded_by"] = sup
+        ai["version_lookup"] = lk
+        return ai
 
     def _add_lookup(self, ai: Dict[str, Any], file_id: int) -> None:
         """Дописывает в ``ai_analysis`` ход поиска версий (``version_lookup``) и ``superseded_by``.
