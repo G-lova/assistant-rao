@@ -5,6 +5,7 @@ import pandas as pd
 
 from json_repair import repair_json
 
+from configs.llm_resilience import call_llm
 from configs.logger import get_logger
 from typing import Any, Dict
 
@@ -97,7 +98,10 @@ class ConsistencyChecker:
         cleaned_content_chunks = split_large_text(json.dumps(cleaned_content, ensure_ascii=False) if not isinstance(cleaned_content, str) else cleaned_content, max_chunk_size=14500)
 
         try:
-            response = await self.client.chat.completions.create(
+            # Устойчивый вызов: поток (шлюз не обрывает долгий ответ), паузы 5/15/45 с вместо повторов SDK
+            # через секунду, предохранитель при серии 504. Сбой модели не роняет весь конвейер экспертизы.
+            raw_response = await call_llm(
+                self.client,
                 model=self.model,
                 messages=[
                     {
@@ -113,15 +117,15 @@ class ConsistencyChecker:
                 temperature=0.1,
                 extra_body={"guided_json": self.CONSISTENCY_SCHEMA}
             )
-        except asyncio.TimeoutError:
-            logger.error(f"Таймаут при анализе документов")
+        except Exception as e:  # noqa: BLE001 — 504 / таймаут после пауз: резервный ответ, как при таймауте
+            logger.error(f"Финальный анализ документов не выполнен: {type(e).__name__}: {str(e)[:200]}")
             fallback = {
                 "overall_summary": "Ошибка анализа данных по закупке",
                 "overall_status": "deny"
             }
             return fallback
 
-        raw_response = response.choices[0].message.content.strip()
+        raw_response = (raw_response or "").strip()
         logger.info(f"Сырой ответ модели: {raw_response}")
         
         # Парсим JSON

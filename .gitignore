@@ -9,6 +9,7 @@
 **/flagged
 **/uploads
 **/logs
+**/tmp
 *.log
 *.swp
 *.swo
@@ -17,4 +18,7 @@
 **/jupyter_checker/data
 make_api_key.ipynb
 example
+celerybeat-schedule
 data/outputs/
+*.xlsx
+*.csv

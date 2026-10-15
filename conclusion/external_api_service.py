@@ -90,14 +90,7 @@ class ExternalAPIService:
                 logger.error(f"❌ {error_msg}")
                 raise Exception(error_msg)
 
-            # Парсинг JSON
-            try:
-                response_data = response.json()
-            except json.JSONDecodeError as e:
-                if response.status == 200:
-                    logger.warning(f"⚠️ Не удалось распарсить JSON, но статус 200: {e}")
-                    return {"status": "success", "message": "Данные успешно обновлены"}
-                raise Exception(f"Ошибка парсинга JSON: {e}. Ответ: {await response.text()}")
+            # Тело ответа уже разобрано выше (await response.json()); повторный разбор не нужен
 
             # Обработка HTTP-ошибок
             if response.status not in (200, 201):

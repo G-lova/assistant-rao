@@ -129,6 +129,39 @@ class Config:
     DB_USER = os.getenv("DB_USER")
     DB_PASSWORD = os.getenv("DB_PASSWORD")
     
+    # Knowledge store («РАО Эксперт»): запись результатов /evaluate-documents в pe_* таблицы
+    KNOWLEDGE_STORE_ENABLED = os.getenv("KNOWLEDGE_STORE_ENABLED", "false").lower() == "true"
+    # Срок хранения полных текстов, чанков и эмбеддингов (дней) — политика утверждена 05.10.2026
+    PE_TEXT_RETENTION_DAYS = int(os.getenv("PE_TEXT_RETENTION_DAYS", "365"))
+    # Построение фактов сразу после индексации (задача index_documents_task); нужен KNOWLEDGE_STORE_ENABLED
+    # Что делать с «0», найденным моделью по тексту документов (факты, презумпция, единый стиль): "suspect" — в значение
+    # не ставить (замечание в trace.suspected, для критерия соответствия ставится «1» как предложение); "value" — ставить «0»
+    # как предложение после повторной проверки (judge). На эталоне экспертов точность таких «0» 10–30%.
+    PE_MODEL_ZEROS = os.getenv("PE_MODEL_ZEROS", "suspect").lower()
+    PE_FACTS_ENABLED = os.getenv("PE_FACTS_ENABLED", "false").lower() == "true"
+    # Максимум времени на построение фактов (запросы к LLM), секунд; при превышении этап прерывается
+    PE_FACTS_TIMEOUT_SEC = int(os.getenv("PE_FACTS_TIMEOUT_SEC", "900"))
+    # Общий документ по хэшу файла: /evaluate-documents берёт готовый текст из ai_documents вместо повторного
+    # чтения/OCR (нужен KNOWLEDGE_STORE_ENABLED). Читается при каждом вызове — см. knowledge_store.hooks.dedup_enabled
+    DOC_DEDUP_ENABLED = os.getenv("DOC_DEDUP_ENABLED", "false").lower() == "true"
+    # Нарезка экспертизы для индексации и поиска фактов (knowledge_store.pages.current_chunker): pages_1500 (прежняя,
+    # по умолчанию) или pages_v2 (по структуре; переключать после диагностики scripts.eval_chunkers variants)
+    PE_CHUNKER = os.getenv("PE_CHUNKER", "pages_1500")
+    # Кэш результата TypeDataExtractor в общем документе: тот же файл с тем же типом, объектом и именем повторно
+    # модели не отправляется (нужен KNOWLEDGE_STORE_ENABLED). Параметр force в /evaluate-documents кэш обходит
+    DOC_EXTRACTION_CACHE_ENABLED = os.getenv("DOC_EXTRACTION_CACHE_ENABLED", "false").lower() == "true"
+    # Сопоставление экспертизы с карточкой закупки риск-мониторинга после индексации (запросы к внешней БД)
+    PE_RM_LINK_ENABLED = os.getenv("PE_RM_LINK_ENABLED", "false").lower() == "true"
+    # Параллельность /evaluate-documents: запросы к LLM (блоки извлечения и проверки полноты), файлы (чтение/OCR +
+    # извлечение) и скачивание ссылок. Ограничение действует на каждый вызов
+    EVAL_LLM_CONCURRENCY = int(os.getenv("EVAL_LLM_CONCURRENCY", "3"))
+    EVAL_FILE_CONCURRENCY = int(os.getenv("EVAL_FILE_CONCURRENCY", "3"))
+    EVAL_LINK_CONCURRENCY = int(os.getenv("EVAL_LINK_CONCURRENCY", "2"))
+    # Срок ссылок риск-мониторинга на общий документ: закрытие закупки/контракта + RM_TEXT_AFTER_CLOSE_DAYS,
+    # но не дольше RM_TEXT_MAX_RETENTION_DAYS от загрузки (решение 13.10.2026)
+    RM_TEXT_AFTER_CLOSE_DAYS = int(os.getenv("RM_TEXT_AFTER_CLOSE_DAYS", "365"))
+    RM_TEXT_MAX_RETENTION_DAYS = int(os.getenv("RM_TEXT_MAX_RETENTION_DAYS", "1095"))
+
     # Paths
     SQL_QUERIES_PATH = os.getenv("SQL_QUERIES_PATH", "queries/")
     OUTPUT_PATH = os.getenv("OUTPUT_PATH", "data/outputs/")
@@ -318,3 +351,29 @@ class Config:
             url = f"{cls.SYSTEM_URL_DEV}/api/risk-monitoring/ai-analysis"
         
         return UpdateAIDBConfig(url=url, bearer_key=bearer_key)
+    @classmethod
+    def get_risk_api_config(cls, environment: str = None) -> dict:
+        """Конфигурация API анализа ИИ риск-мониторинга (``GET/PATCH /api/risk-monitoring/ai-analysis``).
+
+        Тот же адрес и Bearer-токен, что у :meth:`get_update_ai_db_config`, в виде словаря для
+        ``risk_monitoring.risk_monitoring_api.RiskMonitoringAPI``.
+
+        Args:
+            environment: Окружение (``dev`` / ``stage`` / ``prod`` / ``neuro``). По умолчанию ``APP_ENV``.
+
+        Returns:
+            dict: ``{"url": ..., "headers": {...}}``.
+        """
+        cfg = cls.get_update_ai_db_config(environment)
+        return {"url": cfg.url, "headers": cfg.headers}
+
+    @classmethod
+    def risk_monitoring_debug(cls) -> bool:
+        """Включён ли режим отладки риск-мониторинга (повторный анализ уже проанализированных документов).
+
+        Читается при каждом вызове, чтобы флаг ``RISK_MONITORING_DEBUG`` можно было менять без пересборки.
+
+        Returns:
+            bool: ``True``, если ``RISK_MONITORING_DEBUG=true``.
+        """
+        return os.getenv("RISK_MONITORING_DEBUG", "false").lower() == "true"

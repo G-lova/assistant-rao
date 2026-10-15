@@ -1,0 +1,43 @@
+{
+    "type": "object",
+    "required": ["summary", "risks"],
+    "properties": {
+        "summary": {
+            "type": "string",
+            "description": "Краткий вывод по фрагменту документа"
+        },
+        "risks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["code", "severity", "title", "explanation", "evidence"],
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "enum": "RISK_CODES",
+                        "description": "Код риска из каталога (список подставляется из risk_monitoring/risk_catalog.py)"
+                    },
+                    "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "title": {"type": "string"},
+                    "explanation": {"type": "string"},
+                    "law": {"type": ["string", "null"], "description": "Нормативное основание"},
+                    "verification_needed": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Действия эксперта для подтверждения или опровержения"
+                    },
+                    "evidence": {
+                        "type": "object",
+                        "required": ["fragment", "confidence"],
+                        "properties": {
+                            "fragment": {"type": "string"},
+                            "section": {"type": ["string", "null"]},
+                            "page": {"type": ["integer", "null"]},
+                            "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

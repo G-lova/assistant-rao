@@ -76,7 +76,7 @@
                     "properties": {
                         "value": {
                             "type": "string",
-                            "description": "Наименование документа (как написано) с реквизитами"
+                            "description": "Наименование документа (как написано)"
                         },
                         "confidence": {
                             "type": "number",
