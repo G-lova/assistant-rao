@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<export xmlns="http://zakupki.gov.ru/oos/export/1" xmlns:oos="http://zakupki.gov.ru/oos/types/1">
+ <contractProcedure>
+  <oos:regNum>1572000318824000014</oos:regNum>
+  <oos:publishDate>2025-05-10T12:00:00+03:00</oos:publishDate>
+  <oos:termination><oos:reason><oos:code>3</oos:code><oos:name>Односторонний отказ заказчика</oos:name></oos:reason><oos:terminationDate>2025-05-09</oos:terminationDate></oos:termination>
+ </contractProcedure>
+</export>

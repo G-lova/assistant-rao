@@ -77,7 +77,7 @@ document_analysis_cache = {}
 @app.post("/evaluate-documents")
 async def evaluate_documents_batch(
     request: EvaluateRequest,
-    x_api_database: str = Header(default="dev", alias="X-API-Database")
+    x_api_database: str = Header(default="prod", alias="X-API-Database")
 ):
     try:
         expertise_id = request.expertise_id        
@@ -102,7 +102,7 @@ async def evaluate_documents_batch(
 @app.post("/generate-summary-opinion")
 async def generate_summary_opinion(
     request: SummaryOpinionRequest,
-    x_api_database: str = Header(default="dev", alias="X-API-Database")
+    x_api_database: str = Header(default="prod", alias="X-API-Database")
 ):
     """Запускает генерацию сводного экспертного заключения («РАО Эксперт») из хранилища знаний.
 
@@ -138,7 +138,7 @@ async def generate_summary_opinion(
 @app.get("/expertise/{expertise_id}/rm-findings")
 async def get_rm_findings(
     expertise_id: int,
-    x_api_database: str = Header(default="dev", alias="X-API-Database")
+    x_api_database: str = Header(default="prod", alias="X-API-Database")
 ):
     """Находки риск-мониторинга по документам закупки экспертизы — подсказки эксперту.
 
@@ -186,8 +186,29 @@ async def get_task_status(task_id: str):
         return {"status": task.state}
 
 
+def _check_env_header(x_api_database: Optional[str]) -> None:
+    """Проверяет необязательный заголовок ``X-API-Database``: если он передан, имя окружения должно быть допустимым.
+
+    Args:
+        x_api_database: Значение заголовка или ``None``.
+
+    Raises:
+        HTTPException: 400 — недопустимое имя окружения.
+    """
+    if x_api_database is None:
+        return
+    from knowledge_store.scope import normalize_env
+    try:
+        normalize_env(x_api_database)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.post("/get-contract-info")
-async def api_get_contract_info(request_body: Dict[str, str] = Body(...)):
+async def api_get_contract_info(
+    request_body: Dict[str, str] = Body(...),
+    x_api_database: Optional[str] = Header(default="prod", alias="X-API-Database")
+):
     """
     Обработчик API-запроса для получения ключевых реквизитов контракта по идентификатору закупки.
 
@@ -209,6 +230,7 @@ async def api_get_contract_info(request_body: Dict[str, str] = Body(...)):
             - date (str): Дата контракта в текстовом формате или "0", если не найдена.
             При возникновении внутренней ошибки возвращается тот же словарь со значениями "0".
     """
+    _check_env_header(x_api_database)
     procurement_id = request_body.get("procurement_id")
     logger.info(f"Получение данных контракта для экспертизы {procurement_id}")
 
@@ -216,7 +238,7 @@ async def api_get_contract_info(request_body: Dict[str, str] = Body(...)):
         raise HTTPException(status_code=400, detail="Поле 'procurement_id' обязательно в теле запроса")
 
     try:
-        info = await get_contract_info_from_db(procurement_id)
+        info = await get_contract_info_from_db(procurement_id, x_api_database)
         logger.info(f"Обработка документов завершена: {info}")
         return info
     except Exception as e:
@@ -227,7 +249,7 @@ async def api_get_contract_info(request_body: Dict[str, str] = Body(...)):
 @app.post("/get-experts-for-expertise")
 async def get_experts_for_expertise(
     request: ExpertsScoringRequest,
-    x_api_database: str = Header(default="dev", alias="X-API-Database")
+    x_api_database: str = Header(default="prod", alias="X-API-Database")
 ):
     """
     Подбирает список идентификаторов экспертов для заданной экспертизы.
@@ -269,7 +291,7 @@ async def get_experts_for_expertise(
 @app.post("/get-experts-rating")
 async def get_experts_rating(
     request_body: Dict[str, str] = Body(...),
-    x_api_database: str = Header(default="dev", alias="X-API-Database")
+    x_api_database: str = Header(default="prod", alias="X-API-Database")
 ):
     """
     Получает рейтинг экспертов для заданного временного периода.
@@ -332,7 +354,7 @@ async def health_check():
 @app.post("/rao_conclusion")
 async def get_rao_conclusion(
     request: RAOConclusionRequest,
-    x_api_database: str = Header(default="dev", alias="X-API-Database")
+    x_api_database: str = Header(default="prod", alias="X-API-Database")
     ):
     '''
     Эндпоинт для получения сводного отчета эксперта РАО по результатам экспертизы.
@@ -543,11 +565,15 @@ async def parse_eis(request: EISParseRequest):
 
 @app.post("/get-law")
 async def get_law(
-    request_body: Dict[str, int] = Body(...)
+    request_body: Dict[str, int] = Body(...),
+    x_api_database: Optional[str] = Header(default="prod", alias="X-API-Database")
 ):
-    """
+    """Определяет основной закон (44-ФЗ / 223-ФЗ) по отчёту ``/evaluate-documents``.
 
+    Отчёт берётся из ``raw_document_data`` окружения ``X-API-Database``. Без заголовка — самый свежий отчёт
+    экспертизы в любом окружении (поведение до миграции 008, с предупреждением в журнале).
     """
+    _check_env_header(x_api_database)
     try:
         expertise_id = request_body.get("expertise_id")
         
@@ -557,7 +583,7 @@ async def get_law(
         # Запускаем скоринг пайплайн
 
         law_detector = LawDetector()
-        result = await law_detector.get_law(expertise_id)
+        result = await law_detector.get_law(expertise_id, x_api_database)
         
         return result
         
@@ -569,7 +595,7 @@ async def get_law(
 @app.post("/get-subject")
 async def get_subject(
     request: RAOConclusionRequest,
-    x_api_database: str = Header(default="dev", alias="X-API-Database")
+    x_api_database: str = Header(default="prod", alias="X-API-Database")
     ):
     """
     """
@@ -584,7 +610,7 @@ async def get_subject(
         send_subject_service = SendSubjectService(http_manager, x_api_database)
 
         # Получение данных о загруженных документах
-        summary_report = await get_async_summary_report_from_db(expertise_id)
+        summary_report = await get_async_summary_report_from_db(expertise_id, x_api_database)
 
         if not summary_report:
             logger.warning("Отсутствуют извлеченные данные. Пробуем достать предмет контракта из поля `typeDopDetal.ai_doc_answer")
@@ -626,7 +652,7 @@ async def get_subject(
 @app.post("/get-ai-analysis/file")
 async def get_file_analysis(
     request: FileEntity,
-    x_api_database: str = Header(default="dev", alias="X-API-Database")
+    x_api_database: str = Header(default="prod", alias="X-API-Database")
 ):
     '''
     '''

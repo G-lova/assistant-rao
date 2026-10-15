@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<export xmlns="http://zakupki.gov.ru/oos/export/1" xmlns:oos="http://zakupki.gov.ru/oos/types/1">
+ <contract>
+  <oos:id>555</oos:id>
+  <oos:regNum>1572000318824000014</oos:regNum>
+  <oos:versionNumber>0</oos:versionNumber>
+  <oos:publishDate>2025-03-01T12:00:00+03:00</oos:publishDate>
+  <oos:foundation><oos:fcsOrder><oos:order><oos:notificationNumber>0354100008624000011</oos:notificationNumber></oos:order></oos:fcsOrder></oos:foundation>
+  <oos:customer><oos:regNum>03541000086</oos:regNum><oos:inn>5720003188</oos:inn><oos:kpp>572001001</oos:kpp></oos:customer>
+  <oos:priceInfo><oos:price>11979910.80</oos:price></oos:priceInfo>
+  <oos:executionPeriod><oos:endDate>2025-04-04</oos:endDate></oos:executionPeriod>
+  <oos:suppliers><oos:supplier><oos:legalEntityRF><oos:INN>3245021003</oos:INN><oos:fullName>ООО НИКА</oos:fullName></oos:legalEntityRF></oos:supplier></oos:suppliers>
+ </contract>
+</export>

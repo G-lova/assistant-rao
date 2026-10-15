@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<export xmlns="http://zakupki.gov.ru/oos/export/1" xmlns:ns0="http://zakupki.gov.ru/oos/EPtypes/1" xmlns:c="http://zakupki.gov.ru/oos/common/1" xmlns:b="http://zakupki.gov.ru/oos/base/1">
+ <ns0:epNotificationEZK2020>
+  <ns0:versionNumber>1</ns0:versionNumber>
+  <ns0:commonInfo><ns0:placingWay><b:code>ZKP20</b:code><b:name>Запрос котировок в электронной форме</b:name></ns0:placingWay>
+   <ns0:ETP><b:url>http://www.sberbank-ast.ru</b:url></ns0:ETP><ns0:purchaseObjectInfo>Услуги связи</ns0:purchaseObjectInfo></ns0:commonInfo>
+  <ns0:purchaseResponsibleInfo><ns0:responsibleRole>CU</ns0:responsibleRole>
+   <ns0:responsibleOrgInfo><ns0:fullName>ФГБОУ ВО ЗГУ</ns0:fullName></ns0:responsibleOrgInfo>
+   <ns0:responsibleInfo><ns0:contactPersonInfo><c:lastName>Суровцев</c:lastName></ns0:contactPersonInfo>
+    <ns0:contactEMail>SurovcevAM@norvuz.ru</ns0:contactEMail></ns0:responsibleInfo></ns0:purchaseResponsibleInfo>
+  <ns0:notificationInfo>
+   <ns0:procedureInfo><ns0:collectingInfo><ns0:endDT>2026-07-10T13:00:00+07:00</ns0:endDT></ns0:collectingInfo><ns0:summarizingDate>2026-07-13+07:00</ns0:summarizingDate></ns0:procedureInfo>
+   <ns0:purchaseObjectsInfo><ns0:notDrugPurchaseObjectsInfo><ns0:purchaseObject>
+     <c:restrictionsInfo><c:isProhibitionForeignPurchaseObjects>{prohibition}</c:isProhibitionForeignPurchaseObjects>
+      <c:isRestrictForeignPurchaseObjects>false</c:isRestrictForeignPurchaseObjects>
+      <c:isPreferenseRFPurchaseObjects>{preference}</c:isPreferenseRFPurchaseObjects></c:restrictionsInfo>
+   </ns0:purchaseObject></ns0:notDrugPurchaseObjectsInfo></ns0:purchaseObjectsInfo>
+  </ns0:notificationInfo>
+ </ns0:epNotificationEZK2020>
+</export>
