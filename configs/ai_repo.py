@@ -292,6 +292,58 @@ class AIRepo:
             _vec(embedding), embedding_model, limit,
         )
 
+    async def find_chunks_all(
+        self, embedding: Sequence[float], embedding_model: str, limit: int = 30
+    ) -> List[asyncpg.Record]:
+        """Ближайшие чанки и риск-мониторинга (``rm_tokens_800``), и экспертиз (``pages_v2``) — для поиска
+        типовых формулировок по документам многих закупок. Два запроса — чтобы работали частичные индексы.
+
+        Args:
+            embedding: Вектор фрагмента.
+            embedding_model: Модель эмбеддингов.
+            limit: Сколько чанков каждой нарезки вернуть.
+
+        Returns:
+            List[asyncpg.Record]: ``document_id``, ``text``, ``similarity``.
+        """
+        out: List[asyncpg.Record] = []
+        for chunker in ("rm_tokens_800", "pages_v2"):
+            out += await self.pool.fetch(
+                f"""
+                SELECT document_id, text, 1 - (embedding <=> $1::vector) AS similarity
+                FROM ai_document_chunks
+                WHERE embedding_model = $2 AND chunker = '{chunker}'
+                ORDER BY embedding <=> $1::vector
+                LIMIT $3
+                """,
+                _vec(embedding), embedding_model, limit,
+            )
+        return out
+
+    async def document_sources(self, env: str, document_ids: Sequence[int]) -> List[asyncpg.Record]:
+        """Закупки, в которых встречается документ: карточки риск-мониторинга и экспертизы.
+
+        Args:
+            env: Окружение.
+            document_ids: ``ai_documents.id``.
+
+        Returns:
+            List[asyncpg.Record]: ``document_id``, ``kind`` (``rm`` / ``pe``), ``source_id``
+            (``rm_card_id`` или ``expertise_id``).
+        """
+        if not document_ids:
+            return []
+        return await self.pool.fetch(
+            """
+            SELECT document_id, 'rm' AS kind, rm_card_id AS source_id
+            FROM ai_file_links WHERE env = $1 AND document_id = ANY($2::bigint[]) AND rm_card_id IS NOT NULL
+            UNION
+            SELECT ai_document_id AS document_id, 'pe' AS kind, expertise_id AS source_id
+            FROM pe_documents WHERE env = $1 AND ai_document_id = ANY($2::bigint[])
+            """,
+            env, [int(d) for d in document_ids],
+        )
+
     async def find_similar_documents(
         self,
         document_id: int,

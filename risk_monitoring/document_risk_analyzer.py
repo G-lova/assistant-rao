@@ -329,10 +329,14 @@ class DocumentRiskAnalyzer:
         Returns:
             Dict[str, Any]: ``summary``, ``risks`` (только подтверждённые), ``dropped``, ``rejected``.
         """
-        hint = json.dumps(context, ensure_ascii=False, default=str)[:2500] if context else "нет"
+        ctx = {k: v for k, v in (context or {}).items() if k != "norms"}
+        hint = json.dumps(ctx, ensure_ascii=False, default=str)[:2500] if ctx else "нет"
+        norms_block = (f"Нормы, установленные законом для документа этого типа, — это НЕ риски; риск — только то, что "
+                       f"идёт сверх них или отступает от них:\n{context['norms']}\n\n") if (context or {}).get("norms") else ""
         user = (
             f"Документ: {file_name} (часть {n} из {total}).\n"
             f"Контекст (тип документа, краткое содержание, закупка, закон): {hint}\n"
+            f"{norms_block}"
             f"Для этого документа ищи ТОЛЬКО риски с кодами: {', '.join(allowed)}. Другие коды не используй.\n\n"
             f"Текст:\n\n{chunk}"
         )

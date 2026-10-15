@@ -37,8 +37,8 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 from configs.config import Config
 from configs.logger import get_logger
-from risk_monitoring import (doc_kind, file_versions, passport, pdf_text, printform_passport, risk_catalog, rm_sql,
-                             text_quality, version_diff, xml_events)
+from risk_monitoring import (boilerplate, doc_kind, file_versions, norms, passport, pdf_text, printform_passport,
+                             risk_catalog, rm_sql, text_quality, version_diff, xml_events)
 from risk_monitoring.llm_json import prompt_version as _hash_version
 
 logger = get_logger(__name__)
@@ -548,7 +548,7 @@ class AIFileAnalyzer:
             if candidates and allowed:
                 brand_text = "\n".join(candidates)
                 ctx = {"detected_type": type_info["detected_type"], "type_decode": type_decode, "summary": summary,
-                       "purchase": purchase, "law": law,
+                       "purchase": purchase, "law": law, "norms": norms.digest("docOpusObjectZacupFiles", fz),
                        "note": "Переданы только строки описания объекта закупки с признаками товарного знака"}
                 risk = await self._cached(document_id, "risk_analysis_print_form",
                                           lambda: self.risk_analyzer.analyze(brand_text, file_name, ctx, codes=allowed),
@@ -588,8 +588,11 @@ class AIFileAnalyzer:
                                          lambda: self.profiler.profile(text, file_name, type_decode, summary, purchase),
                                          model=self.model, fallback_doc=reuse_doc)
             risk_context = {"detected_type": type_info.get("detected_type"), "type_decode": type_decode,
-                            "summary": summary, "purchase": purchase, "law": law}
-            risk_version = f"{self.versions['risk_analysis']}:{_hash_version(allowed)}"
+                            "summary": summary, "purchase": purchase, "law": law,
+                            "norms": norms.digest(type_info.get("detected_type"), fz)}
+            risk_version = (f"{self.versions['risk_analysis']}:{_hash_version(allowed)}:"
+                            f"{norms.version(type_info.get('detected_type'), fz)}")
+            self._risk_version = risk_version
             prev_risk = (await self._get_cached(reuse_doc, "risk_analysis", risk_version, self.model)) if reuse_doc else None
             if prev_risk is not None:
                 mode = "incremental"
@@ -608,6 +611,7 @@ class AIFileAnalyzer:
             version_changes, version_risks = (await self._version_changes(previous, prev_ctx, diff, document_id,
                                                                           file_name, type_decode, use_llm=True)
                                               if previous else (None, []))
+        risk, typical = await self._drop_typical(risk, document_id, row)
         risk_compact = self.risk_analyzer.to_compact(risk) if risk else {}
 
         prev_codes = await self._previous_codes(previous, prev_ctx, allowed) if previous else None
@@ -629,8 +633,56 @@ class AIFileAnalyzer:
             content_sha256=sha,
         )
         self._annotate(ai, quality, removed_ids, allowed, (risk or {}).get("rejected_inconsistent"))
+        if typical:
+            ai["risk_scope"]["typical_dropped"] = typical
         self._add_lookup(ai, file_id)
         return await self._finalize(file_id, document_id, ai)
+
+    async def _drop_typical(self, risk: Optional[Dict[str, Any]], document_id: int,
+                            row: Dict[str, Any]) -> tuple:
+        """Снимает риски, цитата которых — типовая формулировка многих заказчиков (``boilerplate``).
+
+        Args:
+            risk: Результат риск-анализа (формат ``DocumentRiskAnalyzer.analyze``).
+            document_id: ``ai_documents.id``.
+            row: Строка ``files_meta.sql`` (карточка и заказчик).
+
+        Returns:
+            tuple: ``(риск-анализ без типовых рисков, [{code, fragment, sources}])``. Сбой поиска не ломает анализ.
+        """
+        if not risk or not risk.get("risks") or os.getenv("RM_BOILERPLATE", "true").lower() in ("0", "false", "no"):
+            return risk, []
+        frags = [((r.get("evidence") or {}).get("fragment") or "") for r in risk["risks"]]
+
+        async def fetch_orgs(cards: List[int]) -> Dict[int, Any]:
+            """Заказчики карточек из внешней БД."""
+            rows = await self._query("card_orgs.sql", ids=cards)
+            return {int(r["id"]): r.get("org_id") for r in rows}
+
+        try:
+            counts = await boilerplate.typical_fragments(
+                frags, embedder=self.embedder, repo=self.repo, env=self.env, document_id=document_id,
+                own_card=row.get("risk_monitoring_contract_id"), own_org=row.get("organisation_id"),
+                embedding_model=self.embedding_model, fetch_orgs=fetch_orgs)
+        except Exception as e:  # noqa: BLE001 — без фильтра риски остаются
+            logger.warning(f"Проверка типовых формулировок не выполнена (документ {document_id}): {type(e).__name__}: {e}")
+            return risk, []
+        need = boilerplate.min_sources()
+        kept, dropped = [], []
+        for r, frag in zip(risk["risks"], frags):
+            n = counts.get(frag, 0)
+            if n >= need:
+                dropped.append({"code": r.get("code"), "fragment": frag[:200], "sources": n})
+            else:
+                kept.append(r)
+        if not dropped:
+            return risk, []
+        logger.info(f"Документ {document_id}: сняты типовые формулировки — {[d['code'] for d in dropped]}")
+        new = dict(risk)
+        new["risks"] = kept
+        new["risk_score"] = self.risk_analyzer._score(kept)
+        new["risk_level"] = self.risk_analyzer._level(new["risk_score"])
+        return new, dropped
 
     async def _previous_codes(self, previous: Dict[str, Any], prev_ctx: Optional[Dict[str, Any]],
                               allowed: List[str]) -> Optional[List[str]]:
@@ -649,7 +701,7 @@ class AIFileAnalyzer:
         if previous.get("rm_status") == "completed":
             return []
         doc_id = (prev_ctx or {}).get("doc_id")
-        version = f"{self.versions['risk_analysis']}:{_hash_version(allowed)}"
+        version = getattr(self, "_risk_version", None) or f"{self.versions['risk_analysis']}:{_hash_version(allowed)}"
         cached = await self._get_cached(doc_id, "risk_analysis", version, self.model) if doc_id else None
         if cached is not None:
             return sorted({r.get("code") for r in cached.get("risks") or [] if r.get("code")})

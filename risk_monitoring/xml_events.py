@@ -825,7 +825,30 @@ def build_llm_payload(event: Dict[str, Any], facts: Dict[str, Any], changes: Seq
     }
 
 
-def to_external_event_risks(llm_risks: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+# Риски, которые выставляют только правила кода по типу события (отмена, нет заявок, жалоба …): модель
+# называла «отменой» любое изменение извещения (XML 3209, 15.10.2026)
+RULE_ONLY_CODES = {"PROC-001", "PROC-002", "PROC-005", "PROC-008", "PROC-009", "CTR-019", "CTR-020"}
+
+
+def event_allows(code: str, event: Optional[Dict[str, Any]]) -> bool:
+    """Подходит ли код риска модели к событию: коды контракта (CTR-*) — только к событиям контракта.
+
+    Args:
+        code: Код риска.
+        event: Тип события (``group``: purchase / contract / …).
+
+    Returns:
+        bool: ``True`` — оставить.
+    """
+    if code in RULE_ONLY_CODES:
+        return False
+    group = (event or {}).get("group")
+    if group == "purchase" and code.startswith("CTR-"):
+        return False
+    return True
+
+
+def to_external_event_risks(llm_risks: Sequence[Dict[str, Any]], event: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Риски из ответа ``EventAnalyzer`` → внешний формат.
 
     Args:
@@ -841,7 +864,7 @@ def to_external_event_risks(llm_risks: Sequence[Dict[str, Any]]) -> List[Dict[st
         if not isinstance(r, dict):
             continue
         code = r.get("rule_id")
-        if code not in risk_catalog.RISKS:
+        if code not in risk_catalog.RISKS or not event_allows(code, event):
             continue
         out.append({"rule_id": code, "title": r.get("title") or risk_catalog.title(code),
                     "description": r.get("description") or "", "level": clamp01(r.get("level")) or 0.5,
@@ -878,7 +901,7 @@ def build_xml_analysis(*, event: Dict[str, Any], facts: Dict[str, Any], changes:
     """
     llm = llm or {}
     lookup = list(all_files) if all_files is not None else list(files)
-    risks = merge_risks(list(rule_risk_list or []), to_external_event_risks(llm.get("risks") or []), fz=fz)
+    risks = merge_risks(list(rule_risk_list or []), to_external_event_risks(llm.get("risks") or [], event), fz=fz)
     event_out = dict(event)
     event_out["event_at"] = facts.get("published_at") or facts.get("sign_date")
     event_out["previous_xml_id"] = int(previous["id"]) if previous else None
