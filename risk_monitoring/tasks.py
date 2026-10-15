@@ -127,6 +127,8 @@ def rm_analyze_xml_task(self, xml_ids: List[int], environment: str, force: bool 
                     async with AIRepo() as repo:
                         fa = AIFileAnalyzer(mgr, environment, repo, push_results=push, force=force, recompute=recompute)
                         f_results = await fa.analyze_ids(file_ids)
+                    analyzer.file_results = {int(r["file_id"]): r["ai_analysis"] for r in f_results
+                                             if r.get("ai_analysis") and r.get("file_id") is not None}
                     files_out["summary"] = {**_summary(f_results), "llm": _llm_summary(f_before, fa.stats)}
                     files_out["results"] = _strip(f_results, include_analysis)
                 else:

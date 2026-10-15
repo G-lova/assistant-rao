@@ -38,7 +38,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 from configs.config import Config
 from configs.logger import get_logger
 from risk_monitoring import (boilerplate, doc_kind, file_versions, norms, passport, pdf_text, printform_passport,
-                             risk_catalog, rm_sql, text_quality, version_diff, xml_events)
+                             risk_catalog, rm_sql, settings, text_quality, version_diff, xml_events)
 from risk_monitoring.llm_json import prompt_version as _hash_version
 
 logger = get_logger(__name__)
@@ -186,7 +186,7 @@ class AIFileAnalyzer:
         # (ещё 2 через ~1 с) на 504 шлюза только умножают нагрузку — для риск-мониторинга отключены.
         from configs.llm_resilience import ResilientClient
 
-        ex_client = ResilientClient(client, retries=int(os.getenv("RM_LLM_PROXY_RETRIES", "6")))
+        ex_client = ResilientClient(client, retries=settings.LLM_PROXY_RETRIES)
         self.file_reader = FileReader(ex_client, self.extraction_model)
         self.type_detector = TypeDetector(ex_client, self.extraction_model)
         self.extractor = DataExtractor(ex_client, self.extraction_model)
@@ -514,6 +514,7 @@ class AIFileAnalyzer:
             ai = passport.no_text_analysis(row, "Не удалось извлечь текст документа", pipeline, self.model, sha)
             return await self._finalize(file_id, document_id, ai)
 
+        text = text_quality.unwrap_ocr_json(text)
         quality = text_quality.assess(text)
         print_kind = doc_kind.print_form_kind(row) if doc_kind.is_print_form(row) else None
         if quality["status"] == "bad":
@@ -583,7 +584,7 @@ class AIFileAnalyzer:
             type_info, type_decode = await self._doc_type(document_id, chunks, file_name, extraction, row, None,
                                                           fallback_doc=reuse_doc)
             summary = (extraction.get("raw_data") or {}).get("summary")
-            allowed = doc_kind.allowed_codes(type_info["detected_type"], None)
+            allowed = [] if doc_kind.no_risk_by_name(file_name) else doc_kind.allowed_codes(type_info["detected_type"], None)
             profile = await self._cached(document_id, "document_profile",
                                          lambda: self.profiler.profile(text, file_name, type_decode, summary, purchase),
                                          model=self.model, fallback_doc=reuse_doc)
@@ -650,7 +651,7 @@ class AIFileAnalyzer:
         Returns:
             tuple: ``(риск-анализ без типовых рисков, [{code, fragment, sources}])``. Сбой поиска не ломает анализ.
         """
-        if not risk or not risk.get("risks") or os.getenv("RM_BOILERPLATE", "true").lower() in ("0", "false", "no"):
+        if not risk or not risk.get("risks") or not settings.BOILERPLATE_ENABLED:
             return risk, []
         frags = [((r.get("evidence") or {}).get("fragment") or "") for r in risk["risks"]]
 
@@ -663,7 +664,7 @@ class AIFileAnalyzer:
             counts = await boilerplate.typical_fragments(
                 frags, embedder=self.embedder, repo=self.repo, env=self.env, document_id=document_id,
                 own_card=row.get("risk_monitoring_contract_id"), own_org=row.get("organisation_id"),
-                embedding_model=self.embedding_model, fetch_orgs=fetch_orgs)
+                embedding_model=self.embedding_model, fetch_orgs=fetch_orgs, own_org_name=row.get("customer_name"))
         except Exception as e:  # noqa: BLE001 — без фильтра риски остаются
             logger.warning(f"Проверка типовых формулировок не выполнена (документ {document_id}): {type(e).__name__}: {e}")
             return risk, []
@@ -713,14 +714,14 @@ class AIFileAnalyzer:
 
         Анализируются только актуальные редакции: файл прошлой редакции, пришедший в той же выгрузке, что и
         новая, получает паспорт с отметкой о замене, без скачивания и без запросов к модели. В режиме
-        отладки (``force``) или при ``RM_ANALYZE_SUPERSEDED=true`` файл анализируется как обычно.
+        отладки (``force``) или при ``settings.ANALYZE_SUPERSEDED`` файл анализируется как обычно.
 
         Returns:
             Optional[Dict[str, Any]]: ``ai_analysis`` (``pipeline.result = superseded``) или ``None``.
         """
         lk = (getattr(self, "lookups", None) or {}).get(int(row["id"])) or {}
         sup = lk.get("superseded_by") or {}
-        if not sup.get("file_id") or self.force or os.getenv("RM_ANALYZE_SUPERSEDED", "").lower() in ("1", "true", "yes"):
+        if not sup.get("file_id") or self.force or settings.ANALYZE_SUPERSEDED:
             return None
         from evaluate_documents.type_data_extractor import DOCUMENT_TYPE_MAPPING
 

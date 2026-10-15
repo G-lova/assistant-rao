@@ -472,11 +472,19 @@ class XmlEventAnalyzer:
             logger.warning(f"Файлы XML {xml_id} не получены: {e}")
             return []
         out = []
+        fresh = getattr(self, "file_results", None) or {}
         for r in rows:
-            out.append({"file_id": _int(r.get("id")), "xml_source_id": _int(r.get("xml_source_id")),
-                        "file_name": r.get("file_name"), "source_url": r.get("source_url"),
-                        "detected_type": r.get("detected_type"), "resume": r.get("resume"),
-                        "total_doc_risk": r.get("total_doc_risk")})
+            item = {"file_id": _int(r.get("id")), "xml_source_id": _int(r.get("xml_source_id")),
+                    "file_name": r.get("file_name"), "source_url": r.get("source_url"),
+                    "detected_type": r.get("detected_type"), "resume": r.get("resume"),
+                    "total_doc_risk": r.get("total_doc_risk")}
+            ai = fresh.get(item["file_id"])
+            if ai:
+                # файл проанализирован в этой же задаче (analyze_files): во внешней БД результата ещё может
+                # не быть (push=false) — берём свежий
+                item.update(detected_type=(ai.get("doc_type") or {}).get("detected_type"), resume=ai.get("resume"),
+                            total_doc_risk=ai.get("total_doc_risk"))
+            out.append(item)
         return out
 
     async def _link_orphan(self, facts: Dict[str, Any], row: Dict[str, Any]) -> Dict[str, Any]:

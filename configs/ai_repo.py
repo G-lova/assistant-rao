@@ -323,23 +323,30 @@ class AIRepo:
     async def document_sources(self, env: str, document_ids: Sequence[int]) -> List[asyncpg.Record]:
         """Закупки, в которых встречается документ: карточки риск-мониторинга и экспертизы.
 
+        Для экспертизы заказчик берётся из сопоставления с карточкой РМ (``procurement_identity.rm_card_id`` —
+        дальше заказчик карточки во внешней БД), а если сопоставления нет — из паспорта экспертизы
+        (``pe_procurements.passport.organization`` — организация, подавшая документы на экспертизу).
+
         Args:
             env: Окружение.
             document_ids: ``ai_documents.id``.
 
         Returns:
-            List[asyncpg.Record]: ``document_id``, ``kind`` (``rm`` / ``pe``), ``source_id``
-            (``rm_card_id`` или ``expertise_id``).
+            List[asyncpg.Record]: ``document_id``, ``kind`` (``rm`` / ``pe``), ``source_id`` (``rm_card_id`` или
+            ``expertise_id``), ``rm_card_id`` (для экспертизы — сопоставленная карточка), ``org_name``.
         """
         if not document_ids:
             return []
         return await self.pool.fetch(
             """
-            SELECT document_id, 'rm' AS kind, rm_card_id AS source_id
+            SELECT document_id, 'rm' AS kind, rm_card_id AS source_id, rm_card_id, NULL::text AS org_name
             FROM ai_file_links WHERE env = $1 AND document_id = ANY($2::bigint[]) AND rm_card_id IS NOT NULL
             UNION
-            SELECT ai_document_id AS document_id, 'pe' AS kind, expertise_id AS source_id
-            FROM pe_documents WHERE env = $1 AND ai_document_id = ANY($2::bigint[])
+            SELECT d.ai_document_id, 'pe', d.expertise_id, pi.rm_card_id, p.passport->>'organization'
+            FROM pe_documents d
+            LEFT JOIN procurement_identity pi ON pi.env = d.env AND pi.expertise_id = d.expertise_id
+            LEFT JOIN pe_procurements p ON p.env = d.env AND p.expertise_id = d.expertise_id
+            WHERE d.env = $1 AND d.ai_document_id = ANY($2::bigint[])
             """,
             env, [int(d) for d in document_ids],
         )

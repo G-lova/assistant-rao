@@ -2,12 +2,11 @@
 
 * **потоковый ответ** (``stream=True``): шлюз (openresty / nginx) обрывает соединение, если ответа нет дольше
   своего таймаута (у ``llmhub`` — около 90 с); при потоке токены идут сразу, и долгая генерация не обрывается.
-  Отключается ``LLM_STREAM=false`` (или ``RM_LLM_STREAM=false``);
+  Отключается константой ``STREAM`` в этом модуле;
 * **без встроенных повторов SDK** (``max_retries=0``): SDK повторяет 504 через ~0,8 с, а модель тем
   временем продолжает считать оборванный запрос — нагрузка растёт лавиной. Повторы — свои, с паузой
   5 → 15 → 45 с и случайным разбросом;
-* **общий лимит одновременных запросов** к одному серверу в процессе (``LLM_MAX_INFLIGHT`` /
-  ``RM_LLM_MAX_INFLIGHT``, по умолчанию 4);
+* **общий лимит одновременных запросов** к одному серверу в процессе (``MAX_INFLIGHT``, 4);
 * **предохранитель**: после 3 подряд сбоев сервера (5xx, таймаут, обрыв) все запросы процесса ждут
   30 с (затем 60, 120 … до 300 с), чтобы сервер разгрузился, а не получал повторы.
 """
@@ -22,9 +21,11 @@ from configs.logger import get_logger
 logger = get_logger(__name__)
 
 
-def _env(name: str, default: str) -> str:
-    """Настройка ``LLM_<name>`` или, для совместимости, ``RM_LLM_<name>``."""
-    return os.getenv(f"LLM_{name}") or os.getenv(f"RM_LLM_{name}") or default
+# Переключатели — в коде, не в .env
+MAX_INFLIGHT = 4        # одновременных запросов к одному серверу модели в процессе
+STREAM = True           # потоковый ответ в call_llm (шлюз не обрывает долгую генерацию)
+PROXY_RETRIES = 2       # попыток в ResilientClient по умолчанию (у вызовов экспертизы есть свои повторы)
+RESILIENT = True        # оборачивать ли клиент get_llm() в ResilientClient
 
 
 RETRY_DELAYS = (5.0, 15.0, 45.0)    # паузы между попытками при сбое сервера, с
@@ -73,7 +74,7 @@ def _gate(key: str) -> asyncio.Semaphore:
     loop_id = id(asyncio.get_running_loop())
     sem = _gates.get((loop_id, key))
     if sem is None:
-        sem = _gates[(loop_id, key)] = asyncio.Semaphore(max(1, int(_env("MAX_INFLIGHT", "4"))))
+        sem = _gates[(loop_id, key)] = asyncio.Semaphore(max(1, int(MAX_INFLIGHT)))
     return sem
 
 
@@ -136,7 +137,7 @@ async def call_llm(client: Any, retries: int = len(RETRY_DELAYS) + 1, **kwargs: 
     """
     client = getattr(client, "raw_client", client)   # ResilientClient: без вложенных повторов
     key = _server_key(client)
-    stream = _env("STREAM", "true").lower() not in ("0", "false", "no")
+    stream = bool(STREAM)
     last: Optional[BaseException] = None
     for attempt in range(max(1, retries)):
         await _breaker_wait(key)
@@ -168,13 +169,13 @@ class _Completions:
     """``chat.completions`` с устойчивым ``create``: лимит, предохранитель, паузы между попытками."""
 
     def __init__(self, raw: Any, retries: Optional[int] = None):
-        """Запоминает исходный клиент (без повторов SDK) и число попыток (``None`` — ``LLM_PROXY_RETRIES``)."""
+        """Запоминает исходный клиент (без повторов SDK) и число попыток (``None`` — ``PROXY_RETRIES``)."""
         self._raw = raw
         self._retries = retries
 
     async def create(self, **kwargs: Any) -> Any:
         """Как ``AsyncOpenAI.chat.completions.create``, но 504 / 5xx / таймауты повторяются с паузой (по умолчанию
-        одна повторная попытка через ~5 с, ``LLM_PROXY_RETRIES``), не больше ``LLM_MAX_INFLIGHT`` запросов
+        одна повторная попытка через ~5 с, ``PROXY_RETRIES``), не больше ``MAX_INFLIGHT`` запросов
         одновременно, при серии сбоев — общая пауза всех запросов процесса.
 
         Потоковый запрос (``stream=True``) передаётся как есть (повторяет его вызывающий, например ``call_llm``).
@@ -186,8 +187,8 @@ class _Completions:
             return await self._raw.chat.completions.create(**kwargs)
         key = _server_key(self._raw)
         # Многие вызовы экспертизы уже обёрнуты своими повторами (async_retry): здесь по умолчанию одна
-        # повторная попытка через ~5 с, чтобы повторы не перемножались (LLM_PROXY_RETRIES)
-        retries = max(1, int(self._retries if self._retries is not None else _env("PROXY_RETRIES", "2")))
+        # повторная попытка через ~5 с, чтобы повторы не перемножались (PROXY_RETRIES)
+        retries = max(1, int(self._retries if self._retries is not None else PROXY_RETRIES))
         last: Optional[BaseException] = None
         for attempt in range(retries):
             await _breaker_wait(key)
@@ -217,8 +218,8 @@ class ResilientClient:
 
     Args:
         raw: ``AsyncOpenAI``.
-        retries: Попыток на запрос при 5xx / 404 перезапуска модели / таймауте (``None`` — ``LLM_PROXY_RETRIES``,
-            по умолчанию 2). Ночной риск-мониторинг ждёт дольше (``RM_LLM_PROXY_RETRIES``, 6): перезапуск
+        retries: Попыток на запрос при 5xx / 404 перезапуска модели / таймауте (``None`` — ``PROXY_RETRIES``,
+            по умолчанию 2). Ночной риск-мониторинг ждёт дольше (``risk_monitoring.settings.LLM_PROXY_RETRIES``, 6): перезапуск
             модели длится минуты, и с двумя попытками страницы OCR и блоки извлечения терялись.
     """
 
@@ -241,7 +242,7 @@ class ResilientClient:
 
 
 def resilient(client: Any) -> Any:
-    """Оборачивает клиент в ``ResilientClient`` (если ``LLM_RESILIENT`` не ``false``)."""
-    if isinstance(client, ResilientClient) or _env("RESILIENT", "true").lower() in ("0", "false", "no"):
+    """Оборачивает клиент в ``ResilientClient`` (если ``RESILIENT``)."""
+    if isinstance(client, ResilientClient) or not RESILIENT:
         return client
     return ResilientClient(client)

@@ -101,9 +101,18 @@ celery_app.conf.broker_connection_retry_on_startup = True
 # идёт дольше visibility_timeout (по умолчанию 1 ч), Redis считает её потерянной и снова кладёт в очередь —
 # после завершения она запускается повторно (evaluate_documents_task 13.10.2026: 3844 с > 3600 с).
 # Тайм-аут должен быть больше самой долгой задачи; одинаковый для API и всех воркеров.
-VISIBILITY_TIMEOUT = int(os.getenv("CELERY_VISIBILITY_TIMEOUT", str(6 * 3600)))
+# Тайм-аут больше самой долгой задачи (риск-мониторинг — до 3 ч). Обратная сторона: задача, оборванная
+# пересборкой или падением воркера, вернётся в очередь только через этот тайм-аут — после пересборки её
+# возвращают сразу скриптом scripts/celery_unacked.py (см. его docstring).
+VISIBILITY_TIMEOUT = 4 * 3600
 celery_app.conf.broker_transport_options = {"visibility_timeout": VISIBILITY_TIMEOUT}
 celery_app.conf.result_backend_transport_options = {"visibility_timeout": VISIBILITY_TIMEOUT}
+# Воркер берёт из очереди только задачу, которую выполняет: при остановке «зависает» не больше одной
+# задачи на процесс (по умолчанию резервировалось 4 × concurrency).
+celery_app.conf.worker_prefetch_multiplier = 1
+# Результаты задач хранятся 7 дней (по умолчанию 1 день): после истечения GET /task/{id} отвечает pending,
+# и внешняя система опрашивает такую задачу бесконечно.
+celery_app.conf.result_expires = 7 * 24 * 3600
 
 
 def already_succeeded(task) -> bool:

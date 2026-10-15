@@ -355,7 +355,9 @@ class DocumentRiskAnalyzer:
                 dropped += 1
                 continue
             by_law = str(r.get("requirement_source") or "").strip().lower() == "закон"
-            if by_law or self_denial(r) or statutory(r) or table_total(r) or (r["code"] == "DOC-002" and not brand_like(frag)):
+            # DOC-002 — товарный знак БЕЗ оговорки «или эквивалент»; цитата с этой оговоркой риск опровергает
+            with_equivalent = r["code"] == "DOC-002" and re.search(r"эквивалент", frag, re.IGNORECASE)
+            if by_law or with_equivalent or self_denial(r) or statutory(r) or table_total(r) or (r["code"] == "DOC-002" and not brand_like(frag)):
                 rejected += 1
                 continue
             r["category"] = risk_catalog.category(r["code"])

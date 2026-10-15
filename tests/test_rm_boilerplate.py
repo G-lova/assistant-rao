@@ -24,13 +24,19 @@ class CountSourcesTest(unittest.TestCase):
     """Подсчёт разных заказчиков."""
 
     def test_count(self):
-        """Своя закупка и свой заказчик не считаются; экспертиза — отдельный источник; карточка без заказчика — карточка."""
+        """Своя закупка и свой заказчик не считаются; экспертиза — по карточке или названию организации."""
         sources = [{"document_id": 1, "kind": "rm", "source_id": 10}, {"document_id": 2, "kind": "rm", "source_id": 11},
-                   {"document_id": 3, "kind": "rm", "source_id": 12}, {"document_id": 4, "kind": "pe", "source_id": 500},
+                   {"document_id": 3, "kind": "rm", "source_id": 12},
+                   {"document_id": 4, "kind": "pe", "source_id": 500, "org_name": "ФГБНУ «ВНИИСПК»"},
+                   {"document_id": 7, "kind": "pe", "source_id": 501, "org_name": "фгбну вниispk"},
+                   {"document_id": 8, "kind": "pe", "source_id": 502, "rm_card_id": 13, "org_name": "Б"},
                    {"document_id": 5, "kind": "rm", "source_id": 13}, {"document_id": 6, "kind": "rm", "source_id": 14}]
         orgs = {10: "own", 11: "A", 12: "A", 13: "B", 14: None}
-        n = boilerplate.count_sources([1, 2, 3, 4, 5, 6], sources, orgs, own_card=99, own_org="own")
-        self.assertEqual(n, 4)   # A, B, экспертиза 500, карточка 14
+        n = boilerplate.count_sources([1, 2, 3, 4, 5, 6, 7, 8], sources, orgs, own_card=99, own_org="own",
+                                      own_org_name="ФГБНУ ВНИИСПК")
+        # A, B (карточка 13 и экспертиза 502 с той же карточкой — один заказчик), карточка 14,
+        # экспертиза 501 (другое название); экспертиза 500 — свой заказчик по названию
+        self.assertEqual(n, 4)
 
 
 class TypicalFragmentsTest(unittest.TestCase):
@@ -109,3 +115,46 @@ class EventCodesTest(unittest.TestCase):
         self.assertEqual(kept, ["FIN-013", "PROC-003"])
         kept = [r["rule_id"] for r in to_external_event_risks([{"rule_id": "CTR-005"}], {"group": "contract"})]
         self.assertEqual(kept, ["CTR-005"])
+
+
+class Run1015cTest(unittest.TestCase):
+    """Прогон XML 3208 / 3209 с файлами (15.10.2026, 21:00)."""
+
+    def test_unwrap_ocr_json(self):
+        """Ответ OCR внутри текста .doc заменяется распознанным текстом."""
+        from risk_monitoring.text_quality import unwrap_ocr_json
+
+        text = ('Начало. [OCR из изображения img1.png]: { "has_text": true, "raw_text": "ПРИЛОЖЕНИЕ № 3", '
+                '"visual_notes": "", "processing_quality": {"status": "high"} } Конец {не json}.')
+        self.assertEqual(unwrap_ocr_json(text), "Начало. [OCR из изображения img1.png]: ПРИЛОЖЕНИЕ № 3 Конец {не json}.")
+
+    def test_no_risk_names(self):
+        """Сметы, ведомости, КС-2, счета — без поиска рисков; ТЗ и проект контракта — с поиском."""
+        from risk_monitoring.doc_kind import no_risk_by_name
+
+        for name in ("Сводный сметный расчет.xlsx", "Ведомость объемов работ.xlsx", "Локальный сметный расчет.xlsx",
+                     "КС-2 № 1 осн искл, добавл.xlsx", "КС-3.xlsx", "Счет на оплату № 20.xlsx", "UPD_2025.zip"):
+            self.assertTrue(no_risk_by_name(name), name)
+        for name in ("1.Описание объекта закупки.docx", "5.ПРОЕКТ ГПД.docx"):
+            self.assertFalse(no_risk_by_name(name), name)
+
+    def test_doc002_with_equivalent(self):
+        """DOC-002 на общей оговорке «… читать с "или эквивалент"» отбрасывается."""
+        from risk_monitoring.document_risk_analyzer import DocumentRiskAnalyzer
+
+        frag = ("В случае если в Локальном сметном расчете и настоящем техническом задании имеются указания на "
+                "конкретные товарные знаки, следует читать с оговоркой «или эквивалент»")
+
+        async def create(**kw):
+            """Модель-заглушка с риском DOC-002 на оговорке."""
+            import json as _json
+            body = {"summary": "", "risks": [{"code": "DOC-002", "severity": "high", "title": "т", "explanation": "бренд",
+                                              "requirement_source": "заказчик",
+                                              "evidence": {"fragment": frag, "confidence": 0.95}}]}
+            return types.SimpleNamespace(choices=[types.SimpleNamespace(message=types.SimpleNamespace(
+                content=_json.dumps(body, ensure_ascii=False)))])
+
+        client = types.SimpleNamespace(chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create)))
+        res = asyncio.run(DocumentRiskAnalyzer(client, "m")._analyze_chunk(frag + ".", "tz.docx", {}, 1, 1, ["DOC-002"]))
+        self.assertEqual(res["risks"], [])
+        self.assertEqual(res["rejected"], 1)
