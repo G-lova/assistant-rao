@@ -1,6 +1,6 @@
 import asyncio
 import json
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from configs.llm_client import get_llm
 from configs.logger import get_logger
 from configs.working_with_db import get_async_summary_report_from_db
@@ -28,14 +28,20 @@ class LawDetector:
         self.client, self.model = get_llm()
 
 
-    async def get_law(self, expertise_id: int) -> Dict[str, Any]:
-        """
-        
+    async def get_law(self, expertise_id: int, environment: Optional[str] = None) -> Dict[str, Any]:
+        """Определяет основной закон экспертизы по отчёту ``/evaluate-documents``.
+
+        Args:
+            expertise_id: ID экспертизы.
+            environment: Окружение (``X-API-Database``); ``None`` — самый свежий отчёт в любом окружении.
+
+        Returns:
+            Dict[str, Any]: Результат определения закона.
         """
         logger.info(f"Определение основного закона для экспертизы: {expertise_id}")
             
         # Получение данных о загруженных документах
-        summary_report = await get_async_summary_report_from_db(expertise_id)
+        summary_report = await get_async_summary_report_from_db(expertise_id, environment)
         if isinstance(summary_report, str):
             try:
                 summary_report = json.loads(summary_report)

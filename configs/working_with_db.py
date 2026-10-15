@@ -1,4 +1,5 @@
 import asyncio
+import os
 import asyncpg
 import json
 import logging
@@ -6,7 +7,7 @@ import psycopg2
 from contextlib import asynccontextmanager
 from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
-from typing import Dict, Any, List
+from typing import Any, Dict, List, Optional
 
 from configs.retry_utils import async_retry, sync_retry, DATABASE_RETRY_CONFIG
 from configs.config import Config
@@ -87,6 +88,7 @@ DOCUMENT_CODE_TO_COLUMN = {
         "docValidCountyFiles": "goods_origin_docs",
         "docValidGarantFiles": "warranty_docs",
         "docVziskPenyFiles": "penalty_recovery_docs",
+        "linkDocs": "eis_link",
 
         "consistency_check": "consistency_check",
         "summary_report": "summary_report",
@@ -94,82 +96,145 @@ DOCUMENT_CODE_TO_COLUMN = {
 }
 
 
-@async_retry(DATABASE_RETRY_CONFIG)
-async def save_raw_data(procurement_id: int, analysis: Dict[str, Any]):
-    """
-    Сохраняет полный анализ документа в таблицу сырых данных.
+# Колонки таблицы raw_document_data по типам документов (init.sql). consistency_check и summary_report — не типы
+# документов: consistency_check в таблице нет, summary_report пишется отдельно.
+RAW_DOC_COLUMNS = sorted({c for c in DOCUMENT_CODE_TO_COLUMN.values() if c not in ("consistency_check", "summary_report")})
 
-    Функция сериализует переданный словарь анализа в JSON и сохраняет его
-    в соответствующий столбец таблицы `raw_document_data`, определяемый типом документа.
-    Если запись с указанным procurement_id существует, данные обновляются;
-    в противном случае создаётся новая запись.
+
+def _env(environment: Optional[str]) -> str:
+    """Окружение строки ``raw_document_data`` (``X-API-Database``), нормализованное как в хранилище знаний.
+
+    Если окружение не передано (вызов не из API), берётся ``PE_LEGACY_ENV`` (по умолчанию ``dev``) с предупреждением.
 
     Args:
-        procurement_id (int): Уникальный идентификатор закупки.
-        document_code (str): Тип документа (например, 'contract', 'act'), используется для определения целевого столбца.
-        analysis (Dict[str, Any]): Словарь с полным результатом анализа документа, включая извлечённые данные и метаинформацию.
+        environment: Окружение.
+
+    Returns:
+        str: Нормализованное окружение.
 
     Raises:
-        Исключения логируются, транзакция откатывается при ошибке.
+        ValueError: Недопустимое имя окружения.
     """
-    procurement_id = int(procurement_id)
-    try:
-        async with get_async_db_connection() as conn:
-            
-            updates = {}
-            codes = []
+    from knowledge_store.scope import normalize_env
 
-            for item in analysis:
-                column = DOCUMENT_CODE_TO_COLUMN.get(item["doc_code"])
-                if column is None:
-                    continue
+    if not environment:
+        fallback = os.getenv("PE_LEGACY_ENV", "dev")
+        logger.warning(f"raw_document_data: окружение не передано, используется {fallback}")
+        environment = fallback
+    return normalize_env(environment)
 
-                codes.append(item["doc_code"])
 
-                updates[column] = json.dumps(
-                    item,
-                    ensure_ascii=False,
-                    indent=2
-                )
+def _json(value: Any) -> str:
+    """JSON для колонки JSONB (без нулевых символов: Postgres их не принимает)."""
+    from knowledge_store.documents import strip_nul
+    return json.dumps(strip_nul(value), ensure_ascii=False, indent=2, default=str)
 
-            set_parts = []
-            values = []
 
-            for i, (column, value) in enumerate(updates.items(), start=1):
-                set_parts.append(f'"{column}" = ${i}')
-                values.append(value)
+def document_columns(analysis: Any) -> Dict[str, Optional[str]]:
+    """Значения колонок по типам документов: найденные в анализе — JSON, остальные — ``NULL``.
 
-            # updated_at
-            set_parts.append("updated_at = NOW()")
+    Все колонки перечисляются явно, поэтому тип документа, которого в новом прогоне нет, не остаётся от прошлого.
 
-            sql = f"""
-                UPDATE raw_document_data
-                SET {", ".join(set_parts)}
-                WHERE procurement_id = ${len(values)+1}
-            """
+    Args:
+        analysis: Список результатов по типам документов (элементы с ``doc_code``).
 
-            values.append(procurement_id)
-
-            await conn.execute(sql, *values)
-
-            for code in codes:
-                logger.info(f"Сохранено в raw_document_data: {code} для procurement_id={procurement_id}")
-
-    except Exception as e:
-        logger.error(f"Ошибка при сохранении raw_data: {str(e)}", exc_info=True)
-        raise
-
-async def get_async_summary_report_from_db(procurement_id: str):
+    Returns:
+        Dict[str, Optional[str]]: Колонка → JSON или ``None``.
     """
-    Асинхронно извлекает summary_report из БД по procurement_id.
+    values: Dict[str, Optional[str]] = {c: None for c in RAW_DOC_COLUMNS}
+    for item in analysis or []:
+        column = DOCUMENT_CODE_TO_COLUMN.get((item or {}).get("doc_code"))
+        if column in values:
+            values[column] = _json(item)
+    return values
+
+
+@async_retry(DATABASE_RETRY_CONFIG)
+async def save_evaluation_result(procurement_id: int, environment: Optional[str], analysis: Any,
+                                 summary_data: Dict[str, Any]) -> None:
+    """Атомарно сохраняет результат ``/evaluate-documents``: колонки по типам документов и ``summary_report``.
+
+    Одна запись ``INSERT … ON CONFLICT (env, procurement_id) DO UPDATE`` после успешного прогона. Прежний результат
+    не удаляется заранее: если прогон упал, он остаётся.
+
+    Args:
+        procurement_id: ID экспертизы.
+        environment: Окружение (``X-API-Database``).
+        analysis: Результаты по типам документов (``data_for_final_evaluation["documents"]``).
+        summary_data: Итоговый отчёт ``ConsistencyChecker``.
+    """
+    env, procurement_id = _env(environment), int(procurement_id)
+    columns = document_columns(analysis)
+    names = list(columns) + ["summary_report"]
+    values = list(columns.values()) + [_json(summary_data)]
+    placeholders = ", ".join(f"${i}" for i in range(3, len(names) + 3))
+    updates = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in names)
+    sql = f"""
+        INSERT INTO raw_document_data (env, procurement_id, {", ".join(f'"{c}"' for c in names)})
+        VALUES ($1, $2, {placeholders})
+        ON CONFLICT (env, procurement_id) DO UPDATE SET {updates}, updated_at = NOW()
+    """
+    async with get_async_db_connection() as conn:
+        await conn.execute(sql, env, procurement_id, *values)
+    found = [c for c, v in columns.items() if v is not None]
+    logger.info(f"raw_document_data {env}:{procurement_id}: сохранены summary_report и колонки {found}")
+
+
+@async_retry(DATABASE_RETRY_CONFIG)
+async def save_raw_data(procurement_id: int, analysis: Dict[str, Any], environment: Optional[str] = None):
+    """Сохраняет только колонки по типам документов (строка создаётся, если её нет).
+
+    Пайплайн ``/evaluate-documents`` использует :func:`save_evaluation_result`; функция оставлена для
+    совместимости.
+
+    Args:
+        procurement_id: ID экспертизы.
+        analysis: Результаты по типам документов (элементы с ``doc_code``).
+        environment: Окружение (``X-API-Database``).
+    """
+    env, procurement_id = _env(environment), int(procurement_id)
+    columns = document_columns(analysis)
+    names = list(columns)
+    placeholders = ", ".join(f"${i}" for i in range(3, len(names) + 3))
+    updates = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in names)
+    async with get_async_db_connection() as conn:
+        await conn.execute(f"""
+            INSERT INTO raw_document_data (env, procurement_id, {", ".join(f'"{c}"' for c in names)})
+            VALUES ($1, $2, {placeholders})
+            ON CONFLICT (env, procurement_id) DO UPDATE SET {updates}, updated_at = NOW()
+        """, env, procurement_id, *columns.values())
+
+
+async def get_async_summary_report_from_db(procurement_id: str, environment: Optional[str] = None):
+    """Асинхронно извлекает ``summary_report`` по экспертизе.
+
+    С окружением читается строка этого окружения. Без окружения (вызывающая система не передала
+    ``X-API-Database``) — самая свежая строка с этим ``procurement_id`` в любом окружении, как до миграции 008;
+    если таких окружений несколько, пишется предупреждение.
+
+    Args:
+        procurement_id: ID экспертизы.
+        environment: Окружение или ``None``.
+
+    Returns:
+        Optional[str]: JSON отчёта или ``None``.
     """
     try:
         procurement_id_int = int(procurement_id)
         async with get_async_db_connection() as conn:
-            row = await conn.fetchrow(
-                "SELECT summary_report FROM raw_document_data WHERE procurement_id = $1",
-                procurement_id_int
-            )
+            if environment:
+                row = await conn.fetchrow(
+                    "SELECT summary_report FROM raw_document_data WHERE env = $1 AND procurement_id = $2",
+                    _env(environment), procurement_id_int)
+            else:
+                rows = await conn.fetch(
+                    "SELECT env, summary_report FROM raw_document_data WHERE procurement_id = $1 "
+                    "ORDER BY updated_at DESC NULLS LAST, id DESC", procurement_id_int)
+                envs = {r["env"] for r in rows}
+                if len(envs) > 1:
+                    logger.warning(f"raw_document_data: для {procurement_id} нет X-API-Database, есть строки окружений "
+                                   f"{sorted(envs)} — взята самая свежая ({rows[0]['env']})")
+                row = rows[0] if rows else None
             if not row or not row["summary_report"]:
                 logger.warning(f"Данные summary_report не найдены для procurement_id={procurement_id}")
                 return None
@@ -179,7 +244,8 @@ async def get_async_summary_report_from_db(procurement_id: str):
         logger.error(f"Ошибка при получении данных из БД: {str(e)}", exc_info=True)
         return None
 
-async def get_contract_info_from_db(procurement_id: str) -> Dict[str, str]:
+
+async def get_contract_info_from_db(procurement_id: str, environment: Optional[str] = None) -> Dict[str, str]:
     """
     Извлекает основные реквизиты контракта из базы данных по идентификатору закупки.
 
@@ -189,6 +255,8 @@ async def get_contract_info_from_db(procurement_id: str) -> Dict[str, str]:
 
     Args:
         procurement_id (str): Уникальный идентификатор закупки.
+        environment (Optional[str]): Окружение (``X-API-Database``); ``None`` — см.
+            :func:`get_async_summary_report_from_db`.
 
     Returns:
         Dict[str, str]: Словарь с ключами:
@@ -197,13 +265,12 @@ async def get_contract_info_from_db(procurement_id: str) -> Dict[str, str]:
             - "date" (str): Дата контракта в текстовом формате или "0", если не найдена.
     """
     try:
-        data = await get_async_summary_report_from_db(procurement_id)
+        data = await get_async_summary_report_from_db(procurement_id, environment)
         if not data:
             return {"contract_number": "0", "amount": "0", "date": "0"}
-        data = json.loads(data)
+        data = json.loads(data) if isinstance(data, (str, bytes)) else data   # asyncpg отдаёт JSONB строкой
         logger.info(data)
         
-        # logger.info(f'data.get("documents", [])={data.get("documents", [])}')
         # Извлечение данных из сводного отчета
         for item in data.get('documents', []):
             raw_data = item.get('raw_data', {})
@@ -226,88 +293,38 @@ async def get_contract_info_from_db(procurement_id: str) -> Dict[str, str]:
         return {"contract_number": "0", "amount": "0", "date": "0"}
 
 
-async def save_summary_report(procurement_id: int, summary_data: Dict[str, Any]):
-    """
-    Сохраняет сводный отчёт по закупке в базу данных.
+@async_retry(DATABASE_RETRY_CONFIG)
+async def save_summary_report(procurement_id: int, summary_data: Dict[str, Any], environment: Optional[str] = None):
+    """Сохраняет только ``summary_report`` (строка создаётся, если её нет).
 
-    Функция сериализует переданный словарь с результатами анализа в JSON
-    и сохраняет его в таблицу `raw_document_data` по уникальному идентификатору закупки.
-    Если запись с таким `procurement_id` уже существует — обновляется поле `summary_report`,
-    иначе создаётся новая запись. Время обновления автоматически устанавливается в NOW().
+    Пайплайн ``/evaluate-documents`` использует :func:`save_evaluation_result`; функция оставлена для
+    совместимости.
 
     Args:
-        procurement_id (int): Уникальный идентификатор закупки.
-        summary_data (Dict[str, Any]): Словарь с данными сводного отчёта (например, статусы документов, ошибки, рекомендации).
-
-    Returns:
-        None: Функция ничего не возвращает, но логирует успешное сохранение или ошибку.
+        procurement_id: ID экспертизы.
+        summary_data: Сводный отчёт.
+        environment: Окружение (``X-API-Database``).
     """
-    conn = None
-    procurement_id = int(procurement_id)
-    try:
-        async with get_async_db_connection() as conn:
-            # Преобразуем данные в JSON
-            json_data = json.dumps(summary_data, ensure_ascii=False, indent=2)
-
-            # Логируем ключевую информацию для отладки
-            logger.info(f"Сохранение summary_report для {procurement_id}")
-            logger.info(f"- Всего документов: {len(summary_data.get('documents', {}))}")
-            codes = set([f"{doc.get('document_code')}: {doc.get('document_name')}" for doc in summary_data.get('documents', {})])
-            logger.info(f"- Document codes:")
-            for code in codes:
-                logger.info(f"  -- {code}")
-
-            # Проверка существования записи (asyncpg: $1 вместо %s)
-            check_result = await conn.fetchrow(
-                "SELECT id FROM raw_document_data WHERE procurement_id = $1",
-                procurement_id
-            )
-
-            if check_result:
-                # UPDATE
-                await conn.execute("""
-                    UPDATE raw_document_data 
-                    SET summary_report = $1, updated_at = NOW() 
-                    WHERE procurement_id = $2
-                """, json_data, procurement_id)
-            else:
-                # INSERT
-                await conn.execute("""
-                    INSERT INTO raw_document_data (procurement_id, summary_report) 
-                    VALUES ($1, $2)
-                """, procurement_id, json_data)
-
-            logger.info(f"Сводный отчет сохранен для procurement_id={procurement_id}")
-
-    except Exception as e:
-        logger.error(f"Ошибка при сохранении summary_report: {str(e)}", exc_info=True)
-        raise
+    env, procurement_id = _env(environment), int(procurement_id)
+    async with get_async_db_connection() as conn:
+        await conn.execute("""
+            INSERT INTO raw_document_data (env, procurement_id, summary_report) VALUES ($1, $2, $3)
+            ON CONFLICT (env, procurement_id) DO UPDATE SET summary_report = EXCLUDED.summary_report, updated_at = NOW()
+        """, env, procurement_id, _json(summary_data))
+    logger.info(f"Сводный отчет сохранен для {env}:{procurement_id}")
 
 
 @async_retry(DATABASE_RETRY_CONFIG)
-async def delete_procurement_data(procurement_id: int):
-    """_summary_
+async def delete_procurement_data(procurement_id: int, environment: Optional[str] = None):
+    """Удаляет результат ``/evaluate-documents`` экспертизы в окружении.
+
+    Пайплайн больше не удаляет строку перед прогоном (запись атомарная, :func:`save_evaluation_result`).
 
     Args:
-        procurement_id (int): _description_
+        procurement_id: ID экспертизы.
+        environment: Окружение (``X-API-Database``).
     """
-    procurement_id = int(procurement_id)
-    try:
-        async with get_async_db_connection() as conn:
-            # Выполняем удаление в рамках одной транзакции
-            async with conn.transaction():
-                await conn.execute(
-                    "DELETE FROM raw_document_data WHERE procurement_id = $1",
-                    procurement_id
-                )
-                # При необходимости раскомментируйте удаление из второй таблицы:
-                # await conn.execute(
-                #     "DELETE FROM clean_document_conclusions WHERE procurement_id = $1",
-                #     procurement_id
-                # )
-            
-            logger.info(f"Все данные для procurement_id={procurement_id} успешно удалены.")
-
-    except Exception as e:
-        logger.error(f"Ошибка при удалении данных для procurement_id={procurement_id}: {str(e)}", exc_info=True)
-        raise
+    env, procurement_id = _env(environment), int(procurement_id)
+    async with get_async_db_connection() as conn:
+        await conn.execute("DELETE FROM raw_document_data WHERE env = $1 AND procurement_id = $2", env, procurement_id)
+    logger.info(f"Данные {env}:{procurement_id} удалены из raw_document_data")

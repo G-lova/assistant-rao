@@ -186,8 +186,29 @@ async def get_task_status(task_id: str):
         return {"status": task.state}
 
 
+def _check_env_header(x_api_database: Optional[str]) -> None:
+    """Проверяет необязательный заголовок ``X-API-Database``: если он передан, имя окружения должно быть допустимым.
+
+    Args:
+        x_api_database: Значение заголовка или ``None``.
+
+    Raises:
+        HTTPException: 400 — недопустимое имя окружения.
+    """
+    if x_api_database is None:
+        return
+    from knowledge_store.scope import normalize_env
+    try:
+        normalize_env(x_api_database)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.post("/get-contract-info")
-async def api_get_contract_info(request_body: Dict[str, str] = Body(...)):
+async def api_get_contract_info(
+    request_body: Dict[str, str] = Body(...),
+    x_api_database: Optional[str] = Header(default=None, alias="X-API-Database")
+):
     """
     Обработчик API-запроса для получения ключевых реквизитов контракта по идентификатору закупки.
 
@@ -209,6 +230,7 @@ async def api_get_contract_info(request_body: Dict[str, str] = Body(...)):
             - date (str): Дата контракта в текстовом формате или "0", если не найдена.
             При возникновении внутренней ошибки возвращается тот же словарь со значениями "0".
     """
+    _check_env_header(x_api_database)
     procurement_id = request_body.get("procurement_id")
     logger.info(f"Получение данных контракта для экспертизы {procurement_id}")
 
@@ -216,7 +238,7 @@ async def api_get_contract_info(request_body: Dict[str, str] = Body(...)):
         raise HTTPException(status_code=400, detail="Поле 'procurement_id' обязательно в теле запроса")
 
     try:
-        info = await get_contract_info_from_db(procurement_id)
+        info = await get_contract_info_from_db(procurement_id, x_api_database)
         logger.info(f"Обработка документов завершена: {info}")
         return info
     except Exception as e:
@@ -543,11 +565,15 @@ async def parse_eis(request: EISParseRequest):
 
 @app.post("/get-law")
 async def get_law(
-    request_body: Dict[str, int] = Body(...)
+    request_body: Dict[str, int] = Body(...),
+    x_api_database: Optional[str] = Header(default=None, alias="X-API-Database")
 ):
-    """
+    """Определяет основной закон (44-ФЗ / 223-ФЗ) по отчёту ``/evaluate-documents``.
 
+    Отчёт берётся из ``raw_document_data`` окружения ``X-API-Database``. Без заголовка — самый свежий отчёт
+    экспертизы в любом окружении (поведение до миграции 008, с предупреждением в журнале).
     """
+    _check_env_header(x_api_database)
     try:
         expertise_id = request_body.get("expertise_id")
         
@@ -557,7 +583,7 @@ async def get_law(
         # Запускаем скоринг пайплайн
 
         law_detector = LawDetector()
-        result = await law_detector.get_law(expertise_id)
+        result = await law_detector.get_law(expertise_id, x_api_database)
         
         return result
         
@@ -584,7 +610,7 @@ async def get_subject(
         send_subject_service = SendSubjectService(http_manager, x_api_database)
 
         # Получение данных о загруженных документах
-        summary_report = await get_async_summary_report_from_db(expertise_id)
+        summary_report = await get_async_summary_report_from_db(expertise_id, x_api_database)
 
         if not summary_report:
             logger.warning("Отсутствуют извлеченные данные. Пробуем достать предмет контракта из поля `typeDopDetal.ai_doc_answer")

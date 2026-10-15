@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import pandas as pd
 import asyncio
@@ -11,7 +12,7 @@ from configs.http_client_manager import HTTPClientManager
 from configs.llm_client import get_llm
 from configs.logger import get_logger
 from configs.utils import load_sql_query, split_large_text
-from configs.working_with_db import save_raw_data, save_summary_report, delete_procurement_data
+from configs.working_with_db import save_evaluation_result
 from evaluate_documents.completeness_checker import CompletenessChecker
 from evaluate_documents.consistency_checker import ConsistencyChecker
 from configs.parsing import CloudStorageParser
@@ -405,22 +406,16 @@ class TasksPipeline:
             data_for_final_evaluation["documents"].sort(key=lambda x: (x["required"] != "Обязательный", x["doc_code"] != "linkDocs"))
 
 
-            # === Очистка старых данных ===
-            try:
-                await delete_procurement_data(self.df['id'].iloc[0])
-                logger.info(f"Запись в БД удалена {self.df['id'].iloc[0]}")
-            except:
-                logger.info(f"Запись в БД не существует {self.df['id'].iloc[0]}")
+            # Результаты по типам документов до проверки согласованности (она может дополнять структуру)
+            documents_snapshot = copy.deepcopy(data_for_final_evaluation["documents"])
 
-                
-            
-            # сохранение данных в БД
-            await save_raw_data(procurement_id=self.df.id.iloc[0], analysis=data_for_final_evaluation["documents"]) 
-                        
             # ЭТАП 3: Оценка согласованности и эвристик и формирование финального отчета
-            # logger.info(f"type: {type(data_for_final_evaluation)}, data_for_final_evaluation: {data_for_final_evaluation}")
             final_evaluation_result = await self.consistency_checker.check_consistency(data_for_final_evaluation)
-            await save_summary_report(procurement_id=self.df['id'].iloc[0], summary_data=final_evaluation_result)
+
+            # Атомарная запись результата в raw_document_data (колонки по типам документов + summary_report) с ключом
+            # (окружение, экспертиза). Прежний результат заранее не удаляется: если прогон упал, он остаётся.
+            await save_evaluation_result(self.df['id'].iloc[0], self.x_api_database, documents_snapshot,
+                                         final_evaluation_result)
 
             # Хранилище знаний: фоновая индексация текстов (при выключенном флаге — no-op)
             await ks_hooks.on_run_finished(self.ks_scope)

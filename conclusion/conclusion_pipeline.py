@@ -44,6 +44,7 @@ class RaoConclusionPipeline:
         self.sql_queries_path = paths_config.sql_queries
 
         self.expertise_id = expertise_id
+        self.environment = environment
 
     async def get_expert_opinions(self):
         """Получает все заключения экспертов по expertise_id"""
@@ -219,7 +220,7 @@ class RaoConclusionPipeline:
                 return {}
             
             # Получение данных о загруженных документах
-            summary_report = await get_async_summary_report_from_db(self.expertise_id)
+            summary_report = await get_async_summary_report_from_db(self.expertise_id, self.environment)
             if isinstance(summary_report, str):
                 try:
                     summary_report = json.loads(summary_report)
