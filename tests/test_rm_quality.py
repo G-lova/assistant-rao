@@ -796,3 +796,129 @@ class EventRiskShapeTest(unittest.TestCase):
         out = to_external_event_risks([{"rule_id": "CTR-005", "verification_needed": 1}, "мусор"])
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0]["verification_needed"], [])
+
+
+class InternalResultsTest(unittest.TestCase):
+    """Результаты анализа хранятся у нас (``ai_rm_results``) и используются, если их нет во внешней БД."""
+
+    class Repo:
+        """Хранилище результатов в памяти."""
+
+        def __init__(self, stored=None):
+            """``stored``: ``{(kind, id): запись}``."""
+            self.stored = stored or {}
+            self.saved, self.marked = [], []
+
+        async def get_rm_results(self, env, kind, ids):
+            """Записи по id."""
+            return {i: self.stored[(kind, i)] for i in ids if (kind, i) in self.stored}
+
+        async def save_rm_result(self, env, kind, external_id, ai, pushed, error=None):
+            """Запоминает сохранение."""
+            self.saved.append((kind, external_id, pushed))
+
+        async def mark_rm_pushed(self, env, kind, external_id):
+            """Запоминает дозапись."""
+            self.marked.append((kind, external_id))
+
+    class Api:
+        """Запись во внешнюю БД в памяти."""
+
+        def __init__(self):
+            """Пустой журнал."""
+            self.patched = []
+
+        async def patch_ai_analysis(self, table, rid, ai):
+            """Запоминает запись."""
+            self.patched.append((table, rid))
+
+    def _file_analyzer(self, repo):
+        """Анализатор файлов без внешних зависимостей."""
+        try:
+            from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
+        except ImportError as e:
+            raise unittest.SkipTest(f"нет зависимостей: {e}")
+        an = AIFileAnalyzer.__new__(AIFileAnalyzer)
+        an.repo, an.env, an.force, an.push_results = repo, "prod", False, True
+        an.risk_api = self.Api()
+        an.semaphore = asyncio.Semaphore(1)
+
+        async def boom(*a, **k):
+            raise AssertionError("повторный анализ не нужен")
+
+        an.analyze_file = boom
+        return an
+
+    def test_file_reused_from_internal(self):
+        """Во внешней БД статус не completed, у нас completed — дозапись без анализа."""
+        ai = {"risks": [{"rule_id": "DOC-004"}], "pipeline": {"status": "completed"}}
+        repo = self.Repo({("file", 7): {"ai_analysis": ai, "status": "completed", "debug": False}})
+        an = self._file_analyzer(repo)
+        an.internal = asyncio.run(an._internal([7]))
+        res = asyncio.run(an._guarded({"id": 7, "rm_status": None}, None))
+        self.assertEqual(res["source"], "internal")
+        self.assertTrue(res["pushed"])
+        self.assertEqual(repo.marked, [("file", 7)])
+
+    def test_debug_result_not_reused(self):
+        """Результат отладочного прогона не дозаписывается — файл анализируется заново."""
+        repo = self.Repo({("file", 7): {"ai_analysis": {}, "status": "completed", "debug": True}})
+        an = self._file_analyzer(repo)
+        an.internal = asyncio.run(an._internal([7]))
+
+        async def analyzed(row, previous, attempt):
+            return {"file_id": 7, "status": "done"}
+
+        an.analyze_file = analyzed
+        self.assertEqual(asyncio.run(an._guarded({"id": 7, "rm_status": None}, None))["status"], "done")
+
+    def test_previous_codes_from_internal(self):
+        """Прошлая редакция не записана во внешнюю БД, но есть у нас — коды берутся оттуда."""
+        ai = {"risks": [{"rule_id": "FIN-005"}, {"rule_id": "DOC-004"}], "pipeline": {"status": "completed"}}
+        an = self._file_analyzer(self.Repo({("file", 3): {"ai_analysis": ai, "status": "completed"}}))
+        an.versions, an.model, an.internal = {"risk_analysis": "r"}, "m", {}
+
+        async def no_cache(*a):
+            return None
+
+        an._get_cached = no_cache
+        self.assertEqual(asyncio.run(an._previous_codes({"id": 3, "rule_ids": None}, None, [])), ["DOC-004", "FIN-005"])
+
+    def test_no_table(self):
+        """Таблицы ещё нет (миграция 009 не применена) — пустой результат, анализ идёт как раньше."""
+
+        class Broken(self.Repo):
+            async def get_rm_results(self, *a):
+                raise RuntimeError('relation "ai_rm_results" does not exist')
+
+        an = self._file_analyzer(Broken())
+        self.assertEqual(asyncio.run(an._internal([1])), {})
+
+    def test_xml_files_from_internal(self):
+        """Резюме файла, которого нет во внешней БД, берётся из нашего результата; XML сохраняется у нас."""
+        try:
+            from risk_monitoring.xml_event_analyzer import XmlEventAnalyzer
+        except ImportError as e:
+            raise unittest.SkipTest(f"нет зависимостей: {e}")
+        repo = self.Repo({("file", 11): {"ai_analysis": {"resume": "Проект контракта", "total_doc_risk": 2,
+                                                          "doc_type": {"detected_type": "docProjContractFiles"}},
+                                         "status": "completed"},
+                          ("xml", 5): {"ai_analysis": {"x": 1}, "status": "completed", "debug": False}})
+        xa = XmlEventAnalyzer.__new__(XmlEventAnalyzer)
+        xa.results_repo, xa.env, xa.force, xa.push_results = repo, "prod", False, True
+        xa.risk_api = self.Api()
+        xa.semaphore = asyncio.Semaphore(1)
+
+        async def query(name, head=(), **lists):
+            return [{"id": 11, "file_name": "контракт.docx", "detected_type": None, "resume": None}]
+
+        xa._query = query
+        files = asyncio.run(xa._files(5, None, []))
+        self.assertEqual(files[0]["resume"], "Проект контракта")
+        self.assertEqual(files[0]["detected_type"], "docProjContractFiles")
+        xa.internal = asyncio.run(xa._internal("xml", [5]))
+        res = asyncio.run(xa._guarded({"id": 5, "rm_status": "failed"}, None))
+        self.assertEqual(res["source"], "internal")
+        self.assertEqual(repo.marked, [("xml", 5)])
+        asyncio.run(xa._save_internal(6, {}, False, "500"))
+        self.assertEqual(repo.saved, [("xml", 6, False)])

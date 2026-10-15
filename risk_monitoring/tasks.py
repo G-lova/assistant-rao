@@ -114,19 +114,21 @@ def rm_analyze_xml_task(self, xml_ids: List[int], environment: str, force: bool 
 
     async def run() -> List[Dict[str, Any]]:
         """Создаёт HTTP-менеджер внутри event loop задачи; при необходимости анализирует файлы, затем XML."""
-        async with HTTPClientManager(timeout=180.0) as mgr:
-            analyzer = XmlEventAnalyzer(mgr, environment, push_results=push, force=force, use_llm=use_llm)
+        from configs.ai_repo import AIRepo
+
+        async with HTTPClientManager(timeout=180.0) as mgr, AIRepo() as repo:
+            # repo — внутреннее хранилище результатов (ai_rm_results); срок хранения текстов не трогаем
+            analyzer = XmlEventAnalyzer(mgr, environment, push_results=push, force=force, use_llm=use_llm,
+                                        results_repo=repo)
             if analyze_files:
-                from configs.ai_repo import AIRepo
                 from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
 
                 file_ids = await analyzer.pending_files(xml_ids, include_done=force)
                 logger.info(f"Риск-мониторинг, XML {len(xml_ids)}: файлов к анализу {len(file_ids)}")
                 if file_ids:
                     f_before = dict(CALLS)
-                    async with AIRepo() as repo:
-                        fa = AIFileAnalyzer(mgr, environment, repo, push_results=push, force=force, recompute=recompute)
-                        f_results = await fa.analyze_ids(file_ids)
+                    fa = AIFileAnalyzer(mgr, environment, repo, push_results=push, force=force, recompute=recompute)
+                    f_results = await fa.analyze_ids(file_ids)
                     analyzer.file_results = {int(r["file_id"]): r["ai_analysis"] for r in f_results
                                              if r.get("ai_analysis") and r.get("file_id") is not None}
                     files_out["summary"] = {**_summary(f_results), "llm": _llm_summary(f_before, fa.stats)}

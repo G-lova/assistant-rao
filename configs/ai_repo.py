@@ -292,6 +292,63 @@ class AIRepo:
             _vec(embedding), embedding_model, limit,
         )
 
+    async def save_rm_result(self, env: str, kind: str, external_id: int, ai_analysis: Dict[str, Any],
+                             pushed: bool, push_error: Optional[str] = None) -> None:
+        """Сохраняет результат анализа риск-мониторинга (последний по файлу / XML).
+
+        Args:
+            env: Окружение.
+            kind: ``file`` / ``xml``.
+            external_id: id во внешней БД.
+            ai_analysis: Результат (то, что пишется в ``ai_analysis`` внешней БД).
+            pushed: Записан ли во внешнюю БД.
+            push_error: Ошибка записи.
+        """
+        pipeline = (ai_analysis or {}).get("pipeline") or {}
+        await self.pool.execute(
+            """
+            INSERT INTO ai_rm_results (env, kind, external_id, ai_analysis, status, debug, pushed, push_error,
+                                       analyzed_at, pushed_at)
+            VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, NOW(), CASE WHEN $7 THEN NOW() END)
+            ON CONFLICT (env, kind, external_id) DO UPDATE SET
+                ai_analysis = EXCLUDED.ai_analysis, status = EXCLUDED.status, debug = EXCLUDED.debug,
+                pushed = EXCLUDED.pushed, push_error = EXCLUDED.push_error, analyzed_at = NOW(),
+                pushed_at = EXCLUDED.pushed_at
+            """,
+            env, kind, int(external_id), json.dumps(ai_analysis, ensure_ascii=False, default=str),
+            pipeline.get("status"), bool(pipeline.get("debug")), bool(pushed), push_error,
+        )
+
+    async def mark_rm_pushed(self, env: str, kind: str, external_id: int) -> None:
+        """Отмечает, что сохранённый результат дозаписан во внешнюю БД."""
+        await self.pool.execute(
+            "UPDATE ai_rm_results SET pushed = TRUE, push_error = NULL, pushed_at = NOW() "
+            "WHERE env = $1 AND kind = $2 AND external_id = $3",
+            env, kind, int(external_id),
+        )
+
+    async def get_rm_results(self, env: str, kind: str, external_ids: Sequence[int]) -> Dict[int, Dict[str, Any]]:
+        """Сохранённые результаты анализа по id.
+
+        Args:
+            env: Окружение.
+            kind: ``file`` / ``xml``.
+            external_ids: id во внешней БД.
+
+        Returns:
+            Dict[int, Dict[str, Any]]: ``id → {ai_analysis, status, debug, pushed, analyzed_at}``.
+        """
+        ids = sorted({int(i) for i in external_ids if i is not None})
+        if not ids:
+            return {}
+        rows = await self.pool.fetch(
+            "SELECT external_id, ai_analysis, status, debug, pushed, analyzed_at FROM ai_rm_results "
+            "WHERE env = $1 AND kind = $2 AND external_id = ANY($3::bigint[])",
+            env, kind, ids,
+        )
+        return {int(r["external_id"]): {"ai_analysis": _load(r["ai_analysis"]), "status": r["status"], "debug": r["debug"],
+                                        "pushed": r["pushed"], "analyzed_at": r["analyzed_at"]} for r in rows}
+
     async def find_chunks_all(
         self, embedding: Sequence[float], embedding_model: str, limit: int = 30
     ) -> List[asyncpg.Record]:

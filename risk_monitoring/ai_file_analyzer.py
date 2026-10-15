@@ -405,6 +405,7 @@ class AIFileAnalyzer:
         found = {int(r["id"]): r for r in rows}
         todo = [r for r in found.values() if self.force or r.get("rm_status") != "completed"]
         previous = await self.fetch_previous_versions(todo) if todo else {}
+        self.internal = await self._internal(list(found) + [int(p["id"]) for p in previous.values() if p.get("id")])
         by_id: Dict[int, Dict[str, Any]] = {}
         for wave in self._waves([i for i in ids if i in found], previous, {r["id"] for r in todo}):
             for res in await asyncio.gather(*(self._guarded(found[i], previous.get(i)) for i in wave)):
@@ -455,6 +456,9 @@ class AIFileAnalyzer:
         if not self.force:
             if row.get("rm_status") == "completed":
                 return {"file_id": file_id, "status": "skipped", "reason": "already_analyzed"}
+            stored = (getattr(self, "internal", None) or {}).get(file_id)
+            if stored and stored.get("status") == "completed" and not stored.get("debug"):
+                return await self._reuse_internal(file_id, stored)
             if row.get("rm_status") == "failed" and attempt > MAX_ATTEMPTS:
                 return {"file_id": file_id, "status": "skipped", "reason": "max_attempts"}
         async with self.semaphore:
@@ -466,6 +470,29 @@ class AIFileAnalyzer:
             except Exception as e:  # noqa: BLE001 — сбой одного файла не останавливает остальные
                 logger.error(f"Ошибка анализа файла {file_id}: {e}", exc_info=True)
                 return await self._push_failure(file_id, attempt, f"{type(e).__name__}: {e}")
+
+    async def _reuse_internal(self, file_id: int, stored: Dict[str, Any]) -> Dict[str, Any]:
+        """Файл уже проанализирован, но результата нет во внешней БД (запись не удалась или прогон был без записи):
+        дозаписываем сохранённый результат, без повторного анализа.
+
+        Returns:
+            Dict[str, Any]: ``status = done``, ``source = internal``.
+        """
+        ai = stored["ai_analysis"]
+        result = {"file_id": file_id, "document_id": None, "status": "done", "source": "internal",
+                  "pushed": False, "ai_analysis": ai}
+        if self.push_results:
+            try:
+                await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, file_id, ai)
+                result["pushed"] = True
+                if hasattr(getattr(self, "repo", None), "mark_rm_pushed"):
+                    await self.repo.mark_rm_pushed(self.env, "file", file_id)
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"Не удалось дозаписать ai_analysis файла {file_id}: {e}")
+                result["push_error"] = str(e)
+        logger.info(f"Файл {file_id}: результат из внутренней БД (анализ {stored.get('analyzed_at')}), "
+                    f"записан во внешнюю БД: {result['pushed']}")
+        return result
 
     async def _push_failure(self, file_id: int, attempt: int, error: str) -> Dict[str, Any]:
         """Записывает ``pipeline.status = failed`` (кроме режима отладки, чтобы не затереть готовый анализ)."""
@@ -689,9 +716,9 @@ class AIFileAnalyzer:
                               allowed: List[str]) -> Optional[List[str]]:
         """Коды рисков прошлой редакции для ``risks_comparison``.
 
-        Источник — ``ai_analysis`` прошлой редакции во внешней БД; если она проанализирована без рисков,
-        ``JSON_EXTRACT`` даёт ``NULL`` — это пустой список, а не «нет данных». Если во внешней БД анализа нет
-        (например, прогон без записи), берётся риск-анализ прошлой редакции из кэша сервиса.
+        Источники по порядку: ``ai_analysis`` прошлой редакции во внешней БД (если она проанализирована без
+        рисков, ``JSON_EXTRACT`` даёт ``NULL`` — это пустой список, а не «нет данных»); сохранённый у нас результат
+        (``ai_rm_results``); риск-анализ прошлой редакции из кэша сервиса.
 
         Returns:
             Optional[List[str]]: Коды или ``None`` (прошлая редакция не анализировалась).
@@ -701,6 +728,13 @@ class AIFileAnalyzer:
             return codes
         if previous.get("rm_status") == "completed":
             return []
+        prev_id = int(previous["id"]) if previous.get("id") else None
+        stored = (getattr(self, "internal", None) or {}).get(prev_id) if prev_id else None
+        if stored is None and prev_id:
+            stored = (await self._internal([prev_id])).get(prev_id)
+        if stored and stored.get("status") == "completed":
+            # прошлая редакция проанализирована, но во внешней БД результата нет (без записи / сбой записи)
+            return sorted({r.get("rule_id") for r in (stored["ai_analysis"].get("risks") or []) if r.get("rule_id")})
         doc_id = (prev_ctx or {}).get("doc_id")
         version = getattr(self, "_risk_version", None) or f"{self.versions['risk_analysis']}:{_hash_version(allowed)}"
         cached = await self._get_cached(doc_id, "risk_analysis", version, self.model) if doc_id else None
@@ -1130,7 +1164,27 @@ class AIFileAnalyzer:
             try:
                 await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, file_id, ai_analysis)
                 response["pushed"] = True
-            except Exception as e:  # noqa: BLE001 — анализ сохранён в кэше, повтор запишет его без LLM
+            except Exception as e:  # noqa: BLE001 — результат сохранён у нас, следующий запуск дозапишет без LLM
                 logger.error(f"Не удалось записать ai_analysis файла {file_id}: {e}")
                 response["push_error"] = str(e)
+        await self._save_internal(file_id, ai_analysis, response["pushed"], response.get("push_error"))
         return response
+
+    async def _save_internal(self, file_id: int, ai: Dict[str, Any], pushed: bool, error: Optional[str]) -> None:
+        """Сохраняет ``ai_analysis`` файла во внутренней БД (``ai_rm_results``); сбой не ломает анализ."""
+        if not hasattr(getattr(self, "repo", None), "save_rm_result"):
+            return
+        try:
+            await self.repo.save_rm_result(self.env, "file", file_id, ai, pushed, error)
+        except Exception as e:  # noqa: BLE001 — например, до миграции 009
+            logger.warning(f"Результат файла {file_id} не сохранён во внутренней БД: {type(e).__name__}: {e}")
+
+    async def _internal(self, ids: List[int]) -> Dict[int, Dict[str, Any]]:
+        """Сохранённые у нас результаты файлов (``ai_rm_results``); пустой словарь, если таблицы нет."""
+        if not ids or not hasattr(getattr(self, "repo", None), "get_rm_results"):
+            return {}
+        try:
+            return await self.repo.get_rm_results(self.env, "file", ids)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Внутренние результаты файлов не получены: {type(e).__name__}: {e}")
+            return {}
