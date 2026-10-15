@@ -251,12 +251,14 @@ class AIFileAnalyzer:
         """
         from risk_monitoring.xml_event_analyzer import ArchiveCache
 
-        # Первая версия XML (0) не имеет предыдущей — XML не читаем
-        rows = [r for r in rows if r.get("eis_version") is None or int(r["eis_version"]) > 0]
+        # Версия файла у загрузчика может быть неточной, поэтому XML читаются и для eis_version = 0
+        # (у первой версии предыдущей нет, но может быть следующая — superseded_by)
         if not rows:
             return {}
         result: Dict[int, Dict[str, Any]] = {}
         resolved: set = set()
+        if not hasattr(self, "lookups"):
+            self.lookups: Dict[int, Dict[str, Any]] = {}
         archives = ArchiveCache(self.parser)
         try:
             xml_of = await self._current_xml(rows, archives)
@@ -275,16 +277,28 @@ class AIFileAnalyzer:
                     continue
                 px = prev_xml.get(int(x["id"]))
                 try:
-                    body = x.get("body") or (await self._read_xml(archives, x))
-                    prev_body = await self._read_xml(archives, px) if px else None
+                    body = x.get("body") or (await self._xml_body(archives, x))
+                    prev_body = await self._xml_body(archives, px) if px else None
                 except Exception as e:  # noqa: BLE001 — запасной путь по имени файла
                     logger.warning(f"Файл {fid}: XML {x['id']} / предыдущий не прочитан: {e}")
                     continue
                 ref = file_versions.previous_ref(r, body, prev_body)
                 ref["previous_xml_id"] = int(px["id"]) if px else None
+                ref["xml_id"], ref["xml_eis_version"] = int(x["id"]), x.get("eis_version")
+                for nx in x.get("newer") or []:
+                    try:
+                        nbody = await self._xml_body(archives, nx)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"Файл {fid}: новая версия XML {nx['id']} не прочитана: {e}")
+                        continue
+                    nxt = file_versions.next_ref(r, body, nbody)
+                    if nxt:
+                        ref["superseded"] = {**nxt, "xml_id": int(nx["id"]), "xml_eis_version": nx.get("eis_version")}
+                        break
                 refs[fid] = ref
                 resolved.add(fid)
-            urls = sorted({u for ref in refs.values() for u in ref.get("urls") or []})[:500]
+            urls = sorted({u for ref in refs.values() for u in (ref.get("urls") or [])
+                           + ([ref["superseded"]["url"]] if (ref.get("superseded") or {}).get("url") else [])})[:500]
             pids = sorted({ref["previous_xml_id"] for ref in refs.values() if ref.get("previous_xml_id")})
             cands = await self._query("files_by_ref.sql", urls=urls, ids=pids) if (urls or pids) else []
             for r in rows:
@@ -293,6 +307,7 @@ class AIFileAnalyzer:
                 if not ref:
                     continue
                 prev = file_versions.pick_previous(ref, r, cands, ref.get("previous_xml_id"))
+                self.lookups[fid] = file_versions.lookup_summary(ref, prev, cands, r)
                 if prev:
                     result[fid] = self._with_url({**prev, "match": ref["match"],
                                                   "previous_xml_id": ref.get("previous_xml_id")})
@@ -336,23 +351,37 @@ class AIFileAnalyzer:
             for r in rows:
                 if r.get("xml_source_id") and int(r["xml_source_id"]) in meta:
                     out[int(r["id"])] = meta[int(r["xml_source_id"])]
-        orphans = [r for r in rows if int(r["id"]) not in out and r.get("owner_number")]
-        if not orphans:
-            return out
-        nums = sorted({str(r["owner_number"]) for r in orphans})
-        cands = await self._query("xml_by_owner.sql", head=[self.storage_path], nums=nums, nums2=nums)
-        for r in orphans:
+        nums = sorted({str(r["owner_number"]) for r in rows if r.get("owner_number")})
+        cands = await self._query("xml_by_owner.sql", head=[self.storage_path], nums=nums, nums2=nums) if nums else []
+        for r in rows:
+            if int(r["id"]) in out or not r.get("owner_number"):
+                continue
             own = [c for c in cands if str(r["owner_number"]) in (str(c.get("purchase_number")), str(c.get("contract_number")))]
-            for c in file_versions.choose_xml(r, own)[:5]:
+            # Версия файла у загрузчика может не совпадать с версией XML, к которому приложен файл
+            # (вложения прошлой редакции извещения приходят с eis_version новой) — проверяем все версии.
+            for c in file_versions.choose_xml({**r, "eis_version": None}, own)[:8]:
                 try:
-                    body = await self._read_xml(archives, c)
+                    body = await self._xml_body(archives, c)
                 except Exception as e:  # noqa: BLE001 — пробуем следующий кандидат
                     logger.warning(f"Файл {r['id']}: XML {c['id']} не прочитан: {e}")
                     continue
                 if file_versions.contains(body, r):
                     out[int(r["id"])] = {**c, "body": body}
                     break
+        for r in rows:
+            x = out.get(int(r["id"]))
+            if x is not None:
+                x = out[int(r["id"])] = dict(x)
+                x["newer"] = file_versions.newer_versions(x, cands)
         return out
+
+    async def _xml_body(self, archives: Any, x: Dict[str, Any]) -> Dict[str, Any]:
+        """Тело XML с кэшем на время запуска (одни и те же XML нужны нескольким файлам)."""
+        cache = self.__dict__.setdefault("_xml_cache", {})
+        key = int(x["id"])
+        if key not in cache:
+            cache[key] = await self._read_xml(archives, x)
+        return cache[key]
 
     async def analyze_ids(self, file_ids: List[int]) -> List[Dict[str, Any]]:
         """Анализирует файлы по id.
@@ -550,7 +579,21 @@ class AIFileAnalyzer:
             content_sha256=sha,
         )
         self._annotate(ai, quality, removed_ids, allowed, (risk or {}).get("rejected_inconsistent"))
+        self._add_lookup(ai, file_id)
         return await self._finalize(file_id, document_id, ai)
+
+    def _add_lookup(self, ai: Dict[str, Any], file_id: int) -> None:
+        """Дописывает в ``ai_analysis`` ход поиска версий (``version_lookup``) и ``superseded_by``.
+
+        ``superseded_by`` — файл новой редакции, если этот файл в следующей версии XML заменён: паспорт такого
+        файла описывает уже неактуальную редакцию.
+        """
+        lk = (getattr(self, "lookups", None) or {}).get(int(file_id))
+        if not lk:
+            return
+        ai["version_lookup"] = lk
+        if lk.get("superseded_by"):
+            ai["superseded_by"] = lk["superseded_by"]
 
     async def _read_text(self, path: str, file_name: str, ext: str) -> Optional[str]:
         """Текст файла: для PDF — текстовый слой и OCR только страниц-сканов (``pdf_text``), иначе ``FileReader``.

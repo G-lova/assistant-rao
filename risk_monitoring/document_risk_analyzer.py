@@ -47,6 +47,9 @@ BRAND_RE = re.compile(
     r"|модел|артикул|марк[аиу]\b|товарн\w+\s+знак|производств\w+\s|производител|фирм\w*\s|бренд|торгов\w+\s+наименован",
     re.IGNORECASE,
 )
+# Близкие по смыслу коды: на одну цитату остаётся один код группы
+SYNONYM_GROUPS = ({"DOC-006", "AI-003"}, {"DOC-005", "AI-005"}, {"DOC-002", "DOC-003"})
+MAX_CODES_PER_FRAGMENT = 2
 EIS_ID_RE = re.compile(r"идентификатор\s*:?\s*\d+|\bктру\b|\bокпд", re.IGNORECASE)
 
 
@@ -337,13 +340,28 @@ class DocumentRiskAnalyzer:
         return SEVERITY_WEIGHT.get(r["severity"], 10) * float(r["evidence"]["confidence"])
 
     def _merge(self, risks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Убирает дубли (тот же код и начало цитаты) из рисков разных чанков, сортирует по весу."""
-        seen, out = set(), []
+        """Убирает дубли из рисков разных чанков и сортирует по весу.
+
+        * тот же код и начало цитаты — один риск;
+        * одна цитата под близкими по смыслу кодами (``SYNONYM_GROUPS``: «неоднозначные требования»
+          DOC-006 / AI-003, «избыточные требования» DOC-005 / AI-005) — остаётся код с большим весом;
+        * на одну цитату — не больше ``MAX_CODES_PER_FRAGMENT`` кодов (в прогоне файла 3205 модель
+          повесила 4 кода на один типовой пункт инструкции).
+        """
+        seen, groups, per_frag, out = set(), set(), {}, []
         for r in sorted(risks, key=self._weight, reverse=True):
-            key = (r["code"], _norm(r["evidence"]["fragment"])[:80])
-            if key not in seen:
-                seen.add(key)
-                out.append(r)
+            frag = _norm(r["evidence"]["fragment"])[:80]
+            key = (r["code"], frag)
+            group = next((i for i, g in enumerate(SYNONYM_GROUPS) if r["code"] in g), None)
+            if key in seen or (group is not None and (group, frag) in groups):
+                continue
+            if per_frag.get(frag, 0) >= MAX_CODES_PER_FRAGMENT:
+                continue
+            seen.add(key)
+            if group is not None:
+                groups.add((group, frag))
+            per_frag[frag] = per_frag.get(frag, 0) + 1
+            out.append(r)
         return out
 
     def _score(self, risks: List[Dict[str, Any]]) -> int:

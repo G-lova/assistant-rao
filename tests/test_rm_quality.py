@@ -500,3 +500,106 @@ class ResilientClientTest(LLMTimeoutTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Purchase1405Test(unittest.TestCase):
+    """Закупка 0354100008624000011 (risk_monitoring_contract_id 1405): вложения прошлой редакции извещения
+    (3203–3205) загружены с eis_version = 2, как и новые (3196–3198); xml_source_id не заполнен."""
+
+    U = "https://zakupki.gov.ru/44fz/filestore/public/1.0/download/priz/file.html?uid="
+
+    def setUp(self):
+        """XML версий 1 и 2 и анализатор с подменёнными запросами."""
+        try:
+            from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
+        except ImportError as e:
+            raise unittest.SkipTest(f"нет зависимостей: {e}")
+
+        def att(name, uid):
+            """Вложение XML."""
+            return {"fileName": name, "docDescription": name.rsplit(".", 1)[0], "url": self.U + uid}
+
+        common = [att("Сводный сметный расчет.xlsx", "C4F9")]
+        v1 = {"attachmentsInfo": {"attachmentInfo": common + [
+            att("5.ПРОЕКТ ГПД.docx", "44D1"), att("1.Описание объекта закупки.docx", "8890"),
+            att("3.Требование к содер., составу заявки на участие в закупке.docx", "E61E")]}}
+        v2 = {"attachmentsInfo": {"attachmentInfo": common + [
+            att("5.ПРОЕКТ ГПД.docx", "1DD7"), att("1.Описание объекта закупки.docx", "84FD"),
+            att("3. Требования к содержанию, составу заявки и инструкция по ее заполнению.doc", "10A6")]}}
+        self.bodies = {3208: v1, 3209: v2}
+        xmls = [{"id": 3208, "entry_name": "epNotificationEF2020_0354100008624000011_1_0192.xml", "eis_version": 1,
+                 "tag": "epNotificationEF2020", "purchase_number": "0354100008624000011", "archive_url": "a"},
+                {"id": 3209, "entry_name": "epNotificationEF2020_0354100008624000011_2_0193.xml", "eis_version": 2,
+                 "tag": "epNotificationEF2020", "purchase_number": "0354100008624000011", "archive_url": "a"},
+                {"id": 3210, "entry_name": "epProtocolEF2020SubmitOffers_0354100008624000011_1_0193.xml",
+                 "eis_version": 1, "tag": "epProtocolEF2020SubmitOffers", "purchase_number": "0354100008624000011"}]
+        files = [{"id": 3198, "source_url": self.U + "10A6", "xml_source_id": None, "eis_version": 2,
+                  "file_name": "3. Требования к содержанию, составу заявки и инструкция по ее заполнению.doc", "path": "/p/3198"},
+                 {"id": 3205, "source_url": self.U + "E61E", "xml_source_id": None, "eis_version": 2,
+                  "file_name": "3.Требование к содер., составу заявки на участие в закупке.docx", "path": "/p/3205"}]
+
+        async def query(name, head=(), **lists):
+            """Запросы к внешней БД по данным CSV."""
+            if name == "xml_by_owner.sql":
+                return [dict(x) for x in xmls]
+            if name == "xml_previous.sql":
+                return [{"current_id": 3209, **xmls[0]}] if 3209 in lists["ids"] else []
+            if name == "files_by_ref.sql":
+                return [dict(f) for f in files if f["source_url"] in lists["urls"]]
+            return []
+
+        async def read_xml(archives, x):
+            """XML из «архива»."""
+            return self.bodies[int(x["id"])]
+
+        an = AIFileAnalyzer.__new__(AIFileAnalyzer)
+        an.storage_path, an.parser = "https://s", None
+        an._query, an._read_xml = query, read_xml
+        self.an = an
+        self.rows = [{"id": f["id"], "owner_number": "0354100008624000011", "owner_type": "notice",
+                      "eis_version": 2, "xml_source_id": None, "file_name": f["file_name"], "source_url": f["source_url"]}
+                     for f in files]
+
+    def test_old_attachment_superseded_new_finds_previous(self):
+        """3205 — прошлая редакция: XML версии 1, предыдущего нет, заменён файлом 3198; у 3198 предыдущая — 3205."""
+        res = asyncio.run(self.an.fetch_previous_versions(self.rows))
+        self.assertEqual(res[3198]["id"], 3205)
+        self.assertEqual(res[3198]["match"], "replaced")
+        self.assertNotIn(3205, res)
+        lk = self.an.lookups[3205]
+        self.assertEqual((lk["xml_id"], lk["xml_eis_version"], lk["match"]), (3208, 1, "no_previous_xml"))
+        self.assertEqual(lk["superseded_by"]["file_id"], 3198)
+        self.assertIn("eis_version = 2", lk["note"])
+
+
+class RiskDedupeTest(unittest.TestCase):
+    """Один типовой пункт под четырьмя кодами (файл 3205) — не больше двух, без синонимов."""
+
+    def test_merge(self):
+        """DOC-005/AI-005 и DOC-006/AI-003 на одной цитате → по одному коду из группы."""
+        from risk_monitoring.document_risk_analyzer import DocumentRiskAnalyzer
+
+        an = DocumentRiskAnalyzer.__new__(DocumentRiskAnalyzer)
+        frag = "10. Участником закупки в заявке устанавливаются характеристики и показатели товара"
+        risks = [{"code": c, "severity": "medium", "evidence": {"fragment": frag, "confidence": 0.9}}
+                 for c in ("DOC-005", "DOC-006", "AI-003", "AI-005")]
+        risks.append({"code": "DOC-004", "severity": "high", "evidence": {"fragment": "иной пункт", "confidence": 0.95}})
+        codes = sorted(r["code"] for r in an._merge(risks))
+        self.assertEqual(len([c for c in codes if c != "DOC-004"]), 2)
+        self.assertIn("DOC-004", codes)
+        self.assertFalse({"DOC-006", "AI-003"} <= set(codes))
+        self.assertFalse({"DOC-005", "AI-005"} <= set(codes))
+
+
+class PrintTitleTest(unittest.TestCase):
+    """Заголовок печатной формы, перенесённый на две строки."""
+
+    def test_title(self):
+        """«Изменения извещения о проведении» + «запроса котировок … №…» — одна строка."""
+        from knowledge_store.eis_printform import PrintForm
+        from risk_monitoring.printform_passport import _title
+
+        form = PrintForm("Печатная форма\nИзменения извещения о проведении\nзапроса котировок в электронной форме "
+                         "для закупки №0372100039726000019\nОбщая информация\nНомер извещения\n0372100039726000019")
+        self.assertEqual(_title(form), "Изменения извещения о проведении запроса котировок в электронной форме "
+                                       "для закупки №0372100039726000019")
