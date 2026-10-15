@@ -834,10 +834,12 @@ def to_external_event_risks(llm_risks: Sequence[Dict[str, Any]]) -> List[Dict[st
     Returns:
         List[Dict[str, Any]]: Риски с ``source = ai_event``.
     """
-    from risk_monitoring.passport import clamp01
+    from risk_monitoring.passport import as_text_list, clamp01
 
     out = []
     for r in llm_risks or []:
+        if not isinstance(r, dict):
+            continue
         code = r.get("rule_id")
         if code not in risk_catalog.RISKS:
             continue
@@ -845,7 +847,7 @@ def to_external_event_risks(llm_risks: Sequence[Dict[str, Any]]) -> List[Dict[st
                     "description": r.get("description") or "", "level": clamp01(r.get("level")) or 0.5,
                     "confidence": clamp01(r.get("confidence")) or 0.0,
                     "law": r.get("law"), "evidence": [],
-                    "verification_needed": list(r.get("verification_needed") or []), "source": "ai_event"})
+                    "verification_needed": as_text_list(r.get("verification_needed")), "source": "ai_event"})
     return out
 
 

@@ -780,3 +780,19 @@ class ModelRestartTest(unittest.TestCase):
         self.assertTrue(OCR_ERROR_RE.search('Страница 2 (OCR): {"has_text": false, "processing_quality": {"status": "error"}}'))
         self.assertTrue(OCR_ERROR_RE.search("Страница 3 (OCR):\n[Ошибка при анализе изображения]"))
         self.assertFalse(OCR_ERROR_RE.search("Страница 1:\nСтатус заявки: ошибка заполнения"))
+
+
+class EventRiskShapeTest(unittest.TestCase):
+    """XML 3209 (15.10.2026): модель вернула verification_needed = 1 — событие падало с TypeError."""
+
+    def test_non_list_fields(self):
+        """Число, строка, null вместо массива — не ломают сборку рисков."""
+        from risk_monitoring.passport import as_text_list
+        from risk_monitoring.xml_events import to_external_event_risks
+
+        self.assertEqual(as_text_list(1), [])
+        self.assertEqual(as_text_list("Проверить основание"), ["Проверить основание"])
+        self.assertEqual(as_text_list(None), [])
+        out = to_external_event_risks([{"rule_id": "CTR-005", "verification_needed": 1}, "мусор"])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["verification_needed"], [])
