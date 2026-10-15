@@ -355,8 +355,8 @@ def current_chunker() -> str:
     Raises:
         ValueError: Неизвестная нарезка.
     """
-    import os
-    name = os.getenv("PE_CHUNKER", CHUNKER_PAGES_1500).strip()
+    from configs import settings
+    name = str(settings.PE_CHUNKER or CHUNKER_PAGES_1500).strip()
     if name not in CHUNKERS:
         raise ValueError(f"Неизвестная нарезка PE_CHUNKER={name!r}; допустимо: {', '.join(CHUNKERS)}")
     return name

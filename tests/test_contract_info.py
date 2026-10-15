@@ -74,3 +74,22 @@ class ContractInfoTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EnvLeftoversTest(unittest.TestCase):
+    """Предупреждение о переменных .env, перенесённых в код."""
+
+    def test_leftovers(self):
+        """Совпадающее значение молчит, отличающееся — в списке."""
+        import os
+        from unittest import mock
+
+        from configs import settings
+
+        with mock.patch.dict(os.environ, {"PE_FACTS_ENABLED": "true", "MODEL_TEMPERATURE": "0.1",
+                                          "PE_LEGACY_ENV": "stage", "RISK_MONITORING_DEBUG": "false"}):
+            names = {n for n, _, _ in settings.env_leftovers()}
+        self.assertIn("MODEL_TEMPERATURE", names)
+        self.assertIn("RISK_MONITORING_DEBUG", names)
+        self.assertNotIn("PE_FACTS_ENABLED", names)
+        self.assertNotIn("PE_LEGACY_ENV", names)

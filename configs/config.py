@@ -113,8 +113,8 @@ class Config:
     MODEL_API_URL = os.getenv("MODEL_API_URL")
     MODEL_NAME = os.getenv("MODEL_NAME")
     
-    TEMPERATURE = float(os.getenv("MODEL_TEMPERATURE", 0.7))
-    MAX_NEW_TOKENS = int(os.getenv("MODEL_MAX_TOKENS", 4096))
+    TEMPERATURE = settings.MODEL_TEMPERATURE
+    MAX_NEW_TOKENS = settings.MODEL_MAX_TOKENS
 
     # Model qwen-vl
     M_MODEL_API_URL = os.getenv("M_MODEL_API_URL")
@@ -123,7 +123,7 @@ class Config:
     # Qwen/Qwen3-Embedding-0.6B
     EMBEDDING_URL = os.getenv("EMBEDDING_URL")
     EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
-    BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))
+    BATCH_SIZE = settings.EMBEDDING_BATCH_SIZE
 
     # Postgres
     DB_HOST = os.getenv("DB_HOST")
@@ -140,16 +140,16 @@ class Config:
     # Что делать с «0», найденным моделью по тексту документов (факты, презумпция, единый стиль): "suspect" — в значение
     # не ставить (замечание в trace.suspected, для критерия соответствия ставится «1» как предложение); "value" — ставить «0»
     # как предложение после повторной проверки (judge). На эталоне экспертов точность таких «0» 10–30%.
-    PE_MODEL_ZEROS = os.getenv("PE_MODEL_ZEROS", "suspect").lower()
+    PE_MODEL_ZEROS = settings.PE_MODEL_ZEROS
     PE_FACTS_ENABLED = settings.PE_FACTS_ENABLED
     # Максимум времени на построение фактов (запросы к LLM), секунд; при превышении этап прерывается
-    PE_FACTS_TIMEOUT_SEC = int(os.getenv("PE_FACTS_TIMEOUT_SEC", "900"))
+    PE_FACTS_TIMEOUT_SEC = settings.PE_FACTS_TIMEOUT_SEC
     # Общий документ по хэшу файла: /evaluate-documents берёт готовый текст из ai_documents вместо повторного
     # чтения/OCR (нужен KNOWLEDGE_STORE_ENABLED). Читается при каждом вызове — см. knowledge_store.hooks.dedup_enabled
     DOC_DEDUP_ENABLED = settings.DOC_DEDUP_ENABLED
     # Нарезка экспертизы для индексации и поиска фактов (knowledge_store.pages.current_chunker): pages_1500 (прежняя,
     # по умолчанию) или pages_v2 (по структуре; переключать после диагностики scripts.eval_chunkers variants)
-    PE_CHUNKER = os.getenv("PE_CHUNKER", "pages_1500")
+    PE_CHUNKER = settings.PE_CHUNKER
     # Кэш результата TypeDataExtractor в общем документе: тот же файл с тем же типом, объектом и именем повторно
     # модели не отправляется (нужен KNOWLEDGE_STORE_ENABLED). Параметр force в /evaluate-documents кэш обходит
     DOC_EXTRACTION_CACHE_ENABLED = settings.DOC_EXTRACTION_CACHE_ENABLED
@@ -177,9 +177,9 @@ class Config:
     LOG_FILE = os.getenv("LOG_FILE", "logs/app.log")
 
     # Retry settings
-    RETRY_MAX_ATTEMPTS = int(os.getenv("RETRY_MAX_ATTEMPTS", "3"))
-    RETRY_DELAY = float(os.getenv("RETRY_DELAY", "1.0"))
-    RETRY_BACKOFF = float(os.getenv("RETRY_BACKOFF", "2.0"))
+    RETRY_MAX_ATTEMPTS = settings.RETRY_MAX_ATTEMPTS
+    RETRY_DELAY = settings.RETRY_DELAY
+    RETRY_BACKOFF = settings.RETRY_BACKOFF
 
 
     @classmethod

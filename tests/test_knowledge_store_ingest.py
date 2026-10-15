@@ -230,11 +230,11 @@ class IndexingIntegrationTests(unittest.TestCase):
         asyncio.run(repo.upsert_document(self.conn, Scope("prod", 910), "docIzvejenieFiles", "f.docx", None,
                                          hashlib.sha256(b"910:s1").hexdigest(), ai, 2, 365))
         self.assertEqual(asyncio.run(indexer.index_expertise(Scope("prod", 910), FakeEmbedder()))["documents"], 0)
-        with mock.patch.dict(os.environ, {"PE_CHUNKER": "pages_v2"}):
+        with mock.patch.object(__import__("configs.settings", fromlist=["x"]), "PE_CHUNKER", "pages_v2"):
             self.assertEqual(asyncio.run(indexer.index_expertise(S(910), FakeEmbedder()))["documents"], 1)
         self.assertEqual(self.q("SELECT count(DISTINCT chunker) FROM ai_document_chunks WHERE document_id=%d" % ai), "2")
         from knowledge_store.pages import current_chunker
-        with mock.patch.dict(os.environ, {"PE_CHUNKER": "unknown"}), self.assertRaises(ValueError):
+        with mock.patch.object(__import__("configs.settings", fromlist=["x"]), "PE_CHUNKER", "unknown"), self.assertRaises(ValueError):
             current_chunker()
 
     def test_search_finds_only_own_chunks(self):

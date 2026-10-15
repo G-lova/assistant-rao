@@ -74,12 +74,11 @@ async def main(argv=None) -> int:
     parser.add_argument("--chunker", help="нарезка вместо PE_CHUNKER: pages_1500 | pages_v2")
     args = parser.parse_args(argv)
     if args.chunker:
-        import os
-
+        from configs import settings
         from knowledge_store.pages import CHUNKERS
         if args.chunker not in CHUNKERS:
             parser.error(f"неизвестная нарезка {args.chunker}; допустимо: {', '.join(CHUNKERS)}")
-        os.environ["PE_CHUNKER"] = args.chunker
+        settings.PE_CHUNKER = args.chunker   # только для этого запуска скрипта
     if not args.ids and not args.all:
         parser.error("укажите --ids или --all")
 

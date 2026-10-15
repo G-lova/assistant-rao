@@ -70,6 +70,12 @@ app.include_router(risk_monitoring_router)
 setup_logging()
 logger = get_logger(__name__)
 
+# Переключатели заданы в configs/settings.py: значения, оставшиеся в .env, игнорируются — предупреждаем при старте
+# (main импортируется и API, и воркерами Celery)
+from configs import settings as _settings
+_settings.warn_env_leftovers(logger)
+
+
 # Глобальный словарь для хранения результатов анализа документов
 document_analysis_cache = {}
 

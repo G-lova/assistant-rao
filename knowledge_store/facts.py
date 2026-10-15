@@ -265,8 +265,10 @@ class FactExtractor:
         self.llm_call = llm_call
         self.embedder = embedder
         self.search = search or search_fragments
-        self.top_k = top_k or int(os.getenv("PE_FACTS_TOP_K", "8"))
-        self.recheck_k = int(os.getenv("PE_FACTS_RECHECK_K", "16")) if recheck_k is None else recheck_k
+        from configs import settings
+
+        self.top_k = top_k or int(settings.PE_FACTS_TOP_K)
+        self.recheck_k = int(settings.PE_FACTS_RECHECK_K) if recheck_k is None else recheck_k
         self.notice_search = notice_search or (search_notice_fragments if search is None else None)
         self.notice_k = notice_k
         self.errors: Dict[str, str] = {}
