@@ -19,6 +19,12 @@ MAX_FRAGMENT_CHARS = 1200
 def paragraphs(text: str) -> List[str]:
     """Абзацы текста без маркеров страниц и лишних пробелов (пустые и однобуквенные пропускаются).
 
+    Строки, разорванные жёстким переносом, склеиваются: ``antiword`` (.doc) переносит строки по ширине
+    ~80 символов, а ``python-docx`` (.docx) отдаёт абзац одной строкой. Без склейки одна и та же редакция
+    в .doc и .docx не совпадает ни в одном абзаце (файлы 3205 / 3198: схожесть 0,02). Строка считается
+    продолжением предыдущей, если предыдущая не закончилась точкой, двоеточием, точкой с запятой,
+    вопросительным или восклицательным знаком, а следующая не начинается с номера пункта, тире или маркера.
+
     Args:
         text: Текст документа.
 
@@ -26,12 +32,23 @@ def paragraphs(text: str) -> List[str]:
         List[str]: Абзацы.
     """
     text = PAGE_MARKER_RE.sub("", text or "")
-    out = []
-    for p in re.split(r"\n\s*\n|\n", text):
-        p = re.sub(r"\s+", " ", p).strip()
-        if len(p) > 2:
-            out.append(p)
-    return out
+    out: List[str] = []
+    for block in re.split(r"\n\s*\n", text):
+        cur = ""
+        for line in block.split("\n"):
+            line = re.sub(r"\s+", " ", line).strip()
+            if not line:
+                continue
+            starts_item = bool(re.match(r"^(\d+(\.\d+)*[.)]|[-–—•*]|[а-яa-z]\)|«|\()", line))
+            if cur and not re.search(r"[.;:!?]$", cur) and not starts_item:
+                cur = f"{cur} {line}"
+            else:
+                if cur:
+                    out.append(cur)
+                cur = line
+        if cur:
+            out.append(cur)
+    return [p for p in out if len(p) > 2]
 
 
 def text_diff(old_text: str, new_text: str, max_fragments: int = MAX_FRAGMENTS) -> Dict[str, Any]:

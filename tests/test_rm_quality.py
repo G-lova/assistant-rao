@@ -649,3 +649,44 @@ class SupersededSkipTest(unittest.TestCase):
             self.assertEqual(ai["doc_type"]["detected_type"], "docTrebContentRequestFiles")
             an.force = True
             self.assertIsNone(an._superseded_analysis(row, None, 1))
+
+
+class Run1015Test(unittest.TestCase):
+    """Прогон 15.10.2026: 3198 / 3205 (.doc и .docx), итоги таблицы НМЦК 1097, требования ПП № 2571 и СРО."""
+
+    def test_doc_docx_unwrap(self):
+        """Жёсткие переносы .doc не мешают сравнению с .docx той же редакции."""
+        from risk_monitoring.version_diff import text_diff
+
+        doc = ("1. Подать заявку на участие в закупке вправе только\nзарегистрированный участник закупки.\n"
+               "2. Участник закупки вправе подать\nтолько одну заявку.")
+        docx = ("1. Подать заявку на участие в закупке вправе только зарегистрированный участник закупки.\n"
+                "2. Участник закупки вправе подать только одну заявку.")
+        self.assertEqual(text_diff(doc, docx)["similarity"], 1.0)
+
+    def test_filters(self):
+        """Строка «ИТОГО» с несколькими суммами, СРО и опыт по ПП № 2571 — не риски."""
+        from risk_monitoring.document_risk_analyzer import statutory, table_total
+
+        self.assertTrue(table_total({"code": "FIN-015", "evidence": {"fragment": "ИТОГО 1 046 200,00 1 033 410,00 1 026 336,64"}}))
+        self.assertFalse(table_total({"code": "DOC-002", "evidence": {"fragment": "ИТОГО 1 046 200,00 1 033 410,00"}}))
+        self.assertTrue(statutory({"code": "DOC-004", "evidence": {"fragment": "Участник закупки должен быть членом СРО"}}))
+        self.assertTrue(statutory({"code": "DOC-005", "evidence": {
+            "fragment": "не менее 50 процентов начальной (максимальной) цены контракта, заключаемого по результатам"}}))
+
+    def test_previous_codes(self):
+        """Прошлая редакция без рисков (rule_ids NULL, статус completed) — пустой список, а не «нет данных»."""
+        try:
+            from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
+        except ImportError as e:
+            raise unittest.SkipTest(f"нет зависимостей: {e}")
+        an = AIFileAnalyzer.__new__(AIFileAnalyzer)
+        an.versions, an.model = {"risk_analysis": "r"}, "m"
+
+        async def no_cache(*a):
+            return None
+
+        an._get_cached = no_cache
+        self.assertEqual(asyncio.run(an._previous_codes({"rule_ids": None, "rm_status": "completed"}, None, [])), [])
+        self.assertEqual(asyncio.run(an._previous_codes({"rule_ids": '["DOC-004"]'}, None, [])), ["DOC-004"])
+        self.assertIsNone(asyncio.run(an._previous_codes({"rule_ids": None}, {"doc_id": None}, [])))

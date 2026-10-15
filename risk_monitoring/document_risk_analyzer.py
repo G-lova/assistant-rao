@@ -53,10 +53,31 @@ STATUTORY_RE = re.compile(
     r"|указ\w*\s+президента\s+российской\s+федерации\s+от\s+03\.05\.2022|специальные экономические меры"
     r"|в соответствии с (п\.|пунктом|ч\.|частью)\s*[\d.]+\s*(ч\.|части)?\s*[\d.]*\s*(ст\.|статьи)\s*31"
     r"|«\s*или\s*»\s*,?\s*«\s*либо\s*»|«\s*не более\s*»|«\s*не менее\s*»|знак\w*\s*«?\s*[≥≤]"
-    r"|не было привлечено к административной ответственности",
+    r"|не было привлечено к административной ответственности"
+    r"|член\w*\s+(сро|саморегулируем)|саморегулируемой организации"
+    r"|29\.12\.2021\s*№\s*2571|позици\w+\s+\d+\s+раздела|графы\s+\"?дополнительные требования"
+    r"|не менее \d+ процентов начальной \(максимальной\) цены контракта",
     re.IGNORECASE,
 )
 STATUTORY_CODES = {"DOC-004", "DOC-005", "DOC-006", "AI-003", "AI-005", "PROC-012", "DOC-007"}
+
+
+TABLE_TOTAL_RE = re.compile(r"^\s*(итого|всего)\b[^а-яё]*(\d[\d\s]*[.,]\d{2}[^\d]+){2,}", re.IGNORECASE)
+
+
+def table_total(risk: Dict[str, Any]) -> bool:
+    """«Противоречие» в строке итогов таблицы с несколькими суммами (столбцы разных поставщиков в
+    обосновании НМЦК — файл 1097): для DOC-007 / AI-002 / FIN-015 такая цитата не доказывает риск.
+
+    Args:
+        risk: Риск модели.
+
+    Returns:
+        bool: ``True`` — отбросить.
+    """
+    if risk.get("code") not in ("DOC-007", "AI-002", "FIN-015"):
+        return False
+    return bool(TABLE_TOTAL_RE.search(((risk.get("evidence") or {}).get("fragment")) or ""))
 
 
 def statutory(risk: Dict[str, Any]) -> bool:
@@ -329,7 +350,7 @@ class DocumentRiskAnalyzer:
             if not self._fragment_in_text(frag, norm_chunk):
                 dropped += 1
                 continue
-            if self_denial(r) or statutory(r) or (r["code"] == "DOC-002" and not brand_like(frag)):
+            if self_denial(r) or statutory(r) or table_total(r) or (r["code"] == "DOC-002" and not brand_like(frag)):
                 rejected += 1
                 continue
             r["category"] = risk_catalog.category(r["code"])

@@ -567,6 +567,7 @@ class AIFileAnalyzer:
                                               if previous else (None, []))
         risk_compact = self.risk_analyzer.to_compact(risk) if risk else {}
 
+        prev_codes = await self._previous_codes(previous, prev_ctx, allowed) if previous else None
         pages = len({m.group(1) for m in PAGE_MARKER_RE.finditer(text)}) or None
         ocr_used = "(OCR)" in text
         pipeline = passport.pipeline_block(STAGE, "completed", self.model, self.versions, prev_id, self.force, attempt,
@@ -580,13 +581,36 @@ class AIFileAnalyzer:
         ai = passport.build_file_analysis(
             file_meta=row, type_info=type_info, type_decode=type_decode, extraction=extraction, profile=profile,
             risk_compact=risk_compact, extra_risks=version_risks, similar=similar, version_changes=version_changes,
-            previous_codes=_json_list(previous.get("rule_ids")) if previous else None, pages=pages,
+            previous_codes=prev_codes, pages=pages,
             text_chars=len(text), ocr_used=ocr_used, purchase=purchase, pipeline=pipeline, model=self.model,
             content_sha256=sha,
         )
         self._annotate(ai, quality, removed_ids, allowed, (risk or {}).get("rejected_inconsistent"))
         self._add_lookup(ai, file_id)
         return await self._finalize(file_id, document_id, ai)
+
+    async def _previous_codes(self, previous: Dict[str, Any], prev_ctx: Optional[Dict[str, Any]],
+                              allowed: List[str]) -> Optional[List[str]]:
+        """Коды рисков прошлой редакции для ``risks_comparison``.
+
+        Источник — ``ai_analysis`` прошлой редакции во внешней БД; если она проанализирована без рисков,
+        ``JSON_EXTRACT`` даёт ``NULL`` — это пустой список, а не «нет данных». Если во внешней БД анализа нет
+        (например, прогон без записи), берётся риск-анализ прошлой редакции из кэша сервиса.
+
+        Returns:
+            Optional[List[str]]: Коды или ``None`` (прошлая редакция не анализировалась).
+        """
+        codes = _json_list(previous.get("rule_ids"))
+        if codes is not None:
+            return codes
+        if previous.get("rm_status") == "completed":
+            return []
+        doc_id = (prev_ctx or {}).get("doc_id")
+        version = f"{self.versions['risk_analysis']}:{_hash_version(allowed)}"
+        cached = await self._get_cached(doc_id, "risk_analysis", version, self.model) if doc_id else None
+        if cached is not None:
+            return sorted({r.get("code") for r in cached.get("risks") or [] if r.get("code")})
+        return None
 
     def _superseded_analysis(self, row: Dict[str, Any], previous: Optional[Dict[str, Any]],
                              attempt: int) -> Optional[Dict[str, Any]]:
