@@ -757,3 +757,26 @@ class Run1015bTest(unittest.TestCase):
         self.assertIn("https://z/f?uid=A", seen["urls"])
         self.assertIn("https://z/print?id=1", seen["urls"])
         self.assertEqual(asyncio.run(xa.pending_files([3209], include_done=True)), [3198, 3199])
+
+
+class ModelRestartTest(unittest.TestCase):
+    """Перезапуск модели 15.10.2026 19:02–19:06: 500 → 503 → 404 «Model not found»."""
+
+    def test_rm_client_retries(self):
+        """Клиент извлечения риск-мониторинга: 6 попыток вместо 2, вложенная обёртка не дублируется."""
+        from configs.llm_resilience import ResilientClient
+
+        raw = types.SimpleNamespace(chat=None)
+        rc = ResilientClient(ResilientClient(raw), retries=6)
+        self.assertIs(rc.raw_client, raw)
+        self.assertEqual(rc.chat.completions._retries, 6)
+
+    def test_ocr_error_marker(self):
+        """Текст с ошибкой OCR страницы распознаётся как неполный."""
+        try:
+            from risk_monitoring.ai_file_analyzer import OCR_ERROR_RE
+        except ImportError as e:
+            raise unittest.SkipTest(f"нет зависимостей: {e}")
+        self.assertTrue(OCR_ERROR_RE.search('Страница 2 (OCR): {"has_text": false, "processing_quality": {"status": "error"}}'))
+        self.assertTrue(OCR_ERROR_RE.search("Страница 3 (OCR):\n[Ошибка при анализе изображения]"))
+        self.assertFalse(OCR_ERROR_RE.search("Страница 1:\nСтатус заявки: ошибка заполнения"))

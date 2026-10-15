@@ -128,7 +128,7 @@ async def ocr_image(processor: Any, image_path: str, file_name: str, penalty: fl
         penalty: ``repetition_penalty`` (vLLM).
 
     Returns:
-        str: Распознанный текст (пустая строка при ошибке).
+        str: Распознанный текст; при ошибке — метка «[Ошибка при анализе изображения]».
     """
     with open(image_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("ascii")
@@ -149,7 +149,9 @@ async def ocr_image(processor: Any, image_path: str, file_name: str, penalty: fl
         return ocr_text(content)
     except Exception as e:  # noqa: BLE001 — страница остаётся пустой, документ читается дальше
         logger.error(f"pdf_text: OCR {file_name}/{os.path.basename(image_path)}: {type(e).__name__}: {e}")
-        return ""
+        # Метка ловится AIFileAnalyzer (OCR_ERROR_RE): файл с потерянными страницами не сохраняется и
+        # анализируется повторно при следующем запуске
+        return "[Ошибка при анализе изображения]"
 
 
 async def ocr_page(processor: Any, image: Any, tmp: str, page_no: int, file_name: str) -> Tuple[str, str]:

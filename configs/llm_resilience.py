@@ -167,9 +167,10 @@ async def call_llm(client: Any, retries: int = len(RETRY_DELAYS) + 1, **kwargs: 
 class _Completions:
     """``chat.completions`` с устойчивым ``create``: лимит, предохранитель, паузы между попытками."""
 
-    def __init__(self, raw: Any):
-        """Запоминает исходный клиент (без повторов SDK)."""
+    def __init__(self, raw: Any, retries: Optional[int] = None):
+        """Запоминает исходный клиент (без повторов SDK) и число попыток (``None`` — ``LLM_PROXY_RETRIES``)."""
         self._raw = raw
+        self._retries = retries
 
     async def create(self, **kwargs: Any) -> Any:
         """Как ``AsyncOpenAI.chat.completions.create``, но 504 / 5xx / таймауты повторяются с паузой (по умолчанию
@@ -186,7 +187,7 @@ class _Completions:
         key = _server_key(self._raw)
         # Многие вызовы экспертизы уже обёрнуты своими повторами (async_retry): здесь по умолчанию одна
         # повторная попытка через ~5 с, чтобы повторы не перемножались (LLM_PROXY_RETRIES)
-        retries = max(1, int(_env("PROXY_RETRIES", "2")))
+        retries = max(1, int(self._retries if self._retries is not None else _env("PROXY_RETRIES", "2")))
         last: Optional[BaseException] = None
         for attempt in range(retries):
             await _breaker_wait(key)
@@ -216,18 +217,23 @@ class ResilientClient:
 
     Args:
         raw: ``AsyncOpenAI``.
+        retries: Попыток на запрос при 5xx / 404 перезапуска модели / таймауте (``None`` — ``LLM_PROXY_RETRIES``,
+            по умолчанию 2). Ночной риск-мониторинг ждёт дольше (``RM_LLM_PROXY_RETRIES``, 6): перезапуск
+            модели длится минуты, и с двумя попытками страницы OCR и блоки извлечения терялись.
     """
 
-    def __init__(self, raw: Any):
+    def __init__(self, raw: Any, retries: Optional[int] = None):
         """Отключает повторы SDK и подменяет ``chat.completions``."""
+        raw = getattr(raw, "raw_client", raw)
         self.raw_client = raw.with_options(max_retries=0) if hasattr(raw, "with_options") else raw
+        self.retries = retries
         self.chat = type("Chat", (), {})()
-        self.chat.completions = _Completions(self.raw_client)
+        self.chat.completions = _Completions(self.raw_client, retries)
 
     def with_options(self, **kwargs: Any) -> "ResilientClient":
         """Копия с другими параметрами SDK (повторы SDK остаются выключенными)."""
         kwargs["max_retries"] = 0
-        return ResilientClient(self.raw_client.with_options(**kwargs))
+        return ResilientClient(self.raw_client.with_options(**kwargs), self.retries)
 
     def __getattr__(self, name: str) -> Any:
         """Прочие атрибуты (``base_url``, ``models`` …) — от исходного клиента."""

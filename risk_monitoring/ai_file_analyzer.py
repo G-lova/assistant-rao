@@ -32,6 +32,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 from configs.config import Config
@@ -54,6 +55,7 @@ SIMILAR_LIMIT = 10
 NEAR_DUPLICATE_COVERAGE = 0.9
 NEAR_DUPLICATE_AVG_SIM = 0.95
 
+OCR_ERROR_RE = re.compile(r"Ошибка при анализе изображения|Таймаут при анализе изображения|\"status\":\s*\"error\"")
 CONTRACT_DOC_TYPES = {"docProjContractFiles", "docContractDoWorkFiles", "docContractNIRFiles", "docContractPostTovarFiles"}
 
 
@@ -182,7 +184,9 @@ class AIFileAnalyzer:
         self.parser = CloudStorageParser(http_manager, None)
         # Компоненты экспертизы сами повторяют запрос (async_retry: 2→4→8→16 с); встроенные повторы SDK
         # (ещё 2 через ~1 с) на 504 шлюза только умножают нагрузку — для риск-мониторинга отключены.
-        ex_client = client.with_options(max_retries=0) if hasattr(client, "with_options") else client
+        from configs.llm_resilience import ResilientClient
+
+        ex_client = ResilientClient(client, retries=int(os.getenv("RM_LLM_PROXY_RETRIES", "6")))
         self.file_reader = FileReader(ex_client, self.extraction_model)
         self.type_detector = TypeDetector(ex_client, self.extraction_model)
         self.extractor = DataExtractor(ex_client, self.extraction_model)
@@ -805,6 +809,10 @@ class AIFileAnalyzer:
                 document_id, text = doc["id"], doc["text"]
             else:
                 text = await self._read_text(tmp_path, file_name, ext)
+                if text and OCR_ERROR_RE.search(text):
+                    # Модель OCR была недоступна (перезапуск, 404/5xx) — часть страниц потеряна. Такой текст
+                    # не сохраняем и не анализируем: файл получит pipeline.status = failed и будет взят повторно.
+                    raise RuntimeError("OCR: часть страниц не распознана — модель распознавания была недоступна")
                 if not text or not text.strip() or NO_TEXT_MARK in text:
                     document_id = await self.repo.upsert_document(sha, None, ext, size, None, ocr_status="failed",
                                                                   ocr_error="Не удалось извлечь текст")
