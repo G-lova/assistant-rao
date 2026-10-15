@@ -218,6 +218,34 @@ class XmlEventAnalyzer:
         finally:
             self.archives.close()
 
+    async def pending_files(self, xml_ids: List[int], include_done: bool = False) -> List[int]:
+        """Файлы, указанные в XML (вложения и печатная форма) или привязанные к нему, ещё не проанализированные.
+
+        Используется опцией ``analyze_files``: файлы события анализируются до самого события, чтобы его анализ
+        получил резюме и риски файлов.
+
+        Args:
+            xml_ids: id XML.
+            include_done: Вернуть и уже проанализированные (режим отладки, ``force``).
+
+        Returns:
+            List[int]: id файлов ``risk_monitoring_files`` без повторов.
+        """
+        from risk_monitoring import file_versions
+
+        rows = await self._query("xml_meta.sql", head=[self.storage_path], ids=list(xml_ids))
+        urls: List[str] = []
+        for r in rows:
+            try:
+                _, _, body = xml_events.parse_xml(await self.archives.read(r["archive_url"], r["entry_name"]))
+            except Exception as e:  # noqa: BLE001 — остаются файлы, привязанные по xml_source_id
+                logger.warning(f"XML {r['id']}: не прочитан при поиске файлов: {e}")
+                continue
+            urls += [a["url"] for a in xml_events.attachments(body)] + file_versions.print_form_urls(body)
+        files = await self._query("xml_files.sql", ids=[int(r["id"]) for r in rows], urls=list(dict.fromkeys(urls))[:500])
+        out = [int(f["id"]) for f in files if include_done or f.get("rm_status") != "completed"]
+        return list(dict.fromkeys(out))
+
     async def _previous(self, ids: List[int]) -> Dict[int, Dict[str, Any]]:
         """Предыдущая версия каждого XML (максимальная версия меньше текущей)."""
         try:

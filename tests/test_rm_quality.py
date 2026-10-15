@@ -690,3 +690,70 @@ class Run1015Test(unittest.TestCase):
         self.assertEqual(asyncio.run(an._previous_codes({"rule_ids": None, "rm_status": "completed"}, None, [])), [])
         self.assertEqual(asyncio.run(an._previous_codes({"rule_ids": '["DOC-004"]'}, None, [])), ["DOC-004"])
         self.assertIsNone(asyncio.run(an._previous_codes({"rule_ids": None}, {"doc_id": None}, [])))
+
+
+class Run1015bTest(unittest.TestCase):
+    """Вторая проверка 15.10.2026: порядок редакций, схожесть по словам, источник требования, файлы XML."""
+
+    def test_waves(self):
+        """3205 (прошлая) раньше 3198 (новой); независимый файл — в первой волне."""
+        try:
+            from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
+        except ImportError as e:
+            raise unittest.SkipTest(f"нет зависимостей: {e}")
+        waves = AIFileAnalyzer._waves([3198, 3205, 1096], {3198: {"id": 3205}}, ["3198", "3205", "1096"])
+        self.assertEqual(waves, [[3205, 1096], [3198]])
+        # прошлая редакция уже проанализирована (не в todo) — ждать нечего
+        self.assertEqual(AIFileAnalyzer._waves([3198, 3205], {3198: {"id": 3205}}, [3198]), [[3198, 3205]])
+
+    def test_word_similarity(self):
+        """Таблица и текст с тем же содержанием: по абзацам 0, по словам — высокая."""
+        from risk_monitoring.version_diff import text_diff
+
+        old = "Требования к участнику | Участник должен быть зарегистрирован на электронной площадке и подать одну заявку"
+        new = "Требования к участнику:\nУчастник должен быть зарегистрирован на электронной площадке и подать одну заявку."
+        d = text_diff(old, new)
+        self.assertEqual(d["similarity_paragraphs"], 0.0)
+        self.assertGreater(d["similarity_words"], 0.7)
+        self.assertEqual(d["similarity"], d["similarity_words"])
+
+    def test_requirement_source_schema(self):
+        """В схеме ответа риска обязательно поле requirement_source."""
+        import json as _json
+
+        schema = _json.load(open("schemas/risk_analysis_schema.json", encoding="utf-8"))
+        item = schema["properties"]["risks"]["items"]
+        self.assertIn("requirement_source", item["required"])
+        self.assertEqual(item["properties"]["requirement_source"]["enum"], ["закон", "заказчик", "неясно"])
+
+    def test_pending_files(self):
+        """Файлы XML: по вложениям, печатной форме и xml_source_id; проанализированные — пропускаются."""
+        from risk_monitoring.xml_event_analyzer import XmlEventAnalyzer
+
+        xa = XmlEventAnalyzer.__new__(XmlEventAnalyzer)
+        xa.storage_path = "s"
+        body = (b'<epNotificationEF2020><attachmentsInfo><attachmentInfo><fileName>a.docx</fileName>'
+                b'<url>https://z/f?uid=A</url></attachmentInfo></attachmentsInfo>'
+                b'<printFormInfo><url>https://z/print?id=1</url></printFormInfo></epNotificationEF2020>')
+        seen = {}
+
+        async def query(name, head=(), **lists):
+            """Внешняя БД."""
+            if name == "xml_meta.sql":
+                return [{"id": 3209, "archive_url": "a", "entry_name": "e"}]
+            seen.update(lists)
+            return [{"id": 3198, "rm_status": None}, {"id": 3199, "rm_status": "completed"}]
+
+        class Arch:
+            async def read(self, url, entry):
+                return body
+
+        xa._query, xa.archives = query, Arch()
+        try:
+            ids = asyncio.run(xa.pending_files([3209]))
+        except ImportError as e:
+            raise unittest.SkipTest(f"нет зависимостей: {e}")
+        self.assertEqual(ids, [3198])
+        self.assertIn("https://z/f?uid=A", seen["urls"])
+        self.assertIn("https://z/print?id=1", seen["urls"])
+        self.assertEqual(asyncio.run(xa.pending_files([3209], include_done=True)), [3198, 3199])

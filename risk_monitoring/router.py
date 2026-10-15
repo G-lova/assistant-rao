@@ -29,6 +29,8 @@ class AnalysisRequest(BaseModel):
         recompute: Игнорировать кэш LLM (только режим отладки, только для файлов).
         push: Записывать результат во внешнюю БД (``false`` — пробный прогон, результат в задаче).
         include_analysis: Вернуть ``ai_analysis`` в результате задачи.
+        analyze_files: Только для XML — сначала проанализировать ещё не проанализированные файлы,
+            указанные в XML (вложения, печатная форма) или привязанные к нему.
     """
 
     ids: List[int] = Field(..., min_items=1)
@@ -36,6 +38,7 @@ class AnalysisRequest(BaseModel):
     recompute: bool = False
     push: bool = True
     include_analysis: bool = False
+    analyze_files: bool = False
 
     @validator("ids")
     def _check_ids(cls, v: List[int]) -> List[int]:
@@ -86,7 +89,7 @@ async def analyze_xml(req: AnalysisRequest, x_api_database: str = Header(default
     Уже проанализированные XML пропускаются.
 
     Args:
-        req: Список id и режимы (``recompute`` для XML не используется).
+        req: Список id и режимы; ``analyze_files`` — сначала файлы событий (``recompute`` — для них).
         x_api_database: Окружение внешней системы.
 
     Returns:
@@ -97,6 +100,7 @@ async def analyze_xml(req: AnalysisRequest, x_api_database: str = Header(default
 
     task = rm_analyze_xml_task.apply_async(
         args=[req.ids, x_api_database],
-        kwargs={"force": req.force, "push": req.push, "include_analysis": req.include_analysis},
+        kwargs={"force": req.force, "push": req.push, "include_analysis": req.include_analysis,
+                "analyze_files": req.analyze_files, "recompute": req.recompute},
         queue="risk_monitoring")
     return {"task_id": task.id, "count": len(req.ids), "status": "queued"}

@@ -51,6 +51,33 @@ def paragraphs(text: str) -> List[str]:
     return [p for p in out if len(p) > 2]
 
 
+WORD_RE = re.compile(r"[0-9A-Za-zА-Яа-яЁё]+")
+
+
+def word_similarity(old_text: str, new_text: str, n: int = 5) -> float:
+    """Схожесть по словам: доля общих последовательностей из ``n`` слов (коэффициент Дайса по шинглам).
+
+    Не зависит от разбивки на абзацы, таблиц и переносов строк.
+
+    Args:
+        old_text: Текст прошлой редакции.
+        new_text: Текст новой редакции.
+        n: Длина шингла в словах.
+
+    Returns:
+        float: 0–1.
+    """
+    def shingles(text: str) -> set:
+        """Множество последовательностей из ``n`` слов (нижний регистр, без маркеров страниц)."""
+        words = WORD_RE.findall(PAGE_MARKER_RE.sub(" ", text or "").lower())
+        return {" ".join(words[i:i + n]) for i in range(max(0, len(words) - n + 1))}
+
+    a, b = shingles(old_text), shingles(new_text)
+    if not a or not b:
+        return 0.0
+    return round(2 * len(a & b) / (len(a) + len(b)), 4)
+
+
 def text_diff(old_text: str, new_text: str, max_fragments: int = MAX_FRAGMENTS) -> Dict[str, Any]:
     """Текстовый diff двух редакций по абзацам.
 
@@ -91,9 +118,15 @@ def text_diff(old_text: str, new_text: str, max_fragments: int = MAX_FRAGMENTS) 
         f.pop("_size", None)
     total = sum(len(x) for x in a) + sum(len(x) for x in b) or 1
     same = sum(sum(len(x) for x in a[blk.a:blk.a + blk.size]) * 2 for blk in sm.get_matching_blocks())
+    by_paragraphs = round(same / total, 4)
+    by_words = word_similarity(old_text, new_text)
     return {
         "identical": not fragments,
-        "similarity": round(same / total, 4),
+        # Схожесть по абзацам строгая: таблица, превращённая в текст, или другая разбивка на абзацы дают 0
+        # при том же содержании (3205 → 3198). Итог — большее из схожести по абзацам и по словам.
+        "similarity": max(by_paragraphs, by_words),
+        "similarity_paragraphs": by_paragraphs,
+        "similarity_words": by_words,
         "stats": stats,
         "fragments": fragments[:max_fragments],
         "fragments_total": len(fragments),

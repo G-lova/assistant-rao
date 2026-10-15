@@ -32,7 +32,7 @@ import asyncio
 import hashlib
 import json
 import os
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 from configs.config import Config
 from configs.logger import get_logger
@@ -401,9 +401,48 @@ class AIFileAnalyzer:
         found = {int(r["id"]): r for r in rows}
         todo = [r for r in found.values() if self.force or r.get("rm_status") != "completed"]
         previous = await self.fetch_previous_versions(todo) if todo else {}
-        results = await asyncio.gather(*(self._guarded(found[i], previous.get(i)) for i in ids if i in found))
+        by_id: Dict[int, Dict[str, Any]] = {}
+        for wave in self._waves([i for i in ids if i in found], previous, {r["id"] for r in todo}):
+            for res in await asyncio.gather(*(self._guarded(found[i], previous.get(i)) for i in wave)):
+                by_id[int(res.get("file_id"))] = res
+        results = [by_id[i] for i in ids if i in by_id]
         missing = [{"file_id": i, "status": "not_found"} for i in ids if i not in found]
         return list(results) + missing
+
+    @staticmethod
+    def _waves(ids: List[int], previous: Dict[int, Dict[str, Any]], todo: Iterable[Any]) -> List[List[int]]:
+        """Порядок анализа: прошлая редакция раньше новой, если обе в одном запуске.
+
+        Новая редакция переиспользует анализ прошлой (данные, паспорт, перенос рисков) и сравнивает риски
+        (``risks_comparison``) — для этого прошлая должна быть проанализирована первой. Файлы без связи
+        идут в первой волне параллельно; цепочка v0 → v1 → v2 — тремя волнами.
+
+        Args:
+            ids: id файлов в порядке запроса.
+            previous: ``id → предыдущая версия``.
+            todo: id файлов, которые будут анализироваться (не пропущены как уже проанализированные).
+
+        Returns:
+            List[List[int]]: Волны id.
+        """
+        todo_set = {int(t) for t in todo}
+        depth: Dict[int, int] = {}
+
+        def level(i: int, seen: frozenset = frozenset()) -> int:
+            """Глубина файла в цепочке редакций внутри запуска."""
+            if i in depth:
+                return depth[i]
+            prev = previous.get(i)
+            p = int(prev["id"]) if prev and prev.get("id") is not None else None
+            depth[i] = level(p, seen | {i}) + 1 if p is not None and p in todo_set and p in ids and p not in seen else 0
+            return depth[i]
+
+        for i in ids:
+            level(i)
+        waves: Dict[int, List[int]] = {}
+        for i in ids:
+            waves.setdefault(depth[i], []).append(i)
+        return [waves[k] for k in sorted(waves)]
 
     async def _guarded(self, row: Dict[str, Any], previous: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """Обёртка одного файла: семафор, правило «без повторного анализа», обработка ошибок."""

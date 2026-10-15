@@ -350,7 +350,8 @@ class DocumentRiskAnalyzer:
             if not self._fragment_in_text(frag, norm_chunk):
                 dropped += 1
                 continue
-            if self_denial(r) or statutory(r) or table_total(r) or (r["code"] == "DOC-002" and not brand_like(frag)):
+            by_law = str(r.get("requirement_source") or "").strip().lower() == "закон"
+            if by_law or self_denial(r) or statutory(r) or table_total(r) or (r["code"] == "DOC-002" and not brand_like(frag)):
                 rejected += 1
                 continue
             r["category"] = risk_catalog.category(r["code"])

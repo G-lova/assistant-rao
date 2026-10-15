@@ -31,7 +31,7 @@ def _strip(results: List[Dict[str, Any]], include_analysis: bool) -> List[Dict[s
     return [{k: v for k, v in r.items() if k != "ai_analysis"} for r in results]
 
 
-@celery_app.task(bind=True, name="rm_analyze_files_task", soft_time_limit=3300, time_limit=3600)
+@celery_app.task(bind=True, name="rm_analyze_files_task", soft_time_limit=10500, time_limit=10800)
 def rm_analyze_files_task(self, file_ids: List[int], environment: str, force: bool = False, recompute: bool = False,
                           push: bool = True, include_analysis: bool = False) -> Dict[str, Any]:
     """Анализ файлов ``risk_monitoring_files`` и запись AI-паспорта.
@@ -76,48 +76,62 @@ def rm_analyze_files_task(self, file_ids: List[int], environment: str, force: bo
     return {"summary": summary, "results": _strip(results, include_analysis)}
 
 
-@celery_app.task(bind=True, name="rm_analyze_xml_task", soft_time_limit=3300, time_limit=3600)
+@celery_app.task(bind=True, name="rm_analyze_xml_task", soft_time_limit=10500, time_limit=10800)
 def rm_analyze_xml_task(self, xml_ids: List[int], environment: str, force: bool = False, push: bool = True,
-                        use_llm: bool = True, include_analysis: bool = False) -> Dict[str, Any]:
+                        use_llm: bool = True, include_analysis: bool = False, analyze_files: bool = False,
+                        recompute: bool = False) -> Dict[str, Any]:
     """Анализ XML ЕИС (``risk_monitoring_eis_xml_sources``) как событий и запись результата.
+
+    При ``analyze_files=True`` сначала анализируются ещё не проанализированные файлы, указанные в XML
+    (вложения, печатная форма) или привязанные к нему по ``xml_source_id``: так событие получает резюме и
+    риски своих файлов. Результаты файлов — в ``files`` ответа.
 
     Args:
         xml_ids: id XML.
         environment: Окружение внешней системы.
-        force: Повторный анализ уже проанализированных (режим отладки).
+        force: Повторный анализ уже проанализированных (режим отладки) — и XML, и файлов.
         push: Записывать результат во внешнюю БД.
         use_llm: Вызывать ``EventAnalyzer``.
         include_analysis: Вернуть ``ai_analysis`` в результате задачи.
+        analyze_files: Проанализировать файлы событий до самих событий.
+        recompute: Игнорировать кэш LLM при анализе файлов (режим отладки).
 
     Returns:
-        Dict[str, Any]: ``summary`` (счётчики) и ``results`` по XML.
+        Dict[str, Any]: ``summary`` (счётчики) и ``results`` по XML; при ``analyze_files`` — ``files``
+        (``summary``, ``results``).
     """
     from celery_app import already_succeeded
 
     if already_succeeded(self):
         return self.AsyncResult(self.request.id).result
     from configs.http_client_manager import HTTPClientManager
-    from risk_monitoring.xml_event_analyzer import XmlEventAnalyzer
-
     from risk_monitoring.llm_json import CALLS
+    from risk_monitoring.xml_event_analyzer import XmlEventAnalyzer
 
     before = dict(CALLS)
     stats: Dict[str, Any] = {}
+    files_out: Dict[str, Any] = {}
 
     async def run() -> List[Dict[str, Any]]:
-        """Создаёт HTTP-менеджер (и, если Postgres доступен, пул AIRepo для срока хранения) и запускает анализ."""
-        from contextlib import AsyncExitStack
+        """Создаёт HTTP-менеджер внутри event loop задачи; при необходимости анализирует файлы, затем XML."""
+        async with HTTPClientManager(timeout=180.0) as mgr:
+            analyzer = XmlEventAnalyzer(mgr, environment, push_results=push, force=force, use_llm=use_llm)
+            if analyze_files:
+                from configs.ai_repo import AIRepo
+                from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
 
-        from configs.ai_repo import AIRepo
-
-        async with AsyncExitStack() as stack:
-            mgr = await stack.enter_async_context(HTTPClientManager(timeout=180.0))
-            try:
-                repo = await stack.enter_async_context(AIRepo())
-            except Exception as e:  # noqa: BLE001 — без Postgres события разбираются, срок хранения не меняется
-                logger.warning(f"AIRepo недоступен, срок хранения текстов по событиям не обновляется: {e}")
-                repo = None
-            analyzer = XmlEventAnalyzer(mgr, environment, push_results=push, force=force, use_llm=use_llm, repo=repo)
+                file_ids = await analyzer.pending_files(xml_ids, include_done=force)
+                logger.info(f"Риск-мониторинг, XML {len(xml_ids)}: файлов к анализу {len(file_ids)}")
+                if file_ids:
+                    f_before = dict(CALLS)
+                    async with AIRepo() as repo:
+                        fa = AIFileAnalyzer(mgr, environment, repo, push_results=push, force=force, recompute=recompute)
+                        f_results = await fa.analyze_ids(file_ids)
+                    files_out["summary"] = {**_summary(f_results), "llm": _llm_summary(f_before, fa.stats)}
+                    files_out["results"] = _strip(f_results, include_analysis)
+                else:
+                    files_out["summary"] = {"total": 0}
+                    files_out["results"] = []
             try:
                 return await analyzer.analyze_ids(xml_ids)
             finally:
@@ -127,4 +141,7 @@ def rm_analyze_xml_task(self, xml_ids: List[int], environment: str, force: bool 
     summary = _summary(results)
     summary["llm"] = _llm_summary(before, stats)
     logger.info(f"Риск-мониторинг, XML: {summary}")
-    return {"summary": summary, "results": _strip(results, include_analysis)}
+    out = {"summary": summary, "results": _strip(results, include_analysis)}
+    if analyze_files:
+        out["files"] = files_out
+    return out
