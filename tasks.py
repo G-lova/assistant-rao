@@ -89,7 +89,7 @@ def index_documents_task(self, expertise_id: int, environment: str = None):
     Args:
         expertise_id: ID экспертизы.
         environment: Окружение (``X-API-Database``). Сообщения, поставленные до появления параметра, относятся
-            к ``PE_LEGACY_ENV`` (по умолчанию ``dev``).
+            к ``PE_LEGACY_ENV`` (``configs/settings.py``).
 
     Returns:
         dict: ``{"index": ..., "facts": ...}`` либо ``{"skipped": True}``.
@@ -110,7 +110,8 @@ def index_documents_task(self, expertise_id: int, environment: str = None):
         if facts_enabled():
             from configs.llm_client import get_llm
             client, model = get_llm()
-        scope = Scope.of(environment or os.getenv("PE_LEGACY_ENV", "dev"), expertise_id)
+        from configs import settings
+        scope = Scope.of(environment or settings.PE_LEGACY_ENV, expertise_id)
         async with HTTPClientManager(timeout=120.0) as mgr, task_pool():
             return await index_and_build_facts(scope, mgr, client, model)
 

@@ -15,3 +15,12 @@ ANALYZE_SUPERSEDED = False
 
 # Попыток на запрос к модели для чтения, определения типа и извлечения данных (перезапуск модели длится минуты)
 LLM_PROXY_RETRIES = 6
+
+# Режим отладки: повторный анализ уже проанализированных файлов и XML (force / recompute в API).
+# В отладке результаты помечаются pipeline.debug и не используются как готовые
+RISK_MONITORING_DEBUG = True
+
+# Срок ссылок риск-мониторинга на общий документ: закрытие закупки/контракта + RM_TEXT_AFTER_CLOSE_DAYS,
+# но не дольше RM_TEXT_MAX_RETENTION_DAYS от загрузки (решение 13.10.2026)
+RM_TEXT_AFTER_CLOSE_DAYS = 365
+RM_TEXT_MAX_RETENTION_DAYS = 1095

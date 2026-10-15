@@ -59,7 +59,9 @@ async def apply_all() -> list:
     import asyncpg  # локальный импорт: вспомогательные функции модуля тестируются без asyncpg
 
     dim = 1024  # значение для необязательного плейсхолдера {{EMBEDDING_DIM}} (в 001 размерность задана прямо)
-    legacy_env = os.getenv("PE_LEGACY_ENV", "dev").strip().lower()
+    from configs import settings
+
+    legacy_env = settings.PE_LEGACY_ENV.strip().lower()
     conn = await asyncpg.connect(
         host=os.getenv("DB_HOST"), port=int(os.getenv("DB_PORT", "5432")),
         database=os.getenv("DB_NAME"), user=os.getenv("DB_USER"), password=os.getenv("DB_PASSWORD"),

@@ -104,7 +104,7 @@ RAW_DOC_COLUMNS = sorted({c for c in DOCUMENT_CODE_TO_COLUMN.values() if c not i
 def _env(environment: Optional[str]) -> str:
     """Окружение строки ``raw_document_data`` (``X-API-Database``), нормализованное как в хранилище знаний.
 
-    Если окружение не передано (вызов не из API), берётся ``PE_LEGACY_ENV`` (по умолчанию ``dev``) с предупреждением.
+    Если окружение не передано (вызов не из API), берётся ``PE_LEGACY_ENV`` (``configs/settings.py``) с предупреждением.
 
     Args:
         environment: Окружение.
@@ -118,7 +118,9 @@ def _env(environment: Optional[str]) -> str:
     from knowledge_store.scope import normalize_env
 
     if not environment:
-        fallback = os.getenv("PE_LEGACY_ENV", "dev")
+        from configs import settings
+
+        fallback = settings.PE_LEGACY_ENV
         logger.warning(f"raw_document_data: окружение не передано, используется {fallback}")
         environment = fallback
     return normalize_env(environment)
@@ -245,52 +247,73 @@ async def get_async_summary_report_from_db(procurement_id: str, environment: Opt
         return None
 
 
-async def get_contract_info_from_db(procurement_id: str, environment: Optional[str] = None) -> Dict[str, str]:
+async def get_contract_info_from_db(procurement_id: str, environment: Optional[str] = None) -> Dict[str, Any]:
     """
-    Извлекает основные реквизиты контракта из базы данных по идентификатору закупки.
+    Реквизиты контракта (номер, цена, дата) экспертизы — из контракта или проекта контракта, без запросов к модели.
 
-    Функция обращается к таблице `raw_document_data`, получает данные из поля `summary_report`
-    и извлекает оттуда номер контракта, сумму (НМЦК или сумма контракта) и дату контракта.
-    Если данные отсутствуют или произошла ошибка — возвращает значения по умолчанию ("0").
+    Источник — документы экспертизы в хранилище знаний (``pe_documents``, сохраняются при ``/evaluate-documents``):
+    текст контракта разбирается регулярными выражениями, недостающее берётся из сохранённого результата
+    ``TypeDataExtractor``. Заключённый контракт приоритетнее проекта. Правила — ``knowledge_store/contract_info.py``.
+
+    Прежний источник (``summary_report``) реквизитов не содержит — это итог ``ConsistencyChecker``, поэтому раньше
+    метод почти всегда возвращал «0»; он оставлен запасным для старых записей.
 
     Args:
-        procurement_id (str): Уникальный идентификатор закупки.
-        environment (Optional[str]): Окружение (``X-API-Database``); ``None`` — см.
-            :func:`get_async_summary_report_from_db`.
+        procurement_id (str): ID экспертизы.
+        environment (Optional[str]): Окружение (``X-API-Database``); ``None`` — документы любого окружения,
+            самые свежие.
 
     Returns:
-        Dict[str, str]: Словарь с ключами:
-            - "contract_number" (str): Номер контракта или "0", если не найден.
-            - "amount" (str): Сумма контракта в виде строки или "0", если не найдена.
-            - "date" (str): Дата контракта в текстовом формате или "0", если не найдена.
+        Dict[str, Any]: ``contract_number``, ``amount`` (строка, точка — разделитель копеек), ``date``
+        (``ГГГГ-ММ-ДД``); ``"0"`` — не найдено. ``sources`` — откуда взято каждое поле.
     """
+    from knowledge_store import contract_info
+    from knowledge_store.scope import normalize_env
+
+    empty = dict(contract_info.EMPTY)
+    try:
+        env = normalize_env(environment) if environment else None
+        async with get_async_db_connection() as conn:
+            docs = await contract_info.fetch_documents(conn, int(procurement_id), env)
+        info = contract_info.collect(docs)
+        if any(info[k] != "0" for k in empty):
+            return info
+        logger.warning(f"Контракт/проект контракта экспертизы {procurement_id} не найден в хранилище знаний "
+                       f"(документов: {len(docs)}); проверяем summary_report")
+    except Exception as e:
+        logger.error(f"Ошибка при получении реквизитов контракта из документов: {e}", exc_info=True)
+    return await _contract_info_from_summary(procurement_id, environment) or empty
+
+
+async def _contract_info_from_summary(procurement_id: str, environment: Optional[str]) -> Optional[Dict[str, str]]:
+    """Запасной путь для старых записей: ``summary_report.documents[*].raw_data`` (поля — строки или ``{"value"}``).
+
+    Returns:
+        Optional[Dict[str, str]]: Реквизиты или ``None``.
+    """
+    from knowledge_store import contract_info
+
     try:
         data = await get_async_summary_report_from_db(procurement_id, environment)
         if not data:
-            return {"contract_number": "0", "amount": "0", "date": "0"}
+            return None
         data = json.loads(data) if isinstance(data, (str, bytes)) else data   # asyncpg отдаёт JSONB строкой
-        logger.info(data)
-        
-        # Извлечение данных из сводного отчета
-        for item in data.get('documents', []):
-            raw_data = item.get('raw_data', {})
-            for r in raw_data:
-                if ('контракт' in r.get('document_name', '').lower()) or ('договор' in r.get('document_name', '').lower()):
-                    contract_info = {
-                        'contract_number': str(r.get('contract_number', '0'))
-                    }
-                    finances = r.get('finances', [])
-                    dates = r.get('dates', [])
-                    contract_info['amount'] = str(finances[0].get('value', '0'))
-                    contract_info['date'] = str(dates[0].get('value', '0'))
-                    
-                    return contract_info
-        logger.warning(f"Данные контракта не найдены для procurement_id={procurement_id}")    
-        return {"contract_number": "0", "amount": "0", "date": "0"}
-
+        for item in data.get('documents', []) or []:
+            raw = item.get('raw_data') or []
+            for r in raw if isinstance(raw, list) else [raw]:
+                if not isinstance(r, dict):
+                    continue
+                name = str(contract_info._value(r.get('document_name')) or '')
+                if not contract_info.NAME_RE.search(name):
+                    continue
+                found = contract_info.from_extraction({"raw_data": r})
+                if any(found.values()):
+                    return {k: v or "0" for k, v in found.items()}
+        logger.warning(f"Данные контракта не найдены для procurement_id={procurement_id}")
+        return None
     except Exception as e:
         logger.error(f"Ошибка при получении данных о контракте: {str(e)}", exc_info=True)
-        return {"contract_number": "0", "amount": "0", "date": "0"}
+        return None
 
 
 @async_retry(DATABASE_RETRY_CONFIG)

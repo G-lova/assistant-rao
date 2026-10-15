@@ -1,4 +1,5 @@
 """Связь экспертизы с риск-мониторингом: карточка закупки, продление хранения, находки РМ для эксперта."""
+from tests.flags import flags
 import asyncio
 import hashlib
 import json
@@ -69,12 +70,12 @@ class RunnerLinkTests(unittest.TestCase):
         env = {"KNOWLEDGE_STORE_ENABLED": "true", "PE_FACTS_ENABLED": "false"}
         with mock.patch.object(runner.indexer, "build_embedder", lambda mgr: object()), \
                 mock.patch.object(runner.indexer, "index_expertise", fake_index):
-            with mock.patch.dict(os.environ, dict(env, PE_RM_LINK_ENABLED="false")):
+            with flags(dict(env, PE_RM_LINK_ENABLED="false")):
                 self.assertNotIn("rm_link", asyncio.run(runner.index_and_build_facts(Scope("dev", 1), object())))
-            with mock.patch.dict(os.environ, dict(env, PE_RM_LINK_ENABLED="true")), \
+            with flags(dict(env, PE_RM_LINK_ENABLED="true")), \
                     mock.patch.object(runner, "link_rm", mock.AsyncMock(return_value={"rm_card_id": 5})):
                 self.assertEqual(asyncio.run(runner.index_and_build_facts(Scope("dev", 1), object()))["rm_link"], {"rm_card_id": 5})
-            with mock.patch.dict(os.environ, dict(env, PE_RM_LINK_ENABLED="true")), \
+            with flags(dict(env, PE_RM_LINK_ENABLED="true")), \
                     mock.patch.object(runner, "link_rm", mock.AsyncMock(side_effect=RuntimeError("x"))):
                 self.assertEqual(asyncio.run(runner.index_and_build_facts(Scope("dev", 1), object()))["rm_link"],
                                  {"error": "RuntimeError"})
@@ -114,7 +115,7 @@ class RmLinkDbTests(unittest.TestCase):
 
         df = pd.DataFrame([{"id": 8801, "law_reference": "44-ФЗ", "procurement_method": "Конкурс", "object": 6,
                             "checkType2": 1, "contract": float("nan")}])
-        with mock.patch.object(hooks, "_db", fake_db), mock.patch.dict(os.environ, {"KNOWLEDGE_STORE_ENABLED": "true"}):
+        with mock.patch.object(hooks, "_db", fake_db), flags({"KNOWLEDGE_STORE_ENABLED": "true"}):
             run(hooks.on_run_start(df, "prod"))
             self.assertEqual(c._run("SELECT count(*) FROM procurement_identity WHERE expertise_id = 8801"), "0")  # NaN — не номер
             run(hooks.on_identifiers(scope, "0373100000126000001"))

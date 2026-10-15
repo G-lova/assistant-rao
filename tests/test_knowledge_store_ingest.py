@@ -3,6 +3,7 @@
 Интеграционные тесты выполняются, если задана переменная ``PE_TEST_PG`` в формате ``host:port``
 (Postgres без pgvector допустим: тип ``vector`` в тестовой схеме подменяется на ``real[]``).
 """
+from tests.flags import flags
 import asyncio
 import hashlib
 import os
@@ -135,11 +136,11 @@ class RepositoryIntegrationTests(unittest.TestCase):
             f.write(b"hello")
         try:
             with mock.patch.object(hooks, "_db", fake_db):
-                with mock.patch.dict(os.environ, {"KNOWLEDGE_STORE_ENABLED": "false"}):
+                with flags({"KNOWLEDGE_STORE_ENABLED": "false"}):
                     asyncio.run(hooks.on_run_start(df, "dev"))
                     self.assertIsNone(asyncio.run(hooks.on_document_text(S(902), "c", "a.txt", None, f.name, "t")))
                     self.assertEqual(self.q("SELECT count(*) FROM pe_procurements WHERE expertise_id=902"), "0")
-                with mock.patch.dict(os.environ, {"KNOWLEDGE_STORE_ENABLED": "true"}):
+                with flags({"KNOWLEDGE_STORE_ENABLED": "true"}):
                     asyncio.run(hooks.on_run_start(df, "dev"))
                     doc_id = asyncio.run(hooks.on_document_text(S(902), "docIzvejenieFiles", "a.txt", "http://u", f.name,
                                                                "Страница 1 (OCR): раз\nСтраница 2 (OCR): два"))
@@ -148,7 +149,7 @@ class RepositoryIntegrationTests(unittest.TestCase):
                     self.assertEqual(self.q("SELECT law||'|'||method||'|'||object_code||'|'||check_type2 FROM pe_procurements WHERE expertise_id=902"), "44-ФЗ|Конкурс|6|1")
                     self.assertEqual(self.q("SELECT pages_count||'|'||detected_type FROM pe_documents WHERE id=%d" % doc_id), "2|docIzvejenieFiles")
                     self.assertIsNone(asyncio.run(hooks.find_cached_text(f.name)))       # DOC_DEDUP_ENABLED выключен
-                    with mock.patch.dict(os.environ, {"DOC_DEDUP_ENABLED": "true"}):
+                    with flags({"DOC_DEDUP_ENABLED": "true"}):
                         cached = asyncio.run(hooks.find_cached_text(f.name))
                         self.assertEqual(cached["text"], "Страница 1 (OCR): раз\nСтраница 2 (OCR): два")
                         self.assertEqual(cached["sha256"], documents.file_sha256(f.name))

@@ -13,11 +13,10 @@ def is_enabled() -> bool:
     """Проверяет, включено ли хранилище знаний.
 
     Returns:
-        bool: ``True``, если переменная окружения ``KNOWLEDGE_STORE_ENABLED`` равна ``true``.
-            Значение читается при каждом вызове, чтобы флаг можно было менять без пересборки кода.
+        bool: ``True``, если ``KNOWLEDGE_STORE_ENABLED`` в ``configs/settings.py`` включён.
     """
-    import os
-    return os.getenv("KNOWLEDGE_STORE_ENABLED", str(Config.KNOWLEDGE_STORE_ENABLED)).lower() == "true"
+    from configs import settings
+    return bool(settings.KNOWLEDGE_STORE_ENABLED)
 
 
 async def safe_call_async(func: Callable[..., Awaitable[Any]], *args, default: Optional[Any] = None, **kwargs) -> Any:
