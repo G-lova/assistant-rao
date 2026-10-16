@@ -10,6 +10,11 @@
 |---|---|---|---|
 | POST | `/risk-monitoring/files/analysis` | `{"ids": [1097, 1096], "push": true, "force": false, "recompute": false, "include_analysis": false}` | `202 {"task_id", "count", "status": "queued"}` |
 | POST | `/risk-monitoring/xml/analysis` | `{"ids": [812345], "push": true, "force": false, "include_analysis": false}` | `202 {"task_id", "count", "status": "queued"}` |
+| POST | `/risk-monitoring/contracts/analysis` | `{"ids": [26], "push": true, "use_llm": true, "force": false, "include_analysis": false}` | `202 {"task_id", "count", "status": "queued"}` |
+| POST | `/risk-monitoring/organisations/analysis` | `{"ids": [7], "roles": ["customer", "supplier"], "period_months": 12, "use_llm": true, "include_analysis": true}` | `202 {"task_id", "count", "status": "queued"}` |
+| POST | `/risk-monitoring/typal-clauses/load` | `{"regions": ["34"], "dates": ["2026-10-15"], "read_files": true}` (пусто — по настройкам) | `202 {"task_id"}` |
+| POST | `/risk-monitoring/typal-clauses/xml?read_files=true` | тело — XML `typalOrderClause` | `202 {"task_id", "versions"}` |
+| GET | `/risk-monitoring/typal-clauses/customer/{inn}?kpp=&on=` | — | действующая редакция типового положения заказчика и его файл-положение |
 | GET | `/task/{task_id}` (существующий) | — | `summary` (счётчики `done` / `skipped` / `error` / `not_found` / `pushed`) и `results` по каждому id |
 
 - `ids` — до 500 id; повторы убираются.
@@ -70,6 +75,62 @@
 | `risks[]`, `total_event_risk` | Тот же формат рисков, что у файлов; `sources`: `rule` (правила кода, уверенность 1.0) и `ai_event` (LLM) |
 | `link` | Только для XML без `risk_monitoring_contract_id`: `method` (`purchase_number` / `contract_number` / `ikz` / `ikz_customer` / `none`), `risk_monitoring_contract_id`, `organisation_id`, `ambiguous`, `candidates[]`, `customer_inn`, `customer_kpp`. **PHP применяет привязку**, если `method ≠ none` и `ambiguous = false` |
 | `pipeline` | Как у файлов, `stage = "S1a"`, `export_date` — дата выгрузки архива |
+
+## Анализ закупки/контракта (`risk_monitoring_contracts.ai_analysis`)
+
+`schema_version = "rm-contract-1"`, `pipeline.stage = "S2"`. Документы повторно **не** анализируются: берутся
+сохранённые результаты файлов и XML (во внешней БД, а если их там нет — у нас). Закупка — сводный объект и
+пересчитывается при каждом запросе; если входные данные не изменились (`pipeline.input_hash`), пересчёт
+пропускается (`status: unchanged`). Модель пишет только резюме (один короткий запрос; `use_llm: false` — шаблон).
+
+| Поле | Содержимое |
+|---|---|
+| `passport` | Номер закупки и контракта, ИКЗ, закон, стадия (`notice` / `contract` / `execution` / `completed` / `terminated`), способ, предмет, ОКПД2, НМЦК, цена, снижение %, заявки, аванс, обеспечение, даты, заказчик, поставщик, изменение и расторжение, оплачено, `documents[]` |
+| `package` | `completeness` (ожидаемые группы документов конкурентной закупки и недостающие), `consistency[]` (цена контракта и НМЦК в документах против ЕИС), `files[]`, `files_analyzed` / `files_total` |
+| `registry` | Проверка поставщика в реестре 19.28 КоАП на дату контракта (два года с `date_begin`) |
+| `events[]` | Лента событий XML закупки (новые первыми) |
+| `risks[]` | Сводные риски в том же формате, что у файлов; `evidence[].src` — `file:<id>`, `xml:<id>`, `rule:<показатель>`, `black_list:<id>`, `eis`, `package` |
+| `profile` | `score` 0–100 («шумовое ИЛИ»), `zone` (`green` < 40 ≤ `yellow` < 70 ≤ `red`), `delta` к прошлому баллу, `components` по категориям, `top_factors[]` |
+| `resume` | Резюме для аналитика |
+
+Источники рисков: файлы (только действующие редакции; риски, отклонённые аналитиком или устранённые, не учитываются,
+подтверждённые весят ×1,5), события XML (по последней версии документа ЕИС), правила внешней системы
+(показатель = 1 → код каталога: `pz_p5` → FIN-003, `zc_p1` → PROC-006 …), реестр 19.28 (REG-001), данные ЕИС
+(одна заявка на конкурентной закупке → PROC-001, расторжение → CTR-020), согласованность (DOC-009), комплект (DOC-015).
+Пороги — `risk_monitoring/settings.py`.
+
+## Аналитика организаций (заказчик и поставщик)
+
+`schema_version = "rm-org-1"`. Секции `customer` и `supplier`: `metrics` за `period_months` (12) месяцев, крупнейшие
+контрагенты, `risks[]`, `score`, `zone`, `delta`, `resume`. Ключ заказчика — ИНН/КПП (все строки организации по годам
+и дубли), поставщика — ИНН. Результат относится к канонической строке (`canonical_id`).
+
+| Роль | Метрики | Риски |
+|---|---|---|
+| Заказчик | Закупки и суммы, доля у единственного поставщика и с одной заявкой, среднее снижение цены, демпинг, изменения, расторжения, штрафы, средний балл закупок и доля красной зоны, поставщики, HHI, доля крупнейшего, повторяющиеся риски, контракты с поставщиками из реестра 19.28 | BEH-001 (низкая конкуренция), BEH-005 (концентрация на поставщике), HIST-001 (повтор риска в 3+ закупках), REG-001 |
+| Поставщик | Контракты, заказчики, доля крупнейшего заказчика, расторжения, демпинг, статус СМП, записи реестра 19.28 | REG-001 (запись реестра действует сейчас), BEH-002 (расторжения, систематический демпинг), BEH-006 (выключен: в БД только закупки заказчиков на мониторинге, концентрация завышена) |
+
+Поведенческие риски — только при 5 и более закупках за период. **Внешняя система пока не принимает
+`ai_analysis` организаций**: результат хранится у нас (`ai_rm_results`, `kind = organisation`) и возвращается в задаче.
+Когда API разрешит `risk_monitoring_organisations`, включить `ORG_PUSH_ENABLED` — запись будет «прочитать → слить
+секции → записать».
+
+## Типовые положения о закупке (223-ФЗ)
+
+Источник — ЕИС, документ `typalOrderClause` (`getDocsByOrgRegionRequest`, подсистема `TYPAL_SUBSYSTEM = "RI223"`,
+регион — код ФНС). Ежедневно в 05:40 (Celery beat) загружаются публикации за последние `TYPAL_LOOKBACK_DAYS` дней по
+регионам `TYPAL_REGIONS` (пусто — регионы заказчиков на мониторинге окружения `TYPAL_REGIONS_ENVIRONMENT`).
+Миграция `010_typal_clauses.sql`.
+
+- Каждая **версия** хранится отдельно (`rm_typal_clauses`): реестровый номер, версия, дата утверждения, дата
+  применения (`useForBaseDate`), приказ об изменениях, способы закупки.
+- **Заказчики** версии (`rm_typal_clause_customers`) — из `customerInfo`, с типом учреждения
+  (`budgetAgencyType` → ГБУ, `autonomousAgencyType` → ГАУ).
+- **Файлы** (`rm_typal_clause_files`): положения по типу учреждения, перечни, приказы. Текст — общий документ
+  `ai_documents`; положение режется по пунктам (`chunker = typal_points`, номер пункта — `heading`) с эмбеддингами.
+  Одинаковый файл (`contentUid`) в разных версиях читается один раз.
+- Положение заказчика: `GET /risk-monitoring/typal-clauses/customer/{inn}` — редакция, действующая на дату, и файл
+  для его типа учреждения. Следующий шаг — проверка рисков 223-ФЗ по пунктам положения заказчика.
 
 ## Результаты во внутренней БД (`ai_rm_results`)
 

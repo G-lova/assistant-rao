@@ -149,3 +149,153 @@ def rm_analyze_xml_task(self, xml_ids: List[int], environment: str, force: bool 
     if analyze_files:
         out["files"] = files_out
     return out
+
+
+@celery_app.task(bind=True, name="rm_analyze_contracts_task", soft_time_limit=3300, time_limit=3600)
+def rm_analyze_contracts_task(self, card_ids: List[int], environment: str, force: bool = False, push: bool = True,
+                              use_llm: bool = True, include_analysis: bool = False) -> Dict[str, Any]:
+    """Анализ закупок/контрактов (``risk_monitoring_contracts``) по сохранённым результатам документов.
+
+    Args:
+        card_ids: id карточек.
+        environment: Окружение внешней системы.
+        force: Пересчитать при неизменных входных данных (режим отладки).
+        push: Записывать результат во внешнюю БД.
+        use_llm: Резюме пишет модель.
+        include_analysis: Вернуть ``ai_analysis`` в результате задачи.
+
+    Returns:
+        Dict[str, Any]: ``summary`` и ``results`` по карточкам.
+    """
+    from celery_app import already_succeeded
+
+    if already_succeeded(self):
+        return self.AsyncResult(self.request.id).result
+    from configs.ai_repo import AIRepo
+    from configs.http_client_manager import HTTPClientManager
+    from risk_monitoring.contract_analyzer import ContractAnalyzer
+    from risk_monitoring.llm_json import CALLS
+
+    before, stats = dict(CALLS), {}
+
+    async def run() -> List[Dict[str, Any]]:
+        """HTTP-менеджер и пул Postgres внутри event loop задачи."""
+        async with HTTPClientManager(timeout=180.0) as mgr, AIRepo() as repo:
+            analyzer = ContractAnalyzer(mgr, environment, repo, push_results=push, force=force, use_llm=use_llm)
+            try:
+                return await analyzer.analyze_ids(card_ids)
+            finally:
+                stats.update(analyzer.stats)
+
+    results = asyncio.run(run())
+    summary = _summary(results)
+    summary["llm"] = _llm_summary(before, stats)
+    logger.info(f"Риск-мониторинг, закупки: {summary}")
+    return {"summary": summary, "results": _strip(results, include_analysis)}
+
+
+@celery_app.task(bind=True, name="rm_analyze_orgs_task", soft_time_limit=3300, time_limit=3600)
+def rm_analyze_orgs_task(self, org_ids: List[int], environment: str, roles: List[str] = ("customer", "supplier"),
+                         period_months: int = None, push: bool = True, use_llm: bool = True,
+                         include_analysis: bool = False) -> Dict[str, Any]:
+    """Аналитика организаций как заказчика и поставщика.
+
+    Args:
+        org_ids: id ``risk_monitoring_organisations``.
+        environment: Окружение внешней системы.
+        roles: Секции ``customer`` / ``supplier``.
+        period_months: Период, месяцев.
+        push: Записывать во внешнюю БД (только при ``settings.ORG_PUSH_ENABLED``).
+        use_llm: Резюме пишет модель.
+        include_analysis: Вернуть ``ai_analysis`` в результате задачи.
+
+    Returns:
+        Dict[str, Any]: ``summary`` и ``results`` по организациям.
+    """
+    from celery_app import already_succeeded
+
+    if already_succeeded(self):
+        return self.AsyncResult(self.request.id).result
+    from configs.ai_repo import AIRepo
+    from configs.http_client_manager import HTTPClientManager
+    from risk_monitoring.llm_json import CALLS
+    from risk_monitoring.org_analyzer import OrgAnalyzer
+
+    before, stats = dict(CALLS), {}
+
+    async def run() -> List[Dict[str, Any]]:
+        """HTTP-менеджер и пул Postgres внутри event loop задачи."""
+        async with HTTPClientManager(timeout=180.0) as mgr, AIRepo() as repo:
+            analyzer = OrgAnalyzer(mgr, environment, repo, push_results=push, use_llm=use_llm, roles=tuple(roles),
+                                   period_months=period_months)
+            try:
+                return await analyzer.analyze_ids(org_ids)
+            finally:
+                stats.update(analyzer.stats)
+
+    results = asyncio.run(run())
+    summary = _summary(results)
+    summary["llm"] = _llm_summary(before, stats)
+    logger.info(f"Риск-мониторинг, организации: {summary}")
+    return {"summary": summary, "results": _strip(results, include_analysis)}
+
+
+@celery_app.task(bind=True, name="rm_typal_clauses_task", soft_time_limit=7000, time_limit=7200)
+def rm_typal_clauses_task(self, environment: str = None, regions: List[str] = None, dates: List[str] = None,
+                          xml_base64: str = None, read_files: bool = True) -> Dict[str, Any]:
+    """Загрузка типовых положений о закупке (223-ФЗ) из ЕИС или из переданного XML.
+
+    Без параметров (ежедневный запуск по расписанию): регионы — ``settings.TYPAL_REGIONS`` или регионы заказчиков
+    на мониторинге окружения ``settings.TYPAL_REGIONS_ENVIRONMENT``; даты — последние
+    ``settings.TYPAL_LOOKBACK_DAYS`` дней. Уже сохранённые версии перезаписываются без повторного чтения файлов.
+
+    Args:
+        environment: Окружение (для поиска регионов).
+        regions: Коды регионов ФНС.
+        dates: Даты ``ГГГГ-ММ-ДД``.
+        xml_base64: XML ``typalOrderClause`` в base64 (ручная загрузка) — тогда ЕИС не запрашивается.
+        read_files: Скачивать и читать файлы положений.
+
+    Returns:
+        Dict[str, Any]: ``loaded`` (версии), ``stats``, ``regions``, ``dates``.
+    """
+    from celery_app import already_succeeded
+
+    if already_succeeded(self):
+        return self.AsyncResult(self.request.id).result
+    from risk_monitoring import settings
+
+    if not settings.TYPAL_LOAD_ENABLED and not xml_base64:
+        return {"skipped": "TYPAL_LOAD_ENABLED = False"}
+    import base64
+
+    from configs.ai_repo import AIRepo
+    from configs.http_client_manager import HTTPClientManager
+    from risk_monitoring.typal_loader import TypalLoader, lookback_dates
+
+    out: Dict[str, Any] = {"loaded": [], "errors": []}
+
+    async def run() -> None:
+        """HTTP-менеджер и пул Postgres внутри event loop задачи."""
+        async with HTTPClientManager(timeout=180.0) as mgr, AIRepo() as repo:
+            loader = TypalLoader(mgr, repo, environment or settings.TYPAL_REGIONS_ENVIRONMENT, read_files=read_files)
+            try:
+                if xml_base64:
+                    out["loaded"] += await loader.load_xml(base64.b64decode(xml_base64), source="upload")
+                    return
+                regs = regions or await loader.regions()
+                days = dates or lookback_dates(settings.TYPAL_LOOKBACK_DAYS)
+                out.update(regions=regs, dates=days)
+                for reg in regs:
+                    for d in days:
+                        try:
+                            out["loaded"] += await loader.load_region(reg, d)
+                        except Exception as e:  # noqa: BLE001 — регион/дата не останавливают остальные
+                            logger.warning(f"Типовые положения {reg} за {d}: {type(e).__name__}: {e}")
+                            out["errors"].append({"region": reg, "date": d, "error": f"{type(e).__name__}: {e}"[:300]})
+            finally:
+                out["stats"] = loader.stats
+
+    asyncio.run(run())
+    logger.info(f"Типовые положения: {out.get('stats')}, версий {len(out['loaded'])}")
+    return out

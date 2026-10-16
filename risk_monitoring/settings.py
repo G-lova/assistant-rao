@@ -24,3 +24,39 @@ RISK_MONITORING_DEBUG = True
 # но не дольше RM_TEXT_MAX_RETENTION_DAYS от загрузки (решение 13.10.2026)
 RM_TEXT_AFTER_CLOSE_DAYS = 365
 RM_TEXT_MAX_RETENTION_DAYS = 1095
+
+# ---------------------------------------------------------------- анализ закупки/контракта и организаций
+# Зоны балла 0–100: меньше первого порога — зелёная, меньше второго — жёлтая, иначе красная
+SCORE_ZONES = (40, 70)
+# Подтверждённый аналитиком риск весит больше (status = 1 в risk_monitoring_document_risks)
+CONFIRMED_WEIGHT = 1.5
+# Расхождение сумм между документом и ЕИС, при котором ставится DOC-009 (доля)
+CONSISTENCY_TOLERANCE = 0.01
+# Ставить ли DOC-015 «Неполный комплект документов» (иначе — только в package.completeness)
+COMPLETENESS_RISK = True
+# Резюме закупки и организации пишет модель (иначе — шаблон)
+PACKAGE_LLM_RESUME = True
+
+# Период и пороги аналитики организаций
+ORG_PERIOD_MONTHS = 12
+ORG_MIN_CONTRACTS = 5                  # меньше — поведенческие риски не ставятся (мало данных)
+CUSTOMER_LOW_COMPETITION_SHARE = 0.5   # доля закупок с одной заявкой / у единственного поставщика → BEH-001
+CUSTOMER_TOP_SUPPLIER_SHARE = 0.4      # доля контрактов у одного поставщика → BEH-005
+SUPPLIER_TOP_CUSTOMER_SHARE = 0.7      # доля контрактов поставщика у одного заказчика → BEH-006
+# В БД только закупки заказчиков на мониторинге — у поставщика концентрация завышена; риск BEH-006 выключен,
+# пока не появятся данные о всех контрактах поставщика (метрика top_customer_share считается всегда)
+SUPPLIER_CONCENTRATION_RISK = False
+SUPPLIER_TERMINATION_SHARE = 0.2       # доля расторгнутых контрактов поставщика → BEH-002
+DEMPING_PCT = 25                       # снижение цены на торгах, %, с которого контракт считается демпинговым
+REPEAT_RISK_MIN = 3                    # риск одного кода в стольких закупках заказчика → HIST-001
+# Внешняя система пока не принимает ai_analysis организаций (нет таблицы в API): результат хранится у нас
+ORG_PUSH_ENABLED = False
+
+# ---------------------------------------------------------------- типовые положения о закупке (223-ФЗ)
+TYPAL_LOAD_ENABLED = True
+# Коды регионов ФНС (две цифры); пусто — регионы заказчиков на мониторинге (dataset.owner.region)
+TYPAL_REGIONS: tuple = ()
+TYPAL_REGIONS_ENVIRONMENT = "prod"     # окружение, по заказчикам которого определяются регионы (если TYPAL_REGIONS пуст)
+TYPAL_SUBSYSTEM = "RI223"              # подсистема ЕИС для getDocsByOrgRegionRequest
+TYPAL_DOCUMENT_TYPE = "typalOrderClause"
+TYPAL_LOOKBACK_DAYS = 3                # ежедневная загрузка берёт столько прошедших дней (ЕИС выгружает с задержкой)

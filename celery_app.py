@@ -70,6 +70,9 @@ celery_app.conf.update(
         # Риск-мониторинг — отдельная очередь и отдельный воркер (не блокирует /evaluate-documents)
         'rm_analyze_files_task': {'queue': 'risk_monitoring'},
         'rm_analyze_xml_task': {'queue': 'risk_monitoring'},
+        'rm_analyze_contracts_task': {'queue': 'risk_monitoring'},
+        'rm_analyze_orgs_task': {'queue': 'risk_monitoring'},
+        'rm_typal_clauses_task': {'queue': 'risk_monitoring'},
         'main.get_experts_task': {
             'queue': 'scoring',
             'retry_policy': {
@@ -85,6 +88,12 @@ celery_app.conf.update(
         'purge-expired-texts': {
             'task': 'purge_expired_texts_task',
             'schedule': crontab(hour=3, minute=30),
+        },
+        # Типовые положения о закупке (223-ФЗ) из ЕИС: новые редакции за последние дни (risk_monitoring.settings)
+        'typal-clauses-daily': {
+            'task': 'rm_typal_clauses_task',
+            'schedule': crontab(hour=5, minute=40),
+            'options': {'queue': 'risk_monitoring'},
         },
     },
 )
