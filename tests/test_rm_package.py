@@ -89,6 +89,17 @@ class ContractPackageTest(unittest.TestCase):
         self.assertEqual(out["passport"]["stage"], "contract")
         self.assertIn("Закупка № 0354100008624000011", cp.default_resume(out["passport"], out["profile"], out["risks"], []))
 
+    def test_favourite_supplier(self):
+        """Поставщик закупки — крупнейший у заказчика (4 из 8) → BEH-006; не крупнейший или мало данных — нет."""
+        out = cp.build_contract_analysis(card=CARD, files=[], xmls=[], values=None, black=[], statuses={},
+                                         settings=settings, supplier_counts={"3245021003": 4, "1": 2, "2": 2})
+        self.assertIn("BEH-006", {r["rule_id"] for r in out["risks"]})
+        self.assertEqual(out["customer_supplier"]["share"], 0.5)
+        p = out["passport"]
+        self.assertFalse(cp.favourite_supplier(p, {"3245021003": 3, "1": 5}, settings)["favourite"])
+        self.assertFalse(cp.favourite_supplier(p, {"3245021003": 3, "1": 1}, settings)["favourite"])
+        self.assertIsNone(cp.favourite_supplier(p, None, settings))
+
     def test_competitive(self):
         """Ч. 12 ст. 93 (EZTP20) — неконкурентная; способ неизвестен — ``None``."""
         self.assertFalse(cp.competitive("EZTP20", ""))
@@ -231,8 +242,17 @@ class FakeAnalyzerTest(unittest.TestCase):
         async def query(name, head=(), **lists):
             return [dict(r) for r in data.get(name, [])]
 
+        this_year = date.today().year
+        data["org_rows.sql"] = [{"id": 7, "inn": "3437500183", "kpp": "343701001", "year": this_year}]
+        data["org_group.sql"] = [{"id": 7, "inn": "3437500183", "kpp": "343701001", "year": this_year},
+                                 {"id": 8, "inn": "3437500183", "kpp": "343701001", "year": this_year - 1}]
+        data["customer_supplier_counts.sql"] = [{"organisation_id": 7, "supplier_inn": "3245021003", "contracts": 3},
+                                                {"organisation_id": 8, "supplier_inn": "3245021003", "contracts": 2},
+                                                {"organisation_id": 8, "supplier_inn": "1", "contracts": 2}]
         an._query = query
         res = asyncio.run(an.analyze_ids([26, 27]))
+        fav = res[0]["ai_analysis"]["customer_supplier"]
+        self.assertEqual((fav["supplier_contracts"], fav["total"], fav["favourite"]), (5, 7, True))
         self.assertEqual([r["status"] for r in res], ["done", "not_found"])
         self.assertEqual(an.patched, [("risk_monitoring_contracts", 26)])
         self.assertEqual(an.saved, [("contract", 26, True)])

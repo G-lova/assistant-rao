@@ -538,10 +538,53 @@ def default_resume(p: Dict[str, Any], prof: Dict[str, Any], risks: Sequence[Dict
     return " ".join(parts)
 
 
+def favourite_supplier(p: Dict[str, Any], counts: Optional[Dict[str, int]], settings: Any) -> Optional[Dict[str, Any]]:
+    """Доля поставщика закупки среди контрактов её заказчика за период и признак «любимого поставщика».
+
+    «Любимый поставщик» — поставщик закупки является крупнейшим у заказчика, у него не меньше 3 контрактов и доля
+    не меньше ``CUSTOMER_TOP_SUPPLIER_SHARE`` при не менее ``ORG_MIN_CONTRACTS`` контрактах заказчика.
+
+    Args:
+        p: Паспорт закупки.
+        counts: ``ИНН поставщика → число контрактов заказчика за период`` (все строки заказчика по годам).
+        settings: Пороги.
+
+    Returns:
+        Optional[Dict[str, Any]]: ``total``, ``supplier_contracts``, ``share``, ``rank``, ``favourite`` или ``None``.
+    """
+    inn = str((p.get("supplier") or {}).get("inn") or "").strip()
+    if not inn or not counts:
+        return None
+    total = sum(counts.values())
+    mine = int(counts.get(inn, 0))
+    rank = 1 + sum(1 for k, v in counts.items() if k != inn and v > mine)
+    share = round(mine / total, 3) if total else None
+    favourite = bool(total >= settings.ORG_MIN_CONTRACTS and mine >= 3 and rank == 1
+                     and (share or 0) >= settings.CUSTOMER_TOP_SUPPLIER_SHARE)
+    return {"total": total, "supplier_contracts": mine, "share": share, "rank": rank, "suppliers": len(counts),
+            "months": settings.ORG_PERIOD_MONTHS, "favourite": favourite}
+
+
+def favourite_risks(p: Dict[str, Any], fav: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """BEH-006 «любимый поставщик» на уровне закупки."""
+    if not fav or not fav.get("favourite"):
+        return []
+    sup = p.get("supplier") or {}
+    return [{"rule_id": "BEH-006", "title": risk_catalog.title("BEH-006"),
+             "description": f"Поставщик {sup.get('name') or sup.get('inn')} — крупнейший у заказчика: "
+                            f"{fav['supplier_contracts']} из {fav['total']} контрактов за {fav['months']} мес. "
+                            f"({round(100 * fav['share'])} %)",
+             "level": 0.5, "confidence": 0.8, "law": None,
+             "evidence": [{"src": f"customer:{(p.get('customer') or {}).get('inn')}", "supplier_inn": sup.get("inn"),
+                           "supplier_contracts": fav["supplier_contracts"], "total": fav["total"], "share": fav["share"]}],
+             "verification_needed": ["Проверить конкуренцию в закупках, где побеждает этот поставщик, и связи сторон"],
+             "source": "aggregate"}]
+
+
 def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, Any]], xmls: Sequence[Dict[str, Any]],
                             values: Optional[Dict[str, Any]], black: Sequence[Dict[str, Any]],
                             statuses: Dict[Tuple[int, str], int], previous_score: Optional[float] = None,
-                            settings: Any = None) -> Dict[str, Any]:
+                            settings: Any = None, supplier_counts: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
     """Собирает ``ai_analysis`` закупки/контракта без модели (резюме добавляет анализатор).
 
     Args:
@@ -551,6 +594,7 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
         values: Значения правил внешней системы.
         black: Записи реестра 19.28 по ИНН поставщика.
         statuses: Статусы рисков файлов у аналитика.
+        supplier_counts: Контракты заказчика за период по ИНН поставщиков (для BEH-006); ``None`` — не проверять.
         previous_score: Прошлый балл.
         settings: Модуль ``risk_monitoring.settings`` (пороги).
 
@@ -567,8 +611,10 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
     cons = consistency(p, files, settings.CONSISTENCY_TOLERANCE)
     matches = registry_matches(black, p["supplier"], as_date(p["dates"]["contract"]))
     f_risks, confirmed = file_risks(files, statuses)
+    fav = favourite_supplier(p, supplier_counts, settings)
     risks = passport.merge_risks(
         f_risks, event_risks(xmls), rule_values_risks(values), registry_risks(matches), dataset_risks(p),
+        favourite_risks(p, fav),
         consistency_risks(cons), completeness_risks(comp, settings.COMPLETENESS_RISK), fz=fz)
     prof = profile(risks, previous_score, confirmed, settings.CONFIRMED_WEIGHT, tuple(settings.SCORE_ZONES))
     events = events_feed(xmls)
@@ -582,6 +628,7 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
         "registry": {"checked": bool(p["supplier"].get("inn")), "matches": [
             {"black_list_id": m.get("id"), "deal_number": m.get("deal_number"), "date_begin": str(m.get("date_begin"))[:10],
              "name": m.get("name")} for m in matches]},
+        "customer_supplier": fav,
         "events": events,
         "risks": risks,
         "total_risk": passport.total_risk(risks),

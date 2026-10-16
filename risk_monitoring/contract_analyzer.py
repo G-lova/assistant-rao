@@ -98,10 +98,10 @@ class ContractAnalyzer:
         df = await self.data_fetcher.fetch_async_expertise_data(sql, bindings=bindings)
         return [{k: _none(v) for k, v in r.items()} for r in df.to_dict("records")] if not df.empty else []
 
-    async def _safe_query(self, name: str, **lists: List[Any]) -> List[Dict[str, Any]]:
+    async def _safe_query(self, name: str, head: List[Any] = (), **lists: List[Any]) -> List[Dict[str, Any]]:
         """Запрос, сбой которого не останавливает анализ (таблицы может не быть в окружении)."""
         try:
-            return await self._query(name, **lists)
+            return await self._query(name, head, **lists)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Запрос {name} не выполнен: {type(e).__name__}: {e}")
             return []
@@ -186,7 +186,38 @@ class ContractAnalyzer:
         statuses_rows = await self._safe_query("file_risk_statuses.sql", ids=[int(f["id"]) for f in files]) if files else []
         inns = sorted({str(i) for i in ((cp.as_json(c.get("dataset")) or {}).get("supplier", {}).get("post_inn") for c in cards) if i})
         black = await self._safe_query("black_list.sql", inns=inns) if inns else []
-        return {"cards": cards, "files": files, "xmls": xmls, "rules": rules, "statuses": statuses_rows, "black": black}
+        supplier_counts = await self._supplier_counts(cards)
+        return {"cards": cards, "files": files, "xmls": xmls, "rules": rules, "statuses": statuses_rows, "black": black,
+                "supplier_counts": supplier_counts}
+
+    async def _supplier_counts(self, cards: List[Dict[str, Any]]) -> Dict[int, Dict[str, int]]:
+        """Контракты заказчика каждой закупки за период по поставщикам (для BEH-006 «любимый поставщик»).
+
+        Заказчик — все строки ``risk_monitoring_organisations`` с его ИНН/КПП (по годам и дубли).
+
+        Returns:
+            Dict[int, Dict[str, int]]: ``id карточки → {ИНН поставщика: число контрактов}``.
+        """
+        from datetime import date, timedelta
+
+        org_ids = sorted({int(c["organisation_id"]) for c in cards if c.get("organisation_id") is not None})
+        if not org_ids:
+            return {}
+        rows = await self._safe_query("org_rows.sql", ids=org_ids)
+        inns = sorted({str(r["inn"]).strip() for r in rows if r.get("inn")})
+        group = await self._safe_query("org_group.sql", inns=inns) if inns else []
+        key = {int(r["id"]): (str(r.get("inn") or "").strip(), str(r.get("kpp") or "").strip()) for r in rows + group}
+        all_ids = sorted({i for i, k in key.items() if k in {key.get(o) for o in org_ids}})
+        since = (date.today() - timedelta(days=round(30.44 * settings.ORG_PERIOD_MONTHS))).isoformat()
+        counts_rows = await self._safe_query("customer_supplier_counts.sql", head=[since], ids=all_ids) if all_ids else []
+        by_key: Dict[Tuple[str, str], Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        for r in counts_rows:
+            k = key.get(int(r["organisation_id"])) if r.get("organisation_id") is not None else None
+            inn = str(r.get("supplier_inn") or "").strip()
+            if k and inn:
+                by_key[k][inn] += int(cp.num(r.get("contracts")) or 0)
+        return {int(c["id"]): dict(by_key.get(key.get(int(c["organisation_id"])), {}))
+                for c in cards if c.get("organisation_id") is not None}
 
     @staticmethod
     def _group(data: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
@@ -236,7 +267,8 @@ class ContractAnalyzer:
             """Одна карточка с обработкой ошибок."""
             async with sem:
                 try:
-                    return await self._analyze_card(by[cid], statuses, black_by_inn)
+                    return await self._analyze_card(by[cid], statuses, black_by_inn,
+                                                    data.get("supplier_counts", {}).get(cid))
                 except Exception as e:  # noqa: BLE001 — сбой одной закупки не останавливает остальные
                     logger.error(f"Ошибка анализа закупки {cid}: {e}", exc_info=True)
                     return {"card_id": cid, "status": "error", "error": f"{type(e).__name__}: {e}", "pushed": False}
@@ -245,7 +277,8 @@ class ContractAnalyzer:
         return list(results) + [{"card_id": i, "status": "not_found"} for i in ids if i not in by]
 
     async def _analyze_card(self, item: Dict[str, Any], statuses: Dict[Tuple[int, str], int],
-                            black_by_inn: Dict[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
+                            black_by_inn: Dict[str, List[Dict[str, Any]]],
+                            supplier_counts: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
         """Анализ одной закупки: сборка, резюме, запись."""
         card = item["card"]
         cid = int(card["id"])
@@ -253,7 +286,8 @@ class ContractAnalyzer:
         inn = str((dataset.get("supplier") or {}).get("post_inn") or "").strip()
         built = cp.build_contract_analysis(card=card, files=item["files"], xmls=item["xmls"], values=item["values"],
                                            black=black_by_inn.get(inn, []), statuses=statuses,
-                                           previous_score=cp.num(card.get("prev_score")))
+                                           previous_score=cp.num(card.get("prev_score")),
+                                           supplier_counts=supplier_counts)
         h = built.pop("input_hash")
         if not self.force and card.get("rm_status") == "completed" and card.get("prev_hash") == h:
             return {"card_id": cid, "status": "unchanged", "pushed": False}
