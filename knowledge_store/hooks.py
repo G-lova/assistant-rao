@@ -65,13 +65,13 @@ async def on_run_start(df, env: str) -> None:
 def dedup_enabled() -> bool:
     """Включено ли повторное использование текста общего документа (``DOC_DEDUP_ENABLED``).
 
-    Читается при каждом вызове, чтобы флаг можно было менять без пересборки; нужен и
-    ``KNOWLEDGE_STORE_ENABLED``.
+    Флаг — ``configs/settings.py``; нужен и ``KNOWLEDGE_STORE_ENABLED``.
 
     Returns:
         bool: ``True``, если готовый текст можно брать из ``ai_documents``.
     """
-    return is_enabled() and os.getenv("DOC_DEDUP_ENABLED", str(Config.DOC_DEDUP_ENABLED)).lower() == "true"
+    from configs import settings
+    return is_enabled() and bool(settings.DOC_DEDUP_ENABLED)
 
 
 async def _find_cached_text(file_path: str) -> Optional[dict]:
@@ -173,13 +173,13 @@ async def on_document_text(scope: Scope, doc_code: Optional[str], filename: str,
 
 def extraction_cache_enabled() -> bool:
     """Включён ли кэш результата ``TypeDataExtractor`` (``DOC_EXTRACTION_CACHE_ENABLED``, нужен и
-    ``KNOWLEDGE_STORE_ENABLED``). Читается при каждом вызове.
+    ``KNOWLEDGE_STORE_ENABLED``; флаги — ``configs/settings.py``).
 
     Returns:
         bool: ``True``, если кэш можно читать и писать.
     """
-    return is_enabled() and os.getenv("DOC_EXTRACTION_CACHE_ENABLED",
-                                      str(Config.DOC_EXTRACTION_CACHE_ENABLED)).lower() == "true"
+    from configs import settings
+    return is_enabled() and bool(settings.DOC_EXTRACTION_CACHE_ENABLED)
 
 
 async def _cached_extraction(link_id: int, version: str, model: str) -> Optional[dict]:

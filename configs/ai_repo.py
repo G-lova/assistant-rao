@@ -292,6 +292,122 @@ class AIRepo:
             _vec(embedding), embedding_model, limit,
         )
 
+    async def save_rm_result(self, env: str, kind: str, external_id: int, ai_analysis: Dict[str, Any],
+                             pushed: bool, push_error: Optional[str] = None) -> None:
+        """Сохраняет результат анализа риск-мониторинга (последний по файлу / XML).
+
+        Args:
+            env: Окружение.
+            kind: ``file`` / ``xml``.
+            external_id: id во внешней БД.
+            ai_analysis: Результат (то, что пишется в ``ai_analysis`` внешней БД).
+            pushed: Записан ли во внешнюю БД.
+            push_error: Ошибка записи.
+        """
+        pipeline = (ai_analysis or {}).get("pipeline") or {}
+        await self.pool.execute(
+            """
+            INSERT INTO ai_rm_results (env, kind, external_id, ai_analysis, status, debug, pushed, push_error,
+                                       analyzed_at, pushed_at)
+            VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, NOW(), CASE WHEN $7 THEN NOW() END)
+            ON CONFLICT (env, kind, external_id) DO UPDATE SET
+                ai_analysis = EXCLUDED.ai_analysis, status = EXCLUDED.status, debug = EXCLUDED.debug,
+                pushed = EXCLUDED.pushed, push_error = EXCLUDED.push_error, analyzed_at = NOW(),
+                pushed_at = EXCLUDED.pushed_at
+            """,
+            env, kind, int(external_id), json.dumps(ai_analysis, ensure_ascii=False, default=str),
+            pipeline.get("status"), bool(pipeline.get("debug")), bool(pushed), push_error,
+        )
+
+    async def mark_rm_pushed(self, env: str, kind: str, external_id: int) -> None:
+        """Отмечает, что сохранённый результат дозаписан во внешнюю БД."""
+        await self.pool.execute(
+            "UPDATE ai_rm_results SET pushed = TRUE, push_error = NULL, pushed_at = NOW() "
+            "WHERE env = $1 AND kind = $2 AND external_id = $3",
+            env, kind, int(external_id),
+        )
+
+    async def get_rm_results(self, env: str, kind: str, external_ids: Sequence[int]) -> Dict[int, Dict[str, Any]]:
+        """Сохранённые результаты анализа по id.
+
+        Args:
+            env: Окружение.
+            kind: ``file`` / ``xml``.
+            external_ids: id во внешней БД.
+
+        Returns:
+            Dict[int, Dict[str, Any]]: ``id → {ai_analysis, status, debug, pushed, analyzed_at}``.
+        """
+        ids = sorted({int(i) for i in external_ids if i is not None})
+        if not ids:
+            return {}
+        rows = await self.pool.fetch(
+            "SELECT external_id, ai_analysis, status, debug, pushed, analyzed_at FROM ai_rm_results "
+            "WHERE env = $1 AND kind = $2 AND external_id = ANY($3::bigint[])",
+            env, kind, ids,
+        )
+        return {int(r["external_id"]): {"ai_analysis": _load(r["ai_analysis"]), "status": r["status"], "debug": r["debug"],
+                                        "pushed": r["pushed"], "analyzed_at": r["analyzed_at"]} for r in rows}
+
+    async def find_chunks_all(
+        self, embedding: Sequence[float], embedding_model: str, limit: int = 30
+    ) -> List[asyncpg.Record]:
+        """Ближайшие чанки и риск-мониторинга (``rm_tokens_800``), и экспертиз (``pages_v2``) — для поиска
+        типовых формулировок по документам многих закупок. Два запроса — чтобы работали частичные индексы.
+
+        Args:
+            embedding: Вектор фрагмента.
+            embedding_model: Модель эмбеддингов.
+            limit: Сколько чанков каждой нарезки вернуть.
+
+        Returns:
+            List[asyncpg.Record]: ``document_id``, ``text``, ``similarity``.
+        """
+        out: List[asyncpg.Record] = []
+        for chunker in ("rm_tokens_800", "pages_v2"):
+            out += await self.pool.fetch(
+                f"""
+                SELECT document_id, text, 1 - (embedding <=> $1::vector) AS similarity
+                FROM ai_document_chunks
+                WHERE embedding_model = $2 AND chunker = '{chunker}'
+                ORDER BY embedding <=> $1::vector
+                LIMIT $3
+                """,
+                _vec(embedding), embedding_model, limit,
+            )
+        return out
+
+    async def document_sources(self, env: str, document_ids: Sequence[int]) -> List[asyncpg.Record]:
+        """Закупки, в которых встречается документ: карточки риск-мониторинга и экспертизы.
+
+        Для экспертизы заказчик берётся из сопоставления с карточкой РМ (``procurement_identity.rm_card_id`` —
+        дальше заказчик карточки во внешней БД), а если сопоставления нет — из паспорта экспертизы
+        (``pe_procurements.passport.organization`` — организация, подавшая документы на экспертизу).
+
+        Args:
+            env: Окружение.
+            document_ids: ``ai_documents.id``.
+
+        Returns:
+            List[asyncpg.Record]: ``document_id``, ``kind`` (``rm`` / ``pe``), ``source_id`` (``rm_card_id`` или
+            ``expertise_id``), ``rm_card_id`` (для экспертизы — сопоставленная карточка), ``org_name``.
+        """
+        if not document_ids:
+            return []
+        return await self.pool.fetch(
+            """
+            SELECT document_id, 'rm' AS kind, rm_card_id AS source_id, rm_card_id, NULL::text AS org_name
+            FROM ai_file_links WHERE env = $1 AND document_id = ANY($2::bigint[]) AND rm_card_id IS NOT NULL
+            UNION
+            SELECT d.ai_document_id, 'pe', d.expertise_id, pi.rm_card_id, p.passport->>'organization'
+            FROM pe_documents d
+            LEFT JOIN procurement_identity pi ON pi.env = d.env AND pi.expertise_id = d.expertise_id
+            LEFT JOIN pe_procurements p ON p.env = d.env AND p.expertise_id = d.expertise_id
+            WHERE d.env = $1 AND d.ai_document_id = ANY($2::bigint[])
+            """,
+            env, [int(d) for d in document_ids],
+        )
+
     async def find_similar_documents(
         self,
         document_id: int,

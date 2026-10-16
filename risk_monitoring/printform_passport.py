@@ -73,9 +73,18 @@ def _money(value: Optional[str]) -> Optional[float]:
 
 def _title(form: PrintForm) -> Optional[str]:
     """Название документа из заголовка печатной формы («Извещение о проведении…», «Изменения извещения…»)."""
-    for line in form.sections.get("Заголовок", [])[:15]:
+    head = form.sections.get("Заголовок", [])[:15]
+    for i, line in enumerate(head):
         n = _norm(line)
         if re.match(r"^(извещени|изменени|протокол|сведения|информаци|отчет|документ)", n, re.IGNORECASE) and len(n) > 15:
+            # заголовок переносится на следующие строки: «Изменения извещения о проведении» / «запроса котировок…»
+            for nxt in head[i + 1:i + 4]:
+                if "№" in n or re.search(r"\d{11,}", n):
+                    break
+                m = _norm(nxt)
+                if not m or re.match(r"^(номер|дата|общая информация)", m, re.IGNORECASE):
+                    break
+                n = f"{n} {m}"
             return n
     return None
 

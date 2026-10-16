@@ -47,6 +47,56 @@ BRAND_RE = re.compile(
     r"|модел|артикул|марк[аиу]\b|товарн\w+\s+знак|производств\w+\s|производител|фирм\w*\s|бренд|торгов\w+\s+наименован",
     re.IGNORECASE,
 )
+# Цитаты типовых норм закона: требования, установленные законом, — не риск (prompts/risk_analysis_prompt.txt, п. 12–13)
+STATUTORY_RE = re.compile(
+    r"19\.28\s*кодекса|\bст\w*\.?\s*19\.28|независимая гарантия должна быть безотзывной"
+    r"|указ\w*\s+президента\s+российской\s+федерации\s+от\s+03\.05\.2022|специальные экономические меры"
+    r"|в соответствии с (п\.|пунктом|ч\.|частью)\s*[\d.]+\s*(ч\.|части)?\s*[\d.]*\s*(ст\.|статьи)\s*31"
+    r"|«\s*или\s*»\s*,?\s*«\s*либо\s*»|«\s*не более\s*»|«\s*не менее\s*»|знак\w*\s*«?\s*[≥≤]"
+    r"|не было привлечено к административной ответственности"
+    r"|член\w*\s+(сро|саморегулируем)|саморегулируемой организации"
+    r"|29\.12\.2021\s*№\s*2571|позици\w+\s+\d+\s+раздела|графы\s+\"?дополнительные требования"
+    r"|не менее \d+ процентов начальной \(максимальной\) цены контракта",
+    re.IGNORECASE,
+)
+STATUTORY_CODES = {"DOC-004", "DOC-005", "DOC-006", "AI-003", "AI-005", "PROC-012", "DOC-007"}
+
+
+TABLE_TOTAL_RE = re.compile(r"^\s*(итого|всего)\b[^а-яё]*(\d[\d\s]*[.,]\d{2}[^\d]+){2,}", re.IGNORECASE)
+
+
+def table_total(risk: Dict[str, Any]) -> bool:
+    """«Противоречие» в строке итогов таблицы с несколькими суммами (столбцы разных поставщиков в
+    обосновании НМЦК — файл 1097): для DOC-007 / AI-002 / FIN-015 такая цитата не доказывает риск.
+
+    Args:
+        risk: Риск модели.
+
+    Returns:
+        bool: ``True`` — отбросить.
+    """
+    if risk.get("code") not in ("DOC-007", "AI-002", "FIN-015"):
+        return False
+    return bool(TABLE_TOTAL_RE.search(((risk.get("evidence") or {}).get("fragment")) or ""))
+
+
+def statutory(risk: Dict[str, Any]) -> bool:
+    """Цитата риска — типовая норма закона или типовая формулировка инструкции (риск не выставляется).
+
+    Args:
+        risk: Риск модели (``code``, ``evidence.fragment``).
+
+    Returns:
+        bool: ``True`` — отбросить.
+    """
+    if risk.get("code") not in STATUTORY_CODES:
+        return False
+    return bool(STATUTORY_RE.search(((risk.get("evidence") or {}).get("fragment")) or ""))
+
+
+# Близкие по смыслу коды: на одну цитату остаётся один код группы
+SYNONYM_GROUPS = ({"DOC-006", "AI-003"}, {"DOC-005", "AI-005"}, {"DOC-002", "DOC-003"})
+MAX_CODES_PER_FRAGMENT = 2
 EIS_ID_RE = re.compile(r"идентификатор\s*:?\s*\d+|\bктру\b|\bокпд", re.IGNORECASE)
 
 
@@ -279,10 +329,14 @@ class DocumentRiskAnalyzer:
         Returns:
             Dict[str, Any]: ``summary``, ``risks`` (только подтверждённые), ``dropped``, ``rejected``.
         """
-        hint = json.dumps(context, ensure_ascii=False, default=str)[:2500] if context else "нет"
+        ctx = {k: v for k, v in (context or {}).items() if k != "norms"}
+        hint = json.dumps(ctx, ensure_ascii=False, default=str)[:2500] if ctx else "нет"
+        norms_block = (f"Нормы, установленные законом для документа этого типа, — это НЕ риски; риск — только то, что "
+                       f"идёт сверх них или отступает от них:\n{context['norms']}\n\n") if (context or {}).get("norms") else ""
         user = (
             f"Документ: {file_name} (часть {n} из {total}).\n"
             f"Контекст (тип документа, краткое содержание, закупка, закон): {hint}\n"
+            f"{norms_block}"
             f"Для этого документа ищи ТОЛЬКО риски с кодами: {', '.join(allowed)}. Другие коды не используй.\n\n"
             f"Текст:\n\n{chunk}"
         )
@@ -300,7 +354,10 @@ class DocumentRiskAnalyzer:
             if not self._fragment_in_text(frag, norm_chunk):
                 dropped += 1
                 continue
-            if self_denial(r) or (r["code"] == "DOC-002" and not brand_like(frag)):
+            by_law = str(r.get("requirement_source") or "").strip().lower() == "закон"
+            # DOC-002 — товарный знак БЕЗ оговорки «или эквивалент»; цитата с этой оговоркой риск опровергает
+            with_equivalent = r["code"] == "DOC-002" and re.search(r"эквивалент", frag, re.IGNORECASE)
+            if by_law or with_equivalent or self_denial(r) or statutory(r) or table_total(r) or (r["code"] == "DOC-002" and not brand_like(frag)):
                 rejected += 1
                 continue
             r["category"] = risk_catalog.category(r["code"])
@@ -337,13 +394,28 @@ class DocumentRiskAnalyzer:
         return SEVERITY_WEIGHT.get(r["severity"], 10) * float(r["evidence"]["confidence"])
 
     def _merge(self, risks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Убирает дубли (тот же код и начало цитаты) из рисков разных чанков, сортирует по весу."""
-        seen, out = set(), []
+        """Убирает дубли из рисков разных чанков и сортирует по весу.
+
+        * тот же код и начало цитаты — один риск;
+        * одна цитата под близкими по смыслу кодами (``SYNONYM_GROUPS``: «неоднозначные требования»
+          DOC-006 / AI-003, «избыточные требования» DOC-005 / AI-005) — остаётся код с большим весом;
+        * на одну цитату — не больше ``MAX_CODES_PER_FRAGMENT`` кодов (в прогоне файла 3205 модель
+          повесила 4 кода на один типовой пункт инструкции).
+        """
+        seen, groups, per_frag, out = set(), set(), {}, []
         for r in sorted(risks, key=self._weight, reverse=True):
-            key = (r["code"], _norm(r["evidence"]["fragment"])[:80])
-            if key not in seen:
-                seen.add(key)
-                out.append(r)
+            frag = _norm(r["evidence"]["fragment"])[:80]
+            key = (r["code"], frag)
+            group = next((i for i, g in enumerate(SYNONYM_GROUPS) if r["code"] in g), None)
+            if key in seen or (group is not None and (group, frag) in groups):
+                continue
+            if per_frag.get(frag, 0) >= MAX_CODES_PER_FRAGMENT:
+                continue
+            seen.add(key)
+            if group is not None:
+                groups.add((group, frag))
+            per_frag[frag] = per_frag.get(frag, 0) + 1
+            out.append(r)
         return out
 
     def _score(self, risks: List[Dict[str, Any]]) -> int:

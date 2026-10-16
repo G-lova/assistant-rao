@@ -186,6 +186,20 @@ def resolve_type(detector: Optional[Dict[str, Any]], name_type: Optional[str], a
     return (fallback or "docDopMaterialsFiles"), "document_name"
 
 
+# Табличные и платёжные документы: сметы, ведомости объёмов, КС-2/КС-3, УПД, счета, платёжки — риски по тексту
+# в них не ищутся (модель находит «противоречия» в опечатках позиций сметы — файл 3199)
+NO_RISK_NAME_RE = re.compile(
+    r"смет|ведомост\w*\s+объем|(^|[^а-яё])лср([^а-яё]|$)|кс[-\s]?[23]\b|(^|[^а-яё])упд([^а-яё]|$)|(^|[^a-z])upd([^a-z]|$)|сч[её]т\w*\s+на\s+оплату"
+    r"|плат[её]жн\w*\s+поручени|счет-фактур|товарн\w+\s+накладн",
+    re.IGNORECASE,
+)
+
+
+def no_risk_by_name(file_name: Optional[str]) -> bool:
+    """Документ, в котором по имени файла риски в тексте не ищутся (смета, ведомость объёмов, КС-2, счёт …)."""
+    return bool(NO_RISK_NAME_RE.search(file_name or ""))
+
+
 def allowed_codes(detected_type: str, print_group: Optional[str] = None) -> List[str]:
     """Коды рисков, которые ищутся в тексте документа данного типа.
 

@@ -32,12 +32,13 @@ import asyncio
 import hashlib
 import json
 import os
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+import re
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 from configs.config import Config
 from configs.logger import get_logger
-from risk_monitoring import (doc_kind, file_versions, passport, pdf_text, printform_passport, risk_catalog, rm_sql,
-                             text_quality, version_diff, xml_events)
+from risk_monitoring import (boilerplate, doc_kind, file_versions, norms, passport, pdf_text, printform_passport,
+                             risk_catalog, rm_sql, settings, text_quality, version_diff, xml_events)
 from risk_monitoring.llm_json import prompt_version as _hash_version
 
 logger = get_logger(__name__)
@@ -54,6 +55,7 @@ SIMILAR_LIMIT = 10
 NEAR_DUPLICATE_COVERAGE = 0.9
 NEAR_DUPLICATE_AVG_SIM = 0.95
 
+OCR_ERROR_RE = re.compile(r"Ошибка при анализе изображения|Таймаут при анализе изображения|\"status\":\s*\"error\"")
 CONTRACT_DOC_TYPES = {"docProjContractFiles", "docContractDoWorkFiles", "docContractNIRFiles", "docContractPostTovarFiles"}
 
 
@@ -182,7 +184,9 @@ class AIFileAnalyzer:
         self.parser = CloudStorageParser(http_manager, None)
         # Компоненты экспертизы сами повторяют запрос (async_retry: 2→4→8→16 с); встроенные повторы SDK
         # (ещё 2 через ~1 с) на 504 шлюза только умножают нагрузку — для риск-мониторинга отключены.
-        ex_client = client.with_options(max_retries=0) if hasattr(client, "with_options") else client
+        from configs.llm_resilience import ResilientClient
+
+        ex_client = ResilientClient(client, retries=settings.LLM_PROXY_RETRIES)
         self.file_reader = FileReader(ex_client, self.extraction_model)
         self.type_detector = TypeDetector(ex_client, self.extraction_model)
         self.extractor = DataExtractor(ex_client, self.extraction_model)
@@ -251,12 +255,14 @@ class AIFileAnalyzer:
         """
         from risk_monitoring.xml_event_analyzer import ArchiveCache
 
-        # Первая версия XML (0) не имеет предыдущей — XML не читаем
-        rows = [r for r in rows if r.get("eis_version") is None or int(r["eis_version"]) > 0]
+        # Версия файла у загрузчика может быть неточной, поэтому XML читаются и для eis_version = 0
+        # (у первой версии предыдущей нет, но может быть следующая — superseded_by)
         if not rows:
             return {}
         result: Dict[int, Dict[str, Any]] = {}
         resolved: set = set()
+        if not hasattr(self, "lookups"):
+            self.lookups: Dict[int, Dict[str, Any]] = {}
         archives = ArchiveCache(self.parser)
         try:
             xml_of = await self._current_xml(rows, archives)
@@ -272,19 +278,34 @@ class AIFileAnalyzer:
                 fid = int(r["id"])
                 x = xml_of.get(fid)
                 if not x:
+                    self.lookups[fid] = {"match": "xml_not_found", "file_eis_version": r.get("eis_version"),
+                                         "note": "XML документа не найден ни по xml_source_id, ни по owner_number "
+                                                 "(среди вложений и печатных форм XML нет ссылки файла)"}
                     continue
                 px = prev_xml.get(int(x["id"]))
                 try:
-                    body = x.get("body") or (await self._read_xml(archives, x))
-                    prev_body = await self._read_xml(archives, px) if px else None
+                    body = x.get("body") or (await self._xml_body(archives, x))
+                    prev_body = await self._xml_body(archives, px) if px else None
                 except Exception as e:  # noqa: BLE001 — запасной путь по имени файла
                     logger.warning(f"Файл {fid}: XML {x['id']} / предыдущий не прочитан: {e}")
                     continue
                 ref = file_versions.previous_ref(r, body, prev_body)
                 ref["previous_xml_id"] = int(px["id"]) if px else None
+                ref["xml_id"], ref["xml_eis_version"] = int(x["id"]), x.get("eis_version")
+                for nx in x.get("newer") or []:
+                    try:
+                        nbody = await self._xml_body(archives, nx)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"Файл {fid}: новая версия XML {nx['id']} не прочитана: {e}")
+                        continue
+                    nxt = file_versions.next_ref(r, body, nbody)
+                    if nxt:
+                        ref["superseded"] = {**nxt, "xml_id": int(nx["id"]), "xml_eis_version": nx.get("eis_version")}
+                        break
                 refs[fid] = ref
                 resolved.add(fid)
-            urls = sorted({u for ref in refs.values() for u in ref.get("urls") or []})[:500]
+            urls = sorted({u for ref in refs.values() for u in (ref.get("urls") or [])
+                           + ([ref["superseded"]["url"]] if (ref.get("superseded") or {}).get("url") else [])})[:500]
             pids = sorted({ref["previous_xml_id"] for ref in refs.values() if ref.get("previous_xml_id")})
             cands = await self._query("files_by_ref.sql", urls=urls, ids=pids) if (urls or pids) else []
             for r in rows:
@@ -293,6 +314,7 @@ class AIFileAnalyzer:
                 if not ref:
                     continue
                 prev = file_versions.pick_previous(ref, r, cands, ref.get("previous_xml_id"))
+                self.lookups[fid] = file_versions.lookup_summary(ref, prev, cands, r)
                 if prev:
                     result[fid] = self._with_url({**prev, "match": ref["match"],
                                                   "previous_xml_id": ref.get("previous_xml_id")})
@@ -336,23 +358,37 @@ class AIFileAnalyzer:
             for r in rows:
                 if r.get("xml_source_id") and int(r["xml_source_id"]) in meta:
                     out[int(r["id"])] = meta[int(r["xml_source_id"])]
-        orphans = [r for r in rows if int(r["id"]) not in out and r.get("owner_number")]
-        if not orphans:
-            return out
-        nums = sorted({str(r["owner_number"]) for r in orphans})
-        cands = await self._query("xml_by_owner.sql", head=[self.storage_path], nums=nums, nums2=nums)
-        for r in orphans:
+        nums = sorted({str(r["owner_number"]) for r in rows if r.get("owner_number")})
+        cands = await self._query("xml_by_owner.sql", head=[self.storage_path], nums=nums, nums2=nums) if nums else []
+        for r in rows:
+            if int(r["id"]) in out or not r.get("owner_number"):
+                continue
             own = [c for c in cands if str(r["owner_number"]) in (str(c.get("purchase_number")), str(c.get("contract_number")))]
-            for c in file_versions.choose_xml(r, own)[:5]:
+            # Версия файла у загрузчика может не совпадать с версией XML, к которому приложен файл
+            # (вложения прошлой редакции извещения приходят с eis_version новой) — проверяем все версии.
+            for c in file_versions.choose_xml({**r, "eis_version": None}, own)[:8]:
                 try:
-                    body = await self._read_xml(archives, c)
+                    body = await self._xml_body(archives, c)
                 except Exception as e:  # noqa: BLE001 — пробуем следующий кандидат
                     logger.warning(f"Файл {r['id']}: XML {c['id']} не прочитан: {e}")
                     continue
                 if file_versions.contains(body, r):
                     out[int(r["id"])] = {**c, "body": body}
                     break
+        for r in rows:
+            x = out.get(int(r["id"]))
+            if x is not None:
+                x = out[int(r["id"])] = dict(x)
+                x["newer"] = file_versions.newer_versions(x, cands)
         return out
+
+    async def _xml_body(self, archives: Any, x: Dict[str, Any]) -> Dict[str, Any]:
+        """Тело XML с кэшем на время запуска (одни и те же XML нужны нескольким файлам)."""
+        cache = self.__dict__.setdefault("_xml_cache", {})
+        key = int(x["id"])
+        if key not in cache:
+            cache[key] = await self._read_xml(archives, x)
+        return cache[key]
 
     async def analyze_ids(self, file_ids: List[int]) -> List[Dict[str, Any]]:
         """Анализирует файлы по id.
@@ -369,9 +405,49 @@ class AIFileAnalyzer:
         found = {int(r["id"]): r for r in rows}
         todo = [r for r in found.values() if self.force or r.get("rm_status") != "completed"]
         previous = await self.fetch_previous_versions(todo) if todo else {}
-        results = await asyncio.gather(*(self._guarded(found[i], previous.get(i)) for i in ids if i in found))
+        self.internal = await self._internal(list(found) + [int(p["id"]) for p in previous.values() if p.get("id")])
+        by_id: Dict[int, Dict[str, Any]] = {}
+        for wave in self._waves([i for i in ids if i in found], previous, {r["id"] for r in todo}):
+            for res in await asyncio.gather(*(self._guarded(found[i], previous.get(i)) for i in wave)):
+                by_id[int(res.get("file_id"))] = res
+        results = [by_id[i] for i in ids if i in by_id]
         missing = [{"file_id": i, "status": "not_found"} for i in ids if i not in found]
         return list(results) + missing
+
+    @staticmethod
+    def _waves(ids: List[int], previous: Dict[int, Dict[str, Any]], todo: Iterable[Any]) -> List[List[int]]:
+        """Порядок анализа: прошлая редакция раньше новой, если обе в одном запуске.
+
+        Новая редакция переиспользует анализ прошлой (данные, паспорт, перенос рисков) и сравнивает риски
+        (``risks_comparison``) — для этого прошлая должна быть проанализирована первой. Файлы без связи
+        идут в первой волне параллельно; цепочка v0 → v1 → v2 — тремя волнами.
+
+        Args:
+            ids: id файлов в порядке запроса.
+            previous: ``id → предыдущая версия``.
+            todo: id файлов, которые будут анализироваться (не пропущены как уже проанализированные).
+
+        Returns:
+            List[List[int]]: Волны id.
+        """
+        todo_set = {int(t) for t in todo}
+        depth: Dict[int, int] = {}
+
+        def level(i: int, seen: frozenset = frozenset()) -> int:
+            """Глубина файла в цепочке редакций внутри запуска."""
+            if i in depth:
+                return depth[i]
+            prev = previous.get(i)
+            p = int(prev["id"]) if prev and prev.get("id") is not None else None
+            depth[i] = level(p, seen | {i}) + 1 if p is not None and p in todo_set and p in ids and p not in seen else 0
+            return depth[i]
+
+        for i in ids:
+            level(i)
+        waves: Dict[int, List[int]] = {}
+        for i in ids:
+            waves.setdefault(depth[i], []).append(i)
+        return [waves[k] for k in sorted(waves)]
 
     async def _guarded(self, row: Dict[str, Any], previous: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """Обёртка одного файла: семафор, правило «без повторного анализа», обработка ошибок."""
@@ -380,6 +456,9 @@ class AIFileAnalyzer:
         if not self.force:
             if row.get("rm_status") == "completed":
                 return {"file_id": file_id, "status": "skipped", "reason": "already_analyzed"}
+            stored = (getattr(self, "internal", None) or {}).get(file_id)
+            if stored and stored.get("status") == "completed" and not stored.get("debug"):
+                return await self._reuse_internal(file_id, stored)
             if row.get("rm_status") == "failed" and attempt > MAX_ATTEMPTS:
                 return {"file_id": file_id, "status": "skipped", "reason": "max_attempts"}
         async with self.semaphore:
@@ -391,6 +470,29 @@ class AIFileAnalyzer:
             except Exception as e:  # noqa: BLE001 — сбой одного файла не останавливает остальные
                 logger.error(f"Ошибка анализа файла {file_id}: {e}", exc_info=True)
                 return await self._push_failure(file_id, attempt, f"{type(e).__name__}: {e}")
+
+    async def _reuse_internal(self, file_id: int, stored: Dict[str, Any]) -> Dict[str, Any]:
+        """Файл уже проанализирован, но результата нет во внешней БД (запись не удалась или прогон был без записи):
+        дозаписываем сохранённый результат, без повторного анализа.
+
+        Returns:
+            Dict[str, Any]: ``status = done``, ``source = internal``.
+        """
+        ai = stored["ai_analysis"]
+        result = {"file_id": file_id, "document_id": None, "status": "done", "source": "internal",
+                  "pushed": False, "ai_analysis": ai}
+        if self.push_results:
+            try:
+                await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, file_id, ai)
+                result["pushed"] = True
+                if hasattr(getattr(self, "repo", None), "mark_rm_pushed"):
+                    await self.repo.mark_rm_pushed(self.env, "file", file_id)
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"Не удалось дозаписать ai_analysis файла {file_id}: {e}")
+                result["push_error"] = str(e)
+        logger.info(f"Файл {file_id}: результат из внутренней БД (анализ {stored.get('analyzed_at')}), "
+                    f"записан во внешнюю БД: {result['pushed']}")
+        return result
 
     async def _push_failure(self, file_id: int, attempt: int, error: str) -> Dict[str, Any]:
         """Записывает ``pipeline.status = failed`` (кроме режима отладки, чтобы не затереть готовый анализ)."""
@@ -423,6 +525,9 @@ class AIFileAnalyzer:
         """
         file_id = int(row["id"])
         file_name = row.get("file_name") or f"file_{file_id}"
+        superseded = self._superseded_analysis(row, previous, attempt)
+        if superseded is not None:
+            return await self._finalize(file_id, None, superseded)
         if not row.get("url"):
             raise FileUnavailable("нет пути к файлу и ссылки ЕИС")
         purchase = purchase_context(row)
@@ -436,6 +541,7 @@ class AIFileAnalyzer:
             ai = passport.no_text_analysis(row, "Не удалось извлечь текст документа", pipeline, self.model, sha)
             return await self._finalize(file_id, document_id, ai)
 
+        text = text_quality.unwrap_ocr_json(text)
         quality = text_quality.assess(text)
         print_kind = doc_kind.print_form_kind(row) if doc_kind.is_print_form(row) else None
         if quality["status"] == "bad":
@@ -470,7 +576,7 @@ class AIFileAnalyzer:
             if candidates and allowed:
                 brand_text = "\n".join(candidates)
                 ctx = {"detected_type": type_info["detected_type"], "type_decode": type_decode, "summary": summary,
-                       "purchase": purchase, "law": law,
+                       "purchase": purchase, "law": law, "norms": norms.digest("docOpusObjectZacupFiles", fz),
                        "note": "Переданы только строки описания объекта закупки с признаками товарного знака"}
                 risk = await self._cached(document_id, "risk_analysis_print_form",
                                           lambda: self.risk_analyzer.analyze(brand_text, file_name, ctx, codes=allowed),
@@ -505,13 +611,16 @@ class AIFileAnalyzer:
             type_info, type_decode = await self._doc_type(document_id, chunks, file_name, extraction, row, None,
                                                           fallback_doc=reuse_doc)
             summary = (extraction.get("raw_data") or {}).get("summary")
-            allowed = doc_kind.allowed_codes(type_info["detected_type"], None)
+            allowed = [] if doc_kind.no_risk_by_name(file_name) else doc_kind.allowed_codes(type_info["detected_type"], None)
             profile = await self._cached(document_id, "document_profile",
                                          lambda: self.profiler.profile(text, file_name, type_decode, summary, purchase),
                                          model=self.model, fallback_doc=reuse_doc)
             risk_context = {"detected_type": type_info.get("detected_type"), "type_decode": type_decode,
-                            "summary": summary, "purchase": purchase, "law": law}
-            risk_version = f"{self.versions['risk_analysis']}:{_hash_version(allowed)}"
+                            "summary": summary, "purchase": purchase, "law": law,
+                            "norms": norms.digest(type_info.get("detected_type"), fz)}
+            risk_version = (f"{self.versions['risk_analysis']}:{_hash_version(allowed)}:"
+                            f"{norms.version(type_info.get('detected_type'), fz)}")
+            self._risk_version = risk_version
             prev_risk = (await self._get_cached(reuse_doc, "risk_analysis", risk_version, self.model)) if reuse_doc else None
             if prev_risk is not None:
                 mode = "incremental"
@@ -530,8 +639,10 @@ class AIFileAnalyzer:
             version_changes, version_risks = (await self._version_changes(previous, prev_ctx, diff, document_id,
                                                                           file_name, type_decode, use_llm=True)
                                               if previous else (None, []))
+        risk, typical = await self._drop_typical(risk, document_id, row)
         risk_compact = self.risk_analyzer.to_compact(risk) if risk else {}
 
+        prev_codes = await self._previous_codes(previous, prev_ctx, allowed) if previous else None
         pages = len({m.group(1) for m in PAGE_MARKER_RE.finditer(text)}) or None
         ocr_used = "(OCR)" in text
         pipeline = passport.pipeline_block(STAGE, "completed", self.model, self.versions, prev_id, self.force, attempt,
@@ -545,12 +656,136 @@ class AIFileAnalyzer:
         ai = passport.build_file_analysis(
             file_meta=row, type_info=type_info, type_decode=type_decode, extraction=extraction, profile=profile,
             risk_compact=risk_compact, extra_risks=version_risks, similar=similar, version_changes=version_changes,
-            previous_codes=_json_list(previous.get("rule_ids")) if previous else None, pages=pages,
+            previous_codes=prev_codes, pages=pages,
             text_chars=len(text), ocr_used=ocr_used, purchase=purchase, pipeline=pipeline, model=self.model,
             content_sha256=sha,
         )
         self._annotate(ai, quality, removed_ids, allowed, (risk or {}).get("rejected_inconsistent"))
+        if typical:
+            ai["risk_scope"]["typical_dropped"] = typical
+        self._add_lookup(ai, file_id)
         return await self._finalize(file_id, document_id, ai)
+
+    async def _drop_typical(self, risk: Optional[Dict[str, Any]], document_id: int,
+                            row: Dict[str, Any]) -> tuple:
+        """Снимает риски, цитата которых — типовая формулировка многих заказчиков (``boilerplate``).
+
+        Args:
+            risk: Результат риск-анализа (формат ``DocumentRiskAnalyzer.analyze``).
+            document_id: ``ai_documents.id``.
+            row: Строка ``files_meta.sql`` (карточка и заказчик).
+
+        Returns:
+            tuple: ``(риск-анализ без типовых рисков, [{code, fragment, sources}])``. Сбой поиска не ломает анализ.
+        """
+        if not risk or not risk.get("risks") or not settings.BOILERPLATE_ENABLED:
+            return risk, []
+        frags = [((r.get("evidence") or {}).get("fragment") or "") for r in risk["risks"]]
+
+        async def fetch_orgs(cards: List[int]) -> Dict[int, Any]:
+            """Заказчики карточек из внешней БД."""
+            rows = await self._query("card_orgs.sql", ids=cards)
+            return {int(r["id"]): r.get("org_id") for r in rows}
+
+        try:
+            counts = await boilerplate.typical_fragments(
+                frags, embedder=self.embedder, repo=self.repo, env=self.env, document_id=document_id,
+                own_card=row.get("risk_monitoring_contract_id"), own_org=row.get("organisation_id"),
+                embedding_model=self.embedding_model, fetch_orgs=fetch_orgs, own_org_name=row.get("customer_name"))
+        except Exception as e:  # noqa: BLE001 — без фильтра риски остаются
+            logger.warning(f"Проверка типовых формулировок не выполнена (документ {document_id}): {type(e).__name__}: {e}")
+            return risk, []
+        need = boilerplate.min_sources()
+        kept, dropped = [], []
+        for r, frag in zip(risk["risks"], frags):
+            n = counts.get(frag, 0)
+            if n >= need:
+                dropped.append({"code": r.get("code"), "fragment": frag[:200], "sources": n})
+            else:
+                kept.append(r)
+        if not dropped:
+            return risk, []
+        logger.info(f"Документ {document_id}: сняты типовые формулировки — {[d['code'] for d in dropped]}")
+        new = dict(risk)
+        new["risks"] = kept
+        new["risk_score"] = self.risk_analyzer._score(kept)
+        new["risk_level"] = self.risk_analyzer._level(new["risk_score"])
+        return new, dropped
+
+    async def _previous_codes(self, previous: Dict[str, Any], prev_ctx: Optional[Dict[str, Any]],
+                              allowed: List[str]) -> Optional[List[str]]:
+        """Коды рисков прошлой редакции для ``risks_comparison``.
+
+        Источники по порядку: ``ai_analysis`` прошлой редакции во внешней БД (если она проанализирована без
+        рисков, ``JSON_EXTRACT`` даёт ``NULL`` — это пустой список, а не «нет данных»); сохранённый у нас результат
+        (``ai_rm_results``); риск-анализ прошлой редакции из кэша сервиса.
+
+        Returns:
+            Optional[List[str]]: Коды или ``None`` (прошлая редакция не анализировалась).
+        """
+        codes = _json_list(previous.get("rule_ids"))
+        if codes is not None:
+            return codes
+        if previous.get("rm_status") == "completed":
+            return []
+        prev_id = int(previous["id"]) if previous.get("id") else None
+        stored = (getattr(self, "internal", None) or {}).get(prev_id) if prev_id else None
+        if stored is None and prev_id:
+            stored = (await self._internal([prev_id])).get(prev_id)
+        if stored and stored.get("status") == "completed":
+            # прошлая редакция проанализирована, но во внешней БД результата нет (без записи / сбой записи)
+            return sorted({r.get("rule_id") for r in (stored["ai_analysis"].get("risks") or []) if r.get("rule_id")})
+        doc_id = (prev_ctx or {}).get("doc_id")
+        version = getattr(self, "_risk_version", None) or f"{self.versions['risk_analysis']}:{_hash_version(allowed)}"
+        cached = await self._get_cached(doc_id, "risk_analysis", version, self.model) if doc_id else None
+        if cached is not None:
+            return sorted({r.get("code") for r in cached.get("risks") or [] if r.get("code")})
+        return None
+
+    def _superseded_analysis(self, row: Dict[str, Any], previous: Optional[Dict[str, Any]],
+                             attempt: int) -> Optional[Dict[str, Any]]:
+        """Паспорт без анализа для редакции, уже заменённой новой (``superseded_by``).
+
+        Анализируются только актуальные редакции: файл прошлой редакции, пришедший в той же выгрузке, что и
+        новая, получает паспорт с отметкой о замене, без скачивания и без запросов к модели. В режиме
+        отладки (``force``) или при ``settings.ANALYZE_SUPERSEDED`` файл анализируется как обычно.
+
+        Returns:
+            Optional[Dict[str, Any]]: ``ai_analysis`` (``pipeline.result = superseded``) или ``None``.
+        """
+        lk = (getattr(self, "lookups", None) or {}).get(int(row["id"])) or {}
+        sup = lk.get("superseded_by") or {}
+        if not sup.get("file_id") or self.force or settings.ANALYZE_SUPERSEDED:
+            return None
+        from evaluate_documents.type_data_extractor import DOCUMENT_TYPE_MAPPING
+
+        reason = (f"Редакция заменена: в версии XML {sup.get('xml_eis_version')} вместо этого файла приложен "
+                  f"файл {sup['file_id']} («{sup.get('file_name')}»). Анализируется актуальная редакция.")
+        pipeline = passport.pipeline_block(STAGE, "completed", self.model, self.versions,
+                                           int(previous["id"]) if previous else None, self.force, attempt,
+                                           result="superseded")
+        ai = passport.no_text_analysis(row, reason, pipeline, None, None)
+        ai["readability"] = {"status": None, "issues": [], "readability_score": None, "pages": None, "text_chars": None}
+        by_name = doc_kind.type_by_name(row.get("file_name"))
+        if by_name:
+            ai["doc_type"] = {"detected_type": by_name, "type_decode": DOCUMENT_TYPE_MAPPING.get(by_name),
+                              "confidence": None, "issues": [], "type_source": "file_name"}
+        ai["superseded_by"] = sup
+        ai["version_lookup"] = lk
+        return ai
+
+    def _add_lookup(self, ai: Dict[str, Any], file_id: int) -> None:
+        """Дописывает в ``ai_analysis`` ход поиска версий (``version_lookup``) и ``superseded_by``.
+
+        ``superseded_by`` — файл новой редакции, если этот файл в следующей версии XML заменён: паспорт такого
+        файла описывает уже неактуальную редакцию.
+        """
+        lk = (getattr(self, "lookups", None) or {}).get(int(file_id))
+        if not lk:
+            return
+        ai["version_lookup"] = lk
+        if lk.get("superseded_by"):
+            ai["superseded_by"] = lk["superseded_by"]
 
     async def _read_text(self, path: str, file_name: str, ext: str) -> Optional[str]:
         """Текст файла: для PDF — текстовый слой и OCR только страниц-сканов (``pdf_text``), иначе ``FileReader``.
@@ -661,6 +896,10 @@ class AIFileAnalyzer:
                 document_id, text = doc["id"], doc["text"]
             else:
                 text = await self._read_text(tmp_path, file_name, ext)
+                if text and OCR_ERROR_RE.search(text):
+                    # Модель OCR была недоступна (перезапуск, 404/5xx) — часть страниц потеряна. Такой текст
+                    # не сохраняем и не анализируем: файл получит pipeline.status = failed и будет взят повторно.
+                    raise RuntimeError("OCR: часть страниц не распознана — модель распознавания была недоступна")
                 if not text or not text.strip() or NO_TEXT_MARK in text:
                     document_id = await self.repo.upsert_document(sha, None, ext, size, None, ocr_status="failed",
                                                                   ocr_error="Не удалось извлечь текст")
@@ -925,7 +1164,27 @@ class AIFileAnalyzer:
             try:
                 await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, file_id, ai_analysis)
                 response["pushed"] = True
-            except Exception as e:  # noqa: BLE001 — анализ сохранён в кэше, повтор запишет его без LLM
+            except Exception as e:  # noqa: BLE001 — результат сохранён у нас, следующий запуск дозапишет без LLM
                 logger.error(f"Не удалось записать ai_analysis файла {file_id}: {e}")
                 response["push_error"] = str(e)
+        await self._save_internal(file_id, ai_analysis, response["pushed"], response.get("push_error"))
         return response
+
+    async def _save_internal(self, file_id: int, ai: Dict[str, Any], pushed: bool, error: Optional[str]) -> None:
+        """Сохраняет ``ai_analysis`` файла во внутренней БД (``ai_rm_results``); сбой не ломает анализ."""
+        if not hasattr(getattr(self, "repo", None), "save_rm_result"):
+            return
+        try:
+            await self.repo.save_rm_result(self.env, "file", file_id, ai, pushed, error)
+        except Exception as e:  # noqa: BLE001 — например, до миграции 009
+            logger.warning(f"Результат файла {file_id} не сохранён во внутренней БД: {type(e).__name__}: {e}")
+
+    async def _internal(self, ids: List[int]) -> Dict[int, Dict[str, Any]]:
+        """Сохранённые у нас результаты файлов (``ai_rm_results``); пустой словарь, если таблицы нет."""
+        if not ids or not hasattr(getattr(self, "repo", None), "get_rm_results"):
+            return {}
+        try:
+            return await self.repo.get_rm_results(self.env, "file", ids)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Внутренние результаты файлов не получены: {type(e).__name__}: {e}")
+            return {}

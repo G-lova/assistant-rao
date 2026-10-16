@@ -13,6 +13,7 @@
 Эмбеддинги во внешнюю БД не отправляются (хранятся в Postgres сервиса, ``ai_document_chunks``).
 """
 import datetime
+import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from risk_monitoring import risk_catalog
@@ -26,6 +27,24 @@ MAX_EVIDENCE_PER_RISK = 5
 def now_iso() -> str:
     """Текущее время в ISO-формате (секунды, локальное время сервиса)."""
     return datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def as_text_list(value: Any) -> List[str]:
+    """Список строк из ответа модели: модель иногда отдаёт число, строку или ``null`` вместо массива
+    (XML 3209, 15.10.2026: ``verification_needed = 1`` → ``TypeError: 'int' object is not iterable``).
+
+    Args:
+        value: Значение поля.
+
+    Returns:
+        List[str]: Непустые строки.
+    """
+    if value is None or isinstance(value, bool):
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(v).strip() for v in value if v is not None and str(v).strip()]
+    text = str(value).strip()
+    return [text] if text and not re.fullmatch(r"\d+(\.\d+)?", text) else []
 
 
 def clamp01(value: Any) -> Optional[float]:
@@ -125,7 +144,7 @@ def to_external_risks(compact_risks: Iterable[Dict[str, Any]], source: str = "ai
                 "confidence": clamp01(r.get("confidence")),
                 "quote_verified": True,
             }] if r.get("fragment") else list(r.get("evidence") or []),
-            "verification_needed": list(r.get("verification_needed") or []),
+            "verification_needed": as_text_list(r.get("verification_needed")),
             "severity": r.get("severity"),
             "source": source,
         })
@@ -184,7 +203,7 @@ def merge_risks(*lists: Iterable[Dict[str, Any]], fz: Any = None) -> List[Dict[s
                 cur = dict(r)
                 cur["category"] = risk_catalog.category(code)
                 cur["evidence"] = list(r.get("evidence") or [])
-                cur["verification_needed"] = list(r.get("verification_needed") or [])
+                cur["verification_needed"] = as_text_list(r.get("verification_needed"))
                 cur["sources"] = list(r.get("sources") or [])
                 if r.get("source") and r["source"] not in cur["sources"]:
                     cur["sources"].append(r["source"])
@@ -200,7 +219,7 @@ def merge_risks(*lists: Iterable[Dict[str, Any]], fz: Any = None) -> List[Dict[s
             for ev in r.get("evidence") or []:
                 if ev not in cur["evidence"]:
                     cur["evidence"].append(ev)
-            for v in r.get("verification_needed") or []:
+            for v in as_text_list(r.get("verification_needed")):
                 if v not in cur["verification_needed"]:
                     cur["verification_needed"].append(v)
             for src in list(r.get("sources") or []) + ([r["source"]] if r.get("source") else []):

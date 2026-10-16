@@ -3,6 +3,9 @@ import os
 from dotenv import load_dotenv
 from dataclasses import dataclass
 
+from configs import settings
+from risk_monitoring import settings as rm_settings
+
 
 load_dotenv()
 
@@ -110,8 +113,8 @@ class Config:
     MODEL_API_URL = os.getenv("MODEL_API_URL")
     MODEL_NAME = os.getenv("MODEL_NAME")
     
-    TEMPERATURE = float(os.getenv("MODEL_TEMPERATURE", 0.7))
-    MAX_NEW_TOKENS = int(os.getenv("MODEL_MAX_TOKENS", 4096))
+    TEMPERATURE = settings.MODEL_TEMPERATURE
+    MAX_NEW_TOKENS = settings.MODEL_MAX_TOKENS
 
     # Model qwen-vl
     M_MODEL_API_URL = os.getenv("M_MODEL_API_URL")
@@ -120,7 +123,7 @@ class Config:
     # Qwen/Qwen3-Embedding-0.6B
     EMBEDDING_URL = os.getenv("EMBEDDING_URL")
     EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL")
-    BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))
+    BATCH_SIZE = settings.EMBEDDING_BATCH_SIZE
 
     # Postgres
     DB_HOST = os.getenv("DB_HOST")
@@ -130,37 +133,37 @@ class Config:
     DB_PASSWORD = os.getenv("DB_PASSWORD")
     
     # Knowledge store («РАО Эксперт»): запись результатов /evaluate-documents в pe_* таблицы
-    KNOWLEDGE_STORE_ENABLED = os.getenv("KNOWLEDGE_STORE_ENABLED", "false").lower() == "true"
+    KNOWLEDGE_STORE_ENABLED = settings.KNOWLEDGE_STORE_ENABLED   # переключатели — configs/settings.py
     # Срок хранения полных текстов, чанков и эмбеддингов (дней) — политика утверждена 05.10.2026
-    PE_TEXT_RETENTION_DAYS = int(os.getenv("PE_TEXT_RETENTION_DAYS", "365"))
+    PE_TEXT_RETENTION_DAYS = settings.PE_TEXT_RETENTION_DAYS
     # Построение фактов сразу после индексации (задача index_documents_task); нужен KNOWLEDGE_STORE_ENABLED
     # Что делать с «0», найденным моделью по тексту документов (факты, презумпция, единый стиль): "suspect" — в значение
     # не ставить (замечание в trace.suspected, для критерия соответствия ставится «1» как предложение); "value" — ставить «0»
     # как предложение после повторной проверки (judge). На эталоне экспертов точность таких «0» 10–30%.
-    PE_MODEL_ZEROS = os.getenv("PE_MODEL_ZEROS", "suspect").lower()
-    PE_FACTS_ENABLED = os.getenv("PE_FACTS_ENABLED", "false").lower() == "true"
+    PE_MODEL_ZEROS = settings.PE_MODEL_ZEROS
+    PE_FACTS_ENABLED = settings.PE_FACTS_ENABLED
     # Максимум времени на построение фактов (запросы к LLM), секунд; при превышении этап прерывается
-    PE_FACTS_TIMEOUT_SEC = int(os.getenv("PE_FACTS_TIMEOUT_SEC", "900"))
+    PE_FACTS_TIMEOUT_SEC = settings.PE_FACTS_TIMEOUT_SEC
     # Общий документ по хэшу файла: /evaluate-documents берёт готовый текст из ai_documents вместо повторного
     # чтения/OCR (нужен KNOWLEDGE_STORE_ENABLED). Читается при каждом вызове — см. knowledge_store.hooks.dedup_enabled
-    DOC_DEDUP_ENABLED = os.getenv("DOC_DEDUP_ENABLED", "false").lower() == "true"
+    DOC_DEDUP_ENABLED = settings.DOC_DEDUP_ENABLED
     # Нарезка экспертизы для индексации и поиска фактов (knowledge_store.pages.current_chunker): pages_1500 (прежняя,
     # по умолчанию) или pages_v2 (по структуре; переключать после диагностики scripts.eval_chunkers variants)
-    PE_CHUNKER = os.getenv("PE_CHUNKER", "pages_1500")
+    PE_CHUNKER = settings.PE_CHUNKER
     # Кэш результата TypeDataExtractor в общем документе: тот же файл с тем же типом, объектом и именем повторно
     # модели не отправляется (нужен KNOWLEDGE_STORE_ENABLED). Параметр force в /evaluate-documents кэш обходит
-    DOC_EXTRACTION_CACHE_ENABLED = os.getenv("DOC_EXTRACTION_CACHE_ENABLED", "false").lower() == "true"
+    DOC_EXTRACTION_CACHE_ENABLED = settings.DOC_EXTRACTION_CACHE_ENABLED
     # Сопоставление экспертизы с карточкой закупки риск-мониторинга после индексации (запросы к внешней БД)
-    PE_RM_LINK_ENABLED = os.getenv("PE_RM_LINK_ENABLED", "false").lower() == "true"
+    PE_RM_LINK_ENABLED = settings.PE_RM_LINK_ENABLED
     # Параллельность /evaluate-documents: запросы к LLM (блоки извлечения и проверки полноты), файлы (чтение/OCR +
     # извлечение) и скачивание ссылок. Ограничение действует на каждый вызов
-    EVAL_LLM_CONCURRENCY = int(os.getenv("EVAL_LLM_CONCURRENCY", "3"))
-    EVAL_FILE_CONCURRENCY = int(os.getenv("EVAL_FILE_CONCURRENCY", "3"))
-    EVAL_LINK_CONCURRENCY = int(os.getenv("EVAL_LINK_CONCURRENCY", "2"))
+    EVAL_LLM_CONCURRENCY = settings.EVAL_LLM_CONCURRENCY
+    EVAL_FILE_CONCURRENCY = settings.EVAL_FILE_CONCURRENCY
+    EVAL_LINK_CONCURRENCY = settings.EVAL_LINK_CONCURRENCY
     # Срок ссылок риск-мониторинга на общий документ: закрытие закупки/контракта + RM_TEXT_AFTER_CLOSE_DAYS,
     # но не дольше RM_TEXT_MAX_RETENTION_DAYS от загрузки (решение 13.10.2026)
-    RM_TEXT_AFTER_CLOSE_DAYS = int(os.getenv("RM_TEXT_AFTER_CLOSE_DAYS", "365"))
-    RM_TEXT_MAX_RETENTION_DAYS = int(os.getenv("RM_TEXT_MAX_RETENTION_DAYS", "1095"))
+    RM_TEXT_AFTER_CLOSE_DAYS = rm_settings.RM_TEXT_AFTER_CLOSE_DAYS
+    RM_TEXT_MAX_RETENTION_DAYS = rm_settings.RM_TEXT_MAX_RETENTION_DAYS
 
     # Paths
     SQL_QUERIES_PATH = os.getenv("SQL_QUERIES_PATH", "queries/")
@@ -174,9 +177,9 @@ class Config:
     LOG_FILE = os.getenv("LOG_FILE", "logs/app.log")
 
     # Retry settings
-    RETRY_MAX_ATTEMPTS = int(os.getenv("RETRY_MAX_ATTEMPTS", "3"))
-    RETRY_DELAY = float(os.getenv("RETRY_DELAY", "1.0"))
-    RETRY_BACKOFF = float(os.getenv("RETRY_BACKOFF", "2.0"))
+    RETRY_MAX_ATTEMPTS = settings.RETRY_MAX_ATTEMPTS
+    RETRY_DELAY = settings.RETRY_DELAY
+    RETRY_BACKOFF = settings.RETRY_BACKOFF
 
 
     @classmethod
@@ -371,9 +374,11 @@ class Config:
     def risk_monitoring_debug(cls) -> bool:
         """Включён ли режим отладки риск-мониторинга (повторный анализ уже проанализированных документов).
 
-        Читается при каждом вызове, чтобы флаг ``RISK_MONITORING_DEBUG`` можно было менять без пересборки.
+        Флаг — ``risk_monitoring/settings.py`` (``RISK_MONITORING_DEBUG``).
 
         Returns:
-            bool: ``True``, если ``RISK_MONITORING_DEBUG=true``.
+            bool: ``True`` — повторный анализ разрешён.
         """
-        return os.getenv("RISK_MONITORING_DEBUG", "false").lower() == "true"
+        from risk_monitoring import settings as rm
+
+        return bool(rm.RISK_MONITORING_DEBUG)

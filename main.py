@@ -70,6 +70,12 @@ app.include_router(risk_monitoring_router)
 setup_logging()
 logger = get_logger(__name__)
 
+# Переключатели заданы в configs/settings.py: значения, оставшиеся в .env, игнорируются — предупреждаем при старте
+# (main импортируется и API, и воркерами Celery)
+from configs import settings as _settings
+_settings.warn_env_leftovers(logger)
+
+
 # Глобальный словарь для хранения результатов анализа документов
 document_analysis_cache = {}
 
@@ -77,7 +83,7 @@ document_analysis_cache = {}
 @app.post("/evaluate-documents")
 async def evaluate_documents_batch(
     request: EvaluateRequest,
-    x_api_database: str = Header(default="prod", alias="X-API-Database")
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
 ):
     try:
         expertise_id = request.expertise_id        
@@ -102,7 +108,7 @@ async def evaluate_documents_batch(
 @app.post("/generate-summary-opinion")
 async def generate_summary_opinion(
     request: SummaryOpinionRequest,
-    x_api_database: str = Header(default="prod", alias="X-API-Database")
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
 ):
     """Запускает генерацию сводного экспертного заключения («РАО Эксперт») из хранилища знаний.
 
@@ -138,7 +144,7 @@ async def generate_summary_opinion(
 @app.get("/expertise/{expertise_id}/rm-findings")
 async def get_rm_findings(
     expertise_id: int,
-    x_api_database: str = Header(default="prod", alias="X-API-Database")
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
 ):
     """Находки риск-мониторинга по документам закупки экспертизы — подсказки эксперту.
 
@@ -207,13 +213,14 @@ def _check_env_header(x_api_database: Optional[str]) -> None:
 @app.post("/get-contract-info")
 async def api_get_contract_info(
     request_body: Dict[str, str] = Body(...),
-    x_api_database: Optional[str] = Header(default="prod", alias="X-API-Database")
+    x_api_database: Optional[str] = Header(default=None, alias="X-API-Database")
 ):
     """
     Обработчик API-запроса для получения ключевых реквизитов контракта по идентификатору закупки.
 
-    Извлекает из базы данных номер, сумму и дату контракта на основе данных, ранее сохранённых
-    в поле `contract_draft` таблицы `raw_document_data`. Возвращает информацию в виде JSON.
+    Номер, сумма и дата берутся из контракта или проекта контракта экспертизы, сохранённых в хранилище знаний
+    при `/evaluate-documents`: текст разбирается без запросов к модели, недостающее — из сохранённого результата
+    извлечения (`knowledge_store/contract_info.py`). Заключённый контракт приоритетнее проекта.
     Используется внешними сервисами для быстрого доступа к основным параметрам контракта.
 
     Args:
@@ -227,7 +234,7 @@ async def api_get_contract_info(
         dict: Словарь с реквизитами контракта:
             - contract_number (str): Номер контракта или "0", если не найден.
             - amount (str): Сумма контракта в виде строки или "0", если не найдена.
-            - date (str): Дата контракта в текстовом формате или "0", если не найдена.
+            - date (str): Дата контракта ГГГГ-ММ-ДД или "0", если не найдена.
             При возникновении внутренней ошибки возвращается тот же словарь со значениями "0".
     """
     _check_env_header(x_api_database)
@@ -239,8 +246,9 @@ async def api_get_contract_info(
 
     try:
         info = await get_contract_info_from_db(procurement_id, x_api_database)
-        logger.info(f"Обработка документов завершена: {info}")
-        return info
+        logger.info(f"Реквизиты контракта экспертизы {procurement_id}: {info}")
+        # формат ответа прежний: только три поля (источники — в журнале)
+        return {k: info.get(k, "0") for k in ("contract_number", "amount", "date")}
     except Exception as e:
         logger.error(f"Неожиданная ошибка при обработке /get-contract-info: {e}", exc_info=True)
         return {"contract_number": "0", "amount": "0", "date": "0"}
@@ -249,7 +257,7 @@ async def api_get_contract_info(
 @app.post("/get-experts-for-expertise")
 async def get_experts_for_expertise(
     request: ExpertsScoringRequest,
-    x_api_database: str = Header(default="prod", alias="X-API-Database")
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
 ):
     """
     Подбирает список идентификаторов экспертов для заданной экспертизы.
@@ -291,7 +299,7 @@ async def get_experts_for_expertise(
 @app.post("/get-experts-rating")
 async def get_experts_rating(
     request_body: Dict[str, str] = Body(...),
-    x_api_database: str = Header(default="prod", alias="X-API-Database")
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
 ):
     """
     Получает рейтинг экспертов для заданного временного периода.
@@ -354,7 +362,7 @@ async def health_check():
 @app.post("/rao_conclusion")
 async def get_rao_conclusion(
     request: RAOConclusionRequest,
-    x_api_database: str = Header(default="prod", alias="X-API-Database")
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
     ):
     '''
     Эндпоинт для получения сводного отчета эксперта РАО по результатам экспертизы.
@@ -566,7 +574,7 @@ async def parse_eis(request: EISParseRequest):
 @app.post("/get-law")
 async def get_law(
     request_body: Dict[str, int] = Body(...),
-    x_api_database: Optional[str] = Header(default="prod", alias="X-API-Database")
+    x_api_database: Optional[str] = Header(default=None, alias="X-API-Database")
 ):
     """Определяет основной закон (44-ФЗ / 223-ФЗ) по отчёту ``/evaluate-documents``.
 
@@ -595,7 +603,7 @@ async def get_law(
 @app.post("/get-subject")
 async def get_subject(
     request: RAOConclusionRequest,
-    x_api_database: str = Header(default="prod", alias="X-API-Database")
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
     ):
     """
     """
@@ -652,7 +660,7 @@ async def get_subject(
 @app.post("/get-ai-analysis/file")
 async def get_file_analysis(
     request: FileEntity,
-    x_api_database: str = Header(default="prod", alias="X-API-Database")
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
 ):
     '''
     '''

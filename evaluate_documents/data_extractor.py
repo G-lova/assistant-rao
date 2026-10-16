@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 from configs.logger import get_logger
 from configs.rate_limiter import TokenBucket
 from configs.retry_utils import LLM_RETRY_CONFIG, async_retry
+from configs.llm_resilience import ContextOverflow, split_halves
 from configs.utils import extract_json_objects
 
 
@@ -100,7 +101,9 @@ class DataExtractor:
             if isinstance(result, Exception):
                 logger.error(f"Ошибка при анализе блока {i+1}: {result}")
                 continue
-            if result != None:
+            if isinstance(result, list):   # блок не поместился в контекст и разобран по частям
+                successful_results.extend(r for r in result if r)
+            elif result != None:
                 successful_results.append(result)
 
         if not successful_results:
@@ -223,6 +226,19 @@ class DataExtractor:
                 logger.error("Не удалось распарсить ни одну JSON структуру.")
                 return None
 
+        except ContextOverflow as e:
+            # блок не помещается в контекст модели (токенизатор модели считает кириллицу и XML плотнее, чем
+            # tiktoken при нарезке): делим пополам и извлекаем по частям; результаты объединяет вызывающий
+            parts = split_halves(content)
+            if len(parts) < 2:
+                logger.error(f"Блок {filename} не делится и не помещается в контекст: {e}")
+                return None
+            logger.warning(f"{filename}: {e} — делю на {len(parts)} части")
+            results = []
+            for i, part in enumerate(parts):
+                r = await self.extract_data_from_chunk(content=part, filename=f"{filename}, часть {i + 1}")
+                results.extend(r if isinstance(r, list) else [r] if r else [])
+            return results or None
         except Exception as e:
             logger.error(f"Ошибка при анализе '{filename}': {str(e)}")
             return None

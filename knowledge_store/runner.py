@@ -28,7 +28,8 @@ def rm_link_enabled() -> bool:
     Returns:
         bool: ``True`` — после индексации выполняется :func:`knowledge_store.rm_link.match_card`.
     """
-    flag = os.getenv("PE_RM_LINK_ENABLED", str(Config.PE_RM_LINK_ENABLED)).lower() == "true"
+    from configs import settings
+    flag = bool(settings.PE_RM_LINK_ENABLED)
     return flag and is_enabled()
 
 
@@ -52,7 +53,8 @@ def facts_enabled() -> bool:
     Returns:
         bool: ``True``, если включены и хранилище знаний, и ``PE_FACTS_ENABLED``.
     """
-    flag = os.getenv("PE_FACTS_ENABLED", str(Config.PE_FACTS_ENABLED)).lower() == "true"
+    from configs import settings
+    flag = bool(settings.PE_FACTS_ENABLED)
     return flag and is_enabled()
 
 

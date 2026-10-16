@@ -259,7 +259,9 @@ class FileModesTest(unittest.TestCase):
         self.text = self.BASE.replace("Пункт 7.", "Пункт 7. Взимается штраф в размере 50 % цены.") + \
             "\nПункт 15. Неустойка начисляется по ставке ЦБ."
         allowed = doc_kind.allowed_codes("docOpusObjectZacupFiles")
-        rv = f"{self.an.versions['risk_analysis']}:{prompt_version(allowed)}"
+        from risk_monitoring import norms
+
+        rv = f"{self.an.versions['risk_analysis']}:{prompt_version(allowed)}:{norms.version('docOpusObjectZacupFiles', 44)}"
         old_risk = {"code": "DOC-006", "category": "DOC", "severity": "medium", "title": "т", "explanation": "э",
                     "evidence": {"fragment": "обязательство номер 3", "confidence": 0.9}}
         gone_risk = {"code": "AI-003", "category": "AI", "severity": "low", "title": "т", "explanation": "э",

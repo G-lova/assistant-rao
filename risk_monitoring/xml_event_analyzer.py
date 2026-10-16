@@ -148,11 +148,15 @@ class XmlEventAnalyzer:
     """
 
     def __init__(self, http_manager: Any, environment: str, push_results: bool = True, force: bool = False,
-                 use_llm: bool = True, concurrency: int = 3, repo: Any = None):
+                 use_llm: bool = True, concurrency: int = 3, repo: Any = None, results_repo: Any = None):
         """Создаёт компоненты: доступ к внешней БД, загрузчик архивов, LLM, API записи.
 
         ``repo`` (``configs.ai_repo.AIRepo``) нужен для срока хранения текстов: закрытие закупки/контракта
         сокращает срок ссылок её файлов. Без него события разбираются как прежде.
+
+        ``results_repo`` (``AIRepo``) — внутреннее хранилище результатов (``ai_rm_results``): ``ai_analysis``
+        XML сохраняется у нас; если во внешней БД результата нет, а у нас он есть — дозаписывается без анализа;
+        резюме и тип файлов, которых нет во внешней БД, берутся из сохранённых у нас результатов файлов.
         """
         from configs.data_fetcher import DataFetcher
         from configs.llm_client import get_llm
@@ -164,6 +168,8 @@ class XmlEventAnalyzer:
         db = cfg.get_database_config(environment)
         self.env = (environment or cfg.APP_ENV).lower()
         self.repo = repo
+        self.results_repo = results_repo if results_repo is not None else repo
+        self.internal: Dict[int, Dict[str, Any]] = {}
         self.storage_path = db.storage_path
         self.data_fetcher = DataFetcher(db.url, db.headers, http_manager)
         self.archives = ArchiveCache(CloudStorageParser(http_manager, None))
@@ -202,6 +208,7 @@ class XmlEventAnalyzer:
             rows = await self._query("xml_meta.sql", head=[self.storage_path], ids=ids)
             found = {int(r["id"]): r for r in rows}
             previous = await self._previous(list(found)) if found else {}
+            self.internal = await self._internal("xml", list(found))
             # 1) разбор XML, diff, правила — без модели
             prepared = await asyncio.gather(*(self._guarded(found[i], previous.get(i)) for i in ids if i in found))
             ctxs = [p for p in prepared if p.get("status") == "prepared"]
@@ -217,6 +224,34 @@ class XmlEventAnalyzer:
             return list(results) + [{"xml_id": i, "status": "not_found"} for i in ids if i not in found]
         finally:
             self.archives.close()
+
+    async def pending_files(self, xml_ids: List[int], include_done: bool = False) -> List[int]:
+        """Файлы, указанные в XML (вложения и печатная форма) или привязанные к нему, ещё не проанализированные.
+
+        Используется опцией ``analyze_files``: файлы события анализируются до самого события, чтобы его анализ
+        получил резюме и риски файлов.
+
+        Args:
+            xml_ids: id XML.
+            include_done: Вернуть и уже проанализированные (режим отладки, ``force``).
+
+        Returns:
+            List[int]: id файлов ``risk_monitoring_files`` без повторов.
+        """
+        from risk_monitoring import file_versions
+
+        rows = await self._query("xml_meta.sql", head=[self.storage_path], ids=list(xml_ids))
+        urls: List[str] = []
+        for r in rows:
+            try:
+                _, _, body = xml_events.parse_xml(await self.archives.read(r["archive_url"], r["entry_name"]))
+            except Exception as e:  # noqa: BLE001 — остаются файлы, привязанные по xml_source_id
+                logger.warning(f"XML {r['id']}: не прочитан при поиске файлов: {e}")
+                continue
+            urls += [a["url"] for a in xml_events.attachments(body)] + file_versions.print_form_urls(body)
+        files = await self._query("xml_files.sql", ids=[int(r["id"]) for r in rows], urls=list(dict.fromkeys(urls))[:500])
+        out = [int(f["id"]) for f in files if include_done or f.get("rm_status") != "completed"]
+        return list(dict.fromkeys(out))
 
     async def _previous(self, ids: List[int]) -> Dict[int, Dict[str, Any]]:
         """Предыдущая версия каждого XML (максимальная версия меньше текущей)."""
@@ -239,6 +274,9 @@ class XmlEventAnalyzer:
         if not self.force:
             if row.get("rm_status") == "completed":
                 return {"xml_id": xml_id, "status": "skipped", "reason": "already_analyzed"}
+            stored = self.internal.get(xml_id)
+            if stored and stored.get("status") == "completed" and not stored.get("debug"):
+                return await self._reuse_internal(xml_id, stored)
             if row.get("rm_status") == "failed" and attempt > MAX_ATTEMPTS:
                 return {"xml_id": xml_id, "status": "skipped", "reason": "max_attempts"}
         async with self.semaphore:
@@ -246,6 +284,45 @@ class XmlEventAnalyzer:
                 return await self._prepare(row, previous, attempt)
             except Exception as e:  # noqa: BLE001 — сбой одного XML не останавливает остальные
                 return await self._failure(xml_id, attempt, e)
+
+    async def _internal(self, kind: str, ids: List[int]) -> Dict[int, Dict[str, Any]]:
+        """Сохранённые у нас результаты (``ai_rm_results``); пустой словарь без хранилища или таблицы."""
+        if not ids or self.results_repo is None or not hasattr(self.results_repo, "get_rm_results"):
+            return {}
+        try:
+            return await self.results_repo.get_rm_results(self.env, kind, ids)
+        except Exception as e:  # noqa: BLE001 — например, до миграции 009
+            logger.warning(f"Внутренние результаты ({kind}) не получены: {type(e).__name__}: {e}")
+            return {}
+
+    async def _save_internal(self, xml_id: int, ai: Dict[str, Any], pushed: bool, error: Optional[str]) -> None:
+        """Сохраняет ``ai_analysis`` XML во внутренней БД; сбой не ломает анализ."""
+        if self.results_repo is None or not hasattr(self.results_repo, "save_rm_result"):
+            return
+        try:
+            await self.results_repo.save_rm_result(self.env, "xml", xml_id, ai, pushed, error)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Результат XML {xml_id} не сохранён во внутренней БД: {type(e).__name__}: {e}")
+
+    async def _reuse_internal(self, xml_id: int, stored: Dict[str, Any]) -> Dict[str, Any]:
+        """XML уже разобран, но во внешней БД результата нет: дозаписывает сохранённый, без повторного разбора.
+
+        Returns:
+            Dict[str, Any]: ``status = done``, ``source = internal``.
+        """
+        ai = stored["ai_analysis"]
+        result = {"xml_id": xml_id, "status": "done", "source": "internal", "pushed": False, "ai_analysis": ai}
+        if self.push_results:
+            try:
+                await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, xml_id, ai)
+                result["pushed"] = True
+                await self.results_repo.mark_rm_pushed(self.env, "xml", xml_id)
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"Не удалось дозаписать ai_analysis XML {xml_id}: {e}")
+                result["push_error"] = str(e)
+        logger.info(f"XML {xml_id}: результат из внутренней БД (разбор {stored.get('analyzed_at')}), "
+                    f"записан во внешнюю БД: {result['pushed']}")
+        return result
 
     async def _failure(self, xml_id: int, attempt: int, e: BaseException) -> Dict[str, Any]:
         """Результат с ошибкой и запись ``pipeline.status = failed`` (кроме режима отладки)."""
@@ -404,6 +481,7 @@ class XmlEventAnalyzer:
             except Exception as e:  # noqa: BLE001
                 logger.error(f"Не удалось записать ai_analysis XML {xml_id}: {e}")
                 response["push_error"] = str(e)
+        await self._save_internal(xml_id, ai, response["pushed"], response.get("push_error"))
         return response
 
     async def _update_retention(self, ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -444,11 +522,25 @@ class XmlEventAnalyzer:
             logger.warning(f"Файлы XML {xml_id} не получены: {e}")
             return []
         out = []
+        fresh = dict(getattr(self, "file_results", None) or {})
+        # во внешней БД анализа файла нет (прогон без записи, сбой записи) — берём сохранённый у нас
+        missing = [int(r["id"]) for r in rows if r.get("id") is not None and int(r["id"]) not in fresh
+                   and not (r.get("detected_type") or r.get("resume"))]
+        for fid, stored in (await self._internal("file", missing)).items():
+            if stored.get("status") == "completed":
+                fresh[fid] = stored["ai_analysis"]
         for r in rows:
-            out.append({"file_id": _int(r.get("id")), "xml_source_id": _int(r.get("xml_source_id")),
-                        "file_name": r.get("file_name"), "source_url": r.get("source_url"),
-                        "detected_type": r.get("detected_type"), "resume": r.get("resume"),
-                        "total_doc_risk": r.get("total_doc_risk")})
+            item = {"file_id": _int(r.get("id")), "xml_source_id": _int(r.get("xml_source_id")),
+                    "file_name": r.get("file_name"), "source_url": r.get("source_url"),
+                    "detected_type": r.get("detected_type"), "resume": r.get("resume"),
+                    "total_doc_risk": r.get("total_doc_risk")}
+            ai = fresh.get(item["file_id"])
+            if ai:
+                # файл проанализирован в этой же задаче (analyze_files) или результат есть только у нас:
+                # во внешней БД его может не быть (push=false, сбой записи)
+                item.update(detected_type=(ai.get("doc_type") or {}).get("detected_type"), resume=ai.get("resume"),
+                            total_doc_risk=ai.get("total_doc_risk"))
+            out.append(item)
         return out
 
     async def _link_orphan(self, facts: Dict[str, Any], row: Dict[str, Any]) -> Dict[str, Any]:

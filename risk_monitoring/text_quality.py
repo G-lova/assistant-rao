@@ -140,3 +140,44 @@ def verify_identifiers(raw_data: Dict[str, Any], text: str) -> Tuple[Dict[str, A
         removed.append(f"номер {cn['value']}")
         raw["contract_number"] = {**cn, "value": None}
     return raw, removed
+
+
+def unwrap_ocr_json(text: str) -> str:
+    """Заменяет вставленные в текст ответы OCR (JSON ``{"has_text": …, "raw_text": "…", …}``) их текстом.
+
+    ``FileReader`` вставляет распознанные картинки DOC(X) и страницы PDF ответом модели целиком. В тексте
+    документа оказывается служебный JSON, и цитаты рисков выглядят как ``{ "has_text": true, "raw_text": …``
+    (файл 3198, 15.10.2026). Объект, который не удалось разобрать, остаётся как есть.
+
+    Args:
+        text: Текст документа.
+
+    Returns:
+        str: Текст без служебного JSON.
+    """
+    import json as _json
+
+    if '"raw_text"' not in (text or ""):
+        return text or ""
+    dec = _json.JSONDecoder()
+    out, i = [], 0
+    while True:
+        j = text.find("{", i)
+        if j < 0:
+            out.append(text[i:])
+            break
+        out.append(text[i:j])
+        try:
+            obj, end = dec.raw_decode(text, j)
+        except ValueError:
+            out.append("{")
+            i = j + 1
+            continue
+        if isinstance(obj, dict) and "raw_text" in obj:
+            body = str(obj.get("raw_text") or "").strip()
+            desc = str(obj.get("image_description") or "").strip()
+            out.append(body or (f"[Изображение: {desc}]" if desc else ""))
+        else:
+            out.append(text[j:end])
+        i = end
+    return "".join(out)

@@ -4,6 +4,7 @@ LLM, эмбеддинги и векторный поиск подменяютс�
 Postgres, если задана переменная ``PE_TEST_PG=host:port`` (pgvector в песочнице нет, поэтому SQL
 поиска по вектору проверяется только на dev).
 """
+from tests.flags import flags
 import asyncio
 import json
 import os
@@ -331,7 +332,7 @@ class FactsDbTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile("wb", suffix=".xml", delete=False) as f:
             f.write(make_xml(version=2).encode("utf-8"))
         try:
-            with mock.patch.object(hooks, "_db", fake_db), mock.patch.dict(os.environ, {"KNOWLEDGE_STORE_ENABLED": "true"}):
+            with mock.patch.object(hooks, "_db", fake_db), flags({"KNOWLEDGE_STORE_ENABLED": "true"}):
                 doc = asyncio.run(hooks.on_document_text(S(7001), "docIzvejenieFiles", "epNotification_1.xml", None, f.name, "flat text"))
                 asyncio.run(hooks.on_document_extracted(doc, {"readability": {"status": "allow"}, "raw_data": {}}))
         finally:
@@ -423,7 +424,7 @@ class RunnerFlagTests(unittest.TestCase):
     def test_flags(self):
         """Факты включаются только при KNOWLEDGE_STORE_ENABLED и PE_FACTS_ENABLED одновременно."""
         for store, flag, expected in (("true", "true", True), ("true", "false", False), ("false", "true", False)):
-            with mock.patch.dict(os.environ, {"KNOWLEDGE_STORE_ENABLED": store, "PE_FACTS_ENABLED": flag}):
+            with flags({"KNOWLEDGE_STORE_ENABLED": store, "PE_FACTS_ENABLED": flag}):
                 self.assertEqual(runner.facts_enabled(), expected)
 
     def test_disabled_only_indexes(self):
@@ -432,7 +433,7 @@ class RunnerFlagTests(unittest.TestCase):
             """Индексация-заглушка."""
             return {"documents": 1, "chunks": 2, "failed": 0}
 
-        with mock.patch.dict(os.environ, {"KNOWLEDGE_STORE_ENABLED": "true", "PE_FACTS_ENABLED": "false"}), \
+        with flags({"KNOWLEDGE_STORE_ENABLED": "true", "PE_FACTS_ENABLED": "false"}), \
                 mock.patch.object(runner.indexer, "build_embedder", lambda mgr: object()), \
                 mock.patch.object(runner.indexer, "index_expertise", fake_index), \
                 mock.patch.object(runner, "build_facts", side_effect=AssertionError("не должно вызываться")):
@@ -455,7 +456,7 @@ class RunnerFlagTests(unittest.TestCase):
             raise RuntimeError("сбой")
 
         env = {"KNOWLEDGE_STORE_ENABLED": "true", "PE_FACTS_ENABLED": "true"}
-        with mock.patch.dict(os.environ, env), mock.patch.object(runner.Config, "PE_FACTS_TIMEOUT_SEC", 0.2), \
+        with flags(env), mock.patch.object(runner.Config, "PE_FACTS_TIMEOUT_SEC", 0.2), \
                 mock.patch.object(runner.indexer, "build_embedder", lambda mgr: object()), \
                 mock.patch.object(runner.indexer, "index_expertise", fake_index):
             for func, name in ((slow, "TimeoutError"), (boom, "RuntimeError")):

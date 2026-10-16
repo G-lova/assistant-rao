@@ -230,3 +230,97 @@ def choose_xml(file_row: Dict[str, Any], candidates: Iterable[Dict[str, Any]]) -
         group_ok = doc_kind.xml_group(c.get("tag") or c.get("xml_source_type")) == owner
         return (not same, -(v if v is not None else -1), not group_ok)
     return sorted(out, key=rank)
+
+
+def _family(x: Dict[str, Any]) -> str:
+    """Документ ЕИС, к которому относится XML: тег и номер (первые две части ``entry_name``)."""
+    parts = (x.get("entry_name") or "").split("_")
+    return "_".join(parts[:2]) if len(parts) >= 2 else (x.get("entry_name") or "")
+
+
+def newer_versions(x: Dict[str, Any], candidates: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Более новые версии того же XML-документа (тот же тег и номер), ближайшие первыми.
+
+    Args:
+        x: XML файла.
+        candidates: Строки ``xml_by_owner.sql``.
+
+    Returns:
+        List[Dict[str, Any]]: Новые версии.
+    """
+    fam, v = _family(x), _int(x.get("eis_version"))
+    if v is None:
+        return []
+    out = [c for c in candidates if _int(c["id"]) != _int(x["id"]) and _family(c) == fam
+           and _int(c.get("eis_version")) is not None and _int(c.get("eis_version")) > v]
+    return sorted(out, key=lambda c: _int(c.get("eis_version")))
+
+
+def next_ref(file_row: Dict[str, Any], body: Dict[str, Any], newer_body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Что стало с файлом в следующей версии XML: заменён новой редакцией или удалён.
+
+    Args:
+        file_row: Файл.
+        body: XML, к которому приложен файл.
+        newer_body: Следующая версия XML.
+
+    Returns:
+        Optional[Dict[str, Any]]: ``{"match": "replaced", "url", "file_name", "matched_by", "score"}``,
+        ``{"match": "removed"}`` или ``None`` (файл не изменился или не найден).
+    """
+    atts = xml_events.attachments(body)
+    att = locate(file_row, atts)
+    if att is None:
+        return None
+    changes = xml_events.document_changes(atts, xml_events.attachments(newer_body))
+    for r in changes["replaced"]:
+        if url_key(r["before"]["url"]) == url_key(att["url"]):
+            return {"match": "replaced", "url": r["after"]["url"], "file_name": r["after"].get("file_name"),
+                    "matched_by": r.get("matched_by"), "score": r.get("score")}
+    if any(url_key(a["url"]) == url_key(att["url"]) for a in changes["removed"]):
+        return {"match": "removed"}
+    return None
+
+
+def lookup_summary(ref: Dict[str, Any], prev: Optional[Dict[str, Any]], candidates: Iterable[Dict[str, Any]],
+                   file_row: Dict[str, Any]) -> Dict[str, Any]:
+    """Ход поиска версий файла для ``ai_analysis.version_lookup`` (диагностика) и ``superseded_by``.
+
+    Args:
+        ref: Результат ``previous_ref`` (+ ``xml_id``, ``xml_eis_version``, ``superseded``).
+        prev: Найденная предыдущая версия или ``None``.
+        candidates: Строки ``files_by_ref.sql`` (для поиска файла новой редакции по ссылке).
+        file_row: Файл.
+
+    Returns:
+        Dict[str, Any]: ``xml_id``, ``xml_eis_version``, ``file_eis_version``, ``match``, ``previous_file_id``,
+        ``previous_xml_id``, ``superseded_by`` (``file_id``, ``xml_id``, ``xml_eis_version``, ``file_name``, ``match``),
+        ``note``.
+    """
+    out: Dict[str, Any] = {
+        "xml_id": ref.get("xml_id"), "xml_eis_version": _int(ref.get("xml_eis_version")),
+        "file_eis_version": _int(file_row.get("eis_version")), "match": ref.get("match"),
+        "previous_file_id": _int(prev["id"]) if prev else None, "previous_xml_id": ref.get("previous_xml_id"),
+    }
+    notes = []
+    if out["xml_eis_version"] is not None and out["file_eis_version"] is not None \
+            and out["xml_eis_version"] != out["file_eis_version"]:
+        notes.append(f"файл приложен к версии XML {out['xml_eis_version']}, а в risk_monitoring_files "
+                     f"eis_version = {out['file_eis_version']}")
+    if ref.get("match") == "no_previous_xml":
+        notes.append("предыдущей версии этого XML в risk_monitoring_eis_xml_sources нет")
+    sup = ref.get("superseded")
+    if sup:
+        new_file = None
+        if sup.get("url"):
+            key = url_key(sup["url"])
+            new_file = next((c for c in candidates if url_key(c.get("source_url")) == key
+                             and _int(c["id"]) != _int(file_row["id"])), None)
+        out["superseded_by"] = {"file_id": _int(new_file["id"]) if new_file else None, "xml_id": sup.get("xml_id"),
+                                "xml_eis_version": _int(sup.get("xml_eis_version")), "file_name": sup.get("file_name"),
+                                "match": sup.get("match"), "matched_by": sup.get("matched_by")}
+        notes.append("в следующей версии XML файл " + ("заменён новой редакцией" if sup.get("match") == "replaced"
+                                                      else "удалён") + " — паспорт описывает неактуальную редакцию")
+    if notes:
+        out["note"] = "; ".join(notes)
+    return out

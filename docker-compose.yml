@@ -115,6 +115,9 @@ services:
       - rao_network
     command: celery -A celery_app worker -E --pool=solo --loglevel=info --concurrency=4 -Q evaluation,parsing,scoring
     restart: unless-stopped
+    # Тёплая остановка: воркер дожидается текущей задачи и возвращает в очередь неначатые (иначе через 10 с
+    # Docker убивает его, и сообщение «зависает» до visibility_timeout — см. scripts/celery_unacked.py)
+    stop_grace_period: 5m
 
   celery_worker_rm:
     build: .
@@ -137,6 +140,9 @@ services:
     # Риск-мониторинг: отдельная очередь, чтобы ночной анализ не блокировал /evaluate-documents
     command: celery -A celery_app worker -E --pool=prefork --concurrency=2 --loglevel=info -Q risk_monitoring -n rm@%h
     restart: unless-stopped
+    # Тёплая остановка: воркер дожидается текущей задачи и возвращает в очередь неначатые (иначе через 10 с
+    # Docker убивает его, и сообщение «зависает» до visibility_timeout — см. scripts/celery_unacked.py)
+    stop_grace_period: 5m
 
   celery_beat:
     build: .

@@ -1,4 +1,5 @@
 """Кэш результата TypeDataExtractor в общем документе и параметр force."""
+from tests.flags import flags
 import asyncio
 import hashlib
 import os
@@ -105,10 +106,10 @@ class CacheDbTests(unittest.TestCase):
         link2 = run(repo.upsert_document(conn, Scope("prod", 62), "docIzvejenieFiles", "a.pdf", None, sha, ai, 1, 365))
         version = documents.extraction_version("docIzvejenieFiles", 6, "a.pdf", 10000, "текст")
         with mock.patch.object(hooks, "_db", fake_db):
-            with mock.patch.dict(os.environ, {"KNOWLEDGE_STORE_ENABLED": "true", "DOC_EXTRACTION_CACHE_ENABLED": "false"}):
+            with flags({"KNOWLEDGE_STORE_ENABLED": "true", "DOC_EXTRACTION_CACHE_ENABLED": "false"}):
                 run(hooks.save_extraction(link1, version, "m", GOOD))
                 self.assertEqual(conn._run("SELECT count(*) FROM ai_document_analysis"), "0")
-            with mock.patch.dict(os.environ, {"KNOWLEDGE_STORE_ENABLED": "true", "DOC_EXTRACTION_CACHE_ENABLED": "true"}):
+            with flags({"KNOWLEDGE_STORE_ENABLED": "true", "DOC_EXTRACTION_CACHE_ENABLED": "true"}):
                 run(hooks.save_extraction(link1, version, "m", {"raw_data": {}}))      # запасной ответ — нет
                 self.assertEqual(conn._run("SELECT count(*) FROM ai_document_analysis"), "0")
                 run(hooks.save_extraction(link1, version, "m", GOOD))
@@ -116,7 +117,7 @@ class CacheDbTests(unittest.TestCase):
                 self.assertIsNone(run(hooks.cached_extraction(link2, version, "m", force=True)))
                 self.assertIsNone(run(hooks.cached_extraction(link2, version, "other-model")))
                 self.assertIsNone(run(hooks.cached_extraction(None, version, "m")))
-            with mock.patch.dict(os.environ, {"KNOWLEDGE_STORE_ENABLED": "true", "DOC_EXTRACTION_CACHE_ENABLED": "false"}):
+            with flags({"KNOWLEDGE_STORE_ENABLED": "true", "DOC_EXTRACTION_CACHE_ENABLED": "false"}):
                 self.assertIsNone(run(hooks.cached_extraction(link2, version, "m")))
 
 

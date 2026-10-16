@@ -500,3 +500,425 @@ class ResilientClientTest(LLMTimeoutTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Purchase1405Test(unittest.TestCase):
+    """Закупка 0354100008624000011 (risk_monitoring_contract_id 1405): вложения прошлой редакции извещения
+    (3203–3205) загружены с eis_version = 2, как и новые (3196–3198); xml_source_id не заполнен."""
+
+    U = "https://zakupki.gov.ru/44fz/filestore/public/1.0/download/priz/file.html?uid="
+
+    def setUp(self):
+        """XML версий 1 и 2 и анализатор с подменёнными запросами."""
+        try:
+            from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
+        except ImportError as e:
+            raise unittest.SkipTest(f"нет зависимостей: {e}")
+
+        def att(name, uid):
+            """Вложение XML."""
+            return {"fileName": name, "docDescription": name.rsplit(".", 1)[0], "url": self.U + uid}
+
+        common = [att("Сводный сметный расчет.xlsx", "C4F9")]
+        v1 = {"attachmentsInfo": {"attachmentInfo": common + [
+            att("5.ПРОЕКТ ГПД.docx", "44D1"), att("1.Описание объекта закупки.docx", "8890"),
+            att("3.Требование к содер., составу заявки на участие в закупке.docx", "E61E")]}}
+        v2 = {"attachmentsInfo": {"attachmentInfo": common + [
+            att("5.ПРОЕКТ ГПД.docx", "1DD7"), att("1.Описание объекта закупки.docx", "84FD"),
+            att("3. Требования к содержанию, составу заявки и инструкция по ее заполнению.doc", "10A6")]}}
+        self.bodies = {3208: v1, 3209: v2}
+        xmls = [{"id": 3208, "entry_name": "epNotificationEF2020_0354100008624000011_1_0192.xml", "eis_version": 1,
+                 "tag": "epNotificationEF2020", "purchase_number": "0354100008624000011", "archive_url": "a"},
+                {"id": 3209, "entry_name": "epNotificationEF2020_0354100008624000011_2_0193.xml", "eis_version": 2,
+                 "tag": "epNotificationEF2020", "purchase_number": "0354100008624000011", "archive_url": "a"},
+                {"id": 3210, "entry_name": "epProtocolEF2020SubmitOffers_0354100008624000011_1_0193.xml",
+                 "eis_version": 1, "tag": "epProtocolEF2020SubmitOffers", "purchase_number": "0354100008624000011"}]
+        files = [{"id": 3198, "source_url": self.U + "10A6", "xml_source_id": None, "eis_version": 2,
+                  "file_name": "3. Требования к содержанию, составу заявки и инструкция по ее заполнению.doc", "path": "/p/3198"},
+                 {"id": 3205, "source_url": self.U + "E61E", "xml_source_id": None, "eis_version": 2,
+                  "file_name": "3.Требование к содер., составу заявки на участие в закупке.docx", "path": "/p/3205"}]
+
+        async def query(name, head=(), **lists):
+            """Запросы к внешней БД по данным CSV."""
+            if name == "xml_by_owner.sql":
+                return [dict(x) for x in xmls]
+            if name == "xml_previous.sql":
+                return [{"current_id": 3209, **xmls[0]}] if 3209 in lists["ids"] else []
+            if name == "files_by_ref.sql":
+                return [dict(f) for f in files if f["source_url"] in lists["urls"]]
+            return []
+
+        async def read_xml(archives, x):
+            """XML из «архива»."""
+            return self.bodies[int(x["id"])]
+
+        an = AIFileAnalyzer.__new__(AIFileAnalyzer)
+        an.storage_path, an.parser = "https://s", None
+        an._query, an._read_xml = query, read_xml
+        self.an = an
+        self.rows = [{"id": f["id"], "owner_number": "0354100008624000011", "owner_type": "notice",
+                      "eis_version": 2, "xml_source_id": None, "file_name": f["file_name"], "source_url": f["source_url"]}
+                     for f in files]
+
+    def test_old_attachment_superseded_new_finds_previous(self):
+        """3205 — прошлая редакция: XML версии 1, предыдущего нет, заменён файлом 3198; у 3198 предыдущая — 3205."""
+        res = asyncio.run(self.an.fetch_previous_versions(self.rows))
+        self.assertEqual(res[3198]["id"], 3205)
+        self.assertEqual(res[3198]["match"], "replaced")
+        self.assertNotIn(3205, res)
+        lk = self.an.lookups[3205]
+        self.assertEqual((lk["xml_id"], lk["xml_eis_version"], lk["match"]), (3208, 1, "no_previous_xml"))
+        self.assertEqual(lk["superseded_by"]["file_id"], 3198)
+        self.assertIn("eis_version = 2", lk["note"])
+
+
+class RiskDedupeTest(unittest.TestCase):
+    """Один типовой пункт под четырьмя кодами (файл 3205) — не больше двух, без синонимов."""
+
+    def test_merge(self):
+        """DOC-005/AI-005 и DOC-006/AI-003 на одной цитате → по одному коду из группы."""
+        from risk_monitoring.document_risk_analyzer import DocumentRiskAnalyzer
+
+        an = DocumentRiskAnalyzer.__new__(DocumentRiskAnalyzer)
+        frag = "10. Участником закупки в заявке устанавливаются характеристики и показатели товара"
+        risks = [{"code": c, "severity": "medium", "evidence": {"fragment": frag, "confidence": 0.9}}
+                 for c in ("DOC-005", "DOC-006", "AI-003", "AI-005")]
+        risks.append({"code": "DOC-004", "severity": "high", "evidence": {"fragment": "иной пункт", "confidence": 0.95}})
+        codes = sorted(r["code"] for r in an._merge(risks))
+        self.assertEqual(len([c for c in codes if c != "DOC-004"]), 2)
+        self.assertIn("DOC-004", codes)
+        self.assertFalse({"DOC-006", "AI-003"} <= set(codes))
+        self.assertFalse({"DOC-005", "AI-005"} <= set(codes))
+
+
+class PrintTitleTest(unittest.TestCase):
+    """Заголовок печатной формы, перенесённый на две строки."""
+
+    def test_title(self):
+        """«Изменения извещения о проведении» + «запроса котировок … №…» — одна строка."""
+        from knowledge_store.eis_printform import PrintForm
+        from risk_monitoring.printform_passport import _title
+
+        form = PrintForm("Печатная форма\nИзменения извещения о проведении\nзапроса котировок в электронной форме "
+                         "для закупки №0372100039726000019\nОбщая информация\nНомер извещения\n0372100039726000019")
+        self.assertEqual(_title(form), "Изменения извещения о проведении запроса котировок в электронной форме "
+                                       "для закупки №0372100039726000019")
+
+
+class StatutoryFilterTest(unittest.TestCase):
+    """Требования, установленные законом, и типовые формулировки инструкции — не риск (файл 3205)."""
+
+    def test_statutory(self):
+        """19.28 КоАП, безотзывная гарантия, «или»/«либо» — отбрасываются; опыт сверх закона — нет."""
+        from risk_monitoring.document_risk_analyzer import statutory
+
+        drop = [("DOC-004", "не было привлечено к административной ответственности за совершение "
+                            "административного правонарушения, предусмотренного статьей 19.28"),
+                ("DOC-005", "Независимая гарантия должна быть безотзывной и должна содержать: 1) сумму"),
+                ("DOC-006", "«или», «либо» - участником предлагается одно или несколько характеристик товара"),
+                ("PROC-012", "«или», «либо» - участником предлагается одно или несколько характеристик")]
+        for code, frag in drop:
+            self.assertTrue(statutory({"code": code, "evidence": {"fragment": frag}}), code)
+        keep = {"code": "DOC-004", "evidence": {"fragment": "Опыт реставрации объектов в Москве не менее 5 лет"}}
+        self.assertFalse(statutory(keep))
+        self.assertFalse(statutory({"code": "DOC-002", "evidence": {"fragment": "статьей 19.28"}}))
+
+
+class SupersededSkipTest(unittest.TestCase):
+    """Файл прошлой редакции с известной заменой — паспорт без скачивания и без модели."""
+
+    def test_skip(self):
+        """3205 заменён файлом 3198 — pipeline.result = superseded; в режиме отладки — обычный анализ."""
+        import sys
+        from unittest import mock
+
+        tde = types.ModuleType("evaluate_documents.type_data_extractor")
+        tde.DOCUMENT_TYPE_MAPPING = {"docTrebContentRequestFiles": "Требования к содержанию заявки"}
+        with mock.patch.dict(sys.modules, {"evaluate_documents.type_data_extractor": tde}):
+            try:
+                from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
+            except ImportError as e:
+                raise unittest.SkipTest(f"нет зависимостей: {e}")
+            an = AIFileAnalyzer.__new__(AIFileAnalyzer)
+            an.force, an.model, an.versions = False, "m", {}
+            an.lookups = {3205: {"superseded_by": {"file_id": 3198, "xml_eis_version": 2, "file_name": "3. Треб.doc"}}}
+            row = {"id": 3205, "file_name": "3.Требование к содер., составу заявки на участие в закупке.docx"}
+            ai = an._superseded_analysis(row, None, 1)
+            self.assertEqual(ai["pipeline"]["result"], "superseded")
+            self.assertEqual(ai["superseded_by"]["file_id"], 3198)
+            self.assertEqual(ai["doc_type"]["detected_type"], "docTrebContentRequestFiles")
+            an.force = True
+            self.assertIsNone(an._superseded_analysis(row, None, 1))
+
+
+class Run1015Test(unittest.TestCase):
+    """Прогон 15.10.2026: 3198 / 3205 (.doc и .docx), итоги таблицы НМЦК 1097, требования ПП № 2571 и СРО."""
+
+    def test_doc_docx_unwrap(self):
+        """Жёсткие переносы .doc не мешают сравнению с .docx той же редакции."""
+        from risk_monitoring.version_diff import text_diff
+
+        doc = ("1. Подать заявку на участие в закупке вправе только\nзарегистрированный участник закупки.\n"
+               "2. Участник закупки вправе подать\nтолько одну заявку.")
+        docx = ("1. Подать заявку на участие в закупке вправе только зарегистрированный участник закупки.\n"
+                "2. Участник закупки вправе подать только одну заявку.")
+        self.assertEqual(text_diff(doc, docx)["similarity"], 1.0)
+
+    def test_filters(self):
+        """Строка «ИТОГО» с несколькими суммами, СРО и опыт по ПП № 2571 — не риски."""
+        from risk_monitoring.document_risk_analyzer import statutory, table_total
+
+        self.assertTrue(table_total({"code": "FIN-015", "evidence": {"fragment": "ИТОГО 1 046 200,00 1 033 410,00 1 026 336,64"}}))
+        self.assertFalse(table_total({"code": "DOC-002", "evidence": {"fragment": "ИТОГО 1 046 200,00 1 033 410,00"}}))
+        self.assertTrue(statutory({"code": "DOC-004", "evidence": {"fragment": "Участник закупки должен быть членом СРО"}}))
+        self.assertTrue(statutory({"code": "DOC-005", "evidence": {
+            "fragment": "не менее 50 процентов начальной (максимальной) цены контракта, заключаемого по результатам"}}))
+
+    def test_previous_codes(self):
+        """Прошлая редакция без рисков (rule_ids NULL, статус completed) — пустой список, а не «нет данных»."""
+        try:
+            from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
+        except ImportError as e:
+            raise unittest.SkipTest(f"нет зависимостей: {e}")
+        an = AIFileAnalyzer.__new__(AIFileAnalyzer)
+        an.versions, an.model = {"risk_analysis": "r"}, "m"
+
+        async def no_cache(*a):
+            return None
+
+        an._get_cached = no_cache
+        self.assertEqual(asyncio.run(an._previous_codes({"rule_ids": None, "rm_status": "completed"}, None, [])), [])
+        self.assertEqual(asyncio.run(an._previous_codes({"rule_ids": '["DOC-004"]'}, None, [])), ["DOC-004"])
+        self.assertIsNone(asyncio.run(an._previous_codes({"rule_ids": None}, {"doc_id": None}, [])))
+
+
+class Run1015bTest(unittest.TestCase):
+    """Вторая проверка 15.10.2026: порядок редакций, схожесть по словам, источник требования, файлы XML."""
+
+    def test_waves(self):
+        """3205 (прошлая) раньше 3198 (новой); независимый файл — в первой волне."""
+        try:
+            from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
+        except ImportError as e:
+            raise unittest.SkipTest(f"нет зависимостей: {e}")
+        waves = AIFileAnalyzer._waves([3198, 3205, 1096], {3198: {"id": 3205}}, ["3198", "3205", "1096"])
+        self.assertEqual(waves, [[3205, 1096], [3198]])
+        # прошлая редакция уже проанализирована (не в todo) — ждать нечего
+        self.assertEqual(AIFileAnalyzer._waves([3198, 3205], {3198: {"id": 3205}}, [3198]), [[3198, 3205]])
+
+    def test_word_similarity(self):
+        """Таблица и текст с тем же содержанием: по абзацам 0, по словам — высокая."""
+        from risk_monitoring.version_diff import text_diff
+
+        old = "Требования к участнику | Участник должен быть зарегистрирован на электронной площадке и подать одну заявку"
+        new = "Требования к участнику:\nУчастник должен быть зарегистрирован на электронной площадке и подать одну заявку."
+        d = text_diff(old, new)
+        self.assertEqual(d["similarity_paragraphs"], 0.0)
+        self.assertGreater(d["similarity_words"], 0.7)
+        self.assertEqual(d["similarity"], d["similarity_words"])
+
+    def test_requirement_source_schema(self):
+        """В схеме ответа риска обязательно поле requirement_source."""
+        import json as _json
+
+        schema = _json.load(open("schemas/risk_analysis_schema.json", encoding="utf-8"))
+        item = schema["properties"]["risks"]["items"]
+        self.assertIn("requirement_source", item["required"])
+        self.assertEqual(item["properties"]["requirement_source"]["enum"], ["закон", "заказчик", "неясно"])
+
+    def test_pending_files(self):
+        """Файлы XML: по вложениям, печатной форме и xml_source_id; проанализированные — пропускаются."""
+        from risk_monitoring.xml_event_analyzer import XmlEventAnalyzer
+
+        xa = XmlEventAnalyzer.__new__(XmlEventAnalyzer)
+        xa.storage_path = "s"
+        body = (b'<epNotificationEF2020><attachmentsInfo><attachmentInfo><fileName>a.docx</fileName>'
+                b'<url>https://z/f?uid=A</url></attachmentInfo></attachmentsInfo>'
+                b'<printFormInfo><url>https://z/print?id=1</url></printFormInfo></epNotificationEF2020>')
+        seen = {}
+
+        async def query(name, head=(), **lists):
+            """Внешняя БД."""
+            if name == "xml_meta.sql":
+                return [{"id": 3209, "archive_url": "a", "entry_name": "e"}]
+            seen.update(lists)
+            return [{"id": 3198, "rm_status": None}, {"id": 3199, "rm_status": "completed"}]
+
+        class Arch:
+            async def read(self, url, entry):
+                return body
+
+        xa._query, xa.archives = query, Arch()
+        try:
+            ids = asyncio.run(xa.pending_files([3209]))
+        except ImportError as e:
+            raise unittest.SkipTest(f"нет зависимостей: {e}")
+        self.assertEqual(ids, [3198])
+        self.assertIn("https://z/f?uid=A", seen["urls"])
+        self.assertIn("https://z/print?id=1", seen["urls"])
+        self.assertEqual(asyncio.run(xa.pending_files([3209], include_done=True)), [3198, 3199])
+
+
+class ModelRestartTest(unittest.TestCase):
+    """Перезапуск модели 15.10.2026 19:02–19:06: 500 → 503 → 404 «Model not found»."""
+
+    def test_rm_client_retries(self):
+        """Клиент извлечения риск-мониторинга: 6 попыток вместо 2, вложенная обёртка не дублируется."""
+        from configs.llm_resilience import ResilientClient
+
+        raw = types.SimpleNamespace(chat=None)
+        rc = ResilientClient(ResilientClient(raw), retries=6)
+        self.assertIs(rc.raw_client, raw)
+        self.assertEqual(rc.chat.completions._retries, 6)
+
+    def test_ocr_error_marker(self):
+        """Текст с ошибкой OCR страницы распознаётся как неполный."""
+        try:
+            from risk_monitoring.ai_file_analyzer import OCR_ERROR_RE
+        except ImportError as e:
+            raise unittest.SkipTest(f"нет зависимостей: {e}")
+        self.assertTrue(OCR_ERROR_RE.search('Страница 2 (OCR): {"has_text": false, "processing_quality": {"status": "error"}}'))
+        self.assertTrue(OCR_ERROR_RE.search("Страница 3 (OCR):\n[Ошибка при анализе изображения]"))
+        self.assertFalse(OCR_ERROR_RE.search("Страница 1:\nСтатус заявки: ошибка заполнения"))
+
+
+class EventRiskShapeTest(unittest.TestCase):
+    """XML 3209 (15.10.2026): модель вернула verification_needed = 1 — событие падало с TypeError."""
+
+    def test_non_list_fields(self):
+        """Число, строка, null вместо массива — не ломают сборку рисков."""
+        from risk_monitoring.passport import as_text_list
+        from risk_monitoring.xml_events import to_external_event_risks
+
+        self.assertEqual(as_text_list(1), [])
+        self.assertEqual(as_text_list("Проверить основание"), ["Проверить основание"])
+        self.assertEqual(as_text_list(None), [])
+        out = to_external_event_risks([{"rule_id": "CTR-005", "verification_needed": 1}, "мусор"])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["verification_needed"], [])
+
+
+class InternalResultsTest(unittest.TestCase):
+    """Результаты анализа хранятся у нас (``ai_rm_results``) и используются, если их нет во внешней БД."""
+
+    class Repo:
+        """Хранилище результатов в памяти."""
+
+        def __init__(self, stored=None):
+            """``stored``: ``{(kind, id): запись}``."""
+            self.stored = stored or {}
+            self.saved, self.marked = [], []
+
+        async def get_rm_results(self, env, kind, ids):
+            """Записи по id."""
+            return {i: self.stored[(kind, i)] for i in ids if (kind, i) in self.stored}
+
+        async def save_rm_result(self, env, kind, external_id, ai, pushed, error=None):
+            """Запоминает сохранение."""
+            self.saved.append((kind, external_id, pushed))
+
+        async def mark_rm_pushed(self, env, kind, external_id):
+            """Запоминает дозапись."""
+            self.marked.append((kind, external_id))
+
+    class Api:
+        """Запись во внешнюю БД в памяти."""
+
+        def __init__(self):
+            """Пустой журнал."""
+            self.patched = []
+
+        async def patch_ai_analysis(self, table, rid, ai):
+            """Запоминает запись."""
+            self.patched.append((table, rid))
+
+    def _file_analyzer(self, repo):
+        """Анализатор файлов без внешних зависимостей."""
+        try:
+            from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
+        except ImportError as e:
+            raise unittest.SkipTest(f"нет зависимостей: {e}")
+        an = AIFileAnalyzer.__new__(AIFileAnalyzer)
+        an.repo, an.env, an.force, an.push_results = repo, "prod", False, True
+        an.risk_api = self.Api()
+        an.semaphore = asyncio.Semaphore(1)
+
+        async def boom(*a, **k):
+            raise AssertionError("повторный анализ не нужен")
+
+        an.analyze_file = boom
+        return an
+
+    def test_file_reused_from_internal(self):
+        """Во внешней БД статус не completed, у нас completed — дозапись без анализа."""
+        ai = {"risks": [{"rule_id": "DOC-004"}], "pipeline": {"status": "completed"}}
+        repo = self.Repo({("file", 7): {"ai_analysis": ai, "status": "completed", "debug": False}})
+        an = self._file_analyzer(repo)
+        an.internal = asyncio.run(an._internal([7]))
+        res = asyncio.run(an._guarded({"id": 7, "rm_status": None}, None))
+        self.assertEqual(res["source"], "internal")
+        self.assertTrue(res["pushed"])
+        self.assertEqual(repo.marked, [("file", 7)])
+
+    def test_debug_result_not_reused(self):
+        """Результат отладочного прогона не дозаписывается — файл анализируется заново."""
+        repo = self.Repo({("file", 7): {"ai_analysis": {}, "status": "completed", "debug": True}})
+        an = self._file_analyzer(repo)
+        an.internal = asyncio.run(an._internal([7]))
+
+        async def analyzed(row, previous, attempt):
+            return {"file_id": 7, "status": "done"}
+
+        an.analyze_file = analyzed
+        self.assertEqual(asyncio.run(an._guarded({"id": 7, "rm_status": None}, None))["status"], "done")
+
+    def test_previous_codes_from_internal(self):
+        """Прошлая редакция не записана во внешнюю БД, но есть у нас — коды берутся оттуда."""
+        ai = {"risks": [{"rule_id": "FIN-005"}, {"rule_id": "DOC-004"}], "pipeline": {"status": "completed"}}
+        an = self._file_analyzer(self.Repo({("file", 3): {"ai_analysis": ai, "status": "completed"}}))
+        an.versions, an.model, an.internal = {"risk_analysis": "r"}, "m", {}
+
+        async def no_cache(*a):
+            return None
+
+        an._get_cached = no_cache
+        self.assertEqual(asyncio.run(an._previous_codes({"id": 3, "rule_ids": None}, None, [])), ["DOC-004", "FIN-005"])
+
+    def test_no_table(self):
+        """Таблицы ещё нет (миграция 009 не применена) — пустой результат, анализ идёт как раньше."""
+
+        class Broken(self.Repo):
+            async def get_rm_results(self, *a):
+                raise RuntimeError('relation "ai_rm_results" does not exist')
+
+        an = self._file_analyzer(Broken())
+        self.assertEqual(asyncio.run(an._internal([1])), {})
+
+    def test_xml_files_from_internal(self):
+        """Резюме файла, которого нет во внешней БД, берётся из нашего результата; XML сохраняется у нас."""
+        try:
+            from risk_monitoring.xml_event_analyzer import XmlEventAnalyzer
+        except ImportError as e:
+            raise unittest.SkipTest(f"нет зависимостей: {e}")
+        repo = self.Repo({("file", 11): {"ai_analysis": {"resume": "Проект контракта", "total_doc_risk": 2,
+                                                          "doc_type": {"detected_type": "docProjContractFiles"}},
+                                         "status": "completed"},
+                          ("xml", 5): {"ai_analysis": {"x": 1}, "status": "completed", "debug": False}})
+        xa = XmlEventAnalyzer.__new__(XmlEventAnalyzer)
+        xa.results_repo, xa.env, xa.force, xa.push_results = repo, "prod", False, True
+        xa.risk_api = self.Api()
+        xa.semaphore = asyncio.Semaphore(1)
+
+        async def query(name, head=(), **lists):
+            return [{"id": 11, "file_name": "контракт.docx", "detected_type": None, "resume": None}]
+
+        xa._query = query
+        files = asyncio.run(xa._files(5, None, []))
+        self.assertEqual(files[0]["resume"], "Проект контракта")
+        self.assertEqual(files[0]["detected_type"], "docProjContractFiles")
+        xa.internal = asyncio.run(xa._internal("xml", [5]))
+        res = asyncio.run(xa._guarded({"id": 5, "rm_status": "failed"}, None))
+        self.assertEqual(res["source"], "internal")
+        self.assertEqual(repo.marked, [("xml", 5)])
+        asyncio.run(xa._save_internal(6, {}, False, "500"))
+        self.assertEqual(repo.saved, [("xml", 6, False)])
