@@ -115,11 +115,14 @@ class PackageRequest(AnalysisRequest):
 
     Attributes:
         use_llm: Резюме пишет модель (иначе — шаблон).
+        analyze_documents: Только для закупок — проанализировать файлы и XML, у которых нет результата ни во внешней
+            БД, ни у нас (``false`` — только сборка по готовым результатам).
         roles: Только для организаций — секции ``customer`` и/или ``supplier``.
         period_months: Только для организаций — период аналитики, месяцев (по умолчанию 12).
     """
 
     use_llm: bool = True
+    analyze_documents: bool = True
     roles: List[str] = Field(default_factory=lambda: ["customer", "supplier"])
     period_months: Optional[int] = Field(default=None, ge=1, le=60)
 
@@ -137,7 +140,8 @@ async def analyze_contracts(req: PackageRequest, x_api_database: str = Header(de
     """Ставит в очередь анализ закупок/контрактов (``risk_monitoring_contracts``): паспорт, комплект,
     согласованность, сводные риски файлов, событий, правил и реестра 19.28, балл и резюме.
 
-    Документы повторно не анализируются — берутся сохранённые результаты. Закупка пересчитывается, если изменились
+    Документы повторно не анализируются — берутся сохранённые результаты (внешняя БД, затем наше хранилище); файлы и
+    XML без результата сначала анализируются (``analyze_documents``). Закупка пересчитывается, если изменились
     входные данные; ``force`` (только в режиме отладки) — пересчитать в любом случае.
 
     Args:
@@ -152,7 +156,8 @@ async def analyze_contracts(req: PackageRequest, x_api_database: str = Header(de
 
     task = rm_analyze_contracts_task.apply_async(
         args=[req.ids, x_api_database],
-        kwargs={"force": req.force, "push": req.push, "use_llm": req.use_llm, "include_analysis": req.include_analysis},
+        kwargs={"force": req.force, "push": req.push, "use_llm": req.use_llm, "include_analysis": req.include_analysis,
+                "analyze_documents": req.analyze_documents},
         queue="risk_monitoring")
     return {"task_id": task.id, "count": len(req.ids), "status": "queued"}
 

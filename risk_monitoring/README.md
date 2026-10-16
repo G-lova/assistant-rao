@@ -10,7 +10,7 @@
 |---|---|---|---|
 | POST | `/risk-monitoring/files/analysis` | `{"ids": [1097, 1096], "push": true, "force": false, "recompute": false, "include_analysis": false}` | `202 {"task_id", "count", "status": "queued"}` |
 | POST | `/risk-monitoring/xml/analysis` | `{"ids": [812345], "push": true, "force": false, "include_analysis": false}` | `202 {"task_id", "count", "status": "queued"}` |
-| POST | `/risk-monitoring/contracts/analysis` | `{"ids": [26], "push": true, "use_llm": true, "force": false, "include_analysis": false}` | `202 {"task_id", "count", "status": "queued"}` |
+| POST | `/risk-monitoring/contracts/analysis` | `{"ids": [26], "push": true, "use_llm": true, "analyze_documents": true, "force": false, "include_analysis": false}` | `202 {"task_id", "count", "status": "queued"}` |
 | POST | `/risk-monitoring/organisations/analysis` | `{"ids": [7], "roles": ["customer", "supplier"], "period_months": 12, "use_llm": true, "include_analysis": true}` | `202 {"task_id", "count", "status": "queued"}` |
 | POST | `/risk-monitoring/typal-clauses/load` | `{"regions": ["34"], "dates": ["2026-10-15"], "read_files": true}` (пусто — по настройкам) | `202 {"task_id"}` |
 | POST | `/risk-monitoring/typal-clauses/xml?read_files=true` | тело — XML `typalOrderClause` | `202 {"task_id", "versions"}` |
@@ -79,7 +79,9 @@
 ## Анализ закупки/контракта (`risk_monitoring_contracts.ai_analysis`)
 
 `schema_version = "rm-contract-1"`, `pipeline.stage = "S2"`. Документы повторно **не** анализируются: берутся
-сохранённые результаты файлов и XML (во внешней БД, а если их там нет — у нас). Закупка — сводный объект и
+сохранённые результаты файлов и XML — во внешней БД, а если их там нет, у нас. Файлы и XML закупки без результата
+ни там, ни там сначала анализируются (`analyze_documents: true` по умолчанию): файлы, затем XML; счётчики — в
+`documents` ответа задачи. Закупка — сводный объект и
 пересчитывается при каждом запросе; если входные данные не изменились (`pipeline.input_hash`), пересчёт
 пропускается (`status: unchanged`). Модель пишет только резюме (один короткий запрос; `use_llm: false` — шаблон).
 
@@ -107,8 +109,8 @@
 
 | Роль | Метрики | Риски |
 |---|---|---|
-| Заказчик | Закупки и суммы, доля у единственного поставщика и с одной заявкой, среднее снижение цены, демпинг, изменения, расторжения, штрафы, средний балл закупок и доля красной зоны, поставщики, HHI, доля крупнейшего, повторяющиеся риски, контракты с поставщиками из реестра 19.28 | BEH-001 (низкая конкуренция), BEH-005 (концентрация на поставщике), HIST-001 (повтор риска в 3+ закупках), REG-001 |
-| Поставщик | Контракты, заказчики, доля крупнейшего заказчика, расторжения, демпинг, статус СМП, записи реестра 19.28 | REG-001 (запись реестра действует сейчас), BEH-002 (расторжения, систематический демпинг), BEH-006 (выключен: в БД только закупки заказчиков на мониторинге, концентрация завышена) |
+| Заказчик | Закупки и суммы, доля у единственного поставщика и с одной заявкой, среднее снижение цены, демпинг, изменения, расторжения, штрафы, средний балл закупок и доля красной зоны, поставщики, HHI, доля крупнейшего, повторяющиеся риски, контракты с поставщиками из реестра 19.28 | BEH-001 (низкая конкуренция), BEH-006 («любимый поставщик»: доля контрактов у одного поставщика ≥ 40 %), BEH-005 (концентрация сумм, HHI ≥ 2500), HIST-001 (повтор риска в 3+ закупках), REG-001 |
+| Поставщик | Контракты, заказчики, доля крупнейшего заказчика, расторжения, демпинг, статус СМП, записи реестра 19.28 | REG-001 (запись реестра действует сейчас), BEH-002 (расторжения, систематический демпинг) |
 
 Поведенческие риски — только при 5 и более закупках за период. **Внешняя система пока не принимает
 `ai_analysis` организаций**: результат хранится у нас (`ai_rm_results`, `kind = organisation`) и возвращается в задаче.
@@ -117,7 +119,7 @@
 
 ## Типовые положения о закупке (223-ФЗ)
 
-Источник — ЕИС, документ `typalOrderClause` (`getDocsByOrgRegionRequest`, подсистема `TYPAL_SUBSYSTEM = "RI223"`,
+Источник — ЕИС, документ `typalOrderClause` (`getDocsByOrgRegionRequest`, подсистема `TYPAL_SUBSYSTEM = "TPOZ223"`,
 регион — код ФНС). Ежедневно в 05:40 (Celery beat) загружаются публикации за последние `TYPAL_LOOKBACK_DAYS` дней по
 регионам `TYPAL_REGIONS` (пусто — регионы заказчиков на мониторинге окружения `TYPAL_REGIONS_ENVIRONMENT`).
 Миграция `010_typal_clauses.sql`.

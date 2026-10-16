@@ -12,11 +12,11 @@
 | Роль | Код | Условие |
 |---|---|---|
 | заказчик | BEH-001 | доля закупок у единственного поставщика или с одной заявкой ≥ ``CUSTOMER_LOW_COMPETITION_SHARE`` |
-| заказчик | BEH-005 | доля контрактов у одного поставщика ≥ ``CUSTOMER_TOP_SUPPLIER_SHARE`` (и не меньше 3 контрактов) |
+| заказчик | BEH-006 | «любимый поставщик»: доля контрактов у одного поставщика ≥ ``CUSTOMER_TOP_SUPPLIER_SHARE`` (и не меньше 3 контрактов) |
+| заказчик | BEH-005 | концентрация сумм контрактов: HHI ≥ ``CUSTOMER_HHI`` |
 | заказчик | HIST-001 | один и тот же риск в ``REPEAT_RISK_MIN`` и более закупках |
 | заказчик | REG-001 | контракты с поставщиками из реестра 19.28 КоАП на дату контракта |
 | поставщик | REG-001 | действующая запись в реестре 19.28 КоАП |
-| поставщик | BEH-006 | доля контрактов у одного заказчика ≥ ``SUPPLIER_TOP_CUSTOMER_SHARE`` (если включено ``SUPPLIER_CONCENTRATION_RISK``) |
 | поставщик | BEH-002 | доля расторгнутых контрактов ≥ ``SUPPLIER_TERMINATION_SHARE`` или доля демпинга ≥ 50 % |
 """
 from collections import Counter, defaultdict
@@ -167,10 +167,14 @@ def customer_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
     if len(with_supplier) >= settings.ORG_MIN_CONTRACTS and top and top[0]["contracts"] >= 3 \
             and (top[0]["share"] or 0) >= settings.CUSTOMER_TOP_SUPPLIER_SHARE:
         t = top[0]
-        risks.append(_risk("BEH-005", f"Концентрация контрактов: {t['name'] or t['inn']} — {t['contracts']} из "
-                                      f"{len(with_supplier)} ({round(100 * t['share'])} %)",
+        risks.append(_risk("BEH-006", f"«Любимый поставщик»: {t['name'] or t['inn']} — {t['contracts']} из "
+                                      f"{len(with_supplier)} контрактов заказчика ({round(100 * t['share'])} %)",
                            0.6, [{"src": "aggregate", "supplier_inn": t["inn"], "share": t["share"], "hhi": m["hhi"]}],
-                           ["Проверить, нет ли признаков «любимого поставщика» и дробления закупок"]))
+                           ["Проверить конкуренцию в закупках, где побеждает этот поставщик, связи сторон и дробление закупок"]))
+    if len(with_supplier) >= settings.ORG_MIN_CONTRACTS and m["suppliers"] >= 2 and (m["hhi"] or 0) >= settings.CUSTOMER_HHI:
+        risks.append(_risk("BEH-005", f"Высокая концентрация сумм контрактов заказчика (HHI {m['hhi']:.0f})",
+                           0.4, [{"src": "aggregate", "hhi": m["hhi"], "suppliers": m["suppliers"]}],
+                           ["Проверить, не распределяются ли крупные контракты между узким кругом поставщиков"]))
     if repeated:
         top_codes = list(m["repeated_risks"].items())[:5]
         risks.append(_risk("HIST-001", "Повторяющиеся риски в закупках заказчика: " +
@@ -215,14 +219,8 @@ def supplier_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
                              "date_begin": str(b.get("date_begin"))[:10]} for b in active],
                            ["Проверить, не заключались ли контракты в период действия записи"], confidence=1.0))
     enough = m["contracts"] >= settings.ORG_MIN_CONTRACTS
-    # В БД — только закупки заказчиков на мониторинге: у поставщика доля «одного заказчика» завышена, поэтому
-    # риск включается отдельно (settings.SUPPLIER_CONCENTRATION_RISK), метрика считается всегда
-    if settings.SUPPLIER_CONCENTRATION_RISK and enough and top and (top[0]["share"] or 0) >= settings.SUPPLIER_TOP_CUSTOMER_SHARE:
-        t = top[0]
-        risks.append(_risk("BEH-006", f"Контракты поставщика сосредоточены у одного заказчика: {t['name'] or t['inn']} — "
-                                      f"{t['contracts']} из {m['contracts']} ({round(100 * t['share'])} %)",
-                           0.6, [{"src": "aggregate", "customer_inn": t["inn"], "share": t["share"]}],
-                           ["Проверить конкуренцию в закупках этого заказчика и связи сторон"]))
+    # «Любимый поставщик» (BEH-006) — поведение заказчика, считается в его секции; здесь только метрика
+    # top_customer_share (в БД — закупки заказчиков на мониторинге, поэтому у поставщика она завышена)
     if m["contracts"] >= 3 and (m["terminated_share"] or 0) >= settings.SUPPLIER_TERMINATION_SHARE:
         risks.append(_risk("BEH-002", f"Расторгнуто {m['terminated']} из {m['contracts']} контрактов поставщика",
                            0.6, [{"src": "aggregate", "terminated_share": m["terminated_share"]}],

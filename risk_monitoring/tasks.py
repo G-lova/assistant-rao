@@ -151,10 +151,13 @@ def rm_analyze_xml_task(self, xml_ids: List[int], environment: str, force: bool 
     return out
 
 
-@celery_app.task(bind=True, name="rm_analyze_contracts_task", soft_time_limit=3300, time_limit=3600)
+@celery_app.task(bind=True, name="rm_analyze_contracts_task", soft_time_limit=10500, time_limit=10800)
 def rm_analyze_contracts_task(self, card_ids: List[int], environment: str, force: bool = False, push: bool = True,
-                              use_llm: bool = True, include_analysis: bool = False) -> Dict[str, Any]:
+                              use_llm: bool = True, include_analysis: bool = False,
+                              analyze_documents: bool = True) -> Dict[str, Any]:
     """Анализ закупок/контрактов (``risk_monitoring_contracts``) по сохранённым результатам документов.
+
+    Файлы и XML закупки без результата (ни во внешней БД, ни у нас) сначала анализируются (``analyze_documents``).
 
     Args:
         card_ids: id карточек.
@@ -163,9 +166,10 @@ def rm_analyze_contracts_task(self, card_ids: List[int], environment: str, force
         push: Записывать результат во внешнюю БД.
         use_llm: Резюме пишет модель.
         include_analysis: Вернуть ``ai_analysis`` в результате задачи.
+        analyze_documents: Анализировать недостающие файлы и XML закупок.
 
     Returns:
-        Dict[str, Any]: ``summary`` и ``results`` по карточкам.
+        Dict[str, Any]: ``summary``, ``documents`` (анализ недостающих документов) и ``results`` по карточкам.
     """
     from celery_app import already_succeeded
 
@@ -181,17 +185,20 @@ def rm_analyze_contracts_task(self, card_ids: List[int], environment: str, force
     async def run() -> List[Dict[str, Any]]:
         """HTTP-менеджер и пул Postgres внутри event loop задачи."""
         async with HTTPClientManager(timeout=180.0) as mgr, AIRepo() as repo:
-            analyzer = ContractAnalyzer(mgr, environment, repo, push_results=push, force=force, use_llm=use_llm)
+            analyzer = ContractAnalyzer(mgr, environment, repo, push_results=push, force=force, use_llm=use_llm,
+                                        analyze_documents=analyze_documents)
             try:
                 return await analyzer.analyze_ids(card_ids)
             finally:
                 stats.update(analyzer.stats)
+                documents.update(analyzer.documents)
 
+    documents: Dict[str, Any] = {}
     results = asyncio.run(run())
     summary = _summary(results)
     summary["llm"] = _llm_summary(before, stats)
-    logger.info(f"Риск-мониторинг, закупки: {summary}")
-    return {"summary": summary, "results": _strip(results, include_analysis)}
+    logger.info(f"Риск-мониторинг, закупки: {summary}; документы: {documents}")
+    return {"summary": summary, "documents": documents, "results": _strip(results, include_analysis)}
 
 
 @celery_app.task(bind=True, name="rm_analyze_orgs_task", soft_time_limit=3300, time_limit=3600)

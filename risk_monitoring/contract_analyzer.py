@@ -1,7 +1,9 @@
 """Анализ закупки/контракта по карточке ``risk_monitoring_contracts`` (этапы S2–S3a) и запись ``ai_analysis``.
 
-Документы повторно не анализируются: берутся сохранённые результаты файлов и XML (во внешней БД, а если их там нет —
-у нас, ``ai_rm_results``), значения правил, реестр 19.28 и ``dataset`` (правила сборки — ``contract_package``).
+Документы повторно не анализируются: берутся сохранённые результаты файлов и XML — во внешней БД, а если их там нет,
+у нас (``ai_rm_results``). Файлы и XML закупки, у которых результата нет ни там, ни там, анализируются
+(``analyze_documents``): сначала файлы, затем XML (событие получает резюме и риски файлов). Затем — значения правил,
+реестр 19.28 и ``dataset`` (правила сборки — ``contract_package``).
 Модель пишет только резюме (``settings.PACKAGE_LLM_RESUME``), один короткий запрос на закупку.
 
 Закупка — сводный объект, его анализ пересчитывается при каждом запросе. Если входные данные не изменились
@@ -40,6 +42,14 @@ def _none(v: Any) -> Any:
         return v
 
 
+def _counts(results: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Счётчики результатов анализа документов по статусам."""
+    out: Dict[str, int] = {}
+    for r in results:
+        out[r.get("status", "unknown")] = out.get(r.get("status", "unknown"), 0) + 1
+    return out
+
+
 class ContractAnalyzer:
     """Анализ закупок/контрактов по id карточек.
 
@@ -49,11 +59,12 @@ class ContractAnalyzer:
         repo: ``AIRepo`` — внутреннее хранилище результатов (``ai_rm_results``); ``None`` — без него.
         push_results: Записывать ``ai_analysis`` во внешнюю БД.
         force: Пересчитать, даже если входные данные не изменились (режим отладки).
-        use_llm: Резюме пишет модель (иначе — шаблон).
+        use_llm: Резюме пишет модель (иначе — шаблон); также ``EventAnalyzer`` для непроанализированных XML.
+        analyze_documents: Анализировать файлы и XML закупки, у которых нет результата ни во внешней БД, ни у нас.
     """
 
     def __init__(self, http_manager: Any, environment: str, repo: Any = None, push_results: bool = True,
-                 force: bool = False, use_llm: bool = True):
+                 force: bool = False, use_llm: bool = True, analyze_documents: bool = True):
         """Создаёт доступ к внешней БД, клиент записи и (при ``use_llm``) модель для резюме."""
         from configs.data_fetcher import DataFetcher
         from risk_monitoring.risk_monitoring_api import RiskMonitoringAPI
@@ -62,6 +73,10 @@ class ContractAnalyzer:
         db = cfg.get_database_config(environment)
         self.env = (environment or cfg.APP_ENV).lower()
         self.repo = repo
+        self.http_manager = http_manager
+        self.environment = environment
+        self.use_llm = use_llm
+        self.analyze_documents = analyze_documents
         self.push_results = push_results
         self.force = force
         self.data_fetcher = DataFetcher(db.url, db.headers, http_manager)
@@ -75,6 +90,7 @@ class ContractAnalyzer:
             client, self.model = reasoning_llm(*get_llm())
             self.llm = LLMJson(client, self.model, concurrency=2)
         self.stats: Dict[str, Any] = {"llm_resume": 0}
+        self.documents: Dict[str, Any] = {}
 
     async def _query(self, name: str, head: List[Any] = (), **lists: List[Any]) -> List[Dict[str, Any]]:
         """Выполняет ``queries/rm/<name>`` и возвращает строки как словари."""
@@ -115,12 +131,57 @@ class ContractAnalyzer:
                      finances=(ai.get("raw_data") or {}).get("finances") if isinstance(ai.get("raw_data"), dict) else None,
                      superseded_by=ai.get("superseded_by"))
 
+    async def _fill_xml_from_internal(self, xmls: List[Dict[str, Any]]) -> None:
+        """XML без результата во внешней БД получают событие, резюме и риски из нашего хранилища."""
+        missing = [int(x["id"]) for x in xmls if x.get("rm_status") != "completed"]
+        stored = await self._internal("xml", missing)
+        for x in xmls:
+            s = stored.get(int(x["id"]))
+            if s and s.get("status") == "completed":
+                ai = s["ai_analysis"] or {}
+                x.update(rm_status="completed", source="internal", event=ai.get("event"), resume=ai.get("resume"),
+                         risks=ai.get("risks"))
+
+    async def _analyze_missing(self, data: Dict[str, Any]) -> bool:
+        """Анализирует файлы и XML закупок, у которых нет результата ни во внешней БД, ни у нас.
+
+        Файлы — ``AIFileAnalyzer`` (уже проанализированные и исчерпавшие попытки он сам пропускает), затем XML —
+        ``XmlEventAnalyzer`` со свежими результатами файлов. Результаты пишутся во внешнюю БД (``push``) и у нас.
+
+        Returns:
+            bool: Что-то проанализировано — входные данные нужно перечитать.
+        """
+        file_ids = [int(f["id"]) for f in data["files"] if f.get("rm_status") != "completed"]
+        xml_ids = [int(x["id"]) for x in data["xmls"] if x.get("rm_status") != "completed"]
+        if not (file_ids or xml_ids) or self.repo is None:
+            return False
+        logger.info(f"Закупки: анализ недостающих документов — файлов {len(file_ids)}, XML {len(xml_ids)}")
+        fresh: Dict[int, Dict[str, Any]] = {}
+        if file_ids:
+            from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
+
+            fa = AIFileAnalyzer(self.http_manager, self.environment, self.repo, push_results=self.push_results)
+            f_res = await fa.analyze_ids(file_ids)
+            fresh = {int(r["file_id"]): r["ai_analysis"] for r in f_res if r.get("ai_analysis") and r.get("file_id") is not None}
+            self.documents["files"] = _counts(f_res)
+            self.documents["files_stats"] = fa.stats
+        if xml_ids:
+            from risk_monitoring.xml_event_analyzer import XmlEventAnalyzer
+
+            xa = XmlEventAnalyzer(self.http_manager, self.environment, push_results=self.push_results,
+                                  use_llm=self.use_llm, results_repo=self.repo)
+            xa.file_results = fresh
+            self.documents["xml"] = _counts(await xa.analyze_ids(xml_ids))
+            self.documents["xml_stats"] = getattr(xa, "stats", {})
+        return True
+
     async def _load(self, ids: List[int]) -> Dict[str, Any]:
         """Все входные данные по карточкам одним набором запросов."""
         cards = await self._query("contract_cards.sql", ids=ids)
         files = await self._query("contract_files.sql", ids=ids)
         await self._fill_from_internal(files)
         xmls = await self._query("contract_xml.sql", ids=ids)
+        await self._fill_xml_from_internal(xmls)
         rules = await self._safe_query("contract_rules.sql", ids=ids)
         statuses_rows = await self._safe_query("file_risk_statuses.sql", ids=[int(f["id"]) for f in files]) if files else []
         inns = sorted({str(i) for i in ((cp.as_json(c.get("dataset")) or {}).get("supplier", {}).get("post_inn") for c in cards) if i})
@@ -157,6 +218,8 @@ class ContractAnalyzer:
         """
         ids = list(dict.fromkeys(int(i) for i in card_ids))
         data = await self._load(ids)
+        if self.analyze_documents and await self._analyze_missing(data):
+            data = await self._load(ids)   # результаты документов — во внешней БД или у нас
         by = self._group(data)
         statuses: Dict[Tuple[int, str], int] = {}
         for s in data["statuses"]:

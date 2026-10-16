@@ -110,12 +110,12 @@ class OrgProfileTest(unittest.TestCase):
     """Аналитика заказчика и поставщика."""
 
     def test_customer_concentration_and_competition(self):
-        """6 из 8 контрактов у одного поставщика, 5 из 8 с одной заявкой → BEH-005, BEH-001; повтор DOC-004 → HIST-001."""
+        """6 из 8 контрактов у одного поставщика, 5 из 8 с одной заявкой → BEH-006, BEH-001; повтор DOC-004 → HIST-001."""
         cs = [_contract(i, single_app_flag="true" if i < 5 else "false") for i in range(6)] + \
              [_contract(10, supplier="3333333333"), _contract(11, supplier="4444444444")]
         sec = org_profile.customer_section(cs, [], settings)
         codes = {r["rule_id"] for r in sec["risks"]}
-        self.assertTrue({"BEH-005", "BEH-001", "HIST-001"} <= codes)
+        self.assertTrue({"BEH-006", "BEH-001", "HIST-001"} <= codes)
         self.assertEqual(sec["top_suppliers"][0]["contracts"], 6)
         self.assertEqual(sec["metrics"]["repeated_risks"], {"DOC-004": 8})
 
@@ -125,7 +125,7 @@ class OrgProfileTest(unittest.TestCase):
         self.assertFalse([r for r in sec["risks"] if r["rule_id"].startswith("BEH")])
 
     def test_supplier_registry_and_terminations(self):
-        """Поставщик в реестре сейчас → REG-001; 2 расторжения из 4 → BEH-002; концентрация выключена настройкой."""
+        """Поставщик в реестре сейчас → REG-001; 2 расторжения из 4 → BEH-002; «любимый поставщик» — риск заказчика, не поставщика."""
         cs = [_contract(i, term_code="1" if i < 2 else None) for i in range(4)]
         black = [{"id": 9, "inn": "1111111111", "date_begin": date.today().isoformat(), "deal_number": "1"}]
         sec = org_profile.supplier_section(cs, black, "1111111111", settings)
@@ -204,6 +204,7 @@ class FakeAnalyzerTest(unittest.TestCase):
             raise unittest.SkipTest(f"нет зависимостей: {e}")
         an = ContractAnalyzer.__new__(ContractAnalyzer)
         an.env, an.force, an.push_results, an.llm, an.model, an.stats = "dev", False, True, None, None, {"llm_resume": 0}
+        an.analyze_documents, an.documents, an.http_manager, an.environment, an.use_llm = False, {}, None, "dev", False
         an.patched, an.saved = [], []
 
         class Api:
@@ -240,6 +241,49 @@ class FakeAnalyzerTest(unittest.TestCase):
                                            prev_score=res[0]["ai_analysis"]["profile"]["score"])]
         self.assertEqual(asyncio.run(an.analyze_ids([26]))[0]["status"], "unchanged")
 
+
+    def test_missing_documents_analyzed(self):
+        """Файл и XML без результата во внешней БД и у нас анализируются (файлы — до XML), затем данные перечитываются."""
+        import sys
+        import types
+        from unittest import mock
+
+        an = self._analyzer()
+        an.analyze_documents = True
+        calls = []
+        state = {"done": False}
+
+        class FA:
+            def __init__(self, *a, **k):
+                self.stats = {}
+
+            async def analyze_ids(self, ids):
+                calls.append(("files", ids))
+                state["done"] = True
+                return [{"file_id": 5, "status": "done", "ai_analysis": {"resume": "r"}}]
+
+        class XA:
+            def __init__(self, *a, **k):
+                self.stats = {}
+
+            async def analyze_ids(self, ids):
+                calls.append(("xml", ids, dict(self.file_results)))
+                return [{"xml_id": 9, "status": "done"}]
+
+        async def query(name, head=(), **lists):
+            st = "completed" if state["done"] else None
+            return {"contract_cards.sql": [dict(CARD)],
+                    "contract_files.sql": [{"id": 5, "card_id": 26, "file_name": "ТЗ.docx", "rm_status": st}],
+                    "contract_xml.sql": [{"id": 9, "card_id": 26, "xml_tag": "epNotificationEF2020", "rm_status": st}]}.get(name, [])
+
+        an._query = query
+        mods = {"risk_monitoring.ai_file_analyzer": types.SimpleNamespace(AIFileAnalyzer=FA),
+                "risk_monitoring.xml_event_analyzer": types.SimpleNamespace(XmlEventAnalyzer=XA)}
+        with mock.patch.dict(sys.modules, mods):
+            res = asyncio.run(an.analyze_ids([26]))
+        self.assertEqual(calls, [("files", [5]), ("xml", [9], {5: {"resume": "r"}})])
+        self.assertEqual(an.documents["files"], {"done": 1})
+        self.assertEqual(res[0]["ai_analysis"]["package"]["files_analyzed"], 1)
 
     def test_org_flow(self):
         """OrgAnalyzer: строки организации по годам → каноническая строка, секции заказчика и поставщика."""

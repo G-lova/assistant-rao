@@ -41,11 +41,8 @@ PACKAGE_LLM_RESUME = True
 ORG_PERIOD_MONTHS = 12
 ORG_MIN_CONTRACTS = 5                  # меньше — поведенческие риски не ставятся (мало данных)
 CUSTOMER_LOW_COMPETITION_SHARE = 0.5   # доля закупок с одной заявкой / у единственного поставщика → BEH-001
-CUSTOMER_TOP_SUPPLIER_SHARE = 0.4      # доля контрактов у одного поставщика → BEH-005
-SUPPLIER_TOP_CUSTOMER_SHARE = 0.7      # доля контрактов поставщика у одного заказчика → BEH-006
-# В БД только закупки заказчиков на мониторинге — у поставщика концентрация завышена; риск BEH-006 выключен,
-# пока не появятся данные о всех контрактах поставщика (метрика top_customer_share считается всегда)
-SUPPLIER_CONCENTRATION_RISK = False
+CUSTOMER_TOP_SUPPLIER_SHARE = 0.4      # доля контрактов заказчика у одного поставщика → BEH-006 «любимый поставщик»
+CUSTOMER_HHI = 2500                    # индекс Херфиндаля–Хиршмана по суммам контрактов заказчика → BEH-005
 SUPPLIER_TERMINATION_SHARE = 0.2       # доля расторгнутых контрактов поставщика → BEH-002
 DEMPING_PCT = 25                       # снижение цены на торгах, %, с которого контракт считается демпинговым
 REPEAT_RISK_MIN = 3                    # риск одного кода в стольких закупках заказчика → HIST-001
@@ -57,6 +54,6 @@ TYPAL_LOAD_ENABLED = True
 # Коды регионов ФНС (две цифры); пусто — регионы заказчиков на мониторинге (dataset.owner.region)
 TYPAL_REGIONS: tuple = ()
 TYPAL_REGIONS_ENVIRONMENT = "prod"     # окружение, по заказчикам которого определяются регионы (если TYPAL_REGIONS пуст)
-TYPAL_SUBSYSTEM = "RI223"              # подсистема ЕИС для getDocsByOrgRegionRequest
+TYPAL_SUBSYSTEM = "TPOZ223"              # подсистема ЕИС для getDocsByOrgRegionRequest
 TYPAL_DOCUMENT_TYPE = "typalOrderClause"
 TYPAL_LOOKBACK_DAYS = 3                # ежедневная загрузка берёт столько прошедших дней (ЕИС выгружает с задержкой)
