@@ -18,7 +18,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tup
 
 from configs.config import Config
 from configs.logger import get_logger
-from knowledge_store import assessment, contract_check, doc_titles, eis_notice, facts as facts_mod, form_keys, forms, repository as repo
+from knowledge_store import (assessment, contract_check, doc_titles, eis_notice, facts as facts_mod, form_keys, forms, law_context,
+                             repository as repo, value_format)
 from knowledge_store.scope import Scope
 
 logger = get_logger(__name__)
@@ -289,7 +290,8 @@ def clean_comment(comment: Optional[str], filename: Optional[str] = None) -> Opt
     return defragment(text).strip()
 
 
-def derive_documentation(data: Dict[str, Any], trace: Dict[str, Any], contract_key: Optional[str] = None) -> None:
+def derive_documentation(data: Dict[str, Any], trace: Dict[str, Any], contract_key: Optional[str] = None,
+                         documentation_key: Optional[str] = None) -> None:
     """3.7 (соответствие документации 44-ФЗ) из 2.5: проект контракта — часть документации.
 
     По эталону экспертов при «0» в 2.5 в критерии 3.7 тоже «0» (19 из 19). Если 2.5 = «0» (кроме «0» на слабой
@@ -299,10 +301,13 @@ def derive_documentation(data: Dict[str, Any], trace: Dict[str, Any], contract_k
     Args:
         data: ``data`` (изменяется на месте).
         trace: ``trace`` (изменяется на месте).
-        contract_key: Ключ 2.5 в форме (``form_keys.FormKeys.contract``); по умолчанию — ключ конкурса.
+        contract_key: Ключ «проект контракта» в форме (``form_keys.FormKeys.contract``).
+        documentation_key: Ключ «соответствие документации Закону № 44-ФЗ» (``FormKeys.documentation``). В формах
+            223-ФЗ такого критерия нет — вывод не выполняется. Если оба ключа не заданы, берутся ключи конкурса.
     """
-    src, dst = contract_check_keys()
-    src = contract_key or src
+    src, dst = (contract_key, documentation_key) if (contract_key or documentation_key) else contract_check_keys()
+    if not src or not dst:
+        return
     if src in data and dst in data and data[src] == 0 and data[dst] in (None, 1) and not trace.get(src, {}).get("weak_zero"):
         data[dst] = 0
         trace[dst] = {"status": "proposed", "source": "derived", "derived_from": src, "quote": None, "comment": None,
@@ -463,7 +468,7 @@ def assemble(fields: Sequence[dict], fact_rows: Sequence[dict], documents: Dict[
                 data[key], trace[key] = value, entry
 
     apply_nmck_method_rule(fields, documents, data, trace)
-    derive_documentation(data, trace, fk.contract)
+    derive_documentation(data, trace, fk.contract, fk.documentation)
 
     # итоги подразделов — из решённых дочерних критериев
     for field in fields:
@@ -988,7 +993,7 @@ def fallback_block(key: str, remarks: Sequence[dict], stats: Dict[str, int], nam
         subject += f" на {name.strip().rstrip('.')}"
     if not remarks:
         return (f"{subject} соответствуют требованиям законодательства. На основании представленной документации "
-                f"целесообразно оформить документацию и осуществить закупку в соответствии с требованиями {LAW_44FZ}.")
+                f"целесообразно оформить документацию и осуществить закупку в соответствии с требованиями {law_context.law_title()}.")
     groups: Dict[str, List[str]] = {}
     for r in remarks:
         num = r.get("number") or _title(r["criterion"])
@@ -1021,7 +1026,7 @@ async def write_blocks(fields: Sequence[dict], data: Dict[str, Any], trace: Dict
     remarks = collect_remarks(fields, data, trace)
     checked = sum(1 for f in fields if f["value_kind"] in RESULT_KINDS and data.get(f["field_key"]) is not None)
     stats = {"checked": checked, "remarks": len(remarks)}
-    full_prompt = PROMPT_PATH.read_text(encoding="utf-8")
+    full_prompt = law_context.localize(PROMPT_PATH.read_text(encoding="utf-8"))
     procedure = procedure_phrase(form_code)
     for key in ("field3", "field4"):
         if key not in data:
@@ -1209,7 +1214,7 @@ async def fill_funding_advance(fields: Sequence[dict], data: Dict[str, Any], tra
 
     if not windows:
         return fail("в документах не найдено мест со словами «источник финансирования» / «аванс»")
-    messages = [{"role": "system", "content": FUNDING_PROMPT},
+    messages = [{"role": "system", "content": law_context.localize(FUNDING_PROMPT)},
                 {"role": "user", "content": "\n\n".join(f"[{i}] {w}" for i, w in enumerate(windows, 1))}]
     try:
         raw = await llm_call(messages, FUNDING_SCHEMA)
@@ -1357,6 +1362,7 @@ async def generate_summary(conn, scope: Scope, llm_call: Optional[LlmCall],
     """
     ready = await precheck(conn, scope)
     code = ready["form_code"]
+    law_context.set_from_form(code)       # 44-ФЗ или 223-ФЗ: промпты, чек-листы, правила проекта контракта
     # факты раздела 1 из XML/печатной формы дёшевы и детерминированы — обновляются при каждой сборке
     eis_stats = await facts_mod.extract_facts(conn, scope, code, None)
     fact_rows = [dict(r) for r in await repo.get_facts(conn, scope)]
@@ -1399,6 +1405,7 @@ async def generate_summary(conn, scope: Scope, llm_call: Optional[LlmCall],
                   "eis_xml": eis_stats.get("eis_xml", 0), "eis_print_form": eis_stats.get("eis_print_form", 0)})
     trace["_summary"] = {"unresolved": unresolved, "proposed": proposed, "suspected": suspected, "problems": problems}
     trace["_rm_findings"] = await rm_findings_safe(conn, scope)
+    data = value_format.to_form_format(code, data, trace)       # true/false там, где так хранят эксперты
     async with conn.transaction():
         summary_id = await repo.insert_summary(conn, scope, code, data, trace, status)
         await repo.touch_expiry(conn, scope, Config.PE_TEXT_RETENTION_DAYS)

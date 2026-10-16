@@ -13,6 +13,7 @@
 Модуль не зависит от ``asyncpg`` и сети, поэтому полностью тестируется локально.
 """
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional
 
@@ -30,13 +31,18 @@ METHOD_BY_KEYWORD = (
     ("ед поставщик", "single_supplier"),
 )
 
-# Способ закупки по checkType2 из queries/evaluate_docs_script.sql (только 44-ФЗ-способы).
+# Способ закупки по checkType2 из queries/evaluate_docs_script.sql (44-ФЗ-способы).
 METHOD_BY_CHECK_TYPE2 = {
     1: "competition", 2: "competition", 3: "competition",
     4: "auction", 5: "auction", 6: "auction",
     7: "quotation", 8: "quotation",
     11: "single_supplier",
 }
+
+# 223-ФЗ: в Excel две формы — «Новый (конкурс, аукцион, котировки)» и «Ед поставщик Новый». Запрос предложений (9, 10)
+# проводится по тому же шаблону, что и конкурентные способы. «Иные способы» (12) и отчётные документы (13–15) формы не имеют.
+METHOD_BY_CHECK_TYPE2_223 = {**{n: "competitive" for n in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)}, 11: "single_supplier"}
+OBJECT_223_FORMS = 6          # «Документация о проведении закупки» — единственный объект, для которого в Excel есть формы 223-ФЗ
 
 LAW_PREFIX = {"44-ФЗ": "44fz", "223-ФЗ": "223fz"}
 
@@ -77,16 +83,23 @@ class FormField:
     derived: bool = False
 
 
-def method_code_from_title(title: str) -> Optional[str]:
+def method_code_from_title(title: str, law: str = "44-ФЗ") -> Optional[str]:
     """Определяет код способа закупки по названию формы из Excel.
 
     Args:
-        title: Название формы, например ``Конкурс новый 44-ФЗ``.
+        title: Название формы, например ``Конкурс новый 44-ФЗ`` или ``223-ФЗ Новый (конкурс, аукцион, котировки)``.
+        law: ``44-ФЗ`` или ``223-ФЗ``. Для 223-ФЗ одна форма обслуживает несколько способов, поэтому она называется
+            ``competitive`` (а не по первому слову названия), единственный поставщик — ``single_supplier``.
 
     Returns:
-        ``competition`` / ``auction`` / ``quotation`` / ``single_supplier`` или ``None``.
+        ``competition`` / ``auction`` / ``quotation`` / ``single_supplier`` (44-ФЗ), ``competitive`` /
+        ``single_supplier`` (223-ФЗ) или ``None``.
     """
     low = (title or "").lower()
+    if law == "223-ФЗ":
+        if "ед поставщик" in low or "единственн" in low:
+            return "single_supplier"
+        return "competitive" if any(w in low for w in ("конкурс", "аукцион", "котировк")) else None
     for word, code in METHOD_BY_KEYWORD:
         if word in low:
             return code
@@ -125,7 +138,8 @@ def get_form_code(law: Optional[str], check_type2: Optional[int], object_code: O
         Код формы или ``None``, если форму определить нельзя или она не поддерживается.
     """
     try:
-        method = METHOD_BY_CHECK_TYPE2.get(int(check_type2))
+        table = METHOD_BY_CHECK_TYPE2_223 if law == "223-ФЗ" else METHOD_BY_CHECK_TYPE2
+        method = table.get(int(check_type2))
         obj = int(object_code)
     except (TypeError, ValueError):
         return None
@@ -138,13 +152,17 @@ def get_form_code(law: Optional[str], check_type2: Optional[int], object_code: O
 
 
 def _cell(ws, row: int, col: int):
-    """Значение ячейки (``str`` без пробелов по краям или ``None``)."""
+    """Значение ячейки (``str`` в нормализованном виде NFC без пробелов по краям или ``None``).
+
+    Нормализация нужна, потому что в Excel часть названий (лист 223-ФЗ) записана с комбинируемыми знаками («и» + U+0306
+    вместо «й»), и по таким названиям не работает ни поиск по шаблону, ни сопоставление правил.
+    """
     if col < 1:
         return None
     value = ws.cell(row, col).value
     if value is None:
         return None
-    text = str(value).strip()
+    text = unicodedata.normalize("NFC", str(value)).strip()
     return text or None
 
 
@@ -186,7 +204,7 @@ def classify(key: str, label: str, has_children: bool) -> tuple:
     """
     if key in ("code", "name", "inn", "documents"):
         return KIND_META, None
-    if key in ("field3", "field4") or key.endswith("_text"):
+    if key in ("field3", "field4") or key.endswith("_text") or re.match(r"(?i)\s*комментарий", label or ""):
         return KIND_TEXT, 3
     if key in ("field1_1", "field1_2"):
         return KIND_NUMBER, 1
@@ -203,22 +221,42 @@ def classify(key: str, label: str, has_children: bool) -> tuple:
     return KIND_COMPLIANCE, 2
 
 
-def parse_forms_sheet(ws) -> Dict[str, List[FormField]]:
-    """Разбирает лист «Все Закупки 44-фз» в справочник полей.
+def _find_blocks_223(ws, header_row: int = 2) -> List[dict]:
+    """Находит блоки форм на листе «Все Закупки 223-фз».
+
+    В отличие от 44-ФЗ, здесь нет ячеек «Объект N»: название формы стоит во второй строке в первой колонке блока
+    (A и G), колонка названий критериев — через три колонки справа, колонка ключей — через четыре. Блок начинается
+    с ячейки, в которой название формы начинается с «223».
+
+    Returns:
+        Список словарей ``{title, object_code, key_col, label_col, first_col}`` (объект — :data:`OBJECT_223_FORMS`).
+    """
+    blocks = []
+    for col in range(1, ws.max_column + 1):
+        title = _cell(ws, header_row, col)
+        if title and title.startswith("223"):
+            blocks.append({"title": title, "object_code": OBJECT_223_FORMS, "key_col": col + 4,
+                           "label_col": col + 3, "first_col": col})
+    return blocks
+
+
+def parse_forms_sheet(ws, law: str = "44-ФЗ") -> Dict[str, List[FormField]]:
+    """Разбирает лист «Все Закупки 44-фз» или «Все Закупки 223-фз» в справочник полей.
 
     Args:
         ws: Лист ``openpyxl`` (``data_only=True``).
+        law: ``44-ФЗ`` (блоки находятся по ячейкам «Объект N») или ``223-ФЗ`` (по названию формы, см. :func:`_find_blocks_223`).
 
     Returns:
         Словарь ``код формы → список FormField`` в порядке следования в Excel
         (вместе с производными ключами). Блоки без распознаваемого способа закупки пропускаются.
     """
     result: Dict[str, List[FormField]] = {}
-    for block in _find_blocks(ws):
-        method = method_code_from_title(block["title"])
+    for block in (_find_blocks_223(ws) if law == "223-ФЗ" else _find_blocks(ws)):
+        method = method_code_from_title(block["title"], law)
         if not method:
             continue
-        form_code = build_form_code("44-ФЗ", method, block["object_code"])
+        form_code = build_form_code(law, method, block["object_code"])
         raw = []  # (key, label, section)
         block_name = section = subsection = None
         for row in range(2, ws.max_row + 1):

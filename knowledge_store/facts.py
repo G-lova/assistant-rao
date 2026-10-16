@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
 from configs.logger import get_logger
-from knowledge_store import eis_notice, eis_printform, form_keys, repository as repo
+from knowledge_store import eis_notice, eis_printform, form_keys, law_context, repository as repo
 from knowledge_store.scope import Scope
 
 logger = get_logger(__name__)
@@ -152,7 +152,7 @@ def build_messages(label: str, kind: str, fragments: Sequence[Fragment], system_
         for i, f in enumerate(fragments, 1))
     kind_hint = "наличие информации" if kind == "presence" else "соответствие требованиям законодательства"
     user = f"Критерий ({kind_hint}): {label}\n\nФрагменты документов:\n\n{shown}"
-    return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user}]
+    return [{"role": "system", "content": law_context.localize(system_prompt)}, {"role": "user", "content": user}]
 
 
 def parse_json_any(raw: str) -> Any:
@@ -448,6 +448,7 @@ async def extract_facts(conn, scope: Scope, form_code: str, extractor: Optional[
         dict: Счётчики: ``eis`` (из XML), ``llm`` (принятые ответы модели), ``rejected`` (отвергнутые
         или без текста), ``fields`` (полей проверялось).
     """
+    law_context.set_from_form(form_code)
     fields = [dict(r) for r in await repo.get_form_fields(conn, form_code)]
     eis_facts = build_eis_facts(await repo.get_eis_notices(conn, scope), fields)
     xml_keys = [f["fact_key"] for f in eis_facts]
