@@ -26,6 +26,7 @@ from knowledge_store import repository as repo
 
 SHEET_44FZ = "Все Закупки 44-фз"
 SHEET_223FZ = "Все Закупки 223-фз"  # формы 223-ФЗ: конкурентные способы и единственный поставщик (объект 6)
+# формы объекта 7 — листы «Сравнение НИР…», «Сравнение Выполнение работ…», «Сравнение Поставка товаров…» (см. forms.REPORT_SHEETS)
 
 
 def load_forms(xlsx_path: str) -> Dict[str, List[ks_forms.FormField]]:
@@ -47,6 +48,10 @@ def load_forms(xlsx_path: str) -> Dict[str, List[ks_forms.FormField]]:
     registry = ks_forms.parse_forms_sheet(wb[SHEET_44FZ])
     if SHEET_223FZ in wb.sheetnames:
         registry.update(ks_forms.parse_forms_sheet(wb[SHEET_223FZ], "223-ФЗ"))
+    for title in wb.sheetnames:                  # объект 7: отчётные документы (НИР, работы/услуги, поставка товаров)
+        for prefix, method in ks_forms.REPORT_SHEETS:
+            if title.startswith(prefix):
+                registry.update(ks_forms.parse_report_sheet(wb[title], method))
     return registry
 
 

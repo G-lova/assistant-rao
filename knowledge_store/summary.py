@@ -1342,6 +1342,51 @@ async def precheck(conn, scope: Scope) -> Dict[str, Any]:
     return {"form_code": code, "passport": passport, "documents": docs}
 
 
+async def generate_report_summary(conn, scope: Scope, ready: Dict[str, Any], llm_call: Optional[LlmCall]) -> Dict[str, Any]:
+    """Черновик заключения по форме объекта 7 (отчётные документы по контракту/договору).
+
+    Из документов берётся только перечень поступивших материалов (``field1_1``, как в :func:`fill_documents_list`).
+    Таблица по работам/товарам (``field1_3``), сроки, замечания, неустойка, приёмка и выводы остаются эксперту:
+    для них нет ни эталонных заключений, ни проверенных правил. Факты (RAG) для этих форм не строятся.
+
+    Args:
+        conn: Соединение ``asyncpg``.
+        scope: Экспертиза в окружении.
+        ready: Результат :func:`precheck`.
+        llm_call: Функция вызова LLM для названий документов или ``None``.
+
+    Returns:
+        dict: Как у :func:`generate_summary`; статус всегда ``needs_review``.
+    """
+    code = ready["form_code"]
+    law_context.set_from_form(code)
+    fields = [dict(r) for r in await repo.get_form_fields(conn, code)]
+    documents = {d["id"]: {"filename": d["filename"], "doc_code": d["doc_code"], "text": d["text_full"],
+                           "extraction": d.get("extraction")} for d in ready["documents"]}
+    data: Dict[str, Any] = {f["field_key"]: None for f in fields}
+    trace: Dict[str, Any] = {}
+    try:
+        items = await doc_titles.document_titles(list(documents.values()), llm_call)
+    except Exception as e:  # noqa: BLE001 — перечень документов не должен ронять сборку
+        logger.warning(f"knowledge_store: перечень документов не построен: {type(e).__name__}: {e}")
+        items = []
+    if items and "field1_1" in data:
+        data["field1_1"] = doc_titles.format_titles(items)
+        trace["field1_1"] = {"status": "derived", "rule": "названия документов из самих документов (XML ЕИС, начало текста)",
+                             "sources": {i["title"]: i["source"] for i in items}}
+    problems = validate(data, fields)
+    unresolved = [k for k, v in data.items() if v is None and k != "rao_comment"]
+    trace["_summary"] = {"unresolved": unresolved, "proposed": [], "suspected": [], "problems": problems,
+                         "note": "формы объекта 7: автоматически заполняется только перечень документов; остальное — эксперту"}
+    async with conn.transaction():
+        summary_id = await repo.insert_summary(conn, scope, code, data, trace, "needs_review")
+        await repo.touch_expiry(conn, scope, Config.PE_TEXT_RETENTION_DAYS)
+    stats = {"fields": len(fields), "unresolved": len(unresolved), "documents": len(items)}
+    logger.info(f"knowledge_store: заключение по отчётным документам {scope} ({code}): {stats}")
+    return {"summary_id": summary_id, "form_code": code, "status": "needs_review", "data": data, "trace": trace,
+            "stats": stats, "problems": problems}
+
+
 async def generate_summary(conn, scope: Scope, llm_call: Optional[LlmCall],
                            build_facts: Optional[FactsBuilder] = None, rebuild_facts: bool = False) -> Dict[str, Any]:
     """Собирает и сохраняет сводное ЭЗ экспертизы.
@@ -1362,6 +1407,8 @@ async def generate_summary(conn, scope: Scope, llm_call: Optional[LlmCall],
     """
     ready = await precheck(conn, scope)
     code = ready["form_code"]
+    if forms.is_report_form(code):        # объект 7: отдельный, облегчённый путь без фактов и оценок по критериям
+        return await generate_report_summary(conn, scope, ready, llm_call)
     law_context.set_from_form(code)       # 44-ФЗ или 223-ФЗ: промпты, чек-листы, правила проекта контракта
     # факты раздела 1 из XML/печатной формы дёшевы и детерминированы — обновляются при каждой сборке
     eis_stats = await facts_mod.extract_facts(conn, scope, code, None)

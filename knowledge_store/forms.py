@@ -46,6 +46,13 @@ OBJECT_223_FORMS = 6          # «Документация о проведени
 
 LAW_PREFIX = {"44-ФЗ": "44fz", "223-ФЗ": "223fz"}
 
+# Объект 7 — «Отчетные документы по контракту/договору». Вид отчётных документов задаёт checkType2, а не способ закупки:
+# 13 — НИР, 14 — поставка товара, 15 — выполнение работ/оказание услуг. Форма одна на оба закона (лист Excel «223-фз и 44-фз»).
+OBJECT_REPORT = 7
+METHOD_BY_CHECK_TYPE2_REPORT = {13: "nir", 14: "goods", 15: "works"}
+# Начало названия листа Excel (названия обрезаны до 31 символа) → код вида отчётных документов.
+REPORT_SHEETS = (("Сравнение НИР", "nir"), ("Сравнение Выполнение работ", "works"), ("Сравнение Поставка товаров", "goods"))
+
 # Типы значений поля (pe_form_fields.value_kind)
 KIND_PRESENCE = "presence"        # 1 / 0 / 2 — в наличии / отсутствует / не предусмотрено
 KIND_COMPLIANCE = "compliance"    # 1 / 0 / 2 — соответствует / не соответствует / не применимо
@@ -53,6 +60,7 @@ KIND_SECTION = "section"          # итог подраздела (у ключа
 KIND_CHOICE = "choice"            # выбор из списка (метод обоснования НМЦК)
 KIND_NUMBER = "number"
 KIND_TEXT = "text"                # комментарии, вывод, заключение
+KIND_BOOL = "bool"                # да/нет (формы объекта 7: «Представлена документация по приемке?»)
 KIND_META = "meta"                # шифр, наименование, идентификационный код, состав документов
 
 _KEY_RE = re.compile(r"^(field\d+(?:_\d+)*(?:_text)?|code|name|inn|documents)$")
@@ -138,9 +146,12 @@ def get_form_code(law: Optional[str], check_type2: Optional[int], object_code: O
         Код формы или ``None``, если форму определить нельзя или она не поддерживается.
     """
     try:
-        table = METHOD_BY_CHECK_TYPE2_223 if law == "223-ФЗ" else METHOD_BY_CHECK_TYPE2
-        method = table.get(int(check_type2))
         obj = int(object_code)
+        if obj == OBJECT_REPORT:        # отчётные документы: вид задаёт checkType2 13–15, способ закупки не важен
+            table = METHOD_BY_CHECK_TYPE2_REPORT
+        else:
+            table = METHOD_BY_CHECK_TYPE2_223 if law == "223-ФЗ" else METHOD_BY_CHECK_TYPE2
+        method = table.get(int(check_type2))
     except (TypeError, ValueError):
         return None
     if law not in LAW_PREFIX or not method:
@@ -322,3 +333,129 @@ def _finalize(form_code: str, raw: List[tuple]) -> List[FormField]:
         add(key, label, "Служебные", derived=True,
             force_kind=(KIND_TEXT, None))
     return fields
+
+
+# ---- объект 7: отчётные документы ---------------------------------------------------------------------------------
+# Ключи массивных полей: field1_3[0]['name'], field1_3[0]['field4_0'].q2; булевы поля помечены в Excel «(bool)».
+_REPORT_KEY_RE = re.compile(r"^field\d+(?:_\d+)*(?:\[0\]\['\w+'\])?(?:\.\w+)?$")
+_BOOL_MARK_RE = re.compile(r"\s*\(bool\)\s*$", re.I)
+_BOOL_LABEL_RE = re.compile(r"(?i)\?\s*$|^не представляется возможным|^стоимостное замечание|^сроки приемки соответствуют"
+                            r"|^в документе/акте о приемке")
+_NUMBER_LABEL_RE = re.compile(r"(?i)количество|ключевая ставка|цена контракта|итоговая сумма|сумма |стоимость фактически|процент")
+
+
+def is_report_form(form_code: Optional[str]) -> bool:
+    """Форма относится к объекту 7 (отчётные документы по контракту/договору).
+
+    Args:
+        form_code: Код формы, например ``44fz_nir_obj7``.
+
+    Returns:
+        bool: ``True`` для форм объекта 7.
+    """
+    return bool(form_code) and form_code.endswith(f"_obj{OBJECT_REPORT}")
+
+
+def classify_report(key: str, label: str, marked_bool: bool = False) -> tuple:
+    """Определяет тип значения и уровень проверки поля формы объекта 7.
+
+    Автоматически (уровень 1) готовится только раздел 1: перечень документов и таблица по работам/товарам
+    (наименование, требования к составу отчётной документации, представленные документы). Всё остальное
+    (сроки, замечания, неустойка, приёмка, выводы) — оценка эксперта (уровень 3).
+
+    Args:
+        key: Ключ поля без пометки «(bool)».
+        label: Название поля.
+        marked_bool: В Excel у ключа стоит пометка «(bool)».
+
+    Returns:
+        Пара ``(value_kind, check_level)``.
+    """
+    level = 1 if key == "field1_1" or key.startswith("field1_3[0]['") and "field4" not in key and "field3" not in key \
+        and "field7" not in key else 3
+    if marked_bool or _BOOL_LABEL_RE.search(label or ""):
+        return KIND_BOOL, level
+    if key.startswith("field6_1_") or _NUMBER_LABEL_RE.search(label or "") and not key.startswith("field1_"):
+        return KIND_NUMBER, level
+    return KIND_TEXT, level
+
+
+def _parse_report_rows(ws) -> List[tuple]:
+    """Строки листа объекта 7 в порядке Excel (с повторами ключей): ``(ключ, название, раздел, помечен_bool)``.
+
+    Блок «Новые поля» находится по ячейке «Объект 7 (N)» в первых двух строках: колонка ключей — она, название
+    критерия — слева от неё, подраздел — ещё на две колонки левее, раздел — на три.
+    """
+    key_col = None
+    for row in (1, 2):
+        for col in range(1, ws.max_column + 1):
+            if re.match(r"^Объект\s+7", _cell(ws, row, col) or ""):
+                key_col = col
+                break
+        if key_col:
+            break
+    if not key_col:
+        return []
+    first = key_col - 3
+    rows, section, subsection = [], None, None
+    for r in range(3, ws.max_row + 1):
+        head, sub = _cell(ws, r, first), _cell(ws, r, first + 1)
+        if head:
+            section, subsection = head, None
+        if sub:
+            subsection = sub
+        raw_key = _cell(ws, r, key_col)
+        if not raw_key:
+            continue
+        marked = bool(_BOOL_MARK_RE.search(raw_key))
+        key = _BOOL_MARK_RE.sub("", raw_key).strip()
+        if not _REPORT_KEY_RE.match(key):
+            continue
+        label = _cell(ws, r, key_col - 1) or key
+        rows.append((key, label, " / ".join(x for x in (section, subsection) if x) or None, marked))
+    return rows
+
+
+def report_duplicates(ws) -> Dict[str, List[str]]:
+    """Ключи, которые в листе встречаются у нескольких критериев с разными названиями (вероятные опечатки в Excel).
+
+    Args:
+        ws: Лист вида отчётных документов.
+
+    Returns:
+        dict: ``ключ → названия критериев`` (только ключи с разными названиями).
+    """
+    labels: Dict[str, List[str]] = {}
+    for key, label, _, _ in _parse_report_rows(ws):
+        labels.setdefault(key, []).append(label)
+    return {k: v for k, v in labels.items() if len(set(v)) > 1}
+
+
+def parse_report_sheet(ws, method: str) -> Dict[str, List[FormField]]:
+    """Разбирает лист вида отчётных документов (НИР / работы-услуги / поставка товаров) в формы обоих законов.
+
+    Args:
+        ws: Лист ``openpyxl`` (``data_only=True``).
+        method: Вид отчётных документов (``nir``, ``works``, ``goods``).
+
+    Returns:
+        dict: ``44fz_<method>_obj7`` и ``223fz_<method>_obj7`` → одинаковые списки полей. Ключ, повторённый у
+        нескольких критериев, остаётся за первым (повторы выводит :func:`report_duplicates`). Пусто, если блока нет.
+    """
+    rows = _parse_report_rows(ws)
+    if not rows:
+        return {}
+    result: Dict[str, List[FormField]] = {}
+    for law in LAW_PREFIX:
+        code = build_form_code(law, method, OBJECT_REPORT)
+        fields, seen = [], set()
+        for key, label, section, marked in rows:
+            if key in seen:
+                continue
+            seen.add(key)
+            kind, level = classify_report(key, label, marked)
+            fields.append(FormField(code, key, len(fields) + 1, label, section, kind, level, False))
+        for key, label in (("rao_comment", SERVICE_FIELDS["rao_comment"]),):
+            fields.append(FormField(code, key, len(fields) + 1, label, "Служебные", KIND_TEXT, None, True))
+        result[code] = fields
+    return result
