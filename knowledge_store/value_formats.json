@@ -1,4 +1,43 @@
 {
+ "223fz_competitive_obj6": {
+  "bool": [
+   "field2_2_0",
+   "field2_2_10",
+   "field2_2_11",
+   "field2_2_13",
+   "field2_2_17",
+   "field2_2_18",
+   "field2_2_19",
+   "field2_2_19_0",
+   "field2_2_19_1",
+   "field2_2_2",
+   "field2_2_21",
+   "field2_2_4",
+   "field2_2_6_1",
+   "field2_2_7_0",
+   "field2_2_8",
+   "field2_3_1"
+  ]
+ },
+ "223fz_single_supplier_obj6": {
+  "bool": [
+   "field2_2_0",
+   "field2_2_1",
+   "field2_2_10",
+   "field2_2_11",
+   "field2_2_13",
+   "field2_2_17",
+   "field2_2_17_1",
+   "field2_2_19_1",
+   "field2_2_2",
+   "field2_2_20",
+   "field2_2_21",
+   "field2_2_4",
+   "field2_2_6_1",
+   "field2_2_7_0",
+   "field2_3_1"
+  ]
+ },
  "44fz_auction_obj6": {
   "bool": [
    "field2_2_0",

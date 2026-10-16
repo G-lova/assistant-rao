@@ -13,6 +13,10 @@
     python -m scripts.derive_value_format "Отчеты и закупки поля.xlsx" \\
         44fz_auction_obj6=expertise_expert_opinion7s_4.csv 44fz_quotation_obj6=expertise_expert_opinion7s_7.csv \\
         44fz_single_supplier_obj6=expertise_expert_opinion7s_11.csv
+
+Выгрузка должна содержать заключения только одной формы. В общей выгрузке (``type`` = 4 — 44-ФЗ, 5 — 223-ФЗ)
+сначала отберите строки нужного закона и ``checkType2`` (например, 223-ФЗ конкурентные способы — ``type`` = 5,
+``checkType2`` 1, 4, 7; единственный поставщик — 11). Формы, не названные в аргументах, в файле сохраняются.
 """
 import csv
 import json
@@ -63,7 +67,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(__doc__)
         return 2
     registry = load_forms(args[0])
-    result: Dict[str, dict] = {}
+    try:                                    # формы, которых нет в аргументах, остаются как были
+        result: Dict[str, dict] = json.loads(OUT_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        result = {}
     for pair in args[1:]:
         form, path = pair.split("=", 1)
         keys = [f.field_key for f in registry[form] if not f.field_key.endswith("_text")]

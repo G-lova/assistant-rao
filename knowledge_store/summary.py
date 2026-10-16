@@ -1360,7 +1360,8 @@ async def generate_report_summary(conn, scope: Scope, ready: Dict[str, Any], llm
     """
     code = ready["form_code"]
     law_context.set_from_form(code)
-    fields = [dict(r) for r in await repo.get_form_fields(conn, code)]
+    # поля элементов списка (``field1_3[].…``) лежат внутри ``field1_3`` и отдельными ключами ``data`` не бывают
+    fields = [dict(r) for r in await repo.get_form_fields(conn, code) if "[]" not in r["field_key"]]
     documents = {d["id"]: {"filename": d["filename"], "doc_code": d["doc_code"], "text": d["text_full"],
                            "extraction": d.get("extraction")} for d in ready["documents"]}
     data: Dict[str, Any] = {f["field_key"]: None for f in fields}

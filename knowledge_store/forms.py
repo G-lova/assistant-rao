@@ -12,6 +12,8 @@
 
 Модуль не зависит от ``asyncpg`` и сети, поэтому полностью тестируется локально.
 """
+import json
+import os
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -60,6 +62,7 @@ KIND_SECTION = "section"          # итог подраздела (у ключа
 KIND_CHOICE = "choice"            # выбор из списка (метод обоснования НМЦК)
 KIND_NUMBER = "number"
 KIND_TEXT = "text"                # комментарии, вывод, заключение
+KIND_LIST = "list"                # список элементов (field1_3 в формах объекта 7)
 KIND_BOOL = "bool"                # да/нет (формы объекта 7: «Представлена документация по приемке?»)
 KIND_META = "meta"                # шифр, наименование, идентификационный код, состав документов
 
@@ -290,6 +293,11 @@ def parse_forms_sheet(ws, law: str = "44-ФЗ") -> Dict[str, List[FormField]]:
     return result
 
 
+# Итоговый ключ раздела/подраздела, под которым лежат дочерние (field2_2_3_1 → field2_2_3, field2_1_5 → field2_1).
+# В данных экспертов такие ключи есть (в 223-ФЗ — field2_2_3, field2_2_14, field2_3_8), а в Excel они не записаны.
+_PARENT_RE = re.compile(r"^(field2_[23]_\d+|field2_1)_\d+$")
+
+
 def _finalize(form_code: str, raw: List[tuple]) -> List[FormField]:
     """Классифицирует поля и достраивает производные ключи.
 
@@ -316,12 +324,12 @@ def _finalize(form_code: str, raw: List[tuple]) -> List[FormField]:
     # родители подразделов, не записанные в Excel (например, field2_2_4)
     parents = {}
     for key, label, section in raw:
-        match = re.match(r"^(field2_2_\d+)_\d+$", key)
+        match = _PARENT_RE.match(key)
         if match and match.group(1) not in keys:
             parents.setdefault(match.group(1), section)
 
     for key, label, section in raw:
-        parent = re.match(r"^(field2_2_\d+)_\d+$", key)
+        parent = _PARENT_RE.match(key)
         if parent and parent.group(1) in parents and parent.group(1) not in seen:
             add(parent.group(1), f"Итог подраздела ({parent.group(1)})", section, derived=True)
         add(key, label, section)
@@ -332,6 +340,7 @@ def _finalize(form_code: str, raw: List[tuple]) -> List[FormField]:
     for key, label in SERVICE_FIELDS.items():
         add(key, label, "Служебные", derived=True,
             force_kind=(KIND_TEXT, None))
+    add("inn", "ИНН", "Служебные", derived=True, force_kind=(KIND_META, None))   # в листе 223-ФЗ ключа inn нет, в данных он есть
     return fields
 
 
@@ -371,11 +380,10 @@ def classify_report(key: str, label: str, marked_bool: bool = False) -> tuple:
     Returns:
         Пара ``(value_kind, check_level)``.
     """
-    level = 1 if key == "field1_1" or key.startswith("field1_3[0]['") and "field4" not in key and "field3" not in key \
-        and "field7" not in key else 3
+    level = 1 if key in ("field1_1", "field1_3", "field1_3[].name", "field1_3[].requirements", "field1_3[].documents") else 3
     if marked_bool or _BOOL_LABEL_RE.search(label or ""):
         return KIND_BOOL, level
-    if key.startswith("field6_1_") or _NUMBER_LABEL_RE.search(label or "") and not key.startswith("field1_"):
+    if re.match(r"^field[56]_1_", key) or _NUMBER_LABEL_RE.search(label or "") and not key.startswith("field1_"):
         return KIND_NUMBER, level
     return KIND_TEXT, level
 
@@ -431,31 +439,115 @@ def report_duplicates(ws) -> Dict[str, List[str]]:
     return {k: v for k, v in labels.items() if len(set(v)) > 1}
 
 
-def parse_report_sheet(ws, method: str) -> Dict[str, List[FormField]]:
+# Реальные ключи заключений объекта 7 (строит scripts/derive_report_fields.py по выгрузке экспертов).
+REPORT_FIELDS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "report_fields.json")
+# В Excel у поставки товара заключение пронумеровано как у НИР (field6_*), а эксперты хранят его как field5_*.
+REPORT_KEY_ALIASES = {"goods": ("field6_", "field5_")}
+ITEMS_KEY = "field1_3"          # список работ/товаров/НИР: у каждого элемента name, requirements, documents и критерии fieldN_M
+_ITEM_KEY_RE = re.compile(r"^field1_3\[0\]\['(\w+)'\](?:\.(\w+))?$")
+_SERVICE_TOP_KEYS = ("type", "isConverted", "isConverted1", "is_converted")
+
+
+def item_path(key: str) -> Optional[str]:
+    """Ключ поля элемента списка в форме ``field1_3[].field4_0.q2`` (``None``, если ключ не относится к элементам).
+
+    Args:
+        key: Ключ из Excel, например ``field1_3[0]['field4_0'].q2`` или ``field1_3[0]['name']``.
+
+    Returns:
+        str | None: Путь внутри элемента ``field1_3[]`` либо ``None``.
+    """
+    match = _ITEM_KEY_RE.match(key)
+    if not match:
+        return None
+    return f"{ITEMS_KEY}[]." + ".".join(p for p in match.groups() if p)
+
+
+def load_report_spec() -> Dict[str, dict]:
+    """Читает ``report_fields.json`` (пусто, если файла нет).
+
+    Returns:
+        dict: ``вид → {"top": {ключ: тип}, "item": {путь: тип}}``.
+    """
+    try:
+        with open(REPORT_FIELDS_PATH, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def parse_report_sheet(ws, method: str, spec: Optional[Dict[str, dict]] = None) -> Dict[str, List[FormField]]:
     """Разбирает лист вида отчётных документов (НИР / работы-услуги / поставка товаров) в формы обоих законов.
+
+    Названия берутся из Excel, а состав ключей и тип значения — из данных экспертов (``report_fields.json``):
+
+    * ключи верхнего уровня заключения (``field3_0_3``, ``field6_1_1`` …) — как есть; у поставки товара ``field6_*``
+      из Excel заменяются на ``field5_*``; итоговые флаги критериев (``field4_0`` …), которых нет в Excel,
+      добавляются из данных с названием подраздела;
+    * ``field1_3`` — список элементов (одно поле типа ``list``); поля элементов описаны отдельными строками
+      с ключами вида ``field1_3[].field4_0.q2`` — в ``data`` заключения их нет, они лежат внутри элементов списка.
 
     Args:
         ws: Лист ``openpyxl`` (``data_only=True``).
         method: Вид отчётных документов (``nir``, ``works``, ``goods``).
+        spec: Ключи и типы из данных (по умолчанию читается ``report_fields.json``).
 
     Returns:
         dict: ``44fz_<method>_obj7`` и ``223fz_<method>_obj7`` → одинаковые списки полей. Ключ, повторённый у
-        нескольких критериев, остаётся за первым (повторы выводит :func:`report_duplicates`). Пусто, если блока нет.
+        нескольких критериев Excel, остаётся за первым (повторы выводит :func:`report_duplicates`). Пусто, если блока нет.
     """
     rows = _parse_report_rows(ws)
     if not rows:
         return {}
+    spec = (load_report_spec() if spec is None else spec).get(method, {})
+    top_kinds, item_kinds = spec.get("top", {}), spec.get("item", {})
+    alias = REPORT_KEY_ALIASES.get(method)
+    top_rows, item_rows, titles = [], [], {}
+    for key, label, section, marked in rows:
+        path = item_path(key)
+        if path:
+            item_rows.append((path, label, section, marked))
+            titles.setdefault(path.split(".")[1], (section or "").split(" / ")[-1])   # field4_0 → название подраздела
+        else:
+            if alias and key.startswith(alias[0]):
+                key = alias[1] + key[len(alias[0]):]
+            top_rows.append((key, label, section, marked))
     result: Dict[str, List[FormField]] = {}
     for law in LAW_PREFIX:
         code = build_form_code(law, method, OBJECT_REPORT)
-        fields, seen = [], set()
-        for key, label, section, marked in rows:
+        fields: List[FormField] = []
+        seen = set()
+
+        def add(key, label, section, marked, kinds, level=None):
+            """Добавляет поле один раз; тип берётся из данных, иначе из названия."""
+            if key in seen:
+                return
+            seen.add(key)
+            guessed_kind, guessed_level = classify_report(key, label, marked)
+            fields.append(FormField(code, key, len(fields) + 1, label, section, kinds.get(key, guessed_kind),
+                                    guessed_level if level is None else level, False))
+
+        for key, label, section, marked in top_rows:
+            add(key, label, section, marked, top_kinds)
+        for key in top_kinds:
             if key in seen:
                 continue
-            seen.add(key)
-            kind, level = classify_report(key, label, marked)
-            fields.append(FormField(code, key, len(fields) + 1, label, section, kind, level, False))
-        for key, label in (("rao_comment", SERVICE_FIELDS["rao_comment"]),):
-            fields.append(FormField(code, key, len(fields) + 1, label, "Служебные", KIND_TEXT, None, True))
+            if key in _SERVICE_TOP_KEYS:
+                label, section, kinds = f"Служебное поле ({key})", "Служебные", {key: KIND_META}
+            elif key == ITEMS_KEY:
+                label, section, kinds = "Список работ (услуг, товаров, НИР) с оценкой по каждому", "Раздел 1", top_kinds
+            else:
+                title = titles.get(key)
+                label, section, kinds = (f"Итог по критерию: {title}" if title else f"Итоговое поле ({key})"), None, top_kinds
+            add(key, label, section, False, kinds)
+        if ITEMS_KEY not in seen:
+            add(ITEMS_KEY, "Список работ (услуг, товаров, НИР) с оценкой по каждому", "Раздел 1", False, {ITEMS_KEY: KIND_LIST})
+        for path, label, section, marked in item_rows:
+            add(path, label, section, marked, {f"{ITEMS_KEY}[].{k}": v for k, v in item_kinds.items()})
+        for sub in item_kinds:
+            add(f"{ITEMS_KEY}[].{sub}", f"Поле элемента списка ({sub})", None, False,
+                {f"{ITEMS_KEY}[].{k}": v for k, v in item_kinds.items()})
+        fields.append(FormField(code, "rao_comment", len(fields) + 1, SERVICE_FIELDS["rao_comment"], "Служебные",
+                                KIND_TEXT, None, True))
         result[code] = fields
     return result

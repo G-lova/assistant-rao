@@ -49,6 +49,25 @@ class Form223Tests(unittest.TestCase):
         self.assertEqual(kind, forms.KIND_TEXT)
 
 
+class DerivedKeysTests(unittest.TestCase):
+    """Итоговые ключи и ИНН, которых нет в Excel, но есть в данных экспертов."""
+
+    def test_section_parents_and_inn(self):
+        """field2_1 (итог раздела 1) и field2_3_8 (итог при дочерних) достраиваются; inn — служебное поле."""
+        raw = [("field2_1_1", "1.1. Наличие", "Раздел 1"), ("field2_3_8_1", "3.8.1. Соответствие", "Раздел 3"),
+               ("field2_2_4", "2.1. Соответствие", "Раздел 2")]
+        keys = {f.field_key: f for f in forms._finalize("223fz_competitive_obj6", raw)}
+        self.assertEqual(keys["field2_1"].value_kind, forms.KIND_SECTION)
+        self.assertTrue(keys["field2_1"].derived)
+        self.assertIn("field2_3_8", keys)
+        self.assertEqual(keys["inn"].value_kind, forms.KIND_META)
+
+    def test_value_formats_for_223(self):
+        """Формат значений 223-ФЗ взят из выгрузки: часть критериев хранится как true/false."""
+        self.assertTrue(value_format.bool_keys("223fz_competitive_obj6"))
+        self.assertTrue(value_format.bool_keys("223fz_single_supplier_obj6"))
+
+
 class Keys223Tests(unittest.TestCase):
     """Ключи раздела 3 и проекта договора в форме 223-ФЗ определяются по названию."""
 

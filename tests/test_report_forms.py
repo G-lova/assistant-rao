@@ -46,12 +46,17 @@ ROWS = [
 ]
 
 
+# ключи и типы «из данных экспертов» (как в report_fields.json) для тестового листа
+SPEC = {"goods": {"top": {"field1_1": "text", "field1_3": "list", "field3_0": "bool", "field5_1_1": "number", "type": "text"},
+                  "item": {"name": "text", "field4_0.q1": "bool", "field4_0.q2": "text"}}}
+
+
 class ReportFormsParseTests(unittest.TestCase):
     """Разбор листа объекта 7."""
 
     def setUp(self):
         """Разбирает тестовый лист."""
-        self.reg = forms.parse_report_sheet(make_sheet(ROWS), "goods")
+        self.reg = forms.parse_report_sheet(make_sheet(ROWS), "goods", spec=SPEC)
         self.fields = {f.field_key: f for f in self.reg["44fz_goods_obj7"]}
 
     def test_both_laws_get_same_fields(self):
@@ -61,19 +66,32 @@ class ReportFormsParseTests(unittest.TestCase):
 
     def test_keys_and_duplicates(self):
         """Ключи массивных полей сохраняются, повтор ключа остаётся за первым критерием, строки без ключа пропускаются."""
-        self.assertIn("field1_3[0]['name']", self.fields)
-        self.assertEqual(self.fields["field1_3[0]['requirements']"].label, "Требования к составу отчетной документации")
-        self.assertEqual(sum(1 for f in self.reg["44fz_goods_obj7"] if f.field_key == "field1_3[0]['requirements']"), 1)
+        self.assertIn("field1_3[].name", self.fields)
+        self.assertEqual(self.fields["field1_3[].requirements"].label, "Требования к составу отчетной документации")
+        self.assertEqual(sum(1 for f in self.reg["44fz_goods_obj7"] if f.field_key == "field1_3[].requirements"), 1)
         self.assertEqual(list(forms.report_duplicates(make_sheet(ROWS))), ["field1_3[0]['requirements']"])
+
+    def test_real_structure_from_data(self):
+        """Список field1_3 — одно поле типа list; поля элементов — отдельные пути; тип берётся из данных, а не из названия."""
+        self.assertEqual(self.fields["field1_3"].value_kind, forms.KIND_LIST)
+        self.assertEqual(self.fields["field1_3[].field4_0.q1"].value_kind, forms.KIND_BOOL)     # есть только в данных
+        self.assertEqual(self.fields["type"].value_kind, forms.KIND_META)
+        self.assertEqual(self.fields["field3_0"].value_kind, forms.KIND_BOOL)
+
+    def test_goods_conclusion_keys_are_field5(self):
+        """У поставки товара расчёт неустойки хранится как field5_*, а не field6_*, как в Excel."""
+        self.assertIn("field5_1_1", self.fields)
+        self.assertNotIn("field6_1_1", self.fields)
+        self.assertEqual(self.fields["field5_1_1"].value_kind, forms.KIND_NUMBER)
 
     def test_kinds_and_levels(self):
         """Пометка (bool) и вопросы — bool, расчёты — number, раздел 1 проверяет код, остальное эксперт."""
         self.assertEqual(self.fields["field3_0_3"].value_kind, forms.KIND_BOOL)
         self.assertEqual(self.fields["field7_0"].value_kind, forms.KIND_BOOL)
-        self.assertEqual(self.fields["field6_1_1"].value_kind, forms.KIND_NUMBER)
+        self.assertEqual(self.fields["field5_1_1"].value_kind, forms.KIND_NUMBER)
         self.assertEqual(self.fields["field3_0_5"].value_kind, forms.KIND_NUMBER)
         self.assertEqual(self.fields["field1_1"].value_kind, forms.KIND_TEXT)
-        self.assertEqual((self.fields["field1_1"].check_level, self.fields["field1_3[0]['name']"].check_level), (1, 1))
+        self.assertEqual((self.fields["field1_1"].check_level, self.fields["field1_3[].name"].check_level), (1, 1))
         self.assertEqual(self.fields["field3_0_5"].check_level, 3)
 
     def test_section_path_and_service_field(self):
@@ -83,7 +101,7 @@ class ReportFormsParseTests(unittest.TestCase):
 
     def test_sheet_without_block(self):
         """Лист без «Объект 7» формы не даёт."""
-        self.assertEqual(forms.parse_report_sheet(openpyxl.Workbook().active, "nir"), {})
+        self.assertEqual(forms.parse_report_sheet(openpyxl.Workbook().active, "nir", spec={}), {})
 
 
 class ReportTitleTests(unittest.TestCase):
@@ -137,7 +155,8 @@ class ReportSummaryDbTests(unittest.TestCase):
         c, form = self.conn, "44fz_works_obj7"
         c._run(f"DELETE FROM pe_form_fields WHERE form_code = '{form}'")
         for n, (key, kind) in enumerate([("field1_1", "text"), ("field3_0_3", "bool"), ("field6_1_1", "number"),
-                                          ("rao_comment", "text")], start=1):
+                                          ("rao_comment", "text"),
+                                          ("field1_3[].name", "text")], start=1):
             c._run(f"INSERT INTO pe_form_fields (form_code, field_key, ordinal, label, value_kind) "
                    f"VALUES ('{form}', '{key}', {n}, '{key}', '{kind}')")
         c._run("INSERT INTO pe_procurements (expertise_id, law, method, object_code, check_type2) "
@@ -147,7 +166,7 @@ class ReportSummaryDbTests(unittest.TestCase):
         res = asyncio.run(summary.generate_summary(c, S(8301), None))
         self.assertEqual(res["form_code"], form)
         self.assertEqual(res["status"], "needs_review")
-        self.assertEqual(set(res["data"]), {"field1_1", "field3_0_3", "field6_1_1", "rao_comment"})
+        self.assertEqual(set(res["data"]), {"field1_1", "field3_0_3", "field6_1_1", "rao_comment"})   # поля элементов списка — не ключи data
         self.assertIsNone(res["data"]["field3_0_3"])
         self.assertIn("акт", res["data"]["field1_1"].lower())
         stored = json.loads(c._run("SELECT data FROM pe_summary_opinions WHERE expertise_id = 8301"))
