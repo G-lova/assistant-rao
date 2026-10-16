@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
 from configs.logger import get_logger
-from knowledge_store import eis_notice, eis_printform, form_keys, law_context, repository as repo
+from knowledge_store import eis_notice, eis_notice223, eis_printform, form_keys, law_context, repository as repo
 from knowledge_store.scope import Scope
 
 logger = get_logger(__name__)
@@ -389,6 +389,7 @@ def build_eis_facts(notices: Sequence[dict], fields: Sequence[dict]) -> List[dic
     Returns:
         list[dict]: Факты источника ``eis_xml``. Если версий извещения несколько — берётся последняя.
     """
+    map_fields = eis_notice223.map_to_fields if law_context.is_223() else eis_notice.map_to_fields   # у 223-ФЗ свои правила
     best = None
     for item in notices:
         data = item["eis_notice"]
@@ -400,7 +401,7 @@ def build_eis_facts(notices: Sequence[dict], fields: Sequence[dict]) -> List[dic
     doc_id, data = best
     return [{"fact_key": key, "value": {"value": f.value, "verified": True, "comment": None},
              "document_id": doc_id, "page": None, "quote": f.evidence, "confidence": 1.0}
-            for key, f in eis_notice.map_to_fields(data, fields).items()]
+            for key, f in map_fields(data, fields).items()]
 
 
 def _form_version(filename: str, doc_id: int) -> tuple:
@@ -423,7 +424,7 @@ def build_printform_facts(documents: Sequence[dict], fields: Sequence[dict], sol
         list[dict]: Факты источника ``eis_xml`` с пометкой ``origin = print_form``.
     """
     forms = [d for d in documents if eis_printform.is_print_form(d["text_full"])]
-    if not forms:
+    if not forms or law_context.is_223():      # печатная форма и её правила — только 44-ФЗ: названия критериев 223-ФЗ другие
         return []
     doc = max(forms, key=lambda d: _form_version(d["filename"], d["id"]))
     data = eis_printform.to_json(eis_printform.evaluate_text(doc["text_full"]))

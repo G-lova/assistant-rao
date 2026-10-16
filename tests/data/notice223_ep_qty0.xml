@@ -1,0 +1,825 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<ns2:purchaseNoticeEP xsi:schemaLocation="https://zakupki.gov.ru/223/integration/schema/TFF-16.2 https://zakupki.gov.ru/223/integration/schema/TFF-16.2/purchase.xsd" xmlns="http://zakupki.gov.ru/223fz/types/1" xmlns:ns2="http://zakupki.gov.ru/223fz/purchase/1" xmlns:ns4="http://zakupki.gov.ru/223fz/agencyRelation/1" xmlns:ns3="http://zakupki.gov.ru/223fz/dishonestSupplier/1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ns6="http://zakupki.gov.ru/223fz/contract/1" xmlns:ns5="http://zakupki.gov.ru/223fz/complaint/1" xmlns:ns30="http://zakupki.gov.ru/223fz/ecp-packet/1" xmlns:ns8="http://zakupki.gov.ru/223fz/customerRegistry/1" xmlns:ns7="http://zakupki.gov.ru/223fz/customerAccredited/1" xmlns:ns13="http://zakupki.gov.ru/223fz/machineryListInfo/1" xmlns:ns9="http://zakupki.gov.ru/223fz/decisionSuspension/1" xmlns:ns12="http://zakupki.gov.ru/223fz/exclusion/1" xmlns:ns11="http://zakupki.gov.ru/223fz/disagreementProtocol/1" xmlns:ns10="http://zakupki.gov.ru/223fz/detachedRights/1" xmlns:ns17="http://zakupki.gov.ru/223fz/purchasePlan/1" xmlns:ns16="http://zakupki.gov.ru/223fz/orderClauseList/1" xmlns:ns15="http://zakupki.gov.ru/223fz/notificationIssue/1" xmlns:ns14="http://zakupki.gov.ru/223fz/missedNotice/1" xmlns:ns19="http://zakupki.gov.ru/223fz/purchasePlanAdditionalPosition/1" xmlns:ns18="http://zakupki.gov.ru/223fz/purchasePlanUpdatePositionDataType/1" xmlns:ns20="http://zakupki.gov.ru/223fz/purchasePlanProject/1" xmlns:ns24="http://zakupki.gov.ru/223fz/stopCommodity/1" xmlns:ns23="http://zakupki.gov.ru/223fz/revenue/1" xmlns:ns22="http://zakupki.gov.ru/223fz/reference/1" xmlns:ns21="http://zakupki.gov.ru/223fz/purchasePlanProjectAdditionalPosition/1" xmlns:ns28="http://zakupki.gov.ru/223fz/integration/1" xmlns:ns27="http://zakupki.gov.ru/223fz/guarantee/1" xmlns:ns26="http://zakupki.gov.ru/223fz/webRequest/1" xmlns:ns25="http://zakupki.gov.ru/223fz/typalOrderClauseList/1" xmlns:ns29="http://zakupki.gov.ru/223fz/ecp-packetSpec/1">
+    <header>
+        <guid>fe2b45f4-eeb8-4e00-8ad2-061bd1ed4923</guid>
+        <createDateTime>2026-10-01T10:44:33</createDateTime>
+    </header>
+    <ns2:extendedType>
+        <contentUid>01A0F66AE7C27262B66224A957C566C2</contentUid>
+        
+        <xsltFileDsUid>82C645A86D0A472FAA468E3292F76B13</xsltFileDsUid>
+    </ns2:extendedType>
+    <ns2:body>
+        <ns2:item>
+            <guid>234b0e2c-6520-4922-9d13-45dad8d95c11</guid>
+            <ns2:purchaseNoticeEPData>
+                <ns2:guid>234b0e2c-6520-4922-9d13-45dad8d95c11</ns2:guid>
+                <ns2:createDateTime>2026-10-01T10:39:09</ns2:createDateTime>
+                <ns2:urlEIS>https://lk.zakupki.gov.ru/223/purchase/private/purchase/notice-info/details.html?noticeInfoId=20311887</ns2:urlEIS>
+                <ns2:registrationNumber>32616427799</ns2:registrationNumber>
+                <ns2:name>Поставка молочной продукции для нужд ФГБУ «УСЗ и МТО» Минтруда России</ns2:name>
+                <ns2:customer>
+                    <mainInfo>
+                        <fullName>ФЕДЕРАЛЬНОЕ ГОСУДАРСТВЕННОЕ БЮДЖЕТНОЕ УЧРЕЖДЕНИЕ "УПРАВЛЕНИЕ СЛУЖЕБНЫМИ ЗДАНИЯМИ И МАТЕРИАЛЬНО-ТЕХНИЧЕСКИМ ОБЕСПЕЧЕНИЕМ" МИНИСТЕРСТВА ТРУДА И СОЦИАЛЬНОЙ ЗАЩИТЫ РОССИЙСКОЙ ФЕДЕРАЦИИ</fullName>
+                        <shortName>ФГБУ "УСЗ И МТО" МИНТРУДА РОССИИ</shortName>
+                        <iko>87710247083771001001</iko>
+                        <inn>7710247083</inn>
+                        <kpp>771001001</kpp>
+                        <ogrn>1027739122630</ogrn>
+                        <legalAddress>103132, Г.МОСКВА, УЛ ИЛЬИНКА, Д. 21</legalAddress>
+                        <postalAddress>127994, г. Москва, ул. Ильинка, д. 21, стр. 1, дом 21, корпус 1</postalAddress>
+                        <email>usz-mto@mail.ru</email>
+                        <okato>45286580000</okato>
+                        <okopf>75103</okopf>
+                        <okopfName>Федеральные государственные бюджетные учреждения</okopfName>
+                        <okpo>45936791</okpo>
+                        <okfs>12</okfs>
+                        <okfsName>Федеральная собственность</okfsName>
+                        <timeZone>
+                            <offset>0</offset>
+                            <name>МСК (СГВ+3) Москва, Волгоград</name>
+                        </timeZone>
+                        <region>Г.МОСКВА</region>
+                        <budgetAgencyType>STATE</budgetAgencyType>
+                    </mainInfo>
+                </ns2:customer>
+                <ns2:purchaseMethodCode>3363</ns2:purchaseMethodCode>
+                <ns2:purchaseCodeName>Закупка у единственного поставщика (подрядчика, исполнителя) (до 01.07.18)</ns2:purchaseCodeName>
+                <ns2:placer>
+                    <mainInfo>
+                        <fullName>ФЕДЕРАЛЬНОЕ ГОСУДАРСТВЕННОЕ БЮДЖЕТНОЕ УЧРЕЖДЕНИЕ "УПРАВЛЕНИЕ СЛУЖЕБНЫМИ ЗДАНИЯМИ И МАТЕРИАЛЬНО-ТЕХНИЧЕСКИМ ОБЕСПЕЧЕНИЕМ" МИНИСТЕРСТВА ТРУДА И СОЦИАЛЬНОЙ ЗАЩИТЫ РОССИЙСКОЙ ФЕДЕРАЦИИ</fullName>
+                        <shortName>ФГБУ "УСЗ И МТО" МИНТРУДА РОССИИ</shortName>
+                        <iko>87710247083771001001</iko>
+                        <inn>7710247083</inn>
+                        <kpp>771001001</kpp>
+                        <ogrn>1027739122630</ogrn>
+                        <legalAddress>103132, Г.МОСКВА, УЛ ИЛЬИНКА, Д. 21</legalAddress>
+                        <postalAddress>127994, г. Москва, ул. Ильинка, д. 21, стр. 1, дом 21, корпус 1</postalAddress>
+                        <email>usz-mto@mail.ru</email>
+                        <okato>45286580000</okato>
+                        <okopf>75103</okopf>
+                        <okopfName>Федеральные государственные бюджетные учреждения</okopfName>
+                        <okpo>45936791</okpo>
+                        <okfs>12</okfs>
+                        <okfsName>Федеральная собственность</okfsName>
+                        <timeZone>
+                            <offset>0</offset>
+                            <name>МСК (СГВ+3) Москва, Волгоград</name>
+                        </timeZone>
+                        <region>Г.МОСКВА</region>
+                        <budgetAgencyType>STATE</budgetAgencyType>
+                    </mainInfo>
+                </ns2:placer>
+                <ns2:contact>
+                    <firstName>И.</firstName>
+                    <middleName>М.</middleName>
+                    <lastName>Колнооких</lastName>
+                    <phone>+7 (495) 1800000, доб.: 5063</phone>
+                    <email>kolnookikh_im@uszmto.ru</email>
+                </ns2:contact>
+                <ns2:publicationDateTime>2026-10-01T10:44:32</ns2:publicationDateTime>
+                <ns2:status>P</ns2:status>
+                <ns2:version>1</ns2:version>
+                <ns2:notDishonest>true</ns2:notDishonest>
+                <ns2:attachments>
+                    <totalDocumentsCount>1</totalDocumentsCount>
+                    <document>
+                        <guid>3d2f29eb-c4b7-4539-84b2-ba442b20155f</guid>
+                        <createDateTime>2026-10-01T10:41:42</createDateTime>
+                        <fileName>30.09.26 Извещение ЕП (молочка_300 000,00)  4кв 26.docx</fileName>
+                        <description>30.09.26 Извещение ЕП (молочка_300 000,00)  4кв 26</description>
+                        <url>https://example.invalid/file</url>
+                        <contentUid>A0074794D7684DC287D931E51C880560</contentUid>
+                        
+                    </document>
+                </ns2:attachments>
+                <ns2:modificationDate>2026-10-01T10:44:32</ns2:modificationDate>
+                <ns2:saveUserId>9426577</ns2:saveUserId>
+                <ns2:deliveryPlaceIndication>DIFFERENT_PLACE</ns2:deliveryPlaceIndication>
+                <ns2:emergency>false</ns2:emergency>
+                <ns2:jointPurchase>false</ns2:jointPurchase>
+                <ns2:hidePurchase>false</ns2:hidePurchase>
+                <ns2:antimonopolyDecisionTaken>false</ns2:antimonopolyDecisionTaken>
+                <ns2:lots>
+                    <lot>
+                        <guid>a20990b5-cc8f-4044-a403-38e8aa343fd9</guid>
+                        <ordinalNumber>1</ordinalNumber>
+                        <lotEditEnabled>false</lotEditEnabled>
+                        <lotData>
+                            <subject>Поставка молочной продукции для нужд ФГБУ «УСЗ и МТО» Минтруда России&#13;
+</subject>
+                            <currency>
+                                <code>RUB</code>
+                                <digitalCode>643</digitalCode>
+                                <name>Российский рубль</name>
+                            </currency>
+                            <initialSum>300000</initialSum>
+                            <deliveryPlace>
+                                <state>Центральный федеральный округ</state>
+                                <region>Москва</region>
+                                <regionOkato>45000000000</regionOkato>
+                                <address>г. Москва, ул. Ивана Сусанина, д.3; г. Москва, ул. Тверской бульвар, д. 18, стр. 1, а также по адресам, указанным в Заявке Заказчика (г. Москва, в пределах МКАД)</address>
+                            </deliveryPlace>
+                            <lotItems>
+                                <newCodes>true</newCodes>
+                                <superiorityNationalRegime>false</superiorityNationalRegime>
+                                <lotItem>
+                                    <guid>17df8e3b-3bfb-4831-8a26-bd9b049b1dd9</guid>
+                                    <ordinalNumber>1</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.40.313</code>
+                                        <name>Творог (кроме зерненого и произведенного с использованием ультрафильтрации и сепарирования) без вкусовых компонентов от 4% до 11% жирности</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>55960135-e5a4-46b1-93c8-8047c5a5673f</guid>
+                                    <ordinalNumber>2</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.40.313</code>
+                                        <name>Творог (кроме зерненого и произведенного с использованием ультрафильтрации и сепарирования) без вкусовых компонентов от 4% до 11% жирности</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>8275ab83-3ee9-41b8-b845-b2a097bc3ebe</guid>
+                                    <ordinalNumber>3</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.40.313</code>
+                                        <name>Творог (кроме зерненого и произведенного с использованием ультрафильтрации и сепарирования) без вкусовых компонентов от 4% до 11% жирности</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>ad1ff8b4-a802-48af-9553-cba84f31b161</guid>
+                                    <ordinalNumber>4</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.40.313</code>
+                                        <name>Творог (кроме зерненого и произведенного с использованием ультрафильтрации и сепарирования) без вкусовых компонентов от 4% до 11% жирности</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>d44ead12-f8ca-4108-8930-db6ccdaabdb6</guid>
+                                    <ordinalNumber>5</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.40.311</code>
+                                        <name>Творог (кроме зерненого и произведенного с использованием ультрафильтрации и сепарирования) без вкусовых компонентов обезжиренный, не более 1,8% жирности</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>a68a440d-27b6-4b8b-b027-d3e5fb102784</guid>
+                                    <ordinalNumber>6</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.40.311</code>
+                                        <name>Творог (кроме зерненого и произведенного с использованием ультрафильтрации и сепарирования) без вкусовых компонентов обезжиренный, не более 1,8% жирности</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>25f8cdd6-f136-4238-9900-96d54fee2e27</guid>
+                                    <ordinalNumber>7</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.12.112</code>
+                                        <name>Сливки питьевые ультрапастеризованные (ультравысокотемпературно-обработанные)</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>f4586bdd-8d66-499b-91f8-e25af3100741</guid>
+                                    <ordinalNumber>8</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.52.214</code>
+                                        <name>Сметана от 29,0% до 32,0% жирности</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>59fc9e41-1ed9-476f-b953-8d281f3c2cdc</guid>
+                                    <ordinalNumber>9</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.52.212</code>
+                                        <name>Сметана от 18,0% до 22,0% жирности</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>66697467-68e2-48ab-b7f7-a9bf94e76b88</guid>
+                                    <ordinalNumber>10</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.52.212</code>
+                                        <name>Сметана от 18,0% до 22,0% жирности</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>970b577e-fd5e-4b08-ba87-0bd1c27afae1</guid>
+                                    <ordinalNumber>11</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.52.212</code>
+                                        <name>Сметана от 18,0% до 22,0% жирности</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>db1061a3-a433-4da9-acc5-181bbebaf323</guid>
+                                    <ordinalNumber>12</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.52.211</code>
+                                        <name>Сметана от 10,0% до 17,0% жирности</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>b4fa38dd-25ba-4df4-a56d-3d51446ce896</guid>
+                                    <ordinalNumber>13</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.52.112</code>
+                                        <name>Йогурт с вкусовыми компонентами</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>42f5cffd-4855-478f-9ae6-0379ea587055</guid>
+                                    <ordinalNumber>14</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.30.111</code>
+                                        <name>Масло сладко-сливочное</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.3</code>
+                                        <name>Торговля оптовая пищевыми маслами и жирами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>2bf0ae85-743e-4a02-8a33-915e28763d16</guid>
+                                    <ordinalNumber>15</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.30.111</code>
+                                        <name>Масло сладко-сливочное</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.3</code>
+                                        <name>Торговля оптовая пищевыми маслами и жирами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>aae3ae19-a052-494e-b19f-3548d7e43bd3</guid>
+                                    <ordinalNumber>16</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.30.111</code>
+                                        <name>Масло сладко-сливочное</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.3</code>
+                                        <name>Торговля оптовая пищевыми маслами и жирами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>de8f8cf6-49e5-47a9-8fe8-8461e6d7da3d</guid>
+                                    <ordinalNumber>17</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.30.111</code>
+                                        <name>Масло сладко-сливочное</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.3</code>
+                                        <name>Торговля оптовая пищевыми маслами и жирами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>1457c301-c364-43bd-a97a-3402930406a4</guid>
+                                    <ordinalNumber>18</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.11.121</code>
+                                        <name>Молоко питьевое коровье ультрапастеризованное (ультравысокотемпературно-обработанное)</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>d6f9abb8-1f99-446d-ae34-5b659a5e614a</guid>
+                                    <ordinalNumber>19</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.11.111</code>
+                                        <name>Молоко питьевое коровье пастеризованное</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>cd3017e8-1d93-44f9-8168-90efa7ffe5f1</guid>
+                                    <ordinalNumber>20</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.11.111</code>
+                                        <name>Молоко питьевое коровье пастеризованное</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>c9989a27-f4b5-4001-9405-1911d2c3805f</guid>
+                                    <ordinalNumber>21</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.52.140</code>
+                                        <name>Кефир</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>91a76b76-4eec-4059-9c10-c8ffcea77f22</guid>
+                                    <ordinalNumber>22</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.52.140</code>
+                                        <name>Кефир</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>a56ccd2b-d319-4c41-8fcc-c413803b83fb</guid>
+                                    <ordinalNumber>23</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.40.313</code>
+                                        <name>Творог (кроме зерненого и произведенного с использованием ультрафильтрации и сепарирования) без вкусовых компонентов от 4% до 11% жирности</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>e8e84cd2-1f16-4ed6-b876-a6f604efd5c6</guid>
+                                    <ordinalNumber>24</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.40.313</code>
+                                        <name>Творог (кроме зерненого и произведенного с использованием ультрафильтрации и сепарирования) без вкусовых компонентов от 4% до 11% жирности</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>999ce06e-8ed3-4740-9c92-9a0d310f0de7</guid>
+                                    <ordinalNumber>25</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.40.313</code>
+                                        <name>Творог (кроме зерненого и произведенного с использованием ультрафильтрации и сепарирования) без вкусовых компонентов от 4% до 11% жирности</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>1d110293-91cd-45f0-873e-76866c5a0aa5</guid>
+                                    <ordinalNumber>26</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.11.121</code>
+                                        <name>Молоко питьевое коровье ультрапастеризованное (ультравысокотемпературно-обработанное)</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>0ed1c991-3583-411f-bcce-6100c51f57d6</guid>
+                                    <ordinalNumber>27</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.40.111</code>
+                                        <name>Сыры мягкие без вкусовых наполнителей</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>3dec5ccf-8c83-404c-8065-327714dcb44b</guid>
+                                    <ordinalNumber>28</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.40.132</code>
+                                        <name>Сыры твердые с вкусовыми компонентами</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>dd54b1ca-49cf-4f8c-80f2-43e69ec880c1</guid>
+                                    <ordinalNumber>29</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.51.113</code>
+                                        <name>Молоко сгущенное (концентрированное) с сахаром</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>7a6b8303-9370-4a1e-b813-a3e02975ad6e</guid>
+                                    <ordinalNumber>30</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.56.152</code>
+                                        <name>Сырки творожные</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>b40332c8-0fc0-4510-bda7-5caad68a6d9f</guid>
+                                    <ordinalNumber>31</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.51.113</code>
+                                        <name>Молоко сгущенное (концентрированное) с сахаром</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>f6f10657-88b1-41a1-b446-6248b013426d</guid>
+                                    <ordinalNumber>32</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.52.140</code>
+                                        <name>Кефир</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>0de1cf0f-4dc3-494f-8d2d-4042e15509e4</guid>
+                                    <ordinalNumber>33</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.52.140</code>
+                                        <name>Кефир</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>9126ea5c-2445-43da-ae31-0419e3c72a6b</guid>
+                                    <ordinalNumber>34</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.52.140</code>
+                                        <name>Кефир</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>2b5a7c5a-ed59-479b-a405-7c5b7b3f46bb</guid>
+                                    <ordinalNumber>35</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.52.130</code>
+                                        <name>Ряженка и варенец</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>a19548b0-bb5f-4919-b7dd-81da68b260a5</guid>
+                                    <ordinalNumber>36</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.52.130</code>
+                                        <name>Ряженка и варенец</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>8fdbd7af-da5b-4717-a607-420ef48837ed</guid>
+                                    <ordinalNumber>37</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.52.190</code>
+                                        <name>Продукты кисломолочные прочие (кроме сметаны), не включенные в другие группировки</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>a5d37b17-ae11-4d43-8db0-93032a4878e4</guid>
+                                    <ordinalNumber>38</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.52.190</code>
+                                        <name>Продукты кисломолочные прочие (кроме сметаны), не включенные в другие группировки</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>6edaf2b8-ad85-48dc-bf96-d006938cd9a3</guid>
+                                    <ordinalNumber>39</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.52.190</code>
+                                        <name>Продукты кисломолочные прочие (кроме сметаны), не включенные в другие группировки</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>086cb04a-c7db-49b3-b2ab-b7dc08eb51a5</guid>
+                                    <ordinalNumber>40</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.52.120</code>
+                                        <name>Ацидофилин</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>5e191449-5ad4-42f9-98e5-c87111126f1c</guid>
+                                    <ordinalNumber>41</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.52.112</code>
+                                        <name>Йогурт с вкусовыми компонентами</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>7824870f-c11b-4fa9-9aa1-280f6ac507e8</guid>
+                                    <ordinalNumber>42</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.11.121</code>
+                                        <name>Молоко питьевое коровье ультрапастеризованное (ультравысокотемпературно-обработанное)</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>b76f967b-9dd3-400b-9b9f-6c94c164ca8a</guid>
+                                    <ordinalNumber>43</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.11.121</code>
+                                        <name>Молоко питьевое коровье ультрапастеризованное (ультравысокотемпературно-обработанное)</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>8ebd037c-dda4-43f3-88d5-5902d453b774</guid>
+                                    <ordinalNumber>44</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.11.121</code>
+                                        <name>Молоко питьевое коровье ультрапастеризованное (ультравысокотемпературно-обработанное)</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                                <lotItem>
+                                    <guid>f85fce9d-6d5e-4556-b6c2-708114cca4dc</guid>
+                                    <ordinalNumber>45</ordinalNumber>
+                                    <okpd2>
+                                        <code>10.51.11.121</code>
+                                        <name>Молоко питьевое коровье ультрапастеризованное (ультравысокотемпературно-обработанное)</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>46.33.1</code>
+                                        <name>Торговля оптовая молочными продуктами</name>
+                                    </okved2>
+                                    <prohibitionNationalRegime>false</prohibitionNationalRegime>
+                                    <constraintNationalRegime>false</constraintNationalRegime>
+                                    <exceptionNationalRegime>false</exceptionNationalRegime>
+                                </lotItem>
+                            </lotItems>
+                            <forSmallOrMiddle>false</forSmallOrMiddle>
+                            <excludePurchaseFromPlan>false</excludePurchaseFromPlan>
+                            <subcontractorsRequirement>false</subcontractorsRequirement>
+                            <ignoredPurchase>false</ignoredPurchase>
+                            <centralized>false</centralized>
+                        </lotData>
+                        <deliveryPlaceIndication>GL</deliveryPlaceIndication>
+                        <jointLotData>
+                            <jointLot>false</jointLot>
+                        </jointLotData>
+                        <lotPlanInfo>
+                            <planRegistrationNumber>2250871115</planRegistrationNumber>
+                            <planGuid>d959cb3d-eaba-42e0-9248-5745a7e57b2a</planGuid>
+                            <positionNumber>64</positionNumber>
+                            <lotPlanPosition>COMMODITY</lotPlanPosition>
+                            <positionGuid>653b269a-df09-4730-b738-b3911b6cc036</positionGuid>
+                        </lotPlanInfo>
+                        <cancelled>false</cancelled>
+                    </lot>
+                </ns2:lots>
+            </ns2:purchaseNoticeEPData>
+        </ns2:item>
+    </ns2:body>
+</ns2:purchaseNoticeEP>
