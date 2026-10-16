@@ -40,6 +40,88 @@ UNAVAILABLE_RE = __import__("re").compile(
     r"\b(404|500|502|503|504)\b|Gateway|Service Unavailable|Internal Server Error|timed out|Timeout", __import__("re").I)
 
 
+# Переполнение контекста (vLLM, 400): «maximum context length is 16384 tokens. However, you requested 3000 output
+# tokens and your prompt contains at least 13385 input tokens»
+CONTEXT_RE = __import__("re").compile(
+    r"maximum context length is (\d+) tokens.*?requested (\d+) output tokens.*?(?:prompt contains|messages resulted in)"
+    r"\D*(\d+) input tokens", __import__("re").I | __import__("re").S)
+MIN_OUTPUT_TOKENS = 1024     # меньше — ответ JSON не поместится, запрос делится вызывающим
+CONTEXT_MARGIN = 32          # запас: сервер считает «at least» и добавляет служебные токены
+
+
+class ContextOverflow(ValueError):
+    """Запрос не помещается в контекст модели даже с уменьшенным ответом — текст нужно делить.
+
+    Attributes:
+        limit: Контекст модели (токенов).
+        input_tokens: Токенов в запросе.
+    """
+
+    def __init__(self, limit: int, input_tokens: int, message: str):
+        """Сохраняет размеры."""
+        super().__init__(message)
+        self.limit, self.input_tokens = limit, input_tokens
+
+
+def context_overflow(error: BaseException) -> Optional[tuple]:
+    """Размеры из ошибки переполнения контекста: ``(контекст, запрошено на ответ, токенов запроса)`` или ``None``."""
+    if isinstance(error, ContextOverflow):
+        return error.limit, 0, error.input_tokens
+    if getattr(error, "status_code", None) not in (400, None):
+        return None
+    m = CONTEXT_RE.search(str(error))
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
+
+
+def fit_output(error: BaseException, kwargs: Dict[str, Any]) -> bool:
+    """При переполнении контекста уменьшает ``max_tokens`` в ``kwargs``, если на ответ остаётся достаточно места.
+
+    Args:
+        error: Ошибка запроса.
+        kwargs: Параметры ``chat.completions.create`` (меняются на месте).
+
+    Returns:
+        bool: ``True`` — повторить с новым ``max_tokens``.
+
+    Raises:
+        ContextOverflow: Запрос не помещается даже с ответом ``MIN_OUTPUT_TOKENS`` — текст нужно делить.
+    """
+    sizes = context_overflow(error)
+    if not sizes:
+        return False
+    limit, _, used = sizes
+    room = limit - used - CONTEXT_MARGIN
+    if room >= MIN_OUTPUT_TOKENS and room < int(kwargs.get("max_tokens") or limit):
+        logger.warning(f"LLM: запрос {used} токенов из {limit}, ответ уменьшен с {kwargs.get('max_tokens')} до {room}")
+        kwargs["max_tokens"] = room
+        return True
+    raise ContextOverflow(limit, used, f"запрос {used} токенов не помещается в контекст {limit}: разделите текст") from error
+
+
+def split_halves(text: str) -> List[str]:
+    """Делит текст на две части по границе абзаца или строки ближе к середине (для :class:`ContextOverflow`).
+
+    Args:
+        text: Текст блока.
+
+    Returns:
+        List[str]: Две непустые части или исходный текст одним элементом, если делить нечего.
+    """
+    text = text or ""
+    if len(text) < 200:
+        return [text]
+    mid = len(text) // 2
+    cut = -1
+    for sep in ("\n\n", "\n", ". ", " "):
+        left, right = text.rfind(sep, 0, mid), text.find(sep, mid)
+        cands = [c for c in (left, right) if c > len(text) // 5 and c < len(text) - len(text) // 5]
+        if cands:
+            cut = min(cands, key=lambda c: abs(c - mid)) + len(sep)
+            break
+    cut = cut if cut > 0 else mid
+    return [p for p in (text[:cut], text[cut:]) if p.strip()]
+
+
 def unavailable_text(text: str) -> bool:
     """Похожа ли текстовая причина отказа на недоступность сервера модели (для сводок без исключения)."""
     return bool(UNAVAILABLE_RE.search(text or ""))
@@ -136,10 +218,15 @@ async def call_llm(client: Any, retries: int = len(RETRY_DELAYS) + 1, **kwargs: 
         Exception: Постоянная ошибка или последняя временная после исчерпания попыток.
     """
     client = getattr(client, "raw_client", client)   # ResilientClient: без вложенных повторов
+    kwargs = dict(kwargs)
     key = _server_key(client)
     stream = bool(STREAM)
     last: Optional[BaseException] = None
-    for attempt in range(max(1, retries)):
+    retries = max(1, retries)
+    extra = 0   # смена потока / уменьшение ответа — не считаются попытками
+    for attempt in range(retries + 3):
+        if attempt - extra >= retries:
+            break
         await _breaker_wait(key)
         CALLS["requests"] += 1
         try:
@@ -151,18 +238,22 @@ async def call_llm(client: Any, retries: int = len(RETRY_DELAYS) + 1, **kwargs: 
             if stream and getattr(e, "status_code", None) == 400 and "stream" in str(e).lower():
                 logger.warning(f"LLM {key}: поток не поддерживается, перехожу на обычный ответ")
                 stream = False
+                extra += 1
                 continue
             CALLS["failed"] += 1
+            if fit_output(e, kwargs):   # переполнение контекста: меньший ответ или ContextOverflow
+                extra += 1
+                continue
             if not transient(e):
                 raise
             last = e
             _breaker_record(key, False)
-            if attempt < retries - 1:
-                delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)] * random.uniform(0.8, 1.3)
+            if attempt - extra < retries - 1:
+                delay = RETRY_DELAYS[min(attempt - extra, len(RETRY_DELAYS) - 1)] * random.uniform(0.8, 1.3)
                 logger.warning(f"LLM {key}: {type(e).__name__} ({getattr(e, 'status_code', '')}), "
-                               f"попытка {attempt + 1}/{retries}, ждём {delay:.0f} с")
+                               f"попытка {attempt - extra + 1}/{retries}, ждём {delay:.0f} с")
                 await asyncio.sleep(delay)
-    raise last  # type: ignore[misc]
+    raise last or RuntimeError("LLM: попытки исчерпаны")  # type: ignore[misc]
 
 
 class _Completions:
@@ -185,12 +276,16 @@ class _Completions:
         """
         if kwargs.get("stream"):
             return await self._raw.chat.completions.create(**kwargs)
+        kwargs = dict(kwargs)
         key = _server_key(self._raw)
         # Многие вызовы экспертизы уже обёрнуты своими повторами (async_retry): здесь по умолчанию одна
         # повторная попытка через ~5 с, чтобы повторы не перемножались (PROXY_RETRIES)
         retries = max(1, int(self._retries if self._retries is not None else PROXY_RETRIES))
         last: Optional[BaseException] = None
-        for attempt in range(retries):
+        extra = 0   # повторы из-за уменьшения ответа (не считаются попытками)
+        for attempt in range(retries + 2):
+            if attempt - extra >= retries:
+                break
             await _breaker_wait(key)
             CALLS["requests"] += 1
             try:
@@ -200,16 +295,19 @@ class _Completions:
                 return resp
             except Exception as e:  # noqa: BLE001
                 CALLS["failed"] += 1
+                if fit_output(e, kwargs):   # переполнение контекста: меньший ответ (попытка не тратится)
+                    extra += 1
+                    continue
                 if not transient(e):
                     raise
                 last = e
                 _breaker_record(key, False)
-                if attempt < retries - 1:
-                    delay = RETRY_DELAYS[min(attempt, len(RETRY_DELAYS) - 1)] * random.uniform(0.8, 1.3)
+                if attempt - extra < retries - 1:
+                    delay = RETRY_DELAYS[min(attempt - extra, len(RETRY_DELAYS) - 1)] * random.uniform(0.8, 1.3)
                     logger.warning(f"LLM {key}: {type(e).__name__} ({getattr(e, 'status_code', '')}), "
-                                   f"попытка {attempt + 1}/{retries}, ждём {delay:.0f} с")
+                                   f"попытка {attempt - extra + 1}/{retries}, ждём {delay:.0f} с")
                     await asyncio.sleep(delay)
-        raise last  # type: ignore[misc]
+        raise last or RuntimeError("LLM: попытки исчерпаны")  # type: ignore[misc]
 
 
 class ResilientClient:
