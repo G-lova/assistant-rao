@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import json
+from typing import Any
 import pandas as pd
 import asyncio
 import datetime
@@ -129,7 +130,7 @@ class TasksPipeline:
                 await ks_hooks.on_identifiers(self.ks_scope, eis_procurement_number)
 
                 eis_data = {
-                    "document_name": "Ссылка на ЕИС",
+                    "document_name": {"value": "Ссылка на ЕИС", "confidence": 1.0},
                     "eis_procurement_number": str(eis_procurement_number) if eis_procurement_number else None,
                     "filename": link.media_links,
                     "url": link.media_links,
@@ -161,7 +162,7 @@ class TasksPipeline:
             # if "zakupki.gov.ru" in link.media_links:
                 logger.error(f"Ошибка обработки ЕИС-ссылки {link.media_links}: {e}")
                 eis_data = {
-                    "document_name": "Ссылка на ЕИС",
+                    "document_name": {"value": "Ссылка на ЕИС", "confidence": 1.0},
                     "filename": link.media_links,
                     "url": link.media_links,
                     "eis_status": "error",
@@ -433,8 +434,42 @@ class TasksPipeline:
                 send_subject_service = SendSubjectService(self.http_manager, self.x_api_database)
                 await send_subject_service.send_subject(int(self.df.id.iloc[0]), subject_result.get("subject", None), True)
 
-            return final_evaluation_result
+            # return final_evaluation_result
+            return self.strip_raw_data(final_evaluation_result)
             
         except Exception as e:
             logger.error(f"Error in evaluator pipeline: {e}", exc_info=True)
             raise
+
+    
+    def strip_raw_data(self, response: dict[str, Any]) -> dict[str, Any]:
+        """
+        Возвращает копию ответа проверки документов с урезанным raw_data.
+
+        Все поля ответа сохраняются без изменений, кроме ``raw_data`` внутри
+        каждого элемента ``result.documents``. В каждой записи ``raw_data``
+        остаются только ключи ``document_name``, ``filename`` и ``url``
+        (если они есть в исходной записи). Исходный словарь не изменяется.
+
+        Args:
+            response: Распарсенный JSON-ответ сервиса (со ``status`` и ``result``).
+
+        Returns:
+            Новый словарь той же структуры с сокращённым ``raw_data``.
+        """
+        RAW_DATA_KEYS = ("document_name", "filename", "url")
+
+        result = copy.deepcopy(response)
+        documents = result.get("documents", [])
+
+        for document in documents:
+            raw_items = document.get("raw_data", [])
+            if not isinstance(raw_items, list):
+                continue
+            document["raw_data"] = [
+                {key: item[key] for key in RAW_DATA_KEYS if key in item}
+                for item in raw_items
+                if isinstance(item, dict)
+            ]
+
+        return result

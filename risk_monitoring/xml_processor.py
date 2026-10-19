@@ -247,7 +247,7 @@ class XMLProcessor:
             # === Получение данных
             df = await self.data_fetcher.fetch_async_expertise_data(
                 await load_sql_query_async("get_rm_xml_files.sql"), 
-                bindings=[self.file_storage, self.file_storage, start_date, end_date, self.file_storage, self.file_storage]
+                bindings=[self.file_storage, self.file_storage, start_date, end_date]
             )
         
             if df.empty:
@@ -261,7 +261,7 @@ class XMLProcessor:
             entry_names = set(df["current_entry_name"].dropna()) | set(df["previous_entry_name"].dropna())
 
             # === Чтение и нормализзация xml, маппинг по имени файла
-            text_by_name = self.get_xml_texts(
+            text_by_name = await self.get_xml_texts(
                 archive_links=archive_links,
                 entry_names=entry_names
             )
