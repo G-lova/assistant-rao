@@ -16,6 +16,7 @@ from configs.utils import load_sql_query, split_large_text
 from configs.working_with_db import save_evaluation_result
 from evaluate_documents.completeness_checker import CompletenessChecker
 from evaluate_documents.consistency_checker import ConsistencyChecker
+from evaluate_documents.evidence_check import verify_extraction
 from configs.parsing import CloudStorageParser
 from evaluate_documents.send_subject_service import SendSubjectService
 from evaluate_documents.type_data_extractor import DOCUMENT_TYPE_MAPPING, TypeDataExtractor
@@ -23,12 +24,18 @@ from src.subject_detector import SubjectDetector
 from knowledge_store import hooks as ks_hooks
 from knowledge_store.documents import extraction_version
 from knowledge_store.scope import Scope
-from evaluate_documents.package_view import completeness_input
+from evaluate_documents.package_view import completeness_input, eis_link_assessment
 
 
 logger = get_logger(__name__)
 
 LLM_CHUNK_SIZE = 10000  # размер блока текста для TypeDataExtractor (входит в ключ кэша извлечения)
+
+
+
+async def _ready(value):
+    """Корутина, сразу возвращающая ``value`` (готовый результат в общем списке задач ``asyncio.gather``)."""
+    return value
 
 
 class TasksPipeline:
@@ -267,6 +274,10 @@ class TasksPipeline:
                 extracted_data = json.loads(extracted_data)
             await ks_hooks.save_extraction(ks_doc_id, version, model, extracted_data)
 
+        # Значения, которых нет в тексте документа (выдуманные моделью суммы, даты, реквизиты), отбрасываются.
+        # Проверка и для данных из кэша: кэш мог быть заполнен до её появления
+        extracted_data = verify_extraction(extracted_data, extracted_text, filename)
+
         await ks_hooks.on_document_extracted(ks_doc_id, extracted_data)
 
         return extracted_data
@@ -384,6 +395,11 @@ class TasksPipeline:
                     row.doc_code,
                     'Ссылка на ЕИС' if row.doc_code == 'linkDocs' else DOCUMENT_TYPE_MAPPING.get(row.doc_code, "Неизвестный документ"),
                     row.documents_results)
+                eis_result = eis_link_assessment(row.documents_results) if row.doc_code == 'linkDocs' else None
+                if eis_result is not None:
+                    # ЕИС недоступен: оценка без модели (одна понятная формулировка вместо трёх «критических ошибок»)
+                    completeness_tasks.append(_ready(eis_result))
+                    continue
                 completeness_tasks.append(self.completeness_checker.check_doc_completeness(self.consistency_checker.remove_empty(data_for_completeness), row.doc_code))
 
             completeness_results = await asyncio.gather(

@@ -10,7 +10,11 @@ from configs.logger import get_logger
 from typing import Any, Dict
 
 from configs.utils import extract_json_objects, split_large_text
+from evaluate_documents.final_digest import compact_input, count_tokens, package_facts
 from evaluate_documents.type_data_extractor import DOCUMENT_TYPE_MAPPING
+
+# Предел сводки комплекта для итоговой проверки (токенов); прежний предел обрезки входа был 14 500
+DIGEST_MAX_TOKENS = 14000
 
 
 logger = get_logger(__name__)
@@ -94,8 +98,21 @@ class ConsistencyChecker:
             cleaned_content["documents"] = []
         logger.info(f"cleaned_content: {cleaned_content}")
 
-        # Перед запросом к LLM            
-        cleaned_content_chunks = split_large_text(json.dumps(cleaned_content, ensure_ascii=False) if not isinstance(cleaned_content, str) else cleaned_content, max_chunk_size=14500)
+        # Модели — компактная сводка и факты, посчитанные кодом (раньше полный JSON обрезался до первых 14 500
+        # токенов, и в большом комплекте модель не видела половину документов)
+        digest, level = compact_input(cleaned_content, max_tokens=DIGEST_MAX_TOKENS)
+        facts = package_facts(cleaned_content)
+        user_content = (
+            "ФАКТЫ (посчитаны программно по данным, проверенным по текстам документов; при расхождении с отдельными "
+            "значениями из документов опирайся на факты):\n"
+            f"{json.dumps(facts, ensure_ascii=False, indent=1)}\n\n"
+            f"ДАННЫЕ ПО ДОКУМЕНТАМ:\n{json.dumps(digest, ensure_ascii=False, default=str)}"
+        )
+        tokens = count_tokens(user_content)
+        if level:
+            logger.info(f"Сводка для итоговой проверки сокращена до уровня {level} ({tokens} токенов)")
+        if tokens > DIGEST_MAX_TOKENS + 2000:
+            logger.warning(f"Сводка для итоговой проверки велика даже в краткой форме: {tokens} токенов")
 
         try:
             # Устойчивый вызов: поток (шлюз не обрывает долгий ответ), паузы 5/15/45 с вместо повторов SDK
@@ -110,10 +127,10 @@ class ConsistencyChecker:
                     },
                     {
                         "role": "user",
-                        "content": f"""Проанализируй:\n\n{cleaned_content_chunks[0]}"""
+                        "content": f"Проанализируй:\n\n{user_content}"
                     }
                 ],
-                max_tokens=500,
+                max_tokens=800,   # 3–5 предложений на русском; обрыв ответа ломает JSON
                 temperature=0.1,
                 extra_body={"guided_json": self.CONSISTENCY_SCHEMA}
             )
