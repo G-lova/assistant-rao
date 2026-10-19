@@ -25,6 +25,12 @@ PE_RM_LINK_ENABLED = True
 EVAL_LLM_CONCURRENCY = 3
 EVAL_FILE_CONCURRENCY = 3
 EVAL_LINK_CONCURRENCY = 2
+# Скачивание файлов через /api/media портала (ограничение частоты на SYSTEM_API_KEY): одновременных запросов к
+# одному хосту в процессе; пауза после 429 без Retry-After (с, растёт ×2 с каждой попыткой) и её потолок; число повторов
+MEDIA_DOWNLOAD_CONCURRENCY = 1
+MEDIA_RATE_LIMIT_DELAY = 10.0
+MEDIA_RATE_LIMIT_MAX_DELAY = 60.0
+MEDIA_RATE_LIMIT_RETRIES = 6
 # Окружение строк, записанных до появления env в ключах (миграции 004, 008), и вызовов без X-API-Database.
 # Зафиксировано для текущей установки: исторические данные — со prod
 PE_LEGACY_ENV = "prod"

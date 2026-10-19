@@ -13,7 +13,8 @@ import magic
 import xmltodict
 from configs.config import RetryConfig
 from configs.rate_limiter import TokenBucket
-from configs.retry_utils import EIS_RETRY_CONFIG, EISArchiveNotReadyError, EISRateLimitError, async_retry
+from configs.host_limiter import media_limiter, parse_retry_after
+from configs.retry_utils import EIS_RETRY_CONFIG, MEDIA_RETRY_CONFIG, EISArchiveNotReadyError, EISRateLimitError, async_retry
 from configs.utils import get_file_extension
 import zipfile
 import io
@@ -2129,12 +2130,29 @@ class CloudStorageParser:
             return await self._download_http_file(url=url, procurement_id=procurement_id, source="inner", handle_rate_limit=True)
         
 
-    @async_retry(EIS_RETRY_CONFIG)
+    @async_retry(MEDIA_RETRY_CONFIG)
     async def download_media(
         self,
         url: str,
         procurement_id: str,
     ):
+        """Скачивает файл через ``/api/media`` портала экспертиз (ключ ``SYSTEM_API_KEY``).
+
+        Запросы к одному хосту идут через общий ограничитель процесса (:func:`configs.host_limiter.media_limiter`):
+        не больше ``settings.MEDIA_DOWNLOAD_CONCURRENCY`` одновременно, а после ответа 429 пауза ставится на весь
+        хост — по ``Retry-After`` или ``settings.MEDIA_RATE_LIMIT_DELAY``. Повторы — ``MEDIA_RETRY_CONFIG``.
+
+        Args:
+            url: Ссылка на файл (``.../storage/...`` или ``.../api/media/<id>/<имя>``).
+            procurement_id: ID экспертизы — для результата.
+
+        Returns:
+            dict: ``status="success"``, ``file_path`` (временный файл), ``filename``, ``file_extension`` и др.
+
+        Raises:
+            EISRateLimitError: 429 (повторяется декоратором, после исчерпания попыток — наружу).
+            RuntimeError: Другой ответ, кроме 200.
+        """
         if "storage" in url:
             url = url.replace("storage", "api/media")
         api_url = "/".join((url.split("/"))[:-1])
@@ -2144,7 +2162,8 @@ class CloudStorageParser:
             "X-API-Key": os.getenv("SYSTEM_API_KEY"),
         }
 
-        async with aiohttp.ClientSession() as session:
+        limiter = media_limiter()
+        async with limiter.slot(api_url) as host, aiohttp.ClientSession() as session:
             async with session.get(
                 api_url,
                 headers=headers,
@@ -2152,8 +2171,10 @@ class CloudStorageParser:
             ) as response:
 
                 if response.status == 429:
-                    retry_after = response.headers.get('Retry-After')
-                    retry_after_sec = int(retry_after) if retry_after else None
+                    retry_after_sec = parse_retry_after(response.headers.get('Retry-After'))
+                    # пауза для всех запросов процесса к этому хосту, чтобы они не тратили попытки впустую
+                    from configs import settings
+                    limiter.penalize(host, retry_after_sec if retry_after_sec is not None else settings.MEDIA_RATE_LIMIT_DELAY)
                     raise EISRateLimitError(
                         f"Rate limit exceeded: {api_url}",
                         retry_after=retry_after_sec
