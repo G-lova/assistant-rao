@@ -2140,7 +2140,7 @@ class CloudStorageParser:
 
         Запросы к одному хосту идут через общий ограничитель процесса (:func:`configs.host_limiter.media_limiter`):
         не больше ``settings.MEDIA_DOWNLOAD_CONCURRENCY`` одновременно, а после ответа 429 пауза ставится на весь
-        хост — по ``Retry-After`` или ``settings.MEDIA_RATE_LIMIT_DELAY``. Повторы — ``MEDIA_RETRY_CONFIG``.
+        хост — по ``Retry-After`` или ``settings.PORTAL_RATE_LIMIT_DELAY``. Повторы — ``MEDIA_RETRY_CONFIG``.
 
         Args:
             url: Ссылка на файл (``.../storage/...`` или ``.../api/media/<id>/<имя>``).
@@ -2174,7 +2174,7 @@ class CloudStorageParser:
                     retry_after_sec = parse_retry_after(response.headers.get('Retry-After'))
                     # пауза для всех запросов процесса к этому хосту, чтобы они не тратили попытки впустую
                     from configs import settings
-                    limiter.penalize(host, retry_after_sec if retry_after_sec is not None else settings.MEDIA_RATE_LIMIT_DELAY)
+                    limiter.penalize(host, retry_after_sec if retry_after_sec is not None else settings.PORTAL_RATE_LIMIT_DELAY)
                     raise EISRateLimitError(
                         f"Rate limit exceeded: {api_url}",
                         retry_after=retry_after_sec

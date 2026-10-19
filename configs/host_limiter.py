@@ -6,7 +6,8 @@
 тратят попытки впустую.
 
 Ограничение действует в пределах процесса. Семафоры создаются отдельно для каждого event loop (Celery-задача может
-запускать свой ``asyncio.run``), пауза после 429 — общая для всех loop процесса.
+запускать свой ``asyncio.run``), пауза после 429 — общая для всех loop процесса и для всех ограничителей
+(скачивание ``/api/media`` и SQL-запросы ``/api/database/query`` упираются в один лимит ключа на хосте).
 """
 import asyncio
 import email.utils
@@ -19,6 +20,9 @@ from typing import Dict, Optional
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+# Пауза после 429 по хостам (time.monotonic() до конца паузы) — общая для всех ограничителей процесса
+_SHARED_COOLDOWN: Dict[str, float] = {}
 
 
 def parse_retry_after(value: Optional[str], now: Optional[datetime] = None) -> Optional[float]:
@@ -65,14 +69,16 @@ def host_of(url: str) -> str:
 class HostLimiter:
     """Ограничитель запросов по хостам: семафор на хост и общая пауза («cooldown») после 429."""
 
-    def __init__(self, concurrency: int = 1):
+    def __init__(self, concurrency: int = 1, cooldown: Optional[Dict[str, float]] = None):
         """Создаёт ограничитель.
 
         Args:
             concurrency: Одновременных запросов к одному хосту в одном event loop (не меньше 1).
+            cooldown: Словарь пауз по хостам; по умолчанию — общий для процесса (пауза после 429 у одного
+                ограничителя действует и на другие). Отдельный словарь — для тестов.
         """
         self.concurrency = max(1, int(concurrency))
-        self._cooldown_until: Dict[str, float] = {}
+        self._cooldown_until: Dict[str, float] = _SHARED_COOLDOWN if cooldown is None else cooldown
         self._semaphores: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[str, asyncio.Semaphore]]" = (
             weakref.WeakKeyDictionary()
         )
@@ -146,3 +152,21 @@ def media_limiter() -> HostLimiter:
         from configs import settings
         _media_limiter = HostLimiter(settings.MEDIA_DOWNLOAD_CONCURRENCY)
     return _media_limiter
+
+
+_query_limiter: Optional[HostLimiter] = None
+
+
+def query_limiter() -> HostLimiter:
+    """Общий ограничитель процесса для SQL-запросов ``/api/database/query`` (``settings.PORTAL_QUERY_CONCURRENCY``).
+
+    Пауза после 429 у него общая с :func:`media_limiter`.
+
+    Returns:
+        HostLimiter: Один экземпляр на процесс.
+    """
+    global _query_limiter
+    if _query_limiter is None:
+        from configs import settings
+        _query_limiter = HostLimiter(settings.PORTAL_QUERY_CONCURRENCY)
+    return _query_limiter

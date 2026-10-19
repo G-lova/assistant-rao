@@ -248,7 +248,7 @@ EIS_RETRY_CONFIG = RetryConfig(
     )
 
 def _media_retry_config() -> RetryConfig:
-    """Повторы скачивания через ``/api/media`` портала: 429 ждём дольше (``settings.MEDIA_RATE_LIMIT_*``)."""
+    """Повторы скачивания через ``/api/media`` портала: 429 ждём дольше (``settings.PORTAL_RATE_LIMIT_*``)."""
     from configs import settings
     return RetryConfig(
         max_retries=settings.MEDIA_RATE_LIMIT_RETRIES,
@@ -256,10 +256,26 @@ def _media_retry_config() -> RetryConfig:
         backoff=2.0,
         exceptions=(ConnectionError, TimeoutError, EISRateLimitError),
         log_errors=True,
-        rate_limit_delay=settings.MEDIA_RATE_LIMIT_DELAY,
-        max_delay=settings.MEDIA_RATE_LIMIT_MAX_DELAY,
+        rate_limit_delay=settings.PORTAL_RATE_LIMIT_DELAY,
+        max_delay=settings.PORTAL_RATE_LIMIT_MAX_DELAY,
     )
 
+
+def _portal_query_retry_config() -> RetryConfig:
+    """Повторы SQL-запросов через ``/api/database/query`` портала: только после 429, паузы как у ``/api/media``."""
+    from configs import settings
+    return RetryConfig(
+        max_retries=settings.PORTAL_QUERY_RATE_LIMIT_RETRIES,
+        delay=2.0,
+        backoff=2.0,
+        exceptions=(EISRateLimitError,),
+        log_errors=True,
+        rate_limit_delay=settings.PORTAL_RATE_LIMIT_DELAY,
+        max_delay=settings.PORTAL_RATE_LIMIT_MAX_DELAY,
+    )
+
+
+PORTAL_QUERY_RETRY_CONFIG = _portal_query_retry_config()
 
 # 10→20→40→60→60→60 с при 429 без Retry-After: окно ограничения портала (минута) успевает закончиться
 MEDIA_RETRY_CONFIG = _media_retry_config()

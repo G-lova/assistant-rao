@@ -25,12 +25,17 @@ PE_RM_LINK_ENABLED = True
 EVAL_LLM_CONCURRENCY = 3
 EVAL_FILE_CONCURRENCY = 3
 EVAL_LINK_CONCURRENCY = 2
-# Скачивание файлов через /api/media портала (ограничение частоты на SYSTEM_API_KEY): одновременных запросов к
-# одному хосту в процессе; пауза после 429 без Retry-After (с, растёт ×2 с каждой попыткой) и её потолок; число повторов
+# Запросы к порталу экспертиз с ключом SYSTEM_API_KEY (/api/media, /api/database/query): у портала ограничение
+# частоты на ключ, общее для всех запросов. После 429 пауза ставится на весь хост: по Retry-After, а без него —
+# PORTAL_RATE_LIMIT_DELAY с, растёт ×2 с каждой попыткой, не больше PORTAL_RATE_LIMIT_MAX_DELAY
+PORTAL_RATE_LIMIT_DELAY = 10.0
+PORTAL_RATE_LIMIT_MAX_DELAY = 60.0
+# Скачивание файлов через /api/media: одновременных запросов к одному хосту в процессе и число повторов после 429
 MEDIA_DOWNLOAD_CONCURRENCY = 1
-MEDIA_RATE_LIMIT_DELAY = 10.0
-MEDIA_RATE_LIMIT_MAX_DELAY = 60.0
 MEDIA_RATE_LIMIT_RETRIES = 6
+# SQL-запросы через /api/database/query (DataFetcher): одновременных запросов к хосту в процессе и повторов после 429
+PORTAL_QUERY_CONCURRENCY = 4
+PORTAL_QUERY_RATE_LIMIT_RETRIES = 4
 # Окружение строк, записанных до появления env в ключах (миграции 004, 008), и вызовов без X-API-Database.
 # Зафиксировано для текущей установки: исторические данные — со stage
 PE_LEGACY_ENV = "stage"
