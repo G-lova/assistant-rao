@@ -26,8 +26,8 @@ EVAL_LLM_CONCURRENCY = 3
 EVAL_FILE_CONCURRENCY = 3
 EVAL_LINK_CONCURRENCY = 2
 # Окружение строк, записанных до появления env в ключах (миграции 004, 008), и вызовов без X-API-Database.
-# Зафиксировано для текущей установки: исторические данные — со stage
-PE_LEGACY_ENV = "stage"
+# Зафиксировано для текущей установки: исторические данные — со prod
+PE_LEGACY_ENV = "prod"
 
 # Нарезка экспертизы для индексации и поиска фактов (knowledge_store.pages.current_chunker): pages_1500 (прежняя)
 # или pages_v2 (по структуре; переключать после диагностики scripts.eval_chunkers variants)
