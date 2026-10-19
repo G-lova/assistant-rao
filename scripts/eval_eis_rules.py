@@ -22,8 +22,10 @@ FORM = "44fz_competition_obj6"
 
 
 def norm(value):
-    """Приводит значение поля к ``int`` 0/1/2 или ``None`` (значения бывают int и str)."""
-    if isinstance(value, bool) or value is None:
+    """Приводит значение поля к ``int`` 0/1/2 или ``None`` (значения бывают int, str и bool: ``true``/``false`` → 1/0)."""
+    if isinstance(value, bool):
+        return int(value)
+    if value is None:
         return None
     try:
         number = int(str(value).strip())

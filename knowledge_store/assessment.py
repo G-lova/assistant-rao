@@ -21,7 +21,7 @@ import re
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 from configs.logger import get_logger
-from knowledge_store import contract_check, facts as facts_mod, form_keys
+from knowledge_store import contract_check, facts as facts_mod, form_keys, law_context
 
 logger = get_logger(__name__)
 
@@ -33,9 +33,10 @@ STYLE_KEY = "field2_2_1_6"
 NMCK_METHOD_CODES = {"рыночн": (1, "рыночный"), "нормативн": (2, "нормативный"), "затратн": (3, "затратный"),
                      "тарифн": (4, "тарифный"), "проектно-сметн": (5, "проектно-сметный")}
 
-# Презумпция соответствия: ключ → (чек-лист нарушений, шаблон ключевых слов для отбора фрагментов, формулировка для «1»)
-PRESUMPTION = {
-    "field2_2_3": ("требования к содержанию и составу заявки (ст. 42, 43, 44, 49 44-ФЗ): требуются документы или сведения, "
+# Презумпция соответствия 44-ФЗ: логическое имя критерия (см. form_keys.FormKeys) → (чек-лист нарушений, шаблон ключевых
+# слов для отбора фрагментов, формулировка для «1»)
+PRESUMPTION_44 = {
+    "composition": ("требования к содержанию и составу заявки (ст. 42, 43, 44, 49 44-ФЗ): требуются документы или сведения, "
                    "не предусмотренные законом для заявки (например, копии учредительных документов, выписки из ЕГРЮЛ, "
                    "бухгалтерская отчётность, отзывы и рекомендации, документы о деловой репутации сверх закона); "
                    "требования к составу заявки противоречат закону или друг другу; инструкция по заполнению заявки "
@@ -43,22 +44,22 @@ PRESUMPTION = {
                    r"состав\w* заявк|содержани\w+ заявк|инструкци\w+ по заполнени|в составе заявк|"
                    r"первая часть заявк|вторая часть заявк|документы.{0,60}заявк",
                    "требованиям к содержанию и составу заявки"),
-    "field2_3_3": ("гражданское законодательство РФ (ГК РФ): размер неустойки (пени) и штрафов, не соответствующий "
+    "civil": ("гражданское законодательство РФ (ГК РФ): размер неустойки (пени) и штрафов, не соответствующий "
                    "ст. 34 44-ФЗ и постановлению Правительства № 1042; ответственность только одной стороны; одностороннее "
                    "расторжение контракта только заказчиком вне оснований закона; условия, противоречащие ГК РФ",
                    r"неустойк|пени|штраф|расторжен|односторонн\w+ отказ|ответственност|гражданск\w+ кодекс",
                    "требованиям гражданского законодательства Российской Федерации"),
-    "field2_3_4": ("бюджетное законодательство РФ (БК РФ): размер аванса и порядок его выплаты сверх допустимого, "
+    "budget": ("бюджетное законодательство РФ (БК РФ): размер аванса и порядок его выплаты сверх допустимого, "
                    "несоответствие вида расходов (КОСГУ, КБК) виду контракта, оплата за счёт не предусмотренных источников, "
                    "условия расчётов, противоречащие БК РФ",
                    r"аванс|казначейск|бюджетн|финансировани|вид\w* расход|лимит|порядок оплат|расчет\w* по контракт",
                    "требованиям бюджетного законодательства Российской Федерации"),
-    "field2_3_6": ("персональные данные (152-ФЗ): требование предоставить персональные данные без согласия субъекта или "
+    "personal": ("персональные данные (152-ФЗ): требование предоставить персональные данные без согласия субъекта или "
                    "без указания цели обработки; обязанность обрабатывать данные без правового основания; передача данных "
                    "третьим лицам без оснований",
                    r"персональн\w+ данн|152-ФЗ|согласие на обработк",
                    "требованиям законодательства Российской Федерации о персональных данных"),
-    "field2_3_8": ("антимонопольное законодательство (135-ФЗ, ст. 17 и 25 44-ФЗ): требования, ограничивающие конкуренцию — "
+    "antitrust": ("антимонопольное законодательство (135-ФЗ, ст. 17 и 25 44-ФЗ): требования, ограничивающие конкуренцию — "
                    "завышенные или нерелевантные требования к опыту, лицензиям, членству, наличию собственных мощностей; "
                    "указание товарного знака без «или эквивалент»; требования, под которые подходит один участник; "
                    "необоснованно короткие сроки",
@@ -66,6 +67,42 @@ PRESUMPTION = {
                    r"товарн\w+ знак|торгов\w+ марк|эквивалент|ограничени\w+ конкуренц",
                    "антимонопольному законодательству Российской Федерации"),
 }
+# Для 223-ФЗ нарушения из 44-ФЗ (ст. 34, ПП № 1042, ст. 42–49) не применяются: свои чек-листы там, где они отличаются.
+PRESUMPTION_223 = {
+    **PRESUMPTION_44,
+    "composition": ("требования к содержанию и составу заявки (ст. 3, 3.2 Закона № 223-ФЗ и Положение о закупке заказчика): "
+                    "требуются документы или сведения, не предусмотренные Положением о закупке, либо избыточные и "
+                    "ограничивающие конкуренцию; требования к составу заявки противоречат друг другу; инструкция по "
+                    "заполнению заявки противоречива либо несовместима с требованиями извещения",
+                    PRESUMPTION_44["composition"][1], "требованиям к содержанию и составу заявки"),
+    "civil": ("гражданское законодательство РФ (ГК РФ): чрезмерная или несоразмерная нарушению неустойка (пени, штрафы); "
+              "ответственность только одной стороны; одностороннее расторжение договора только заказчиком вне оснований "
+              "закона; условия, противоречащие ГК РФ",
+              PRESUMPTION_44["civil"][1], "требованиям гражданского законодательства Российской Федерации"),
+    "antitrust": ("антимонопольное законодательство (ст. 17 Закона № 135-ФЗ, ч. 6 ст. 3 Закона № 223-ФЗ): требования, "
+                  "ограничивающие конкуренцию — завышенные или нерелевантные требования к опыту, лицензиям, членству, "
+                  "наличию собственных мощностей; указание товарного знака без «или эквивалент»; требования, под которые "
+                  "подходит один участник; необоснованно короткие сроки",
+                  PRESUMPTION_44["antitrust"][1], "антимонопольному законодательству Российской Федерации"),
+}
+# ключи конкурса (обратная совместимость и тесты): ключ поля → описание
+PRESUMPTION = {getattr(form_keys.COMPETITION, name): spec for name, spec in PRESUMPTION_44.items()}
+PRESUMPTION_NAMES = tuple(PRESUMPTION_44)
+
+
+def presumption_specs(fk: "form_keys.FormKeys") -> Dict[str, tuple]:
+    """Критерии презумпции соответствия в форме: ``ключ поля → (чек-лист, шаблон, формулировка)``.
+
+    Args:
+        fk: Ключи особых критериев формы (:func:`knowledge_store.form_keys.resolve`).
+
+    Returns:
+        dict: Чек-листы 44-ФЗ или 223-ФЗ (по :mod:`knowledge_store.law_context`) для критериев, которые есть в форме.
+    """
+    table = PRESUMPTION_223 if law_context.is_223() else PRESUMPTION_44
+    return {getattr(fk, name): table[name] for name in PRESUMPTION_NAMES if getattr(fk, name)}
+
+
 EDUCATION_KEY = "field2_3_2"
 EDUCATION_RE = r"образовательн|обучени|учебн|школ|вуз\b|университет|дошкольн|повышени\w+ квалификации|курсов\w+ подготовк|студент"
 EXPENSE_KEY = "field2_3_5"
@@ -98,7 +135,7 @@ def method_conflict(text: Optional[str], chosen: Optional[int]) -> Optional[str]
 # Критерии соответствия, где эксперты применяют «2» (не применимо). Для остальных «2» от модели — не ответ,
 # а признак «не нашла сведений»: значение остаётся эксперту (по эталону «2» здесь почти не встречается; для 2.1.5 — 1 из 36).
 NOT_APPLICABLE_ALLOWED = frozenset({"field2_2_2_5_2", "field2_2_2_5_3", "field2_4_3", "field2_4_4", "field2_4_5"})
-FILL_IF_EMPTY = frozenset(PRESUMPTION) | {EDUCATION_KEY, EXPENSE_KEY, "field2_2_2_3"}   # ставятся, только если поиск фактов значения не дал
+FILL_IF_EMPTY = frozenset(PRESUMPTION) | {EDUCATION_KEY, EXPENSE_KEY, "field2_2_2_3"}      # ключи конкурса; в других формах — fill_if_empty(fk)   # ставятся, только если поиск фактов значения не дал
 VIOLATION_SCHEMA = {"type": "object", "properties": {"violations": {"type": "array", "maxItems": 2, "items": {
     "type": "object", "properties": {"quote": {"type": "string", "maxLength": 300}, "issue": {"type": "string", "maxLength": 300}},
     "required": ["quote", "issue"]}}}, "required": ["violations"], "additionalProperties": False}
@@ -295,7 +332,7 @@ async def detect_nmck_choice(documents: Dict[int, dict], llm_call: Optional[LlmC
     if not windows:
         return classify_nmck_method(documents)
     try:
-        parsed = _parse(await llm_call([{"role": "system", "content": NMCK_PROMPT},
+        parsed = _parse(await llm_call([{"role": "system", "content": law_context.localize(NMCK_PROMPT)},
                                         {"role": "user", "content": "\n\n".join(f"[{i}] {w}" for i, w in enumerate(windows, 1))}],
                                        NMCK_SCHEMA)) or {}
     except Exception as e:  # noqa: BLE001
@@ -339,7 +376,7 @@ async def assess_style(documents: Dict[int, dict], llm_call: LlmCall, concurrenc
         """Один запрос по одной части документа."""
         try:
             async with semaphore:
-                raw = await llm_call([{"role": "system", "content": STYLE_PROMPT},
+                raw = await llm_call([{"role": "system", "content": law_context.localize(STYLE_PROMPT)},
                                       {"role": "user", "content": f"Документ «{doc.get('filename')}»:\n{part}"}], STYLE_SCHEMA)
         except Exception as e:  # noqa: BLE001
             errors.append(f"{type(e).__name__}: {e}"[:200])
@@ -385,7 +422,7 @@ async def assess_presumption(key: str, documents: Dict[int, dict], llm_call: Llm
                    "comment": f"Положений, затрагивающих соответствие {phrase}, в документах не найдено; нарушений не выявлено.",
                    "note": "презумпция соответствия: фрагментов по теме нет, требует проверки экспертом"}
     try:
-        raw = await llm_call([{"role": "system", "content": VIOLATION_PROMPT.format(checklist=checklist)},
+        raw = await llm_call([{"role": "system", "content": law_context.localize(VIOLATION_PROMPT.format(checklist=checklist))},
                               {"role": "user", "content": "\n\n".join(f"[{i}] {w}" for i, w in enumerate(windows, 1))}],
                              VIOLATION_SCHEMA)
     except Exception as e:  # noqa: BLE001
@@ -474,7 +511,7 @@ async def judge_claim(label: str, comment: Any, quote: Any, context: str, llm_ca
     user = (f"Критерий: {label}\nУтверждение: {comment or '—'}\nЦитата: {quote or '—'}\n"
             f"Окружение цитаты в документе:\n{context[:1800]}")
     try:
-        raw = await llm_call([{"role": "system", "content": JUDGE_PROMPT},
+        raw = await llm_call([{"role": "system", "content": law_context.localize(JUDGE_PROMPT)},
                               {"role": "user", "content": user}], JUDGE_SCHEMA)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"knowledge_store: проверка замечания не выполнена: {type(e).__name__}: {e}")
@@ -565,8 +602,7 @@ def fill_if_empty(fk: "form_keys.FormKeys") -> frozenset:
     Returns:
         frozenset: Для конкурса совпадает с :data:`FILL_IF_EMPTY`; для других форм ключи 2.3 и «метод соответствует» заменены своими.
     """
-    base = (set(PRESUMPTION) - {"field2_2_3"}) | {EDUCATION_KEY, EXPENSE_KEY}
-    return frozenset(base | {k for k in (fk.composition, fk.method_fit) if k})
+    return frozenset(presumption_specs(fk)) | {k for k in (fk.education, fk.expense, fk.method_fit) if k}
 
 
 def zero_overrides(fk: "form_keys.FormKeys") -> frozenset:
@@ -679,9 +715,7 @@ async def compute_assessed(fields: Sequence[dict], documents: Dict[int, dict],
     keys = {f["field_key"] for f in fields}
     fk = form_keys.resolve(fields)
     nmck_key, fit_key, style_key, contract_key = fk.nmck_choice, fk.method_fit, fk.style, fk.contract
-    presumption = {k: v for k, v in PRESUMPTION.items() if k != "field2_2_3"}
-    if fk.composition:
-        presumption[fk.composition] = PRESUMPTION["field2_2_3"]
+    presumption = presumption_specs(fk)
     preset: Dict[str, Tuple[Any, dict]] = {}
     if nmck_key and nmck_key in keys:
         found = await detect_nmck_choice(documents, llm_call)
@@ -701,7 +735,8 @@ async def compute_assessed(fields: Sequence[dict], documents: Dict[int, dict],
         preset[fit_key] = (1, {
             "status": "proposed", "source": "rule", "quote": None,
             "comment": f"Для обоснования НМЦК применён {name} метод"
-                       + (" — приоритетный по ст. 22 Закона № 44-ФЗ; его выбор нарушением не является." if code == 1 else "."),
+                       + (" — приоритетный по ст. 22 Закона № 44-ФЗ; его выбор нарушением не является."
+                          if code == 1 and not law_context.is_223() else "."),
             "note": "вывод по определённому методу НМЦК; требует проверки экспертом"})
     if style_key and style_key in keys and llm_call is not None:
         result = await assess_style(documents, llm_call)
@@ -727,16 +762,16 @@ async def compute_assessed(fields: Sequence[dict], documents: Dict[int, dict],
                 preset[key] = res
     if llm_call is not None and recheck:
         await recheck_presets(preset, fields, documents, llm_call)
-    if contract_key and contract_key in keys:
+    if contract_key and contract_key in keys and not law_context.is_223():       # правила проекта контракта — нормы 44-ФЗ
         found = assess_contract(documents, competition)
         if found:
             preset[contract_key] = found
-    if EXPENSE_KEY in keys and EXPENSE_KEY not in skip:
+    if fk.expense and fk.expense in keys and fk.expense not in skip:
         found = assess_expense_type(documents)
         if found:
-            preset[EXPENSE_KEY] = found
-    if EDUCATION_KEY in keys and EDUCATION_KEY not in skip and not education_applicable(documents) and documents:
-        preset[EDUCATION_KEY] = (1, {
+            preset[fk.expense] = found
+    if fk.education and fk.education in keys and fk.education not in skip and not education_applicable(documents) and documents:
+        preset[fk.education] = (1, {
             "status": "proposed", "source": "rule", "quote": None,
             "comment": "Объект закупки не относится к сфере образования, требования Федерального закона от 29.12.2012 № 273-ФЗ "
                        "к документации не предъявляются; нарушений не выявлено.",

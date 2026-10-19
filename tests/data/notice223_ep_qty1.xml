@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<ns2:purchaseNoticeEP xsi:schemaLocation="https://zakupki.gov.ru/223/integration/schema/TFF-16.2 https://zakupki.gov.ru/223/integration/schema/TFF-16.2/purchase.xsd" xmlns="http://zakupki.gov.ru/223fz/types/1" xmlns:ns2="http://zakupki.gov.ru/223fz/purchase/1" xmlns:ns4="http://zakupki.gov.ru/223fz/agencyRelation/1" xmlns:ns3="http://zakupki.gov.ru/223fz/dishonestSupplier/1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ns6="http://zakupki.gov.ru/223fz/contract/1" xmlns:ns5="http://zakupki.gov.ru/223fz/complaint/1" xmlns:ns30="http://zakupki.gov.ru/223fz/ecp-packet/1" xmlns:ns8="http://zakupki.gov.ru/223fz/customerRegistry/1" xmlns:ns7="http://zakupki.gov.ru/223fz/customerAccredited/1" xmlns:ns13="http://zakupki.gov.ru/223fz/machineryListInfo/1" xmlns:ns9="http://zakupki.gov.ru/223fz/decisionSuspension/1" xmlns:ns12="http://zakupki.gov.ru/223fz/exclusion/1" xmlns:ns11="http://zakupki.gov.ru/223fz/disagreementProtocol/1" xmlns:ns10="http://zakupki.gov.ru/223fz/detachedRights/1" xmlns:ns17="http://zakupki.gov.ru/223fz/purchasePlan/1" xmlns:ns16="http://zakupki.gov.ru/223fz/orderClauseList/1" xmlns:ns15="http://zakupki.gov.ru/223fz/notificationIssue/1" xmlns:ns14="http://zakupki.gov.ru/223fz/missedNotice/1" xmlns:ns19="http://zakupki.gov.ru/223fz/purchasePlanAdditionalPosition/1" xmlns:ns18="http://zakupki.gov.ru/223fz/purchasePlanUpdatePositionDataType/1" xmlns:ns20="http://zakupki.gov.ru/223fz/purchasePlanProject/1" xmlns:ns24="http://zakupki.gov.ru/223fz/stopCommodity/1" xmlns:ns23="http://zakupki.gov.ru/223fz/revenue/1" xmlns:ns22="http://zakupki.gov.ru/223fz/reference/1" xmlns:ns21="http://zakupki.gov.ru/223fz/purchasePlanProjectAdditionalPosition/1" xmlns:ns28="http://zakupki.gov.ru/223fz/integration/1" xmlns:ns27="http://zakupki.gov.ru/223fz/guarantee/1" xmlns:ns26="http://zakupki.gov.ru/223fz/webRequest/1" xmlns:ns25="http://zakupki.gov.ru/223fz/typalOrderClauseList/1" xmlns:ns29="http://zakupki.gov.ru/223fz/ecp-packetSpec/1">
+    <header>
+        <guid>b753d9b4-392b-4682-a6cf-23b14f9fea95</guid>
+        <createDateTime>2026-10-01T09:03:24</createDateTime>
+    </header>
+    <ns2:extendedType>
+        <contentUid>01A0F60F23237499BAB762AC0818AFF2</contentUid>
+        
+        <xsltFileDsUid>82C645A86D0A472FAA468E3292F76B13</xsltFileDsUid>
+    </ns2:extendedType>
+    <ns2:body>
+        <ns2:item>
+            <guid>cc1f0385-2cca-4b5a-b6b0-5640f5218405</guid>
+            <ns2:purchaseNoticeEPData>
+                <ns2:guid>cc1f0385-2cca-4b5a-b6b0-5640f5218405</ns2:guid>
+                <ns2:createDateTime>2026-10-01T09:01:40</ns2:createDateTime>
+                <ns2:urlEIS>https://lk.zakupki.gov.ru/223/purchase/private/purchase/notice-info/details.html?noticeInfoId=20311065</ns2:urlEIS>
+                <ns2:registrationNumber>32616427186</ns2:registrationNumber>
+                <ns2:name>Лабораторные исследования проб почвы и воды</ns2:name>
+                <ns2:customer>
+                    <mainInfo>
+                        <fullName>ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ "СОВМЕСТНАЯ КОМПАНИЯ "РУСВЬЕТПЕТРО"</fullName>
+                        <shortName>ООО "СК "РУСВЬЕТПЕТРО"</shortName>
+                        <iko>57701791321771301001</iko>
+                        <inn>7701791321</inn>
+                        <kpp>771301001</kpp>
+                        <ogrn>1087746814000</ogrn>
+                        <legalAddress>127422, Г.МОСКВА, ПР-Д ДМИТРОВСКИЙ, Д. 10, СТР. 1</legalAddress>
+                        <postalAddress>127422, г Москва, проезд Дмитровский, дом 10, корпус 1</postalAddress>
+                        <okato>45277592000</okato>
+                        <okopf>12300</okopf>
+                        <okopfName>Общества с ограниченной ответственностью</okopfName>
+                        <okpo>87565363</okpo>
+                        <okfs>31</okfs>
+                        <okfsName>Совместная федеральная и иностранная собственность</okfsName>
+                        <timeZone>
+                            <offset>0</offset>
+                            <name>МСК (СГВ+3) Москва, Волгоград</name>
+                        </timeZone>
+                        <region>Г.МОСКВА</region>
+                    </mainInfo>
+                </ns2:customer>
+                <ns2:purchaseMethodCode>3363</ns2:purchaseMethodCode>
+                <ns2:purchaseCodeName>Закупка у единственного поставщика (подрядчика, исполнителя) (до 01.07.18)</ns2:purchaseCodeName>
+                <ns2:placer>
+                    <mainInfo>
+                        <fullName>ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ "СОВМЕСТНАЯ КОМПАНИЯ "РУСВЬЕТПЕТРО"</fullName>
+                        <shortName>ООО "СК "РУСВЬЕТПЕТРО"</shortName>
+                        <iko>57701791321771301001</iko>
+                        <inn>7701791321</inn>
+                        <kpp>771301001</kpp>
+                        <ogrn>1087746814000</ogrn>
+                        <legalAddress>127422, Г.МОСКВА, ПР-Д ДМИТРОВСКИЙ, Д. 10, СТР. 1</legalAddress>
+                        <postalAddress>127422, г Москва, проезд Дмитровский, дом 10, корпус 1</postalAddress>
+                        <okato>45277592000</okato>
+                        <okopf>12300</okopf>
+                        <okopfName>Общества с ограниченной ответственностью</okopfName>
+                        <okpo>87565363</okpo>
+                        <okfs>31</okfs>
+                        <okfsName>Совместная федеральная и иностранная собственность</okfsName>
+                        <timeZone>
+                            <offset>0</offset>
+                            <name>МСК (СГВ+3) Москва, Волгоград</name>
+                        </timeZone>
+                        <region>Г.МОСКВА</region>
+                    </mainInfo>
+                </ns2:placer>
+                <ns2:contact>
+                    <firstName>С.</firstName>
+                    <middleName>С.</middleName>
+                    <lastName>Гордиенко</lastName>
+                    <phone>+7 (495) 748, доб.: 6601</phone>
+                    <email>SGordienko@rvpetro.ru</email>
+                </ns2:contact>
+                <ns2:publicationDateTime>2026-10-01T09:03:23</ns2:publicationDateTime>
+                <ns2:status>P</ns2:status>
+                <ns2:version>1</ns2:version>
+                <ns2:notDishonest>false</ns2:notDishonest>
+                <ns2:attachments>
+                    <totalDocumentsCount>1</totalDocumentsCount>
+                    <document>
+                        <guid>6c28f16b-58be-4248-92a9-27b91b1d47e8</guid>
+                        <createDateTime>2026-10-01T09:02:54</createDateTime>
+                        <fileName>Форма КП.xlsx</fileName>
+                        <description>Форма КП</description>
+                        <url>https://example.invalid/file</url>
+                        <contentUid>AEA87373082440128381109988DCD44F</contentUid>
+                        
+                    </document>
+                </ns2:attachments>
+                <ns2:modificationDate>2026-10-01T09:03:23</ns2:modificationDate>
+                <ns2:saveUserId>9287659</ns2:saveUserId>
+                <ns2:deliveryPlaceIndication>SINGLE_PLACE</ns2:deliveryPlaceIndication>
+                <ns2:emergency>false</ns2:emergency>
+                <ns2:jointPurchase>false</ns2:jointPurchase>
+                <ns2:hidePurchase>false</ns2:hidePurchase>
+                <ns2:antimonopolyDecisionTaken>false</ns2:antimonopolyDecisionTaken>
+                <ns2:lots>
+                    <lot>
+                        <guid>b3cf4930-fdd8-45b9-97a5-b56901c6eee7</guid>
+                        <ordinalNumber>1</ordinalNumber>
+                        <lotEditEnabled>false</lotEditEnabled>
+                        <lotData>
+                            <subject>Лабораторные исследования проб почвы и воды</subject>
+                            <currency>
+                                <code>RUB</code>
+                                <digitalCode>643</digitalCode>
+                                <name>Российский рубль</name>
+                            </currency>
+                            <initialSum>1214510</initialSum>
+                            <deliveryPlace>
+                                <state>Северо-Западный федеральный округ</state>
+                                <region>Коми Респ </region>
+                                <regionOkato>87000000000</regionOkato>
+                                <address>Усинск</address>
+                            </deliveryPlace>
+                            <lotItems>
+                                <newCodes>true</newCodes>
+                                <lotItem>
+                                    <guid>6c810d8a-cf00-45fe-881b-af3477cf422b</guid>
+                                    <ordinalNumber>1</ordinalNumber>
+                                    <okpd2>
+                                        <code>43.13</code>
+                                        <name>Работы буровые и разведочные буровые</name>
+                                    </okpd2>
+                                    <okved2>
+                                        <code>43.13</code>
+                                        <name>Разведочное бурение</name>
+                                    </okved2>
+                                    <okei>
+                                        <code>876</code>
+                                        <name>Условная единица</name>
+                                    </okei>
+                                    <qty>1</qty>
+                                </lotItem>
+                            </lotItems>
+                            <forSmallOrMiddle>false</forSmallOrMiddle>
+                            <excludePurchaseFromPlan>false</excludePurchaseFromPlan>
+                            <subcontractorsRequirement>false</subcontractorsRequirement>
+                            <ignoredPurchase>false</ignoredPurchase>
+                            <centralized>false</centralized>
+                        </lotData>
+                        <deliveryPlaceIndication>GL</deliveryPlaceIndication>
+                        <jointLotData>
+                            <jointLot>false</jointLot>
+                        </jointLotData>
+                        <lotPlanInfo>
+                            <planRegistrationNumber>2250858398</planRegistrationNumber>
+                            <planGuid>c350af51-7173-4483-99ed-9957570abff3</planGuid>
+                            <positionNumber>604</positionNumber>
+                            <lotPlanPosition>COMMODITY</lotPlanPosition>
+                            <positionGuid>d79dc8ba-2ea2-4317-828f-dd90b9b6cddd</positionGuid>
+                        </lotPlanInfo>
+                        <cancelled>false</cancelled>
+                    </lot>
+                </ns2:lots>
+            </ns2:purchaseNoticeEPData>
+        </ns2:item>
+    </ns2:body>
+</ns2:purchaseNoticeEP>

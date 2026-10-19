@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 from configs.config import Config
 from configs.logger import get_logger
-from knowledge_store import db, documents, eis_notice, repository as repo, rm_link
+from knowledge_store import db, documents, eis_notice, eis_notice223, repository as repo, rm_link
 from knowledge_store.pages import split_pages
 from knowledge_store.safe import is_enabled, safe_call_async
 from knowledge_store.scope import Scope
@@ -126,7 +126,7 @@ async def _on_document_text(scope: Scope, doc_code: Optional[str], filename: str
 def _eis_notice_patch(file_path: str, filename: str) -> Optional[dict]:
     """Разбирает XML извещения ЕИС и возвращает результат правил раздела 1.
 
-    Работает только для ``.xml`` с корнем ``epNotification*``; для остальных файлов (и при любой
+    Работает только для ``.xml`` с корнем ``epNotification*`` (44-ФЗ) или ``purchaseNotice*`` (223-ФЗ); для остальных файлов (и при любой
     ошибке разбора) возвращает ``None`` — загрузка документа от этого не зависит.
 
     Args:
@@ -140,8 +140,13 @@ def _eis_notice_patch(file_path: str, filename: str) -> Optional[dict]:
         return None
     try:
         with open(file_path, "rb") as fh:
-            notice = eis_notice.Notice.from_xml(fh.read())
-        return eis_notice.findings_to_json(notice, eis_notice.evaluate_all(notice))
+            raw = fh.read()
+        try:
+            notice = eis_notice.Notice.from_xml(raw)
+            return eis_notice.findings_to_json(notice, eis_notice.evaluate_all(notice))
+        except ValueError:          # не epNotification* — возможно, извещение 223-ФЗ (purchaseNotice*)
+            notice223 = eis_notice223.Notice223.from_xml(raw)
+            return eis_notice223.findings_to_json(notice223, eis_notice223.evaluate_all(notice223))
     except Exception:  # не извещение или битый XML — просто не извлекаем структурные факты
         return None
 

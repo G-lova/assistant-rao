@@ -24,7 +24,9 @@ from typing import Dict, List
 from knowledge_store import forms as ks_forms
 from knowledge_store import repository as repo
 
-SHEET_44FZ = "Все Закупки 44-фз"  # MVP: остальные листы (223-ФЗ, объект 7) — отдельным этапом
+SHEET_44FZ = "Все Закупки 44-фз"
+SHEET_223FZ = "Все Закупки 223-фз"  # формы 223-ФЗ: конкурентные способы и единственный поставщик (объект 6)
+# формы объекта 7 — листы «Сравнение НИР…», «Сравнение Выполнение работ…», «Сравнение Поставка товаров…» (см. forms.REPORT_SHEETS)
 
 
 def load_forms(xlsx_path: str) -> Dict[str, List[ks_forms.FormField]]:
@@ -34,7 +36,7 @@ def load_forms(xlsx_path: str) -> Dict[str, List[ks_forms.FormField]]:
         xlsx_path: Путь к «Отчеты и закупки поля.xlsx».
 
     Returns:
-        dict: ``код формы → список FormField``.
+        dict: ``код формы → список FormField`` (формы 44-ФЗ и, если лист есть в файле, 223-ФЗ).
     """
     import warnings
 
@@ -43,7 +45,14 @@ def load_forms(xlsx_path: str) -> Dict[str, List[ks_forms.FormField]]:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # openpyxl ругается на комментарии в объединённых ячейках
         wb = openpyxl.load_workbook(xlsx_path, data_only=True)
-    return ks_forms.parse_forms_sheet(wb[SHEET_44FZ])
+    registry = ks_forms.parse_forms_sheet(wb[SHEET_44FZ])
+    if SHEET_223FZ in wb.sheetnames:
+        registry.update(ks_forms.parse_forms_sheet(wb[SHEET_223FZ], "223-ФЗ"))
+    for title in wb.sheetnames:                  # объект 7: отчётные документы (НИР, работы/услуги, поставка товаров)
+        for prefix, method in ks_forms.REPORT_SHEETS:
+            if title.startswith(prefix):
+                registry.update(ks_forms.parse_report_sheet(wb[title], method))
+    return registry
 
 
 def summarize(registry: Dict[str, List[ks_forms.FormField]]) -> str:

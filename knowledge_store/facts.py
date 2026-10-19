@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
 from configs.logger import get_logger
-from knowledge_store import eis_notice, eis_printform, form_keys, repository as repo
+from knowledge_store import eis_notice, eis_notice223, eis_printform, form_keys, law_context, repository as repo
 from knowledge_store.scope import Scope
 
 logger = get_logger(__name__)
@@ -152,7 +152,7 @@ def build_messages(label: str, kind: str, fragments: Sequence[Fragment], system_
         for i, f in enumerate(fragments, 1))
     kind_hint = "наличие информации" if kind == "presence" else "соответствие требованиям законодательства"
     user = f"Критерий ({kind_hint}): {label}\n\nФрагменты документов:\n\n{shown}"
-    return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user}]
+    return [{"role": "system", "content": law_context.localize(system_prompt)}, {"role": "user", "content": user}]
 
 
 def parse_json_any(raw: str) -> Any:
@@ -389,6 +389,7 @@ def build_eis_facts(notices: Sequence[dict], fields: Sequence[dict]) -> List[dic
     Returns:
         list[dict]: Факты источника ``eis_xml``. Если версий извещения несколько — берётся последняя.
     """
+    map_fields = eis_notice223.map_to_fields if law_context.is_223() else eis_notice.map_to_fields   # у 223-ФЗ свои правила
     best = None
     for item in notices:
         data = item["eis_notice"]
@@ -400,7 +401,7 @@ def build_eis_facts(notices: Sequence[dict], fields: Sequence[dict]) -> List[dic
     doc_id, data = best
     return [{"fact_key": key, "value": {"value": f.value, "verified": True, "comment": None},
              "document_id": doc_id, "page": None, "quote": f.evidence, "confidence": 1.0}
-            for key, f in eis_notice.map_to_fields(data, fields).items()]
+            for key, f in map_fields(data, fields).items()]
 
 
 def _form_version(filename: str, doc_id: int) -> tuple:
@@ -423,7 +424,7 @@ def build_printform_facts(documents: Sequence[dict], fields: Sequence[dict], sol
         list[dict]: Факты источника ``eis_xml`` с пометкой ``origin = print_form``.
     """
     forms = [d for d in documents if eis_printform.is_print_form(d["text_full"])]
-    if not forms:
+    if not forms or law_context.is_223():      # печатная форма и её правила — только 44-ФЗ: названия критериев 223-ФЗ другие
         return []
     doc = max(forms, key=lambda d: _form_version(d["filename"], d["id"]))
     data = eis_printform.to_json(eis_printform.evaluate_text(doc["text_full"]))
@@ -448,6 +449,7 @@ async def extract_facts(conn, scope: Scope, form_code: str, extractor: Optional[
         dict: Счётчики: ``eis`` (из XML), ``llm`` (принятые ответы модели), ``rejected`` (отвергнутые
         или без текста), ``fields`` (полей проверялось).
     """
+    law_context.set_from_form(form_code)
     fields = [dict(r) for r in await repo.get_form_fields(conn, form_code)]
     eis_facts = build_eis_facts(await repo.get_eis_notices(conn, scope), fields)
     xml_keys = [f["fact_key"] for f in eis_facts]

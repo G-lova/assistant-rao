@@ -802,7 +802,7 @@ class ClipAndDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_presumption_error_in_trace(self):
         """Сбой модели при презумпции — причина в trace, значение остаётся эксперту."""
         from knowledge_store import assessment
-        fields = [{"field_key": "field2_3_3", "value_kind": "compliance", "label": "x"}]
+        fields = [{"field_key": "field2_3_3", "value_kind": "compliance", "label": "3.3. Соответствие документации о проведении закупки требованиям гражданского законодательства Российской Федерации"}]
         docs = {1: {"filename": "k.docx", "doc_code": "docIzvejenieFiles", "text": "Размер неустойки (пени) 5 процентов"}}
         async def llm(m, s):
             return "не json"
@@ -1099,7 +1099,7 @@ class ContractCheckTests(unittest.TestCase):
     def test_rule_overrides_one_and_derives_37(self):
         """Правило даёт 2.5 = 0 вместо «1» модели; 3.7 выводится из 2.5 и не дублируется в замечаниях."""
         fields = [{"field_key": "field2_2_5", "value_kind": "compliance", "label": "2.5. Соответствие проекта контракта действующему законодательству Российской Федерации", "ordinal": 1},
-                  {"field_key": "field2_3_7", "value_kind": "compliance", "label": "3.7. Документация", "ordinal": 2}]
+                  {"field_key": "field2_3_7", "value_kind": "compliance", "label": "3.7. Соответствие документации о проведении закупки требованиям Федерального закона № 44-ФЗ", "ordinal": 2}]
         docs = {1: {"filename": "Проект контракта.docx", "doc_code": None, "text": self.BODY}}
         rows = [{"fact_key": "field2_2_5", "source": "fact_extractor", "document_id": 1, "page": 1, "quote": None,
                  "value": {"value": 1, "verified": True, "comment": None}}]
