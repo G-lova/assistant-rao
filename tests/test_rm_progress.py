@@ -38,3 +38,22 @@ class ProgressTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TokenBucketTest(unittest.TestCase):
+    """Лимитер частоты с rate < 1 не зависает (запись во внешнюю БД, 20.10.2026)."""
+
+    def test_rate_below_one(self):
+        """rate = 0.9: первый запрос проходит сразу, второй — примерно через 1.1 с."""
+        import time
+
+        from configs.rate_limiter import TokenBucket
+
+        async def main():
+            b = TokenBucket(rate=0.9)
+            t = time.monotonic()
+            await asyncio.wait_for(b.acquire(), 1)
+            await asyncio.wait_for(b.acquire(), 3)
+            return time.monotonic() - t
+
+        self.assertLess(asyncio.run(main()), 2.5)

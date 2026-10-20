@@ -9,7 +9,9 @@ class TokenBucket:
     """
     def __init__(self, rate: float, capacity: Optional[float] = None):
         self.rate = rate  # токенов в секунду (макс. частота)
-        self.capacity = capacity or rate  # макс. размер «бака»
+        # Бак вмещает хотя бы один токен: при rate < 1 (например, 0.9 у RiskMonitoringAPI) и capacity = rate бак
+        # никогда не набирал 1 токен, и acquire() ждал бесконечно — запись во внешнюю БД «висела» (20.10.2026)
+        self.capacity = max(capacity or rate, 1.0)  # макс. размер «бака»
         self.tokens = self.capacity  # текущее количество токенов
         self.last_update = time.monotonic()
         self._lock = asyncio.Lock()
