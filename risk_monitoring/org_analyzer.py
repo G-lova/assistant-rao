@@ -251,7 +251,7 @@ class OrgAnalyzer:
             data = await self.llm.ask(RESUME_SYSTEM.format(role=ROLE_NAMES[role]),
                                       json.dumps(payload, ensure_ascii=False, default=str),
                                       {"type": "object", "properties": {"resume": {"type": "string"}}, "required": ["resume"]},
-                                      max_tokens=600, temperature=0.2)
+                                      max_tokens=1200, temperature=0.2)
             self.stats["llm_resume"] += 1
             return str(data.get("resume") or "").strip() or fallback
         except Exception as e:  # noqa: BLE001

@@ -344,7 +344,7 @@ class ContractAnalyzer:
 
         try:
             data = await self.llm.ask(RESUME_SYSTEM, json.dumps(payload, ensure_ascii=False, default=str),
-                                      RESUME_SCHEMA, max_tokens=800, temperature=0.2)
+                                      RESUME_SCHEMA, max_tokens=1500, temperature=0.2)
             text = str(data.get("resume") or "").strip()
             self.stats["llm_resume"] += 1
             return (text, True) if text else (fallback, False)

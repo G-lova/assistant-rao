@@ -30,6 +30,10 @@ RM_TEXT_MAX_RETENTION_DAYS = 1095
 SCORE_ZONES = (40, 70)
 # Подтверждённый аналитиком риск весит больше (status = 1 в risk_monitoring_document_risks)
 CONFIRMED_WEIGHT = 1.5
+# Балл: каждый следующий риск (по убыванию веса) весит в SCORE_DECAY раз меньше предыдущего — много средних рисков
+# не дают «100»; риск, найденный только моделью и не подтверждённый аналитиком, весит AI_UNCONFIRMED_WEIGHT
+SCORE_DECAY = 0.5
+AI_UNCONFIRMED_WEIGHT = 0.6
 # Расхождение сумм между документом и ЕИС, при котором ставится DOC-009 (доля)
 CONSISTENCY_TOLERANCE = 0.01
 # Ставить ли DOC-015 «Неполный комплект документов» (иначе — только в package.completeness)

@@ -37,7 +37,8 @@ SELF_DENIAL_RE = re.compile(
     r"|не\s+(выявлен|обнаружен|установлен|содерж\w*\s+ограничени)"
     r"|отсутству\w*\s+(конкретные\s+|какие-либо\s+|дополнительные\s+)?(ограничени|нарушени|признак)"
     r"|в\s+пределах\s+(допустим|установленн|норм)"
-    r"|нарушени\w*\s+нет",
+    r"|нарушени\w*\s+нет"
+    r"|исключа\w*\s+(риск|возможност)|не\s+влия\w*\s+на|не\s+затрагива|риск\w*\s+отсутству|риск\s+не\s+выявлен",
     re.IGNORECASE,
 )
 # Признаки товарного знака, модели, артикула или производителя в цитате (для DOC-002)
@@ -74,10 +75,29 @@ STATUTORY_RE = re.compile(
     # ч. 2 ст. 43: конкретные показатели предложения участника
     r"|конкретные значения показателей"
     # диапазон «≥ … ≤ …» из КТРУ / описания объекта — не сужает круг товаров
-    r"|[≥≤]\s*\d[^≥≤]{0,40}[≥≤]\s*\d",
+    r"|[≥≤]\s*\d[^≥≤]{0,40}[≥≤]\s*\d"
+    # ч. 6 ст. 34 и ПП № 1042 (пени), ст. 95 (односторонний отказ), казначейское сопровождение, ч. 5 ст. 30 (СМП),
+    # ст. 45 и ПП № 1005 (независимая гарантия), ч. 13 ст. 94 (приёмка до 20 рабочих дней)
+    r"|в случае просрочки исполнения (поставщиком|заказчиком|подрядчиком|исполнителем)"
+    r"|решени\w+ об одностороннем отказе от исполнения"
+    r"|казначейск\w+\s+сопровождени"
+    r"|субподрядчик\w*[^.]{0,80}(смп|соно|малого предпринимательства)|subcontractorsattraction"
+    r"|независим\w+\s+гаранти|гарантийного случая"
+    r"|не позднее 20 \(двадцати\) рабочих дней",
     re.IGNORECASE,
 )
-STATUTORY_CODES = {"DOC-004", "DOC-005", "DOC-006", "AI-003", "AI-005", "PROC-012", "DOC-007", "DOC-003", "FIN-016"}
+STATUTORY_CODES = {"DOC-004", "DOC-005", "DOC-006", "AI-003", "AI-005", "PROC-012", "DOC-007", "DOC-003", "FIN-016",
+                   "FIN-012", "AI-001", "DOC-001"}
+GARBLED_WORD_RE = re.compile(r"[А-ЯЁа-яёA-Za-z]{3,}")
+
+
+def garbled(fragment: str) -> bool:
+    """Цитата — мусор OCR (скан без текстового слоя): осмысленных слов меньше трети (ДС 1.PDF, 20.10.2026)."""
+    tokens = (fragment or "").split()
+    if len(tokens) < 6:
+        return False
+    words = [t for t in tokens if GARBLED_WORD_RE.fullmatch(t.strip(".,;:!?«»\"()[]"))]
+    return len(words) / len(tokens) < 0.35
 SECURITY_PCT_RE = re.compile(r"обеспечени\w*[^.]{0,120}?(\d+(?:[.,]\d+)?)\s*(%|процент)", re.IGNORECASE)
 
 
@@ -91,16 +111,18 @@ def security_in_range(risk: Dict[str, Any]) -> bool:
     Returns:
         bool: ``True`` — отбросить.
     """
-    if risk.get("code") not in ("FIN-005", "FIN-006"):
+    if risk.get("code") not in ("FIN-005", "FIN-006", "DOC-006"):
         return False
     m = SECURITY_PCT_RE.search(((risk.get("evidence") or {}).get("fragment")) or "")
     if not m:
         return False
     pct = float(m.group(1).replace(",", "."))
-    return 0.5 <= pct <= (30 if risk["code"] == "FIN-005" else 10)
+    return 0.5 <= pct <= (10 if risk["code"] == "FIN-006" else 30)
 
 
-TABLE_TOTAL_RE = re.compile(r"^\s*(итого|всего)\b[^а-яё]*(\d[\d\s]*[.,]\d{2}[^\d]+){2,}", re.IGNORECASE)
+# строка таблицы обоснования НМЦК с суммами поставщиков («Итого 130000000.0 130000000.0 …», 3070 20.10.2026)
+TABLE_TOTAL_RE = re.compile(r"(^|\s)(итого|всего)\b[^а-яё]*(\d[\d\s]*[.,]\d{1,2}[^\d]+){2,}|(\d{4,}(?:[.,]\d{1,2})?\s+){3,}",
+                            re.IGNORECASE)
 
 
 def table_total(risk: Dict[str, Any]) -> bool:
@@ -149,7 +171,7 @@ def rejected_by_rules(r: Dict[str, Any]) -> bool:
     # DOC-002 — товарный знак БЕЗ оговорки «или эквивалент»; цитата с этой оговоркой риск опровергает
     with_equivalent = r.get("code") == "DOC-002" and re.search(r"эквивалент", frag, re.IGNORECASE)
     return bool(by_law or with_equivalent or self_denial(r) or statutory(r) or table_total(r) or security_in_range(r)
-                or (r.get("code") == "DOC-002" and not brand_like(frag)))
+                or garbled(frag) or (r.get("code") == "DOC-002" and not brand_like(frag)))
 
 
 # Близкие по смыслу коды: на одну цитату остаётся один код группы

@@ -455,12 +455,30 @@ def consistency_risks(items: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 # ------------------------------------------------------------------ профиль и балл
-def _weight(r: Dict[str, Any], confirmed: Iterable[str], confirmed_weight: float) -> float:
-    """Вес риска в балле: ``level × confidence`` (× ``confirmed_weight`` для подтверждённых), не больше 1."""
+AI_SOURCES = {"ai_file", "ai_event", "version_diff"}
+
+
+def _weight(r: Dict[str, Any], confirmed: Iterable[str], confirmed_weight: float, ai_weight: float = 1.0) -> float:
+    """Вес риска в балле: ``level × confidence``; подтверждённый аналитиком × ``confirmed_weight``; найденный
+    только моделью и не подтверждённый × ``ai_weight`` (его ещё нужно проверить); не больше 1."""
     w = (passport.clamp01(r.get("level")) or 0.0) * (passport.clamp01(r.get("confidence")) or 0.0)
     if r.get("rule_id") in set(confirmed):
         w *= confirmed_weight
+    elif r.get("sources") and set(r["sources"]) <= AI_SOURCES:
+        w *= ai_weight
     return min(1.0, w)
+
+
+def decayed_or(weights: Iterable[float], decay: float) -> float:
+    """«Шумовое ИЛИ» с затуханием: веса по убыванию, i-й умножается на ``decay ** i``.
+
+    Обычное «ИЛИ» по многим средним рискам насыщается до 100 (закупка 1387: 9 рисков по 0,4–0,5 → 99,6).
+    С затуханием главный риск задаёт балл, остальные добавляют всё меньше: 0,9 → 90; пять рисков по 0,5 → ≈ 69.
+    """
+    p = 1.0
+    for i, w in enumerate(sorted(weights, reverse=True)):
+        p *= 1 - w * (decay ** i)
+    return 1 - p
 
 
 def money(v: Optional[float]) -> str:
@@ -476,8 +494,10 @@ def zone(score: Optional[float], zones: Tuple[int, int] = (40, 70)) -> Optional[
 
 
 def profile(risks: Sequence[Dict[str, Any]], previous_score: Optional[float] = None, confirmed: Iterable[str] = (),
-            confirmed_weight: float = 1.5, zones: Tuple[int, int] = (40, 70)) -> Dict[str, Any]:
-    """Балл 0–100 «шумовым ИЛИ» по рискам, компоненты по категориям, зона, изменение и главные факторы.
+            confirmed_weight: float = 1.5, zones: Tuple[int, int] = (40, 70), decay: float = 0.5,
+            ai_weight: float = 0.6) -> Dict[str, Any]:
+    """Балл 0–100 «шумовым ИЛИ» с затуханием (:func:`decayed_or`), компоненты по категориям, зона, изменение и
+    главные факторы. Риски, найденные только моделью и не подтверждённые аналитиком, весят ``ai_weight``.
 
     Args:
         risks: Сводные риски.
@@ -490,15 +510,13 @@ def profile(risks: Sequence[Dict[str, Any]], previous_score: Optional[float] = N
         Dict[str, Any]: ``score``, ``zone``, ``delta``, ``previous_score``, ``components``, ``top_factors``.
     """
     confirmed = set(confirmed)
-    comps: Dict[str, float] = {}
-    total = 1.0
+    weights = {id(r): _weight(r, confirmed, confirmed_weight, ai_weight) for r in risks}
+    by_cat: Dict[str, List[float]] = {}
     for r in risks:
-        w = _weight(r, confirmed, confirmed_weight)
-        total *= 1 - w
-        cat = risk_catalog.category(r.get("rule_id", ""))
-        comps[cat] = 1 - (1 - comps.get(cat, 0.0)) * (1 - w)
-    score = round(100 * (1 - total), 1)
-    top = sorted(risks, key=lambda r: _weight(r, confirmed, confirmed_weight), reverse=True)[:5]
+        by_cat.setdefault(risk_catalog.category(r.get("rule_id", "")), []).append(weights[id(r)])
+    comps = {cat: decayed_or(ws, decay) for cat, ws in by_cat.items()}
+    score = round(100 * decayed_or(weights.values(), decay), 1)
+    top = sorted(risks, key=lambda r: weights[id(r)], reverse=True)[:5]
     return {
         "score": score, "zone": zone(score, zones),
         "previous_score": previous_score,
@@ -526,8 +544,8 @@ def default_resume(p: Dict[str, Any], prof: Dict[str, Any], risks: Sequence[Dict
     parts = [f"Закупка № {p.get('purchase_number')} ({p.get('law')}), «{(p.get('subject') or '')[:150]}»; "
              f"стадия: {stage_names.get(p.get('stage'), p.get('stage'))}."]
     if p.get("nmck"):
-        parts.append(f"НМЦК {money(p['nmck'])} руб."
-                     + (f", цена контракта {money(p['contract_price'])} руб." if p.get("contract_price") else "")
+        parts.append(f"НМЦК {money(p['nmck'])} руб"
+                     + (f", цена контракта {money(p['contract_price'])} руб" if p.get("contract_price") else "")
                      + (f" (снижение {p['price_reduction_pct']} %)" if p.get("price_reduction_pct") else "") + ".")
     parts.append(f"Балл риска {prof['score']} ({ {'green': 'зелёная', 'yellow': 'жёлтая', 'red': 'красная'}.get(prof['zone'], '') } зона)"
                  + (f", изменение {prof['delta']:+}" if prof.get("delta") else "") + ".")
@@ -616,7 +634,8 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
         f_risks, event_risks(xmls), rule_values_risks(values), registry_risks(matches), dataset_risks(p),
         favourite_risks(p, fav),
         consistency_risks(cons), completeness_risks(comp, settings.COMPLETENESS_RISK), fz=fz)
-    prof = profile(risks, previous_score, confirmed, settings.CONFIRMED_WEIGHT, tuple(settings.SCORE_ZONES))
+    prof = profile(risks, previous_score, confirmed, settings.CONFIRMED_WEIGHT, tuple(settings.SCORE_ZONES),
+                   settings.SCORE_DECAY, settings.AI_UNCONFIRMED_WEIGHT)
     events = events_feed(xmls)
     files_brief = [{"file_id": f.get("id"), "file_name": f.get("file_name"), "detected_type": f.get("detected_type"),
                     "total_doc_risk": num(f.get("total_doc_risk")), "analyzed": f.get("rm_status") == "completed",

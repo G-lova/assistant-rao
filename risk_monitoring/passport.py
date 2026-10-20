@@ -235,10 +235,10 @@ def merge_risks(*lists: Iterable[Dict[str, Any]], fz: Any = None) -> List[Dict[s
 
 
 def total_risk(risks: Sequence[Dict[str, Any]]) -> float:
-    """Интегральный риск документа 0–1: «шумовое ИЛИ» по рискам.
+    """Интегральный риск документа 0–1: «шумовое ИЛИ» по рискам с затуханием.
 
-    ``1 − Π(1 − level × confidence)``: один серьёзный риск даёт высокий балл, а пустые категории
-    его не занижают (в отличие от среднего по категориям в старом ``FileProcessor``).
+    ``1 − Π(1 − wᵢ × SCORE_DECAY^i)``, ``w = level × confidence`` по убыванию: один серьёзный риск даёт высокий балл,
+    пустые категории его не занижают, а много средних рисков не насыщают балл до 1 (20.10.2026).
 
     Args:
         risks: Риски во внешнем формате.
@@ -246,10 +246,13 @@ def total_risk(risks: Sequence[Dict[str, Any]]) -> float:
     Returns:
         float: Балл 0–1 (4 знака).
     """
+    from risk_monitoring import settings
+
+    ws = sorted(((clamp01(r.get("level")) or 0.0) * (clamp01(r.get("confidence")) or 0.0) for r in risks or []),
+                reverse=True)
     p = 1.0
-    for r in risks or []:
-        w = (clamp01(r.get("level")) or 0.0) * (clamp01(r.get("confidence")) or 0.0)
-        p *= (1.0 - w)
+    for i, w in enumerate(ws):
+        p *= (1.0 - w * (settings.SCORE_DECAY ** i))   # затухание: см. contract_package.decayed_or
     return round(1.0 - p, 4)
 
 

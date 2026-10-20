@@ -336,3 +336,22 @@ class FakeAnalyzerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScoreCalibrationTest(unittest.TestCase):
+    """Балл с затуханием и весом непроверенных рисков модели (закупка 1387, 20.10.2026: было 99,6)."""
+
+    def test_many_medium_risks_not_red(self):
+        """5 рисков модели по 0,6×0,85 и 4 правила по 0,4 → жёлтая зона, не 99,6."""
+        ai = [{"rule_id": c, "level": 0.6, "confidence": 0.85, "sources": ["ai_file"]}
+              for c in ("DOC-006", "DOC-007", "DOC-005", "DOC-010", "DOC-003")]
+        rules = [{"rule_id": c, "level": 0.4, "confidence": 1.0, "sources": ["rule"]}
+                 for c in ("FIN-004", "FIN-006", "FIN-008", "CTR-002")]
+        prof = cp.profile(ai + rules, decay=settings.SCORE_DECAY, ai_weight=settings.AI_UNCONFIRMED_WEIGHT)
+        self.assertEqual(prof["zone"], "yellow")
+        self.assertLess(prof["score"], 70)
+
+    def test_single_violation_red(self):
+        """Один серьёзный подтверждённый признак (реестр 19.28, 0,9) — красная зона."""
+        prof = cp.profile([{"rule_id": "REG-001", "level": 0.9, "confidence": 1.0, "sources": ["registry"]}])
+        self.assertEqual(prof["zone"], "red")

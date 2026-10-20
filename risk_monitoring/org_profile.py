@@ -238,7 +238,8 @@ def _finish(metrics: Dict[str, Any], risks: List[Dict[str, Any]], previous_score
             **extra: Any) -> Dict[str, Any]:
     """Объединение рисков, балл и зона секции."""
     merged = passport.merge_risks(risks)
-    prof = cp.profile(merged, previous_score, (), settings.CONFIRMED_WEIGHT, tuple(settings.SCORE_ZONES))
+    prof = cp.profile(merged, previous_score, (), settings.CONFIRMED_WEIGHT, tuple(settings.SCORE_ZONES),
+                      settings.SCORE_DECAY, settings.AI_UNCONFIRMED_WEIGHT)
     return {"metrics": metrics, **extra, "risks": merged, "score": prof["score"], "zone": prof["zone"],
             "delta": prof["delta"], "previous_score": previous_score, "components": prof["components"],
             "top_factors": prof["top_factors"]}
