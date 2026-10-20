@@ -60,6 +60,15 @@ OCR_ERROR_RE = re.compile(r"Ошибка при анализе изображе�
 CONTRACT_DOC_TYPES = {"docProjContractFiles", "docContractDoWorkFiles", "docContractNIRFiles", "docContractPostTovarFiles"}
 
 
+def _not_looping(result: Any) -> bool:
+    """Извлечение из кэша годно, если модель не зациклилась (повторов записей меньше ``LOOP_MIN``)."""
+    import copy
+
+    from configs.llm_repetition import LOOP_MIN, dedupe_repeats
+
+    return dedupe_repeats(copy.deepcopy(result))[1] < LOOP_MIN
+
+
 class FileUnavailable(Exception):
     """Файл не удалось скачать (ожидаемая ситуация, без traceback в логах)."""
 
@@ -625,7 +634,7 @@ class AIFileAnalyzer:
             extraction = await self._cached(document_id, "data_extraction",
                                             lambda: self.extractor.extract_data_from_document(chunks, file_name),
                                             keep=lambda r: isinstance(r, dict) and bool(r.get("raw_data")),
-                                            fallback_doc=reuse_doc)
+                                            fallback_doc=reuse_doc, reuse_if=_not_looping)
             if isinstance(extraction, str):
                 extraction = json.loads(extraction)
             extraction = dict(extraction or {})
@@ -954,7 +963,7 @@ class AIFileAnalyzer:
                       compact: Optional[Callable[[Any], Any]] = None,
                       keep: Optional[Callable[[Any], bool]] = None, version_key: Optional[str] = None,
                       version: Optional[str] = None, model: Optional[str] = None,
-                      fallback_doc: Optional[int] = None) -> Any:
+                      fallback_doc: Optional[int] = None, reuse_if: Optional[Callable[[Any], bool]] = None) -> Any:
         """Результат анализа из кэша ``ai_document_analysis`` или новый (с сохранением).
 
         ``fallback_doc`` — документ прошлой редакции: при анализе изменений его результат (если он есть
@@ -971,6 +980,8 @@ class AIFileAnalyzer:
             version: Явная версия (например, версия промпта + набор допустимых кодов).
             model: Модель, выполняющая анализ (ключ кэша; по умолчанию — модель извлечения).
             fallback_doc: ``ai_documents.id`` прошлой редакции (анализ изменений).
+            reuse_if: Условие, при котором результат из кэша годен (например, извлечение без зацикливания модели);
+                иначе анализ выполняется заново.
 
         Returns:
             Any: Результат (``None``, если анализ не дал результата).
@@ -980,9 +991,11 @@ class AIFileAnalyzer:
         title = progress.analysis_title(analysis_type)
         if not self.recompute:
             cached = await self.repo.get_analysis(document_id, analysis_type, version, model)
-            if cached:
+            if cached and (reuse_if is None or reuse_if(cached["result"])):
                 progress.note(f"{title}: из кэша")
                 return cached["result"]
+            if cached:
+                progress.note(f"{title}: результат в кэше негоден (зацикливание модели) — выполняю заново")
         result = None
         stats = getattr(self, "stats", None)
         if fallback_doc and not self.recompute:

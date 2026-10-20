@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 from configs.logger import get_logger
 from configs.rate_limiter import TokenBucket
 from configs.retry_utils import LLM_RETRY_CONFIG, async_retry
+from configs.llm_repetition import LOOP_MIN, dedupe_repeats, penalized
 from configs.llm_resilience import ContextOverflow, split_halves
 from configs.utils import extract_json_objects
 
@@ -202,7 +203,8 @@ class TypeDataExtractor:
     
 
     @async_retry(LLM_RETRY_CONFIG)
-    async def extract_data_from_chunk(self, content: str, document_name: str, doc_type: str) -> Dict[str, Any]:
+    async def extract_data_from_chunk(self, content: str, document_name: str, doc_type: str,
+                                      penalize: bool = False) -> Dict[str, Any]:
         """
         Анализирует отдельный текстовый чанк с помощью LLM и возвращает структурированные данные.
 
@@ -251,7 +253,7 @@ class TypeDataExtractor:
 
             # Вызов модели с guided_json и таймаутом
             try:
-                response = await self.client.chat.completions.create(
+                request = dict(
                     model=self.model,
                     messages=[
                         {"role": "system",
@@ -266,6 +268,9 @@ class TypeDataExtractor:
                     max_tokens=3000,
                     temperature=0.1
                 )
+                if penalize:  # повтор после зацикливания: штраф за повторяющиеся токены
+                    request = penalized(request)
+                response = await self.client.chat.completions.create(**request)
             except asyncio.TimeoutError:
                 logger.error(f"Таймаут при анализе {document_name}")
                 return None
@@ -280,6 +285,9 @@ class TypeDataExtractor:
                 logger.info("Удалось распарсить JSON.")
                 if isinstance(result, list):
                     result = self.merge_json_objects(result)
+                result, removed = dedupe_repeats(result)
+                if removed:
+                    logger.info(f"'{document_name}': убрано повторов записей: {removed}")
                 return result
             
             except json.JSONDecodeError as e:
@@ -296,6 +304,16 @@ class TypeDataExtractor:
                 logger.info("Удалось распарсить JSON из извлечённого фрагмента вручную.")
                 if isinstance(result, list):
                     result = self.merge_json_objects(result)
+                result, removed = dedupe_repeats(result)
+                if removed:
+                    logger.info(f"'{document_name}': убрано повторов записей: {removed}")
+                if removed >= LOOP_MIN and not penalize:
+                    # ответ обрезан и полон повторов — модель зациклилась; данные после цикла потеряны
+                    logger.warning(f"'{document_name}': модель зациклилась (повторов {removed}, ответ обрезан) — "
+                                   f"повторяю запрос со штрафом за повторы")
+                    again = await self.extract_data_from_chunk(content=content, document_name=document_name, doc_type=doc_type, penalize=True)
+                    if again:
+                        return again
                 return result
             
             except json.JSONDecodeError:
