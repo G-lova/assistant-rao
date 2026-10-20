@@ -294,7 +294,7 @@ def resume_facts(role: str, section: Dict[str, Any], settings: Any) -> List[str]
     other = "поставщик" if role == "customer" else "заказчик"
     if top and linked:
         if linked < settings.ORG_MIN_CONTRACTS:
-            facts.append(f"Закупок с известным {other}ом: {linked} — для выводов о концентрации и "
+            facts.append(f"{other.capitalize()} указан в данных только у {linked} из {n} закупок — для выводов о концентрации и "
                          f"«любимом {other}е» данных мало (нужно не меньше {settings.ORG_MIN_CONTRACTS}).")
         elif len(top) > 1 and top[0]["contracts"] == top[1]["contracts"]:
             facts.append(f"Контрагентов: {len(top)}; у нескольких одинаковое число контрактов — ни один не преобладает.")
