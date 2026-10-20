@@ -24,6 +24,37 @@ def _llm_summary(before: Dict[str, int], stats: Dict[str, Any]) -> Dict[str, Any
     return {"requests": CALLS["requests"] - before["requests"], "failed": CALLS["failed"] - before["failed"], **(stats or {})}
 
 
+PULSE_SECONDS = 60   # как часто задача пишет в журнал, что она жива и чем занята
+
+
+async def _pulsed(coro: Any, name: str, task_id: str) -> Any:
+    """Выполняет корутину задачи и раз в ``PULSE_SECONDS`` пишет в журнал «пульс».
+
+    Пульс показывает, что задача жива, даже когда долгий запрос к модели не пишет ничего: сколько она идёт, сколько
+    запросов к модели сделано, сколько выполняется сейчас, сколько сбоев и прерываний по пределу времени.
+    """
+    import time
+
+    from risk_monitoring.llm_json import CALLS
+
+    start, before = time.monotonic(), dict(CALLS)
+
+    async def pulse() -> None:
+        """Пишет пульс, пока задача не завершится."""
+        while True:
+            await asyncio.sleep(PULSE_SECONDS)
+            logger.info(f"{name}[{task_id}]: идёт {time.monotonic() - start:.0f} с; запросов к модели "
+                        f"{CALLS['requests'] - before.get('requests', 0)}, сейчас выполняется {CALLS.get('inflight', 0)}, "
+                        f"сбоев {CALLS['failed'] - before.get('failed', 0)}, прервано по времени "
+                        f"{CALLS.get('deadline', 0) - before.get('deadline', 0)}")
+
+    beat = asyncio.ensure_future(pulse())
+    try:
+        return await coro
+    finally:
+        beat.cancel()
+
+
 def _strip(results: List[Dict[str, Any]], include_analysis: bool) -> List[Dict[str, Any]]:
     """Убирает ``ai_analysis`` из ответа задачи (он уже записан во внешнюю БД), если не просили вернуть."""
     if include_analysis:
@@ -69,7 +100,7 @@ def rm_analyze_files_task(self, file_ids: List[int], environment: str, force: bo
             finally:
                 stats.update(analyzer.stats)
 
-    results = asyncio.run(run())
+    results = asyncio.run(_pulsed(run(), self.name, self.request.id))
     summary = _summary(results)
     summary["llm"] = _llm_summary(before, stats)
     logger.info(f"Риск-мониторинг, файлы: {summary}")
@@ -141,7 +172,7 @@ def rm_analyze_xml_task(self, xml_ids: List[int], environment: str, force: bool 
             finally:
                 stats.update(getattr(analyzer, "stats", {}) or {})
 
-    results = asyncio.run(run())
+    results = asyncio.run(_pulsed(run(), self.name, self.request.id))
     summary = _summary(results)
     summary["llm"] = _llm_summary(before, stats)
     logger.info(f"Риск-мониторинг, XML: {summary}")
@@ -194,7 +225,7 @@ def rm_analyze_contracts_task(self, card_ids: List[int], environment: str, force
                 documents.update(analyzer.documents)
 
     documents: Dict[str, Any] = {}
-    results = asyncio.run(run())
+    results = asyncio.run(_pulsed(run(), self.name, self.request.id))
     summary = _summary(results)
     summary["llm"] = _llm_summary(before, stats)
     logger.info(f"Риск-мониторинг, закупки: {summary}; документы: {documents}")
@@ -240,7 +271,7 @@ def rm_analyze_orgs_task(self, org_ids: List[int], environment: str, roles: List
             finally:
                 stats.update(analyzer.stats)
 
-    results = asyncio.run(run())
+    results = asyncio.run(_pulsed(run(), self.name, self.request.id))
     summary = _summary(results)
     summary["llm"] = _llm_summary(before, stats)
     logger.info(f"Риск-мониторинг, организации: {summary}")
@@ -303,6 +334,6 @@ def rm_typal_clauses_task(self, environment: str = None, regions: List[str] = No
             finally:
                 out["stats"] = loader.stats
 
-    asyncio.run(run())
+    asyncio.run(_pulsed(run(), self.name, self.request.id))
     logger.info(f"Типовые положения: {out.get('stats')}, версий {len(out['loaded'])}")
     return out

@@ -26,13 +26,18 @@ MAX_INFLIGHT = 4        # одновременных запросов к одн�
 STREAM = True           # потоковый ответ в call_llm (шлюз не обрывает долгую генерацию)
 PROXY_RETRIES = 2       # попыток в ResilientClient по умолчанию (у вызовов экспертизы есть свои повторы)
 RESILIENT = True        # оборачивать ли клиент get_llm() в ResilientClient
+# Предел одного запроса к модели целиком, с. Таймаут клиента (300 с) — это пауза между порциями ответа: поток, который
+# медленно идёт (модель зациклилась до max_tokens), им не обрывается, и задача «молчит» десятки минут (20.10.2026).
+# По пределу запрос прерывается как временный сбой (asyncio.TimeoutError) — с записью в журнал и повтором.
+REQUEST_DEADLINE = 420
 
 
 RETRY_DELAYS = (5.0, 15.0, 45.0)    # паузы между попытками при сбое сервера, с
 BREAKER_FAILS = 3                    # подряд сбоев до срабатывания предохранителя
 BREAKER_PAUSE = (30.0, 300.0)        # пауза предохранителя: начальная и предельная, с
 _gates: Dict[Tuple[int, str], asyncio.Semaphore] = {}
-CALLS: Dict[str, int] = {"requests": 0, "failed": 0}   # счётчик запросов к модели в процессе (для сводки задачи)
+# счётчики запросов к модели в процессе: для сводки задачи и пульса (inflight — выполняются сейчас)
+CALLS: Dict[str, int] = {"requests": 0, "failed": 0, "inflight": 0, "deadline": 0}
 _breaker: Dict[str, Dict[str, float]] = {}
 
 
@@ -183,6 +188,23 @@ def _breaker_record(key: str, ok: bool) -> None:
         state["fails"] = 0
 
 
+async def _bounded(coro: Any, what: str) -> Any:
+    """Выполняет запрос к модели не дольше ``REQUEST_DEADLINE``; учитывает выполняющиеся запросы (``inflight``).
+
+    Raises:
+        asyncio.TimeoutError: Запрос превысил предел (временный сбой — вызывающий повторяет его).
+    """
+    CALLS["inflight"] += 1
+    try:
+        return await asyncio.wait_for(coro, timeout=REQUEST_DEADLINE)
+    except asyncio.TimeoutError:
+        CALLS["deadline"] += 1
+        logger.warning(f"LLM {what}: запрос дольше {REQUEST_DEADLINE} с — прерван")
+        raise
+    finally:
+        CALLS["inflight"] -= 1
+
+
 async def _create(client: Any, stream: bool, kwargs: Dict[str, Any]) -> str:
     """Один запрос ``chat.completions.create`` без повторов SDK; при потоке собирает текст из чанков."""
     c = client.with_options(max_retries=0) if hasattr(client, "with_options") else client
@@ -231,7 +253,7 @@ async def call_llm(client: Any, retries: int = len(RETRY_DELAYS) + 1, **kwargs: 
         CALLS["requests"] += 1
         try:
             async with _gate(key):
-                text = await _create(client, stream, kwargs)
+                text = await _bounded(_create(client, stream, kwargs), key)
             _breaker_record(key, True)
             return text
         except Exception as e:  # noqa: BLE001
@@ -290,7 +312,7 @@ class _Completions:
             CALLS["requests"] += 1
             try:
                 async with _gate(key):
-                    resp = await self._raw.chat.completions.create(**kwargs)
+                    resp = await _bounded(self._raw.chat.completions.create(**kwargs), key)
                 _breaker_record(key, True)
                 return resp
             except Exception as e:  # noqa: BLE001
