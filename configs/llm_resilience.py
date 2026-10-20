@@ -353,7 +353,7 @@ class ResilientClient:
     Args:
         raw: ``AsyncOpenAI``.
         retries: Попыток на запрос при 5xx / 404 перезапуска модели / таймауте (``None`` — ``PROXY_RETRIES``,
-            по умолчанию 2). Ночной риск-мониторинг ждёт дольше (``risk_monitoring.settings.LLM_PROXY_RETRIES``, 6): перезапуск
+            по умолчанию 2). Ночной риск-мониторинг ждёт дольше (``configs.settings.LLM_PROXY_RETRIES``, 6): перезапуск
             модели длится минуты, и с двумя попытками страницы OCR и блоки извлечения терялись.
     """
 

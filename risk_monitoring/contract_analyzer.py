@@ -16,7 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from configs.config import Config
 from configs.logger import get_logger
 from risk_monitoring import contract_package as cp
-from risk_monitoring import passport, progress, rm_sql, settings
+from configs import settings
+from risk_monitoring import passport, progress, rm_sql
 
 logger = get_logger(__name__)
 

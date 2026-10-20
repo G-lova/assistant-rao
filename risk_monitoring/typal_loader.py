@@ -17,7 +17,8 @@ from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Sequence
 
 from configs.logger import get_logger
-from risk_monitoring import progress, settings, typal_clauses
+from configs import settings
+from risk_monitoring import progress, typal_clauses
 from risk_monitoring.typal_clauses import TypalRepo
 
 logger = get_logger(__name__)

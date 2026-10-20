@@ -13,7 +13,7 @@
 
 Окружение внешней системы — заголовок ``X-API-Database`` (как в остальных эндпоинтах).
 Повторный анализ уже проанализированных документов (``force``, ``recompute``) разрешён только
-в режиме отладки (``risk_monitoring.settings.RISK_MONITORING_DEBUG``).
+в режиме отладки (``configs.settings.RISK_MONITORING_DEBUG``).
 """
 from typing import List, Optional
 

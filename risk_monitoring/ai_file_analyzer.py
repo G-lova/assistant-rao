@@ -37,8 +37,9 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 from configs.config import Config
 from configs.logger import get_logger
-from risk_monitoring import (boilerplate, doc_kind, file_versions, norms, passport, pdf_text, printform_passport,
-                             risk_catalog, rm_sql, settings, text_quality, version_diff, xml_events)
+from configs import settings
+from risk_monitoring import (boilerplate, doc_kind, file_versions, norms, passport, pdf_text,
+                            printform_passport, risk_catalog, rm_sql, text_quality, version_diff, xml_events)
 from risk_monitoring import progress
 from risk_monitoring.llm_json import prompt_version as _hash_version
 

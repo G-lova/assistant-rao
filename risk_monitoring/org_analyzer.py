@@ -15,7 +15,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from configs.config import Config
 from configs.logger import get_logger
-from risk_monitoring import org_profile, passport, progress, rm_sql, settings
+from configs import settings
+from risk_monitoring import org_profile, passport, progress, rm_sql
 from risk_monitoring.contract_analyzer import _none
 from risk_monitoring.xml_events import canonical_org
 

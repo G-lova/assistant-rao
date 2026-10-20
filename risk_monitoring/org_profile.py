@@ -139,7 +139,7 @@ def customer_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
     Args:
         contracts: Закупки заказчика за период.
         black: Записи реестра 19.28 по ИНН его поставщиков.
-        settings: Пороги (``risk_monitoring.settings``).
+        settings: Пороги (``configs.settings``).
         previous_score: Прошлый балл.
 
     Returns:
@@ -316,6 +316,6 @@ def resume_facts(role: str, section: Dict[str, Any], settings: Any) -> List[str]
 def default_resume(role: str, name: str, section: Dict[str, Any], settings: Any = None) -> str:
     """Резюме секции шаблоном (без модели): название и факты :func:`resume_facts`."""
     if settings is None:
-        from risk_monitoring import settings
+        from configs import settings
     who = "Заказчик" if role == "customer" else "Поставщик"
     return f"{who} {name}. " + " ".join(resume_facts(role, section, settings))

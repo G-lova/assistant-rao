@@ -87,9 +87,21 @@ class EnvLeftoversTest(unittest.TestCase):
         from configs import settings
 
         with mock.patch.dict(os.environ, {"PE_FACTS_ENABLED": "true", "MODEL_TEMPERATURE": "0.1",
-                                          "PE_LEGACY_ENV": "stage", "RISK_MONITORING_DEBUG": "false"}):
+                                          "PE_LEGACY_ENV": settings.PE_LEGACY_ENV, "RISK_MONITORING_DEBUG": "false"}):
             names = {n for n, _, _ in settings.env_leftovers()}
         self.assertIn("MODEL_TEMPERATURE", names)
         self.assertIn("RISK_MONITORING_DEBUG", names)
         self.assertNotIn("PE_FACTS_ENABLED", names)
         self.assertNotIn("PE_LEGACY_ENV", names)
+
+    def test_environment_from_app_env(self):
+        """Окружение установки — из APP_ENV: длинные имена сокращаются; от него зависят окружения по умолчанию."""
+        from configs import settings
+
+        self.assertEqual(settings.normalize_env("development"), "dev")
+        self.assertEqual(settings.normalize_env("Production"), "prod")
+        self.assertEqual(settings.normalize_env("staging"), "stage")
+        self.assertEqual(settings.normalize_env("stage"), "stage")
+        self.assertEqual(settings.normalize_env(""), "dev")
+        self.assertEqual({settings.PE_LEGACY_ENV, settings.DAILY_ENVIRONMENT, settings.TYPAL_REGIONS_ENVIRONMENT},
+                         {settings.ENVIRONMENT})

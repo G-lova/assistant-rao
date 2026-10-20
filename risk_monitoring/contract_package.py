@@ -726,14 +726,14 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
         statuses: Статусы рисков файлов у аналитика.
         supplier_counts: Контракты заказчика за период по ИНН поставщиков (для BEH-006); ``None`` — не проверять.
         previous_score: Прошлый балл.
-        settings: Модуль ``risk_monitoring.settings`` (пороги).
+        settings: Модуль ``configs.settings`` (пороги).
 
     Returns:
         Dict[str, Any]: ``passport``, ``package``, ``registry``, ``events``, ``risks``, ``profile``, ``total_risk``,
         ``input_hash`` (служебный, переносится в ``pipeline``).
     """
     if settings is None:
-        from risk_monitoring import settings
+        from configs import settings
     dataset = as_json(card.get("dataset")) or {}
     p = build_passport(card, dataset, files)
     fz = p["fz"]

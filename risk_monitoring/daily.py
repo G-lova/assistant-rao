@@ -22,7 +22,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from configs.config import Config
 from configs.logger import get_logger
-from risk_monitoring import passport, progress, rm_sql, settings
+from configs import settings
+from risk_monitoring import passport, progress, rm_sql
 from risk_monitoring.contract_analyzer import _none
 
 logger = get_logger(__name__)

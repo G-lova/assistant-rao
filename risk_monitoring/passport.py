@@ -246,7 +246,7 @@ def total_risk(risks: Sequence[Dict[str, Any]]) -> float:
     Returns:
         float: Балл 0–1 (4 знака).
     """
-    from risk_monitoring import settings
+    from configs import settings
 
     ws = sorted(((clamp01(r.get("level")) or 0.0) * (clamp01(r.get("confidence")) or 0.0) for r in risks or []),
                 reverse=True)

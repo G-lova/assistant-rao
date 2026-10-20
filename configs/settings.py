@@ -1,12 +1,44 @@
-"""Переключатели и лимиты сервиса — в коде, а не в ``.env``.
+"""Переключатели и лимиты сервиса — в коде, а не в ``.env``. Единственный файл настроек сервиса: и экспертизы
+(«РАО Эксперт»), и риск-мониторинг (раздел «Риск-мониторинг» ниже).
 
-В ``.env`` остаются только адреса, ключи, пароли и названия моделей (они разные на dev / stage / prod).
-Всё, что меняет поведение сервиса, задаётся здесь и попадает в историю репозитория вместе с кодом.
-Переключатели риск-мониторинга — в ``risk_monitoring/settings.py``.
+В ``.env`` остаются только адреса, ключи, пароли, названия моделей и ``APP_ENV`` (они разные на dev / stage / prod).
+Всё, что меняет поведение сервиса, задаётся здесь и попадает в историю репозитория вместе с кодом. Окружение
+установки по умолчанию (``ENVIRONMENT``) выводится из ``APP_ENV``: от него зависят ``PE_LEGACY_ENV``,
+``DAILY_ENVIRONMENT`` и ``TYPAL_REGIONS_ENVIRONMENT``.
 
 Значения читаются при каждом вызове (``settings.X``), поэтому в тестах их можно подменять
 ``mock.patch.object(settings, "X", ...)``.
 """
+
+import os
+
+# Окружение установки из APP_ENV (.env): development → dev, staging → stage, production → prod,
+# neuro_assistant_database → neuro; так же его понимает Config.get_database_config
+ENV_ALIASES = {"development": "dev", "develop": "dev", "staging": "stage", "production": "prod",
+               "neuro_assistant_database": "neuro"}
+
+
+def normalize_env(value: str) -> str:
+    """Имя окружения в ключах хранилища (``dev`` / ``stage`` / ``prod`` / ``neuro``) из значения ``APP_ENV``.
+
+    Args:
+        value: Значение ``APP_ENV`` (``development``, ``stage``, ``Production`` …).
+
+    Returns:
+        str: Короткое имя окружения в нижнем регистре.
+    """
+    v = (value or "").strip().lower()
+    return ENV_ALIASES.get(v, v or "dev")
+
+
+try:  # APP_ENV может быть только в файле .env (вне docker), а settings импортируется раньше Config
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:  # pragma: no cover
+    pass
+ENVIRONMENT = normalize_env(os.getenv("APP_ENV", "development"))
+
 
 # Хранилище знаний («РАО Эксперт»): запись результатов /evaluate-documents в pe_* таблицы
 KNOWLEDGE_STORE_ENABLED = True
@@ -36,9 +68,9 @@ MEDIA_RATE_LIMIT_RETRIES = 6
 # SQL-запросы через /api/database/query (DataFetcher): одновременных запросов к хосту в процессе и повторов после 429
 PORTAL_QUERY_CONCURRENCY = 4
 PORTAL_QUERY_RATE_LIMIT_RETRIES = 4
-# Окружение строк, записанных до появления env в ключах (миграции 004, 008), и вызовов без X-API-Database.
-# Зафиксировано для текущей установки: исторические данные — со stage
-PE_LEGACY_ENV = "stage"
+# Окружение строк, записанных до появления env в ключах (миграции 004, 008), и вызовов без X-API-Database —
+# окружение установки (APP_ENV)
+PE_LEGACY_ENV = ENVIRONMENT
 
 # Нарезка экспертизы для индексации и поиска фактов (knowledge_store.pages.current_chunker): pages_1500 (прежняя)
 # или pages_v2 (по структуре; переключать после диагностики scripts.eval_chunkers variants)
@@ -63,6 +95,79 @@ EMBEDDING_BATCH_SIZE = 16
 RETRY_MAX_ATTEMPTS = 3
 RETRY_DELAY = 1.0
 RETRY_BACKOFF = 2.0
+
+# ================================================================ Риск-мониторинг
+
+# Фильтр типовых формулировок (boilerplate.py): снимать риск, если цитата встречается у стольких разных
+# заказчиков (закупки РМ и экспертизы)
+BOILERPLATE_ENABLED = True
+BOILERPLATE_MIN_SOURCES = 3
+
+# Анализировать ли файл прошлой редакции, если уже известна новая (superseded_by); в режиме отладки (force) —
+# анализируется всегда
+ANALYZE_SUPERSEDED = False
+
+# Попыток на запрос к модели для чтения, определения типа и извлечения данных (перезапуск модели длится минуты)
+LLM_PROXY_RETRIES = 6
+
+# Режим отладки: повторный анализ уже проанализированных файлов и XML (force / recompute в API).
+# В отладке результаты помечаются pipeline.debug и не используются как готовые
+RISK_MONITORING_DEBUG = True
+
+# Срок ссылок риск-мониторинга на общий документ: закрытие закупки/контракта + RM_TEXT_AFTER_CLOSE_DAYS,
+# но не дольше RM_TEXT_MAX_RETENTION_DAYS от загрузки (решение 13.10.2026)
+RM_TEXT_AFTER_CLOSE_DAYS = 365
+RM_TEXT_MAX_RETENTION_DAYS = 1095
+
+# ---------------------------------------------------------------- анализ закупки/контракта и организаций
+# Зоны балла 0–100: меньше первого порога — зелёная, меньше второго — жёлтая, иначе красная
+SCORE_ZONES = (40, 70)
+# Подтверждённый аналитиком риск весит больше (status = 1 в risk_monitoring_document_risks)
+CONFIRMED_WEIGHT = 1.5
+# Балл: каждый следующий риск (по убыванию веса) весит в SCORE_DECAY раз меньше предыдущего — много средних рисков
+# не дают «100»; риск, найденный только моделью и не подтверждённый аналитиком, весит AI_UNCONFIRMED_WEIGHT
+SCORE_DECAY = 0.5
+AI_UNCONFIRMED_WEIGHT = 0.6
+# Расхождение сумм между документом и ЕИС, при котором ставится DOC-009 (доля)
+CONSISTENCY_TOLERANCE = 0.01
+# Ставить ли DOC-015 «Неполный комплект документов» (иначе — только в package.completeness)
+COMPLETENESS_RISK = True
+# Резюме закупки и организации пишет модель (иначе — шаблон)
+PACKAGE_LLM_RESUME = True
+
+# Период и пороги аналитики организаций
+ORG_PERIOD_MONTHS = 12
+ORG_MIN_CONTRACTS = 5                  # меньше — поведенческие риски не ставятся (мало данных)
+CUSTOMER_LOW_COMPETITION_SHARE = 0.5   # доля закупок с одной заявкой / у единственного поставщика → BEH-001
+CUSTOMER_TOP_SUPPLIER_SHARE = 0.4      # доля контрактов заказчика у одного поставщика → BEH-006 «любимый поставщик»
+CUSTOMER_HHI = 2500                    # индекс Херфиндаля–Хиршмана по суммам контрактов заказчика → BEH-005
+SUPPLIER_TERMINATION_SHARE = 0.2       # доля расторгнутых контрактов поставщика → BEH-002
+DEMPING_PCT = 25                       # снижение цены на торгах, %, с которого контракт считается демпинговым
+REPEAT_RISK_MIN = 3                    # риск одного кода в стольких закупках заказчика → HIST-001
+# Внешняя система пока не принимает ai_analysis организаций (нет таблицы в API): результат хранится у нас
+ORG_PUSH_ENABLED = False
+
+# ---------------------------------------------------------------- ежедневный прогон и сводка (S0–S4)
+# Прогон за дату выгрузки запускает Laravel (POST /risk-monitoring/daily); если до DAILY_WATCHDOG_HOUR вызова не было,
+# Celery beat запускает его сам для последней даты выгрузки окружения DAILY_ENVIRONMENT
+DAILY_WATCHDOG_ENABLED = True
+DAILY_WATCHDOG_HOUR = 6
+DAILY_ENVIRONMENT = ENVIRONMENT         # окружение текущей установки (APP_ENV)
+DAILY_PUSH = True                      # записывать результаты этапов во внешнюю БД
+# Сводка — только по заказчикам с risk_monitoring_organisations.monitoring = 1
+DAILY_MONITORED_ONLY = True
+DAILY_SCORE_JUMP = 15                  # рост балла закупки за прогон, с которого она попадает в «внимание»
+DAILY_TOP = 15                         # сколько закупок и событий показывать в каждом списке сводки
+DAILY_EVENT_IMPORTANCE = ("high", "critical")   # события этой важности попадают в «внимание»
+
+# ---------------------------------------------------------------- типовые положения о закупке (223-ФЗ)
+TYPAL_LOAD_ENABLED = True
+# Коды регионов ФНС (две цифры); пусто — регионы заказчиков на мониторинге (dataset.owner.region)
+TYPAL_REGIONS: tuple = ()
+TYPAL_REGIONS_ENVIRONMENT = ENVIRONMENT  # окружение, по заказчикам которого определяются регионы (если TYPAL_REGIONS пуст) — APP_ENV
+TYPAL_SUBSYSTEM = "TPOZ223"              # подсистема ЕИС для getDocsByOrgRegionRequest
+TYPAL_DOCUMENT_TYPE = "typalOrderClause"
+TYPAL_LOOKBACK_DAYS = 3                # ежедневная загрузка берёт столько прошедших дней (ЕИС выгружает с задержкой)
 
 # Переменные, которые раньше задавались в .env и теперь задаются здесь (имя в .env → имя здесь, модуль).
 # Если в окружении осталось другое значение, при старте пишется предупреждение (см. warn_env_leftovers)
@@ -101,10 +206,6 @@ def env_leftovers() -> list:
     Returns:
         list: ``[(имя в .env, значение в .env, значение в коде)]`` — значение в окружении игнорируется.
     """
-    import os
-
-    from risk_monitoring import settings as rm
-
     out = []
     for env_name, name in MOVED_FROM_ENV.items():
         v = os.environ.get(env_name)
@@ -112,8 +213,8 @@ def env_leftovers() -> list:
             out.append((env_name, v, globals()[name]))
     for name in RM_MOVED_FROM_ENV:
         v = os.environ.get(name)
-        if v is not None and hasattr(rm, name) and not _same(v, getattr(rm, name)):
-            out.append((name, v, getattr(rm, name)))
+        if v is not None and name in globals() and not _same(v, globals()[name]):
+            out.append((name, v, globals()[name]))
     return out
 
 

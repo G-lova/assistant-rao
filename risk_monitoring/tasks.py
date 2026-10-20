@@ -304,7 +304,7 @@ def rm_typal_clauses_task(self, environment: str = None, regions: List[str] = No
 
     if already_succeeded(self):
         return self.AsyncResult(self.request.id).result
-    from risk_monitoring import settings
+    from configs import settings
 
     if not settings.TYPAL_LOAD_ENABLED and not xml_base64:
         return {"skipped": "TYPAL_LOAD_ENABLED = False"}
@@ -385,7 +385,7 @@ def rm_daily_task(self, environment: str, export_date: str, force: bool = False,
 
     if already_succeeded(self):
         return self.AsyncResult(self.request.id).result
-    from risk_monitoring import settings
+    from configs import settings
 
     push = settings.DAILY_PUSH if push is None else push
     return asyncio.run(_pulsed(_daily_run(environment, export_date, force, push, use_llm, stages),
@@ -406,7 +406,7 @@ def rm_daily_watchdog_task(self) -> Dict[str, Any]:
 
     if already_succeeded(self):
         return self.AsyncResult(self.request.id).result
-    from risk_monitoring import settings
+    from configs import settings
 
     if not settings.DAILY_WATCHDOG_ENABLED:
         return {"skipped": "DAILY_WATCHDOG_ENABLED = False"}

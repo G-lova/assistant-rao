@@ -1060,7 +1060,8 @@ class JsonNullTest(unittest.TestCase):
 
     def test_customer_metrics_without_nulls(self):
         """Без строк ``"null"`` изменения, расторжения и поставщики считаются по реальным значениям."""
-        from risk_monitoring import org_profile, settings
+        from configs import settings
+        from risk_monitoring import org_profile
         from risk_monitoring.contract_analyzer import _none
 
         raw = [{"id": i, "contract_number": "1", "nmck": "100", "contract_price": "90", "mod_reason_code": "null",
@@ -1078,7 +1079,8 @@ class OrgResumeFactsTest(unittest.TestCase):
 
     def test_small_sample_and_unknown_method(self):
         """Мало контрактов с известным поставщиком — без выводов о концентрации; неизвестный способ — не «без конкурса»."""
-        from risk_monitoring import org_profile, settings
+        from configs import settings
+        from risk_monitoring import org_profile
 
         rows = [{"id": i, "contract_number": "1", "nmck": None if i == 0 else "100", "contract_price": "90",
                  "method_code": None if i == 0 else "EA20", "supplier_inn": "1" if i < 2 else None} for i in range(5)]
@@ -1092,7 +1094,8 @@ class OrgResumeFactsTest(unittest.TestCase):
 
     def test_tie_not_dominant(self):
         """Равные доли контрагентов — ни один не преобладает."""
-        from risk_monitoring import org_profile, settings
+        from configs import settings
+        from risk_monitoring import org_profile
 
         rows = [{"id": i, "contract_number": "1", "nmck": "100", "contract_price": "90", "method_code": "EA20",
                  "supplier_inn": str(i)} for i in range(5)]

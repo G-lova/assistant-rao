@@ -5,7 +5,8 @@ import unittest
 from datetime import date
 
 from risk_monitoring import contract_package as cp
-from risk_monitoring import org_profile, settings, typal_clauses
+from configs import settings
+from risk_monitoring import org_profile, typal_clauses
 
 DATASET = {
     "owner": {"region": "34", "zak_inn": "3437500183", "zak_kpp": "343701001", "zak_name_krat": "ГБПОУ «МППК»"},

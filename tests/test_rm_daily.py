@@ -4,7 +4,8 @@ import unittest
 from datetime import datetime, timedelta
 from unittest import mock
 
-from risk_monitoring import daily, settings
+from configs import settings
+from risk_monitoring import daily
 
 
 def _contract(score, zone, prev=None, delta=None, registry=False):
