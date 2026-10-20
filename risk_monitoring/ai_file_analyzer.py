@@ -674,6 +674,14 @@ class AIFileAnalyzer:
             version_changes, version_risks = (await self._version_changes(previous, prev_ctx, diff, document_id,
                                                                           file_name, type_decode, use_llm=True)
                                               if previous else (None, []))
+        if risk and risk.get("risks"):
+            # правила отбора уточняются, а результат риск-анализа может быть из кэша — применяем их повторно
+            from risk_monitoring.document_risk_analyzer import rejected_by_rules
+
+            before = len(risk["risks"])
+            risk = {**risk, "risks": [r for r in risk["risks"] if not rejected_by_rules(r)]}
+            if len(risk["risks"]) < before:
+                progress.note(f"правила отбора сняли рисков: {before - len(risk['risks'])}")
         async with progress.step("фильтр типовых формулировок") as st:
             risk, typical = await self._drop_typical(risk, document_id, row)
             st["detail"] = f"снято {len(typical)}" if typical else "типовых не найдено"

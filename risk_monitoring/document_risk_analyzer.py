@@ -41,12 +41,22 @@ SELF_DENIAL_RE = re.compile(
     re.IGNORECASE,
 )
 # Признаки товарного знака, модели, артикула или производителя в цитате (для DOC-002)
+# Кавычки и короткие обозначения сами по себе товарный знак не доказывают: «триплекс» (материал), «О средствах
+# массовой информации» (название закона), «Тип А2» (класс по ГОСТ) — ложные DOC-002 прогона 20.10.2026.
+CAMEL_RE = re.compile(r"\b[А-ЯЁ][а-яё]+[А-ЯЁ][а-яёА-ЯЁ]*\b")   # слитное написание с заглавной внутри: «КлериГель»
 BRAND_RE = re.compile(
-    r"[®™]|\b[A-Za-z][A-Za-z0-9\-]{1,}\b|«[^»]{2,40}»|\"[^\"]{2,40}\""
-    r"|\b[А-ЯЁ][а-яё]+[А-ЯЁ][а-яёА-ЯЁ]*\b"   # слитное написание с заглавной внутри: «КлериГель»
+    r"[®™]|\b[A-Za-z][A-Za-z0-9\-]{2,}\b"
+    r"|\b[A-Za-z]{2,}[-\s]?\d+[A-Za-z0-9-]*\b|\b\d+[A-Za-z]+\b"      # HP 85A, X200, 85A (но не «А2»)
     r"|модел|артикул|марк[аиу]\b|товарн\w+\s+знак|производств\w+\s|производител|фирм\w*\s|бренд|торгов\w+\s+наименован",
     re.IGNORECASE,
 )
+QUOTED_RE = re.compile(r"«([^»]{2,40})»|\"([^\"]{2,40})\"")
+# Название в кавычках — не товарный знак: закон, документ, порядок, правила; строчное слово (материал, тип)
+NOT_BRAND_QUOTED_RE = re.compile(r"^(о|об|по|порядок|правила|положени|закон|стандарт|техническ|паспорт)\b|закон|кодекс",
+                                 re.IGNORECASE)
+NOT_BRAND_WORDS = {"iso", "gost", "usb", "hdmi", "led", "lcd", "din", "iec", "astm", "wi-fi", "wifi", "pdf", "html",
+                   "http", "https", "www", "ghz", "mhz", "vga", "dvi", "ssd", "hdd", "ram", "dna", "pcr", "gmp",
+                   "rohs", "atx", "hepa", "ulpa", "nsf", "led", "ups", "rus"}
 # Цитаты типовых норм закона: требования, установленные законом, — не риск (prompts/risk_analysis_prompt.txt, п. 12–13)
 STATUTORY_RE = re.compile(
     r"19\.28\s*кодекса|\bст\w*\.?\s*19\.28|независимая гарантия должна быть безотзывной"
@@ -56,10 +66,38 @@ STATUTORY_RE = re.compile(
     r"|не было привлечено к административной ответственности"
     r"|член\w*\s+(сро|саморегулируем)|саморегулируемой организации"
     r"|29\.12\.2021\s*№\s*2571|позици\w+\s+\d+\s+раздела|графы\s+\"?дополнительные требования"
-    r"|не менее \d+ процентов начальной \(максимальной\) цены контракта",
+    r"|не менее \d+ процентов начальной \(максимальной\) цены контракта"
+    # ПП РФ № 1042: шкала штрафов «за каждый факт неисполнения или ненадлежащего исполнения…»
+    r"|за каждый факт неисполнения или ненадлежащего исполнения"
+    # ст. 14 и ПП РФ № 1875: подтверждение страны происхождения, евразийский реестр, участники ЕАЭС
+    r"|стран\w*\s+происхождения|евразийск\w+\s+реестр|государств\w*\s*-?\s*член\w*\s+евразийского экономического союза"
+    # ч. 2 ст. 43: конкретные показатели предложения участника
+    r"|конкретные значения показателей"
+    # диапазон «≥ … ≤ …» из КТРУ / описания объекта — не сужает круг товаров
+    r"|[≥≤]\s*\d[^≥≤]{0,40}[≥≤]\s*\d",
     re.IGNORECASE,
 )
-STATUTORY_CODES = {"DOC-004", "DOC-005", "DOC-006", "AI-003", "AI-005", "PROC-012", "DOC-007"}
+STATUTORY_CODES = {"DOC-004", "DOC-005", "DOC-006", "AI-003", "AI-005", "PROC-012", "DOC-007", "DOC-003", "FIN-016"}
+SECURITY_PCT_RE = re.compile(r"обеспечени\w*[^.]{0,120}?(\d+(?:[.,]\d+)?)\s*(%|процент)", re.IGNORECASE)
+
+
+def security_in_range(risk: Dict[str, Any]) -> bool:
+    """FIN-005 / FIN-006 на обеспечении в пределах закона: исполнение контракта 0,5–30 % (ч. 6 ст. 96 44-ФЗ),
+    гарантийные обязательства до 10 % — не «недостаточное обеспечение» (2807 прогона 20.10.2026: «5 % от НМЦК»).
+
+    Args:
+        risk: Риск модели.
+
+    Returns:
+        bool: ``True`` — отбросить.
+    """
+    if risk.get("code") not in ("FIN-005", "FIN-006"):
+        return False
+    m = SECURITY_PCT_RE.search(((risk.get("evidence") or {}).get("fragment")) or "")
+    if not m:
+        return False
+    pct = float(m.group(1).replace(",", "."))
+    return 0.5 <= pct <= (30 if risk["code"] == "FIN-005" else 10)
 
 
 TABLE_TOTAL_RE = re.compile(r"^\s*(итого|всего)\b[^а-яё]*(\d[\d\s]*[.,]\d{2}[^\d]+){2,}", re.IGNORECASE)
@@ -94,6 +132,26 @@ def statutory(risk: Dict[str, Any]) -> bool:
     return bool(STATUTORY_RE.search(((risk.get("evidence") or {}).get("fragment")) or ""))
 
 
+def rejected_by_rules(r: Dict[str, Any]) -> bool:
+    """Риск модели отбрасывается правилами: требование закона, «или эквивалент» у DOC-002, самоопровержение,
+    типовая норма, строка итогов, обеспечение в пределах закона, DOC-002 без признаков товарного знака.
+
+    Применяется и к свежему ответу модели, и к результату из кэша (правила уточняются, а кэш остаётся).
+
+    Args:
+        r: Риск модели (``code``, ``evidence.fragment``, ``requirement_source``, ``title``, ``explanation``).
+
+    Returns:
+        bool: ``True`` — отбросить.
+    """
+    frag = ((r.get("evidence") or {}).get("fragment")) or ""
+    by_law = str(r.get("requirement_source") or "").strip().lower() == "закон"
+    # DOC-002 — товарный знак БЕЗ оговорки «или эквивалент»; цитата с этой оговоркой риск опровергает
+    with_equivalent = r.get("code") == "DOC-002" and re.search(r"эквивалент", frag, re.IGNORECASE)
+    return bool(by_law or with_equivalent or self_denial(r) or statutory(r) or table_total(r) or security_in_range(r)
+                or (r.get("code") == "DOC-002" and not brand_like(frag)))
+
+
 # Близкие по смыслу коды: на одну цитату остаётся один код группы
 SYNONYM_GROUPS = ({"DOC-006", "AI-003"}, {"DOC-005", "AI-005"}, {"DOC-002", "DOC-003"})
 MAX_CODES_PER_FRAGMENT = 2
@@ -124,7 +182,13 @@ def brand_like(fragment: str) -> bool:
         bool: ``True``, если цитата может подтверждать DOC-002.
     """
     text = EIS_ID_RE.sub(" ", fragment or "")
-    return bool(BRAND_RE.search(text))
+    for m in QUOTED_RE.finditer(text):
+        q = (m.group(1) or m.group(2) or "").strip()
+        if q and q[0].isupper() and not NOT_BRAND_QUOTED_RE.search(q):
+            return True
+    if CAMEL_RE.search(text):   # без IGNORECASE: иначе любое слово похоже на «КлериГель»
+        return True
+    return any(m.group(0).lower() not in NOT_BRAND_WORDS for m in BRAND_RE.finditer(text))
 
 
 def _norm(s: str) -> str:
@@ -354,10 +418,7 @@ class DocumentRiskAnalyzer:
             if not self._fragment_in_text(frag, norm_chunk):
                 dropped += 1
                 continue
-            by_law = str(r.get("requirement_source") or "").strip().lower() == "закон"
-            # DOC-002 — товарный знак БЕЗ оговорки «или эквивалент»; цитата с этой оговоркой риск опровергает
-            with_equivalent = r["code"] == "DOC-002" and re.search(r"эквивалент", frag, re.IGNORECASE)
-            if by_law or with_equivalent or self_denial(r) or statutory(r) or table_total(r) or (r["code"] == "DOC-002" and not brand_like(frag)):
+            if rejected_by_rules(r):
                 rejected += 1
                 continue
             r["category"] = risk_catalog.category(r["code"])

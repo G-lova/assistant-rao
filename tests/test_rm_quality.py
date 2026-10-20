@@ -922,3 +922,36 @@ class InternalResultsTest(unittest.TestCase):
         self.assertEqual(repo.marked, [("xml", 5)])
         asyncio.run(xa._save_internal(6, {}, False, "500"))
         self.assertEqual(repo.saved, [("xml", 6, False)])
+
+
+class Run1020Test(unittest.TestCase):
+    """Ложные риски прогона 20.10.2026 (файлы 1, 2805, 2807, 2808, 2809)."""
+
+    def test_doc002_not_brand(self):
+        """Название закона, материал в кавычках, класс по ГОСТ — не товарный знак."""
+        from risk_monitoring.document_risk_analyzer import brand_like
+
+        self.assertFalse(brand_like("РФ от 27.12.1991 N 2124-1 «О средствах массовой информации» телеканал"))
+        self.assertFalse(brand_like("Лицевое стекло –распашное, материал стекла «триплекс»"))
+        self.assertFalse(brand_like("Тип бокса Тип А2 Значение характеристики не может меняться"))
+        self.assertTrue(brand_like("Бокс «Ламинар-С» или эквивалент"))
+
+    def test_statutory_and_security(self):
+        """ПП 1042, страна происхождения, ЕАЭС, диапазоны ≥ ≤, обеспечение 5 % — не риски."""
+        from risk_monitoring.document_risk_analyzer import security_in_range, statutory
+
+        r = lambda c, f: {"code": c, "evidence": {"fragment": f}}  # noqa: E731
+        self.assertTrue(statutory(r("DOC-007", "7.4.3. За каждый факт неисполнения или ненадлежащего исполнения поставщиком")))
+        self.assertTrue(statutory(r("DOC-005", "подтверждение страны происхождения товаров из евразийского реестра")))
+        self.assertTrue(statutory(r("DOC-003", "Уровень шума ≥ 54 и ≤ 65 Децибел")))
+        self.assertTrue(statutory(r("DOC-006", "должно содержать конкретные значения показателей")))
+        self.assertTrue(security_in_range(r("FIN-005", "обеспечение его исполнения в размере 5 % от начальной (максимальной) цены")))
+        self.assertFalse(security_in_range(r("FIN-005", "обеспечение исполнения 0,1 % цены контракта")))
+
+    def test_print_form_law_line(self):
+        """Строка со ссылкой на закон не кандидат товарного знака печатной формы."""
+        from risk_monitoring.printform_passport import LAW_LINE_RE, _not_brand_quote
+
+        self.assertTrue(LAW_LINE_RE.search("закон РФ от 27.12.1991 N 2124-1 «О средствах массовой информации»"))
+        self.assertTrue(_not_brand_quote("«триплекс»"))
+        self.assertFalse(_not_brand_quote("«Ламинар-С»"))
