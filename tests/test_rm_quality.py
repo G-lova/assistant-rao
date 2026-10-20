@@ -1044,3 +1044,30 @@ class Run1020cTest(unittest.TestCase):
         self.assertEqual([r["rule_id"] for r in out], ["DOC-006", "FIN-004"])
         self.assertEqual(out[0]["related_codes"], ["DOC-010"])
         self.assertEqual(len(cp.drop_same_quote(risks, {"DOC-010"})), 3)
+
+
+class JsonNullTest(unittest.TestCase):
+    """JSON ``null`` из ``JSON_UNQUOTE`` не считается значением (аналитика организаций 20.10.2026)."""
+
+    def test_null_string(self):
+        """``"null"`` → ``None``; обычные строки и NaN обрабатываются как раньше."""
+        from risk_monitoring.contract_analyzer import _none
+
+        self.assertIsNone(_none("null"))
+        self.assertIsNone(_none(" NULL "))
+        self.assertIsNone(_none(float("nan")))
+        self.assertEqual(_none("1660331280"), "1660331280")
+
+    def test_customer_metrics_without_nulls(self):
+        """Без строк ``"null"`` изменения, расторжения и поставщики считаются по реальным значениям."""
+        from risk_monitoring import org_profile, settings
+        from risk_monitoring.contract_analyzer import _none
+
+        raw = [{"id": i, "contract_number": "1", "nmck": "100", "contract_price": "90", "mod_reason_code": "null",
+                "term_code": "null", "supplier_inn": "1660331280" if i < 3 else "null", "supplier_name": "СК"}
+               for i in range(5)]
+        rows = [{k: _none(v) for k, v in r.items()} for r in raw]
+        sec = org_profile.customer_section(rows, [], settings, None)
+        self.assertEqual(sec["metrics"]["modified"], 0)
+        self.assertEqual(sec["metrics"]["terminated"], 0)
+        self.assertEqual([t["inn"] for t in sec["top_suppliers"]], ["1660331280"])

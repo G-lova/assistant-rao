@@ -34,7 +34,14 @@ RESUME_SCHEMA = {"type": "object", "properties": {"resume": {"type": "string"}},
 
 
 def _none(v: Any) -> Any:
-    """NaN/NaT из DataFrame → ``None``."""
+    """NaN/NaT из DataFrame и JSON ``null`` → ``None``.
+
+    ``JSON_UNQUOTE(JSON_EXTRACT(...))`` над значением ``null`` возвращает строку ``"null"``: без замены она
+    считалась признаком изменения/расторжения контракта и «поставщиком» с ИНН ``null`` (аналитика организаций
+    20.10.2026: изменено и расторгнуто 60 % контрактов у всех трёх заказчиков, HHI по поставщику ``null``).
+    """
+    if isinstance(v, str) and v.strip().lower() == "null":
+        return None
     try:
         import pandas as pd
 
