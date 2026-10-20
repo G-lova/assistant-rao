@@ -223,12 +223,37 @@ class _TextIndex:
         return not n or n in self.norm
 
 
-def verify_raw_data(raw: Dict[str, Any], text: str) -> Tuple[Dict[str, Any], List[str]]:
+def plausible_contract_number(value: Any) -> bool:
+    """Похоже ли значение на номер договора: есть цифра, это не сумма и не дата, не слишком длинное.
+
+    Модель иногда кладёт в номер договора сумму («124,92 тыс.руб.») или дату.
+
+    Args:
+        value: Значение ``contract_number.value``.
+
+    Returns:
+        bool: ``True`` — похоже на номер.
+    """
+    s = str(value or "").strip()
+    if not s or len(s) > 60 or not re.search(r"\d", s):
+        return False
+    if re.search(r"руб|коп|тыс|млн|млрд|%|₽", s, flags=re.I):
+        return False
+    if parse_date(s) is not None:
+        return False
+    return not re.fullmatch(r"[\d\s]+[.,]\d{1,2}", s)   # «124,92» — сумма, а не номер
+
+
+def verify_raw_data(raw: Dict[str, Any], text: str,
+                    expected_number: Optional[str] = None) -> Tuple[Dict[str, Any], List[str]]:
     """Убирает из ``raw_data`` значения, которых нет в тексте документа.
 
     Args:
         raw: ``raw_data`` результата извлечения.
         text: Полный текст документа.
+        expected_number: Номер договора экспертизы. Если документ его упоминает (с учётом путаницы символов при
+            OCR), а извлечён другой номер, номер заменяется номером экспертизы: «другой» номер в таком документе —
+            обычно номер сметы, акта или счёта.
 
     Returns:
         tuple: (проверенная копия ``raw_data``, список удалённого — для журнала).
@@ -257,9 +282,16 @@ def verify_raw_data(raw: Dict[str, Any], text: str) -> Tuple[Dict[str, Any], Lis
         out["dates"] = keep(out["dates"], lambda it: date_in_text(it.get("value"), idx.dates), "дата")
 
     cn = out.get("contract_number")
-    if isinstance(cn, dict) and cn.get("value") and not idx.has_contract_number(cn["value"]):
-        dropped.append(f"номер договора: {cn['value']}")
-        out.pop("contract_number")
+    if isinstance(cn, dict) and cn.get("value"):
+        if not plausible_contract_number(cn["value"]) or not idx.has_contract_number(cn["value"]):
+            dropped.append(f"номер договора: {cn['value']}")
+            out.pop("contract_number")
+    cn = out.get("contract_number")
+    if expected_number and idx.has_contract_number(expected_number) and normalize_number(expected_number):
+        current = cn.get("value") if isinstance(cn, dict) else None
+        if current and normalize_number(current) != normalize_number(expected_number):
+            dropped.append(f"номер договора: {current} → {expected_number} (документ упоминает договор экспертизы)")
+            cn["value"] = expected_number
 
     for org in out.get("organizations") or []:
         if not isinstance(org, dict):
@@ -293,20 +325,21 @@ def verify_raw_data(raw: Dict[str, Any], text: str) -> Tuple[Dict[str, Any], Lis
     return out, dropped
 
 
-def verify_extraction(extracted: Any, text: str, filename: str = "") -> Any:
+def verify_extraction(extracted: Any, text: str, filename: str = "", expected_number: Optional[str] = None) -> Any:
     """Проверяет результат ``TypeDataExtractor`` по тексту документа (см. :func:`verify_raw_data`).
 
     Args:
         extracted: Результат извлечения (``dict`` с ``raw_data``); другие значения возвращаются как есть.
         text: Полный текст документа.
         filename: Имя файла — для журнала.
+        expected_number: Номер договора экспертизы (см. :func:`verify_raw_data`).
 
     Returns:
         Копия результата с проверенным ``raw_data``.
     """
     if not isinstance(extracted, dict) or not isinstance(extracted.get("raw_data"), dict):
         return extracted
-    raw, dropped = verify_raw_data(extracted["raw_data"], text)
+    raw, dropped = verify_raw_data(extracted["raw_data"], text, expected_number)
     if not dropped:
         return extracted
     logger.warning(f"Извлечённые данные {filename}: нет в тексте документа, отброшено {len(dropped)}: {dropped[:20]}")

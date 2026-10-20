@@ -276,7 +276,8 @@ class TasksPipeline:
 
         # Значения, которых нет в тексте документа (выдуманные моделью суммы, даты, реквизиты), отбрасываются.
         # Проверка и для данных из кэша: кэш мог быть заполнен до её появления
-        extracted_data = verify_extraction(extracted_data, extracted_text, filename)
+        extracted_data = verify_extraction(extracted_data, extracted_text, filename,
+                                           expected_number=getattr(self, "expected_contract_number", None))
 
         await ks_hooks.on_document_extracted(ks_doc_id, extracted_data)
 
@@ -309,6 +310,9 @@ class TasksPipeline:
             for k, v in dop_fields.items():
                 if self.df.loc[self.df['doc_code'] == k, 'required_docs'].iloc[0] == 1:
                     data_for_final_evaluation[v] = self.df[k].iloc[0]
+            # Номер договора экспертизы: если документ его упоминает, извлечённый «другой» номер — ошибка извлечения
+            contract_value = self.df['contract'].iloc[0] if 'contract' in self.df.columns else None
+            self.expected_contract_number = str(contract_value).strip() if contract_value not in (None, "") and str(contract_value) != "nan" else None
 
             # определение типа документа для правильной категоризации и оценки полноты
             obj = self.df['object'].iloc[0]
