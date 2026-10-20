@@ -53,6 +53,19 @@ REPEAT_RISK_MIN = 3                    # риск одного кода в ст�
 # Внешняя система пока не принимает ai_analysis организаций (нет таблицы в API): результат хранится у нас
 ORG_PUSH_ENABLED = False
 
+# ---------------------------------------------------------------- ежедневный прогон и сводка (S0–S4)
+# Прогон за дату выгрузки запускает Laravel (POST /risk-monitoring/daily); если до DAILY_WATCHDOG_HOUR вызова не было,
+# Celery beat запускает его сам для последней даты выгрузки окружения DAILY_ENVIRONMENT
+DAILY_WATCHDOG_ENABLED = True
+DAILY_WATCHDOG_HOUR = 6
+DAILY_ENVIRONMENT = "prod"
+DAILY_PUSH = True                      # записывать результаты этапов во внешнюю БД
+# Сводка — только по заказчикам с risk_monitoring_organisations.monitoring = 1
+DAILY_MONITORED_ONLY = True
+DAILY_SCORE_JUMP = 15                  # рост балла закупки за прогон, с которого она попадает в «внимание»
+DAILY_TOP = 15                         # сколько закупок и событий показывать в каждом списке сводки
+DAILY_EVENT_IMPORTANCE = ("high", "critical")   # события этой важности попадают в «внимание»
+
 # ---------------------------------------------------------------- типовые положения о закупке (223-ФЗ)
 TYPAL_LOAD_ENABLED = True
 # Коды регионов ФНС (две цифры); пусто — регионы заказчиков на мониторинге (dataset.owner.region)

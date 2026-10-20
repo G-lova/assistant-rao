@@ -340,3 +340,92 @@ def rm_typal_clauses_task(self, environment: str = None, regions: List[str] = No
     asyncio.run(_pulsed(run(), self.name, self.request.id))
     logger.info(f"Типовые положения: {out.get('stats')}, версий {len(out['loaded'])}")
     return out
+
+
+async def _daily_run(environment: str, export_date: str, force: bool, push: bool, use_llm: bool,
+                     stages: List[str] = None) -> Dict[str, Any]:
+    """Прогон за дату с защитой от повтора: готовая сводка возвращается без пересчёта (кроме ``force``),
+    идущий прогон второй раз не запускается."""
+    from configs.ai_repo import AIRepo
+    from configs.http_client_manager import HTTPClientManager
+    from risk_monitoring import daily
+
+    d = daily.parse_date(export_date).isoformat()
+    async with HTTPClientManager(timeout=180.0) as mgr, AIRepo() as repo:
+        env = environment.lower()
+        stored = (await repo.get_rm_results(env, daily.KIND, [daily.run_key(d)])).get(daily.run_key(d))
+        if not force and daily.completed(stored):
+            logger.info(f"Ежедневный прогон {d} ({env}) уже выполнен — повтор не нужен")
+            return {"status": "already_done", "date": d, "summary": stored["ai_analysis"]}
+        if not force and daily.running_fresh(stored):
+            logger.info(f"Ежедневный прогон {d} ({env}) уже идёт — второй не запускается")
+            return {"status": "already_running", "date": d}
+        run = daily.DailyRun(mgr, environment, repo, push_results=push, use_llm=use_llm, stages=stages)
+        summary = await run.run(d)
+        return {"status": "done", "date": d, "summary": summary}
+
+
+@celery_app.task(bind=True, name="rm_daily_task", soft_time_limit=13500, time_limit=14100)
+def rm_daily_task(self, environment: str, export_date: str, force: bool = False, push: bool = None,
+                  use_llm: bool = True, stages: List[str] = None) -> Dict[str, Any]:
+    """Ежедневный прогон за дату выгрузки (S0–S4) и сводка (``risk_monitoring.daily``).
+
+    Args:
+        environment: Окружение внешней системы.
+        export_date: Дата выгрузки ЕИС ``ГГГГ-ММ-ДД``.
+        force: Пересобрать готовую сводку (режим отладки; документы всё равно повторно не анализируются).
+        push: Записывать результаты этапов во внешнюю БД (по умолчанию ``settings.DAILY_PUSH``).
+        use_llm: Резюме пишет модель.
+        stages: Этапы (по умолчанию все).
+
+    Returns:
+        Dict[str, Any]: ``status`` (``done`` / ``already_done`` / ``already_running``), ``date``, ``summary``.
+    """
+    from celery_app import already_succeeded
+
+    if already_succeeded(self):
+        return self.AsyncResult(self.request.id).result
+    from risk_monitoring import settings
+
+    push = settings.DAILY_PUSH if push is None else push
+    return asyncio.run(_pulsed(_daily_run(environment, export_date, force, push, use_llm, stages),
+                               self.name, self.request.id))
+
+
+@celery_app.task(bind=True, name="rm_daily_watchdog_task", soft_time_limit=13500, time_limit=14100)
+def rm_daily_watchdog_task(self) -> Dict[str, Any]:
+    """Страховка по расписанию: если Laravel не вызвал прогон за последнюю дату выгрузки, запускает его сам.
+
+    Окружение — ``settings.DAILY_ENVIRONMENT``; дата — последняя ``exact_date`` архивов ЕИС не позже сегодня.
+    Готовую или идущую сводку не трогает (``_daily_run``).
+
+    Returns:
+        Dict[str, Any]: Результат прогона или причина пропуска.
+    """
+    from celery_app import already_succeeded
+
+    if already_succeeded(self):
+        return self.AsyncResult(self.request.id).result
+    from risk_monitoring import settings
+
+    if not settings.DAILY_WATCHDOG_ENABLED:
+        return {"skipped": "DAILY_WATCHDOG_ENABLED = False"}
+
+    async def run() -> Dict[str, Any]:
+        """Последняя дата выгрузки и прогон за неё."""
+        from datetime import date
+
+        from configs.http_client_manager import HTTPClientManager
+        from risk_monitoring import daily
+
+        async with HTTPClientManager(timeout=60.0) as mgr:
+            probe = daily.DailyRun(mgr, settings.DAILY_ENVIRONMENT, None)
+            rows = await probe._query("latest_export_date.sql", head=[date.today().isoformat()])
+        last = rows[0].get("exact_date") if rows else None
+        if not last:
+            return {"skipped": "нет выгрузок ЕИС"}
+        logger.info(f"Страховка ежедневного прогона: последняя выгрузка {str(last)[:10]} ({settings.DAILY_ENVIRONMENT})")
+        return await _daily_run(settings.DAILY_ENVIRONMENT, str(last)[:10], False, settings.DAILY_PUSH, True)
+
+    out = asyncio.run(_pulsed(run(), self.name, self.request.id))
+    return {k: v for k, v in out.items() if k != "summary"} if isinstance(out, dict) else out
