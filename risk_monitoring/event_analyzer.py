@@ -23,7 +23,7 @@ PROMPT_PATH = "prompts/event_analyzer_prompt.txt"
 SCHEMA_PATH = "schemas/event_analyzer_schema.json"
 MAX_PAYLOAD_CHARS = 24000
 BATCH_MAX_EVENTS = 6         # событий в одном запросе
-BATCH_MAX_CHARS = 30000      # суммарный размер пакетов событий в одном запросе
+BATCH_MAX_CHARS = 18000      # суммарный размер пакетов событий в одном запросе (контекст модели 16 384 токена)
 BATCH_PROMPT = """
 
 ## НЕСКОЛЬКО СОБЫТИЙ

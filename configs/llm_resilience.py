@@ -52,6 +52,7 @@ CONTEXT_RE = __import__("re").compile(
     r"\D*(\d+) input tokens", __import__("re").I | __import__("re").S)
 MIN_OUTPUT_TOKENS = 1024     # меньше — ответ JSON не поместится, запрос делится вызывающим
 CONTEXT_MARGIN = 32          # запас: сервер считает «at least» и добавляет служебные токены
+MAX_FITS = 3                 # уменьшений ответа на один запрос, дальше — ContextOverflow (текст нужно делить)
 
 
 class ContextOverflow(ValueError):
@@ -94,13 +95,26 @@ def fit_output(error: BaseException, kwargs: Dict[str, Any]) -> bool:
     sizes = context_overflow(error)
     if not sizes:
         return False
-    limit, _, used = sizes
-    room = limit - used - CONTEXT_MARGIN
-    if room >= MIN_OUTPUT_TOKENS and room < int(kwargs.get("max_tokens") or limit):
-        logger.warning(f"LLM: запрос {used} токенов из {limit}, ответ уменьшен с {kwargs.get('max_tokens')} до {room}")
+    limit, requested, used = sizes
+    current = int(kwargs.get("max_tokens") or requested or limit)
+    fits = int(kwargs.pop("_fits", 0)) + 1
+    # vLLM пишет «at least N input tokens», где N = контекст − запрошенный ответ + 1, — это нижняя граница, а не
+    # длина запроса (20.10.2026: 8385 = 16384 − 8000 + 1, затем 8418, 8451… — уменьшение на 33 токена по кругу).
+    # Тогда длина неизвестна, и ответ уменьшается вдвое.
+    lower_bound = requested and used == limit - requested + 1
+    room = current // 2 if lower_bound else limit - used - CONTEXT_MARGIN
+    if fits <= MAX_FITS and MIN_OUTPUT_TOKENS <= room < current:
+        logger.warning(f"LLM: запрос {'не меньше ' if lower_bound else ''}{used} токенов из {limit}, "
+                       f"ответ уменьшен с {current} до {room}")
         kwargs["max_tokens"] = room
+        kwargs["_fits"] = fits
         return True
     raise ContextOverflow(limit, used, f"запрос {used} токенов не помещается в контекст {limit}: разделите текст") from error
+
+
+def _sdk(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Параметры запроса без служебных ключей (``_fits`` — счётчик уменьшений ответа)."""
+    return {k: v for k, v in kwargs.items() if not k.startswith("_")}
 
 
 def split_halves(text: str) -> List[str]:
@@ -253,7 +267,7 @@ async def call_llm(client: Any, retries: int = len(RETRY_DELAYS) + 1, **kwargs: 
         CALLS["requests"] += 1
         try:
             async with _gate(key):
-                text = await _bounded(_create(client, stream, kwargs), key)
+                text = await _bounded(_create(client, stream, _sdk(kwargs)), key)
             _breaker_record(key, True)
             return text
         except Exception as e:  # noqa: BLE001
@@ -312,7 +326,7 @@ class _Completions:
             CALLS["requests"] += 1
             try:
                 async with _gate(key):
-                    resp = await _bounded(self._raw.chat.completions.create(**kwargs), key)
+                    resp = await _bounded(self._raw.chat.completions.create(**_sdk(kwargs)), key)
                 _breaker_record(key, True)
                 return resp
             except Exception as e:  # noqa: BLE001

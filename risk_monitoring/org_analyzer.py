@@ -28,7 +28,8 @@ ROLES = ("customer", "supplier")
 RESUME_SYSTEM = (
     "Ты — аналитик риск-мониторинга госзакупок. По метрикам организации в роли {role} за период и выявленным "
     "признакам риска напиши резюме: 3–5 предложений, по-русски, без вступлений. Объём и характер закупок, главные "
-    "признаки риска с цифрами, что проверить. Не делай вывод о нарушении и не придумывай фактов.")
+    "признаки риска с цифрами, что проверить. Не делай вывод о нарушении и не придумывай фактов. Ответ — обычный "
+    "текст, без JSON и разметки.")
 ROLE_NAMES = {"customer": "заказчика", "supplier": "поставщика"}
 
 
@@ -248,12 +249,11 @@ class OrgAnalyzer:
                    "risks": [{"rule_id": r["rule_id"], "title": r["title"], "description": r["description"]} for r in sec["risks"]],
                    "score": sec["score"], "delta": sec["delta"]}
         try:
-            data = await self.llm.ask(RESUME_SYSTEM.format(role=ROLE_NAMES[role]),
-                                      json.dumps(payload, ensure_ascii=False, default=str),
-                                      {"type": "object", "properties": {"resume": {"type": "string"}}, "required": ["resume"]},
-                                      max_tokens=1200, temperature=0.2)
+            text = await self.llm.ask_text(RESUME_SYSTEM.format(role=ROLE_NAMES[role]),
+                                           json.dumps(payload, ensure_ascii=False, default=str),
+                                           max_tokens=1200, temperature=0.2)
             self.stats["llm_resume"] += 1
-            return str(data.get("resume") or "").strip() or fallback
+            return text or fallback
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Резюме организации {name} шаблоном: {type(e).__name__}: {e}")
             return fallback

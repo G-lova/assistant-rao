@@ -28,7 +28,8 @@ RESUME_SYSTEM = (
     "Ты — аналитик риск-мониторинга госзакупок (44-ФЗ, 223-ФЗ). По паспорту закупки, её рискам и событиям напиши "
     "резюме для аналитика: 4–7 предложений, по-русски, без вступлений. Что закупают и на какой стадии, главные риски "
     "со ссылкой на источник (документ, событие ЕИС, правило, реестр), что проверить в первую очередь. Не придумывай "
-    "фактов, которых нет во входных данных; не делай вывод о нарушении — только о признаках риска.")
+    "фактов, которых нет во входных данных; не делай вывод о нарушении — только о признаках риска. Ответ — обычный "
+    "текст, без JSON, списков и разметки.")
 RESUME_SCHEMA = {"type": "object", "properties": {"resume": {"type": "string"}}, "required": ["resume"]}
 
 
@@ -343,9 +344,8 @@ class ContractAnalyzer:
         import json
 
         try:
-            data = await self.llm.ask(RESUME_SYSTEM, json.dumps(payload, ensure_ascii=False, default=str),
-                                      RESUME_SCHEMA, max_tokens=1500, temperature=0.2)
-            text = str(data.get("resume") or "").strip()
+            text = await self.llm.ask_text(RESUME_SYSTEM, json.dumps(payload, ensure_ascii=False, default=str),
+                                           max_tokens=1500, temperature=0.2)
             self.stats["llm_resume"] += 1
             return (text, True) if text else (fallback, False)
         except Exception as e:  # noqa: BLE001 — резюме не обязательно
