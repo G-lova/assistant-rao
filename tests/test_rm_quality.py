@@ -1071,3 +1071,30 @@ class JsonNullTest(unittest.TestCase):
         self.assertEqual(sec["metrics"]["modified"], 0)
         self.assertEqual(sec["metrics"]["terminated"], 0)
         self.assertEqual([t["inn"] for t in sec["top_suppliers"]], ["1660331280"])
+
+
+class OrgResumeFactsTest(unittest.TestCase):
+    """Факты для резюме организации (аналитика 20.10.2026: выводы модели по трём контрактам)."""
+
+    def test_small_sample_and_unknown_method(self):
+        """Мало контрактов с известным поставщиком — без выводов о концентрации; неизвестный способ — не «без конкурса»."""
+        from risk_monitoring import org_profile, settings
+
+        rows = [{"id": i, "contract_number": "1", "nmck": None if i == 0 else "100", "contract_price": "90",
+                 "method_code": None if i == 0 else "EA20", "supplier_inn": "1" if i < 2 else None} for i in range(5)]
+        sec = org_profile.customer_section(rows, [], settings, None)
+        facts = " ".join(org_profile.resume_facts("customer", sec, settings))
+        self.assertIn("данных мало", facts)
+        self.assertIn("не означает закупку без конкурса", facts)
+        self.assertIn("закупок без НМЦК в данных: 1", facts)
+        self.assertIn("Признаков риска по правилам не выявлено", facts)
+        self.assertNotIn("..", facts)
+
+    def test_tie_not_dominant(self):
+        """Равные доли контрагентов — ни один не преобладает."""
+        from risk_monitoring import org_profile, settings
+
+        rows = [{"id": i, "contract_number": "1", "nmck": "100", "contract_price": "90", "method_code": "EA20",
+                 "supplier_inn": str(i)} for i in range(5)]
+        facts = " ".join(org_profile.resume_facts("customer", org_profile.customer_section(rows, [], settings, None), settings))
+        self.assertIn("ни один не преобладает", facts)

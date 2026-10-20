@@ -22,14 +22,15 @@ from risk_monitoring.xml_events import canonical_org
 logger = get_logger(__name__)
 
 EXTERNAL_TABLE = "risk_monitoring_organisations"
-PROMPT_VERSION = "org-resume-1"
+PROMPT_VERSION = "org-resume-2"
 ROLES = ("customer", "supplier")
 
 RESUME_SYSTEM = (
-    "Ты — аналитик риск-мониторинга госзакупок. По метрикам организации в роли {role} за период и выявленным "
-    "признакам риска напиши резюме: 3–5 предложений, по-русски, без вступлений. Объём и характер закупок, главные "
-    "признаки риска с цифрами, что проверить. Не делай вывод о нарушении и не придумывай фактов. Ответ — обычный "
-    "текст, без JSON и разметки.")
+    "Ты — аналитик риск-мониторинга госзакупок. Тебе дан список фактов об организации в роли {role} за период. "
+    "Перескажи их связным резюме: 3–5 предложений, по-русски, без вступлений — объём закупок, признаки риска "
+    "(если есть), что проверить. Используй только эти факты: не добавляй цифр, сравнений и выводов, которых в них "
+    "нет, не пересчитывай доли. Если признаков риска нет или данных мало — так и напиши, не ищи риски сам. "
+    "Ответ — обычный текст, без JSON и разметки.")
 ROLE_NAMES = {"customer": "заказчика", "supplier": "поставщика"}
 
 
@@ -241,13 +242,10 @@ class OrgAnalyzer:
 
     async def _resume(self, role: str, name: str, sec: Dict[str, Any]) -> str:
         """Резюме секции моделью или шаблоном."""
-        fallback = org_profile.default_resume(role, name, sec)
+        fallback = org_profile.default_resume(role, name, sec, settings)
         if self.llm is None:
             return fallback
-        payload = {"organisation": name, "metrics": sec["metrics"],
-                   "top": sec.get("top_suppliers") or sec.get("top_customers"),
-                   "risks": [{"rule_id": r["rule_id"], "title": r["title"], "description": r["description"]} for r in sec["risks"]],
-                   "score": sec["score"], "delta": sec["delta"]}
+        payload = {"organisation": name, "facts": org_profile.resume_facts(role, sec, settings)}
         try:
             text = await self.llm.ask_text(RESUME_SYSTEM.format(role=ROLE_NAMES[role]),
                                            json.dumps(payload, ensure_ascii=False, default=str),
