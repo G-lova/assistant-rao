@@ -355,3 +355,15 @@ class ScoreCalibrationTest(unittest.TestCase):
         """Один серьёзный подтверждённый признак (реестр 19.28, 0,9) — красная зона."""
         prof = cp.profile([{"rule_id": "REG-001", "level": 0.9, "confidence": 1.0, "sources": ["registry"]}])
         self.assertEqual(prof["zone"], "red")
+
+
+class RuleCoveredTest(unittest.TestCase):
+    """Риски модели по кодам с правилом внешней системы уступают правилу (закупка 1399, 20.10.2026)."""
+
+    def test_drop_rule_covered(self):
+        """FIN-005 модели при pz_p2 = 0 и FIN-006 при pz_p3 = 1 убираются; DOC-003 остаётся; подтверждённый — тоже."""
+        risks = [{"rule_id": "FIN-005"}, {"rule_id": "FIN-006"}, {"rule_id": "DOC-003"}]
+        out = cp.drop_rule_covered(risks, {"pz_p2": 0, "pz_p3": 1})
+        self.assertEqual([r["rule_id"] for r in out], ["DOC-003"])
+        self.assertEqual(len(cp.drop_rule_covered(risks, {"pz_p2": 0}, confirmed={"FIN-005"})), 3)
+        self.assertEqual(len(cp.drop_rule_covered(risks, None)), 3)

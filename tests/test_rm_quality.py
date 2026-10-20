@@ -955,3 +955,39 @@ class Run1020Test(unittest.TestCase):
         self.assertTrue(LAW_LINE_RE.search("закон РФ от 27.12.1991 N 2124-1 «О средствах массовой информации»"))
         self.assertTrue(_not_brand_quote("«триплекс»"))
         self.assertFalse(_not_brand_quote("«Ламинар-С»"))
+
+
+class Run1020bTest(unittest.TestCase):
+    """Второй прогон 20.10.2026: проект контракта 2807, закупки 1001 / 1387 / 1399."""
+
+    def test_absence_contradicted(self):
+        """«Отсутствует обеспечение исполнения» при п. 8.1 с 5 % — отбросить; без п. 8.1 — оставить."""
+        from risk_monitoring.document_risk_analyzer import absence_contradicted
+
+        r = {"title": "Отсутствие обеспечения исполнения контракта",
+             "explanation": "В проекте контракта отсутствует требование об обеспечении исполнения контракта"}
+        text = "8.1. Контракт предусматривает обеспечение его исполнения в размере 5 % от НМЦК. 13.4. Контракт составлен"
+        self.assertTrue(absence_contradicted(r, text))
+        self.assertFalse(absence_contradicted(r, "13.4. Контракт составлен в письменной форме"))
+
+    def test_more_statutory(self):
+        """Штраф заказчика по ПП 1042, обеспечение 5 % для FIN-007, стадии производства в ЕАЭС."""
+        from risk_monitoring.document_risk_analyzer import rejected_by_rules
+
+        r = lambda c, f: {"code": c, "evidence": {"fragment": f}}  # noqa: E731
+        self.assertTrue(rejected_by_rules(r("FIN-016", "7.2.2. За каждый факт неисполнения Заказчиком обязательств")))
+        self.assertTrue(rejected_by_rules(r("FIN-007", "8.1. Контракт предусматривает обеспечение его исполнения в размере 5 % от НМЦК")))
+        self.assertTrue(rejected_by_rules(r("DOC-006", "сведения о стадиях производства лекарственного средства на территории ЕАЭС")))
+
+    def test_contract_reapplies_rules(self):
+        """Риск файла, проанализированного до уточнения правил, в закупку не идёт; подтверждённый — идёт."""
+        from risk_monitoring import contract_package as cp
+
+        files = [{"id": 3077, "file_name": "Доп. условия.docx", "risks": [
+            {"rule_id": "FIN-012", "level": 0.6, "confidence": 0.8, "description": "Необычные условия оплаты",
+             "evidence": [{"fragment": "2.9. … в части казначейского сопровождения авансовых платежей"}]},
+            {"rule_id": "DOC-003", "level": 0.9, "confidence": 0.9, "evidence": [{"fragment": "внутренний диаметр 1800 мм"}]}]}]
+        risks, _ = cp.file_risks(files, {})
+        self.assertEqual([x["rule_id"] for x in risks], ["DOC-003"])
+        risks, confirmed = cp.file_risks(files, {(3077, "FIN-012"): 1})
+        self.assertEqual(sorted(x["rule_id"] for x in risks), ["DOC-003", "FIN-012"])

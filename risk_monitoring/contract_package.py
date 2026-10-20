@@ -219,6 +219,8 @@ def file_risks(files: Sequence[Dict[str, Any]], statuses: Dict[Tuple[int, str], 
     Returns:
         Tuple[List[Dict[str, Any]], set]: Риски (``source = ai_file``) и коды, подтверждённые аналитиком.
     """
+    from risk_monitoring.document_risk_analyzer import rejected_by_rules
+
     out, confirmed = [], set()
     for f in files:
         if f.get("superseded_by"):
@@ -227,6 +229,13 @@ def file_risks(files: Sequence[Dict[str, Any]], statuses: Dict[Tuple[int, str], 
             code = r.get("rule_id")
             st = statuses.get((int(f["id"]), code))
             if not code or st in IGNORED_RISK_STATUSES:
+                continue
+            # файл мог быть проанализирован до уточнения правил отбора: риск, все цитаты которого правила
+            # отбрасывают, в закупку не идёт (подтверждённый аналитиком — остаётся)
+            evs = [e for e in (r.get("evidence") or []) if isinstance(e, dict) and e.get("fragment")]
+            if st != CONFIRMED_STATUS and evs and all(
+                    rejected_by_rules({"code": code, "title": r.get("title"), "explanation": r.get("description"),
+                                       "evidence": {"fragment": e["fragment"]}}) for e in evs):
                 continue
             if st == CONFIRMED_STATUS:
                 confirmed.add(code)
@@ -274,6 +283,30 @@ def events_feed(xmls: Sequence[Dict[str, Any]], limit: int = 50) -> List[Dict[st
                       "eis_version": x.get("eis_version"), "summary": x.get("resume")})
     items.sort(key=lambda e: (str(e.get("event_at") or ""), int(e.get("xml_id") or 0)), reverse=True)
     return items[:limit]
+
+
+def drop_rule_covered(risks: Sequence[Dict[str, Any]], values: Optional[Dict[str, Any]],
+                      confirmed: Iterable[str] = ()) -> List[Dict[str, Any]]:
+    """Убирает риски модели по кодам, которые внешняя система считает правилом по данным ЕИС.
+
+    Для таких кодов (FIN-004 ↔ pz_p1, FIN-005 ↔ pz_p2, FIN-006 ↔ pz_p3, FIN-008 ↔ pz_p4 …) правило точнее модели:
+    сработало — риск уже есть с ``source = rule``; не сработало — данные ЕИС утверждению модели противоречат
+    (закупка 1399, 20.10.2026: «нет обеспечения исполнения» с цитатой об авансе при pz_p2 = 0). Подтверждённые
+    аналитиком риски не трогаются.
+
+    Args:
+        risks: Риски файлов.
+        values: Значения правил закупки (``None`` — расчёта нет, ничего не убирается).
+        confirmed: Коды, подтверждённые аналитиком.
+
+    Returns:
+        List[Dict[str, Any]]: Риски без перекрытых правилами.
+    """
+    if not values:
+        return list(risks)
+    covered = {code for key, code in INDICATOR_TO_CODE.items() if key in values}
+    keep = set(confirmed)
+    return [r for r in risks if r.get("rule_id") not in covered or r.get("rule_id") in keep]
 
 
 def rule_values_risks(values: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -629,6 +662,7 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
     cons = consistency(p, files, settings.CONSISTENCY_TOLERANCE)
     matches = registry_matches(black, p["supplier"], as_date(p["dates"]["contract"]))
     f_risks, confirmed = file_risks(files, statuses)
+    f_risks = drop_rule_covered(f_risks, values, confirmed)
     fav = favourite_supplier(p, supplier_counts, settings)
     risks = passport.merge_risks(
         f_risks, event_risks(xmls), rule_values_risks(values), registry_risks(matches), dataset_risks(p),

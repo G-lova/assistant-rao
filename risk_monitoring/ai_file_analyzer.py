@@ -676,10 +676,11 @@ class AIFileAnalyzer:
                                               if previous else (None, []))
         if risk and risk.get("risks"):
             # правила отбора уточняются, а результат риск-анализа может быть из кэша — применяем их повторно
-            from risk_monitoring.document_risk_analyzer import rejected_by_rules
+            from risk_monitoring.document_risk_analyzer import absence_contradicted, rejected_by_rules
 
             before = len(risk["risks"])
-            risk = {**risk, "risks": [r for r in risk["risks"] if not rejected_by_rules(r)]}
+            risk = {**risk, "risks": [r for r in risk["risks"]
+                                      if not rejected_by_rules(r) and not absence_contradicted(r, text)]}
             if len(risk["risks"]) < before:
                 progress.note(f"правила отбора сняли рисков: {before - len(risk['risks'])}")
         async with progress.step("фильтр типовых формулировок") as st:
