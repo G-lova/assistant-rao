@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from configs.config import Config
 from configs.logger import get_logger
+from risk_monitoring import progress
 from risk_monitoring import passport, risk_catalog, rm_sql, xml_events
 
 logger = get_logger(__name__)
@@ -205,9 +206,13 @@ class XmlEventAnalyzer:
         """
         ids = list(dict.fromkeys(int(i) for i in xml_ids))
         try:
-            rows = await self._query("xml_meta.sql", head=[self.storage_path], ids=ids)
+            progress.subject(f"XML ({len(ids)})")
+            async with progress.step("чтение сведений о XML из внешней БД") as st:
+                rows = await self._query("xml_meta.sql", head=[self.storage_path], ids=ids)
+                st["detail"] = f"найдено {len(rows)} из {len(ids)}"
             found = {int(r["id"]): r for r in rows}
-            previous = await self._previous(list(found)) if found else {}
+            async with progress.step("поиск предыдущих версий XML"):
+                previous = await self._previous(list(found)) if found else {}
             self.internal = await self._internal("xml", list(found))
             # 1) разбор XML, diff, правила — без модели
             prepared = await asyncio.gather(*(self._guarded(found[i], previous.get(i)) for i in ids if i in found))
@@ -271,8 +276,10 @@ class XmlEventAnalyzer:
         """Один XML: правило «без повторного анализа», семафор, обработка ошибок."""
         xml_id = int(row["id"])
         attempt = (_int(row.get("rm_attempt")) or 0) + 1
+        progress.subject(f"XML {xml_id} «{row.get('entry_name') or ''}»")
         if not self.force:
             if row.get("rm_status") == "completed":
+                progress.note("уже проанализирован во внешней БД — пропуск")
                 return {"xml_id": xml_id, "status": "skipped", "reason": "already_analyzed"}
             stored = self.internal.get(xml_id)
             if stored and stored.get("status") == "completed" and not stored.get("debug"):
@@ -312,6 +319,7 @@ class XmlEventAnalyzer:
         """
         ai = stored["ai_analysis"]
         result = {"xml_id": xml_id, "status": "done", "source": "internal", "pushed": False, "ai_analysis": ai}
+        progress.note(f"результат есть во внутренней БД (разбор {stored.get('analyzed_at')}) — без повторного разбора")
         if self.push_results:
             try:
                 await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, xml_id, ai)
@@ -369,8 +377,10 @@ class XmlEventAnalyzer:
             group.sort(key=lambda c: (_int(c["row"].get("eis_version")) or 0, c["xml_id"]))
             items = [{"event_id": c["xml_id"], "payload": c["payload"]} for c in group]
             name = group[0]["row"].get("purchase_number") or group[0]["row"].get("contract_number") or key
+            progress.subject(f"Закупка {name}")
             for batch in self.event_analyzer.batches(items):
-                out.update(await self.event_analyzer.analyze_batch(batch, str(name)))
+                async with progress.step(f"анализ событий моделью ({len(batch)} XML)"):
+                    out.update(await self.event_analyzer.analyze_batch(batch, str(name)))
 
         await asyncio.gather(*(run(k, g) for k, g in groups.items()))
         calls = sum(len(self.event_analyzer.batches([{"event_id": 0, "payload": c["payload"]} for c in g])) for g in groups.values())
@@ -409,14 +419,18 @@ class XmlEventAnalyzer:
             Dict[str, Any]: Контекст события (``status = prepared``, ``needs_llm``, ``llm_reason``, ``payload``).
         """
         xml_id = int(row["id"])
-        raw = await self.archives.read(row["archive_url"], row["entry_name"])
-        tag, xml_version, body = xml_events.parse_xml(raw)
+        progress.subject(f"XML {xml_id} «{row.get('entry_name') or ''}»")
+        async with progress.step("чтение XML из архива ЕИС") as st:
+            raw = await self.archives.read(row["archive_url"], row["entry_name"])
+            tag, xml_version, body = xml_events.parse_xml(raw)
+            st["detail"] = f"{tag}, {len(raw) // 1024} КБ"
         version = _int(row.get("eis_version"))
         version = xml_version if version is None else version
 
         prev_body = None
         if previous:
             try:
+                progress.note(f"предыдущая версия: XML {previous.get('id')} (версия {previous.get('eis_version')})")
                 prev_raw = await self.archives.read(previous["archive_url"], previous["entry_name"])
                 _, _, prev_body = xml_events.parse_xml(prev_raw)
             except Exception as e:  # noqa: BLE001 — нет предыдущей версии: событие без изменений
@@ -428,17 +442,23 @@ class XmlEventAnalyzer:
         changes = xml_events.diff(xml_events.strip_ignored(prev_body), xml_events.strip_ignored(body)) if prev_body else []
         atts = xml_events.attachments(body)
         doc_changes = xml_events.document_changes(xml_events.attachments(prev_body) if prev_body else None, atts)
-        all_files = await self._files(xml_id, previous, atts)
+        async with progress.step("файлы события и их результаты анализа") as st:
+            all_files = await self._files(xml_id, previous, atts)
+            st["detail"] = f"изменений {len(changes)}, файлов {len(all_files)}"
         urls = {a["url"] for a in atts}
         files = [f for f in all_files if f.get("xml_source_id") == xml_id or f.get("source_url") in urls]
         event = xml_events.classify(tag, version, previous is not None, changes, facts, doc_changes)
 
         link = None
         if row.get("risk_monitoring_contract_id") is None:
-            link = await self._link_orphan(facts, row)
+            async with progress.step("поиск закупки для XML без привязки") as st:
+                link = await self._link_orphan(facts, row)
+                st["detail"] = (link or {}).get("method")
 
         rules = xml_events.rule_risks(event, changes, facts)
         needs_llm, reason = xml_events.llm_decision(event, changes, rules)
+        progress.note(f"событие {event.get('code')} «{event.get('title')}», правил сработало {len(rules)}, "
+                      f"модель {'нужна' if needs_llm else 'не нужна'} ({reason})")
         payload = None
         if needs_llm:
             payload = xml_events.build_llm_payload(event, facts, changes, doc_changes, files)
@@ -459,6 +479,7 @@ class XmlEventAnalyzer:
             Dict[str, Any]: ``xml_id``, ``status``, ``pushed``, ``ai_analysis``.
         """
         row, previous, xml_id = ctx["row"], ctx["previous"], ctx["xml_id"]
+        progress.subject(f"XML {xml_id} «{row.get('entry_name') or ''}»")
         pipeline = passport.pipeline_block(STAGE, "completed", self.model, self.versions,
                                            _int(previous["id"]) if previous else None, self.force, ctx["attempt"],
                                            export_date=str(row.get("exact_date"))[:10] if row.get("exact_date") else None)
@@ -476,12 +497,14 @@ class XmlEventAnalyzer:
             response["retention"] = retention
         if self.push_results:
             try:
-                await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, xml_id, ai)
+                async with progress.step("запись результата во внешнюю БД"):
+                    await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, xml_id, ai)
                 response["pushed"] = True
             except Exception as e:  # noqa: BLE001
                 logger.error(f"Не удалось записать ai_analysis XML {xml_id}: {e}")
                 response["push_error"] = str(e)
-        await self._save_internal(xml_id, ai, response["pushed"], response.get("push_error"))
+        async with progress.step("сохранение результата во внутренней БД"):
+            await self._save_internal(xml_id, ai, response["pushed"], response.get("push_error"))
         return response
 
     async def _update_retention(self, ctx: Dict[str, Any]) -> Optional[Dict[str, Any]]:

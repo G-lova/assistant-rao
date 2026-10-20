@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from configs.config import Config
 from configs.logger import get_logger
 from risk_monitoring import contract_package as cp
-from risk_monitoring import passport, rm_sql, settings
+from risk_monitoring import passport, progress, rm_sql, settings
 
 logger = get_logger(__name__)
 
@@ -154,6 +154,7 @@ class ContractAnalyzer:
         file_ids = [int(f["id"]) for f in data["files"] if f.get("rm_status") != "completed"]
         xml_ids = [int(x["id"]) for x in data["xmls"] if x.get("rm_status") != "completed"]
         if not (file_ids or xml_ids) or self.repo is None:
+            progress.note("все файлы и XML закупок уже проанализированы")
             return False
         logger.info(f"Закупки: анализ недостающих документов — файлов {len(file_ids)}, XML {len(xml_ids)}")
         fresh: Dict[int, Dict[str, Any]] = {}
@@ -248,9 +249,15 @@ class ContractAnalyzer:
             ``error``), ``pushed``, ``ai_analysis``.
         """
         ids = list(dict.fromkeys(int(i) for i in card_ids))
-        data = await self._load(ids)
+        progress.subject(f"Закупки ({len(ids)})")
+        async with progress.step("чтение закупок, файлов, XML, правил и реестра 19.28") as st:
+            data = await self._load(ids)
+            st["detail"] = (f"закупок {len(data['cards'])}, файлов {len(data['files'])}, XML {len(data['xmls'])}, "
+                            f"расчётов правил {len(data['rules'])}")
         if self.analyze_documents and await self._analyze_missing(data):
-            data = await self._load(ids)   # результаты документов — во внешней БД или у нас
+            progress.subject(f"Закупки ({len(ids)})")
+            async with progress.step("повторное чтение данных закупок после анализа документов"):
+                data = await self._load(ids)   # результаты документов — во внешней БД или у нас
         by = self._group(data)
         statuses: Dict[Tuple[int, str], int] = {}
         for s in data["statuses"]:
@@ -282,6 +289,7 @@ class ContractAnalyzer:
         """Анализ одной закупки: сборка, резюме, запись."""
         card = item["card"]
         cid = int(card["id"])
+        progress.subject(f"Закупка {cid} ({card.get('number') or ''})")
         dataset = cp.as_json(card.get("dataset")) or {}
         inn = str((dataset.get("supplier") or {}).get("post_inn") or "").strip()
         built = cp.build_contract_analysis(card=card, files=item["files"], xmls=item["xmls"], values=item["values"],
@@ -289,9 +297,12 @@ class ContractAnalyzer:
                                            previous_score=cp.num(card.get("prev_score")),
                                            supplier_counts=supplier_counts)
         h = built.pop("input_hash")
+        progress.note(f"сборка: рисков {len(built['risks'])}, балл {built['profile']['score']} ({built['profile']['zone']})")
         if not self.force and card.get("rm_status") == "completed" and card.get("prev_hash") == h:
+            progress.note("входные данные не изменились — пересчёт не нужен")
             return {"card_id": cid, "status": "unchanged", "pushed": False}
-        resume, used_llm = await self._resume(built)
+        async with progress.step("резюме закупки" + (" (модель)" if self.llm else " (шаблон)")):
+            resume, used_llm = await self._resume(built)
         pipeline = passport.pipeline_block(STAGE, "completed", self.model if used_llm else None,
                                            {"contract_resume": PROMPT_VERSION} if used_llm else {}, debug=self.force)
         pipeline.update(schema_version=cp.SCHEMA_VERSION, input_hash=h,
@@ -302,12 +313,14 @@ class ContractAnalyzer:
                   "zone": built["profile"]["zone"], "risks": len(built["risks"]), "ai_analysis": ai}
         if self.push_results:
             try:
-                await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, cid, ai)
+                async with progress.step("запись результата во внешнюю БД"):
+                    await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, cid, ai)
                 result["pushed"] = True
             except Exception as e:  # noqa: BLE001 — результат сохранён у нас
                 logger.error(f"Не удалось записать ai_analysis закупки {cid}: {e}")
                 result["push_error"] = str(e)
-        await self._save_internal(cid, ai, result["pushed"], result.get("push_error"))
+        async with progress.step("сохранение результата во внутренней БД"):
+            await self._save_internal(cid, ai, result["pushed"], result.get("push_error"))
         return result
 
     async def _resume(self, built: Dict[str, Any]) -> Tuple[str, bool]:

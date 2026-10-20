@@ -39,6 +39,7 @@ from configs.config import Config
 from configs.logger import get_logger
 from risk_monitoring import (boilerplate, doc_kind, file_versions, norms, passport, pdf_text, printform_passport,
                              risk_catalog, rm_sql, settings, text_quality, version_diff, xml_events)
+from risk_monitoring import progress
 from risk_monitoring.llm_json import prompt_version as _hash_version
 
 logger = get_logger(__name__)
@@ -401,11 +402,17 @@ class AIFileAnalyzer:
             ``not_found`` / ``error``), ``pushed``, ``ai_analysis`` (кроме пропущенных).
         """
         ids = list(dict.fromkeys(int(i) for i in file_ids))
-        rows = await self.fetch_files_meta(ids)
+        progress.subject(f"Файлы ({len(ids)})")
+        async with progress.step("чтение сведений о файлах из внешней БД") as st:
+            rows = await self.fetch_files_meta(ids)
+            st["detail"] = f"найдено {len(rows)} из {len(ids)}"
         found = {int(r["id"]): r for r in rows}
         todo = [r for r in found.values() if self.force or r.get("rm_status") != "completed"]
-        previous = await self.fetch_previous_versions(todo) if todo else {}
-        self.internal = await self._internal(list(found) + [int(p["id"]) for p in previous.values() if p.get("id")])
+        async with progress.step("поиск прошлых редакций файлов (XML ЕИС)") as st:
+            previous = await self.fetch_previous_versions(todo) if todo else {}
+            st["detail"] = f"к анализу {len(todo)}, с прошлой редакцией {len(previous)}"
+        async with progress.step("чтение результатов из внутренней БД"):
+            self.internal = await self._internal(list(found) + [int(p["id"]) for p in previous.values() if p.get("id")])
         by_id: Dict[int, Dict[str, Any]] = {}
         for wave in self._waves([i for i in ids if i in found], previous, {r["id"] for r in todo}):
             for res in await asyncio.gather(*(self._guarded(found[i], previous.get(i)) for i in wave)):
@@ -453,15 +460,19 @@ class AIFileAnalyzer:
         """Обёртка одного файла: семафор, правило «без повторного анализа», обработка ошибок."""
         file_id = int(row["id"])
         attempt = int(row.get("rm_attempt") or 0) + 1
+        progress.subject(f"Файл {file_id} «{row.get('file_name') or ''}»")
         if not self.force:
             if row.get("rm_status") == "completed":
+                progress.note("уже проанализирован во внешней БД — пропуск")
                 return {"file_id": file_id, "status": "skipped", "reason": "already_analyzed"}
             stored = (getattr(self, "internal", None) or {}).get(file_id)
             if stored and stored.get("status") == "completed" and not stored.get("debug"):
                 return await self._reuse_internal(file_id, stored)
             if row.get("rm_status") == "failed" and attempt > MAX_ATTEMPTS:
+                progress.note(f"исчерпаны попытки ({MAX_ATTEMPTS}) — пропуск")
                 return {"file_id": file_id, "status": "skipped", "reason": "max_attempts"}
         async with self.semaphore:
+            progress.note(f"начало анализа (попытка {attempt})")
             try:
                 return await self.analyze_file(row, previous, attempt)
             except FileUnavailable as e:
@@ -481,9 +492,11 @@ class AIFileAnalyzer:
         ai = stored["ai_analysis"]
         result = {"file_id": file_id, "document_id": None, "status": "done", "source": "internal",
                   "pushed": False, "ai_analysis": ai}
+        progress.note(f"результат есть во внутренней БД (анализ {stored.get('analyzed_at')}) — без повторного анализа")
         if self.push_results:
             try:
-                await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, file_id, ai)
+                async with progress.step("дозапись результата во внешнюю БД"):
+                    await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, file_id, ai)
                 result["pushed"] = True
                 if hasattr(getattr(self, "repo", None), "mark_rm_pushed"):
                     await self.repo.mark_rm_pushed(self.env, "file", file_id)
@@ -527,14 +540,17 @@ class AIFileAnalyzer:
         file_name = row.get("file_name") or f"file_{file_id}"
         superseded = self._superseded_analysis(row, previous, attempt)
         if superseded is not None:
+            progress.note("прошлая редакция, уже заменённая новой — паспорт без анализа")
             return await self._finalize(file_id, None, superseded)
         if not row.get("url"):
             raise FileUnavailable("нет пути к файлу и ссылки ЕИС")
         purchase = purchase_context(row)
         prev_id = int(previous["id"]) if previous else None
 
-        document_id, text, sha, size = await self._load_document(file_id, row["url"], file_name,
-                                                                 card_id=row.get("risk_monitoring_contract_id"))
+        async with progress.step("скачивание файла и чтение текста") as st:
+            document_id, text, sha, size = await self._load_document(file_id, row["url"], file_name,
+                                                                     card_id=row.get("risk_monitoring_contract_id"))
+            st["detail"] = f"документ {document_id}, {len(text or '')} символов" if text else "текст не извлечён"
         if text is None:
             pipeline = passport.pipeline_block(STAGE, "completed", self.model, self.versions, prev_id,
                                                self.force, attempt, result="no_text")
@@ -548,18 +564,28 @@ class AIFileAnalyzer:
             return await self._finalize(file_id, document_id, self._bad_text_analysis(
                 row, quality, print_kind, prev_id, attempt, sha))
         text = quality["text"]
+        progress.note(f"качество текста: {quality['status']}" + (f", печатная форма ЕИС ({print_kind.get('detected_type')})" if print_kind else ""))
 
         from configs.utils import split_large_text
         from knowledge_store.pages import PAGE_MARKER_RE
 
-        embeddings_ok = await self._ensure_embeddings(document_id, text)
-        similar = await self._find_similar(document_id) if embeddings_ok else []
+        async with progress.step("эмбеддинги документа") as st:
+            embeddings_ok = await self._ensure_embeddings(document_id, text)
+            st["detail"] = "готово" if embeddings_ok else "не получены"
+        similar = []
+        if embeddings_ok:
+            async with progress.step("поиск похожих документов") as st:
+                similar = await self._find_similar(document_id)
+                st["detail"] = f"найдено {len(similar)}"
 
         fz = risk_catalog.normalize_fz(row.get("fz_type"))
         law = f"{fz}-ФЗ" if fz else "закон не определён"
 
         # Прошлая редакция: текст и diff нужны до анализа — от них зависит режим
-        prev_ctx = await self._load_previous(previous, sha, file_name) if previous else None
+        prev_ctx = None
+        if previous:
+            async with progress.step(f"загрузка прошлой редакции (файл {previous.get('id')})"):
+                prev_ctx = await self._load_previous(previous, sha, file_name)
         diff = None
         if prev_ctx and prev_ctx.get("text") is not None:
             diff = version_diff.text_diff(prev_ctx["text"], text)
@@ -639,7 +665,9 @@ class AIFileAnalyzer:
             version_changes, version_risks = (await self._version_changes(previous, prev_ctx, diff, document_id,
                                                                           file_name, type_decode, use_llm=True)
                                               if previous else (None, []))
-        risk, typical = await self._drop_typical(risk, document_id, row)
+        async with progress.step("фильтр типовых формулировок") as st:
+            risk, typical = await self._drop_typical(risk, document_id, row)
+            st["detail"] = f"снято {len(typical)}" if typical else "типовых не найдено"
         risk_compact = self.risk_analyzer.to_compact(risk) if risk else {}
 
         prev_codes = await self._previous_codes(previous, prev_ctx, allowed) if previous else None
@@ -664,6 +692,7 @@ class AIFileAnalyzer:
         if typical:
             ai["risk_scope"]["typical_dropped"] = typical
         self._add_lookup(ai, file_id)
+        progress.note(f"анализ готов: режим {mode}, тип {type_info.get('detected_type')}, рисков {len(ai.get('risks') or [])}")
         return await self._finalize(file_id, document_id, ai)
 
     async def _drop_typical(self, risk: Optional[Dict[str, Any]], document_id: int,
@@ -889,13 +918,16 @@ class AIFileAnalyzer:
             sha = sha256_file(tmp_path)
             size = os.path.getsize(tmp_path)
             ext = os.path.splitext(file_name)[1].lower() or res.get("file_extension") or ".bin"
+            progress.note(f"файл скачан: {size / 1024:.0f} КБ, {ext}")
             doc = await self.repo.get_document_by_sha(sha)
             reuse = doc and doc["text"] and not self.recompute and (
                 doc["ocr_status"] == "done" or (doc["ocr_status"] == "suspect" and not self.force))
             if reuse:
                 document_id, text = doc["id"], doc["text"]
+                progress.note(f"текст взят из общего документа {document_id} (файл уже читался)")
             else:
-                text = await self._read_text(tmp_path, file_name, ext)
+                async with progress.step(f"чтение текста ({ext}{', распознавание сканов' if ext == '.pdf' else ''})"):
+                    text = await self._read_text(tmp_path, file_name, ext)
                 if text and OCR_ERROR_RE.search(text):
                     # Модель OCR была недоступна (перезапуск, 404/5xx) — часть страниц потеряна. Такой текст
                     # не сохраняем и не анализируем: файл получит pipeline.status = failed и будет взят повторно.
@@ -945,20 +977,25 @@ class AIFileAnalyzer:
         """
         version = version or self.versions[version_key or analysis_type]
         model = model or self.extraction_model
+        title = progress.analysis_title(analysis_type)
         if not self.recompute:
             cached = await self.repo.get_analysis(document_id, analysis_type, version, model)
             if cached:
+                progress.note(f"{title}: из кэша")
                 return cached["result"]
         result = None
         stats = getattr(self, "stats", None)
         if fallback_doc and not self.recompute:
             result = await self._get_cached(fallback_doc, analysis_type, version, model)
+            if result is not None:
+                progress.note(f"{title}: взято из прошлой редакции (текст почти не изменился)")
             if result is not None and stats is not None:
                 stats["reused_previous"][analysis_type.split(":")[0]] = stats["reused_previous"].get(analysis_type.split(":")[0], 0) + 1
         if result is None:
             if stats is not None:
                 stats["produced"][analysis_type.split(":")[0]] = stats["produced"].get(analysis_type.split(":")[0], 0) + 1
-            result = await produce()
+            async with progress.step(f"{title}: запрос к модели {model}"):
+                result = await produce()
         if result and (keep is None or keep(result)):
             await self.repo.save_analysis(document_id, analysis_type, version, model, result,
                                           compact(result) if compact else result,
@@ -1162,12 +1199,14 @@ class AIFileAnalyzer:
                     "pushed": False, "ai_analysis": ai_analysis}
         if self.push_results:
             try:
-                await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, file_id, ai_analysis)
+                async with progress.step("запись результата во внешнюю БД"):
+                    await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, file_id, ai_analysis)
                 response["pushed"] = True
             except Exception as e:  # noqa: BLE001 — результат сохранён у нас, следующий запуск дозапишет без LLM
                 logger.error(f"Не удалось записать ai_analysis файла {file_id}: {e}")
                 response["push_error"] = str(e)
-        await self._save_internal(file_id, ai_analysis, response["pushed"], response.get("push_error"))
+        async with progress.step("сохранение результата во внутренней БД"):
+            await self._save_internal(file_id, ai_analysis, response["pushed"], response.get("push_error"))
         return response
 
     async def _save_internal(self, file_id: int, ai: Dict[str, Any], pushed: bool, error: Optional[str]) -> None:

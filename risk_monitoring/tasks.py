@@ -31,10 +31,12 @@ async def _pulsed(coro: Any, name: str, task_id: str) -> Any:
     """Выполняет корутину задачи и раз в ``PULSE_SECONDS`` пишет в журнал «пульс».
 
     Пульс показывает, что задача жива, даже когда долгий запрос к модели не пишет ничего: сколько она идёт, сколько
-    запросов к модели сделано, сколько выполняется сейчас, сколько сбоев и прерываний по пределу времени.
+    запросов к модели сделано, сколько выполняется сейчас, сколько сбоев и прерываний по пределу времени, и какие этапы
+    идут прямо сейчас и как долго («Файл 2805 «ТЗ.docx»: анализ рисков: запрос к модели 340 с»; ``progress``).
     """
     import time
 
+    from risk_monitoring import progress
     from risk_monitoring.llm_json import CALLS
 
     start, before = time.monotonic(), dict(CALLS)
@@ -46,7 +48,8 @@ async def _pulsed(coro: Any, name: str, task_id: str) -> Any:
             logger.info(f"{name}[{task_id}]: идёт {time.monotonic() - start:.0f} с; запросов к модели "
                         f"{CALLS['requests'] - before.get('requests', 0)}, сейчас выполняется {CALLS.get('inflight', 0)}, "
                         f"сбоев {CALLS['failed'] - before.get('failed', 0)}, прервано по времени "
-                        f"{CALLS.get('deadline', 0) - before.get('deadline', 0)}")
+                        f"{CALLS.get('deadline', 0) - before.get('deadline', 0)}"
+                        + ("; сейчас: " + "; ".join(progress.active()) if progress.active() else ""))
 
     beat = asyncio.ensure_future(pulse())
     try:

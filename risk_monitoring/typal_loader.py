@@ -17,7 +17,7 @@ from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Sequence
 
 from configs.logger import get_logger
-from risk_monitoring import settings, typal_clauses
+from risk_monitoring import progress, settings, typal_clauses
 from risk_monitoring.typal_clauses import TypalRepo
 
 logger = get_logger(__name__)
@@ -97,9 +97,12 @@ class TypalLoader:
         Returns:
             List[Dict[str, Any]]: Результаты по версиям (:meth:`load_xml`).
         """
-        res = await self.eis._parse_eis_soap_ip("getDocsByOrgRegionRequest", subsystem_type=settings.TYPAL_SUBSYSTEM,
-                                                org_region=str(region), fz=223, document_type=settings.TYPAL_DOCUMENT_TYPE,
-                                                exact_date=exact_date)
+        progress.subject(f"Типовые положения, регион {region}, {exact_date}")
+        async with progress.step(f"запрос в ЕИС (getDocsByOrgRegionRequest, {settings.TYPAL_SUBSYSTEM})") as st:
+            res = await self.eis._parse_eis_soap_ip("getDocsByOrgRegionRequest", subsystem_type=settings.TYPAL_SUBSYSTEM,
+                                                    org_region=str(region), fz=223, document_type=settings.TYPAL_DOCUMENT_TYPE,
+                                                    exact_date=exact_date)
+            st["detail"] = f"{res.get('status')}, файлов {len(res.get('files') or [])}"
         if res.get("status") != "success":
             err = str(res.get("error") or "")
             # «нет данных за дату» — обычный ответ ЕИС, а не сбой
@@ -140,7 +143,10 @@ class TypalLoader:
         self.stats["xml"] += 1
         out = []
         for c in clauses:
-            cid = await self.typal.save_clause(c)
+            progress.subject(f"Типовое положение {c['registration_number']} v{c['version']}")
+            async with progress.step("сохранение версии, заказчиков и списка файлов") as st:
+                cid = await self.typal.save_clause(c)
+                st["detail"] = f"заказчиков {len(c['customers'])}, файлов {len(c['files'])}"
             self.stats["versions"] += 1
             files = await self._read_files(cid) if self.read_files else []
             logger.info(f"Типовое положение {c['registration_number']} v{c['version']} ({source}): заказчиков "
@@ -155,7 +161,9 @@ class TypalLoader:
         out = []
         for f in await self.typal.files_to_read(clause_id):
             try:
-                doc_id, chunks = await self._read_one(f)
+                async with progress.step(f"скачивание и чтение файла «{f['file_name']}» ({f['kind']})") as st:
+                    doc_id, chunks = await self._read_one(f)
+                    st["detail"] = f"документ {doc_id}, пунктов {chunks}" if doc_id else "текст не извлечён"
                 status = "done" if doc_id else "no_text"
                 await self.typal.set_file_document(f["id"], doc_id, status)
                 self.stats["files_read"] += 1
