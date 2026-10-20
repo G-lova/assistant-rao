@@ -991,3 +991,56 @@ class Run1020bTest(unittest.TestCase):
         self.assertEqual([x["rule_id"] for x in risks], ["DOC-003"])
         risks, confirmed = cp.file_risks(files, {(3077, "FIN-012"): 1})
         self.assertEqual(sorted(x["rule_id"] for x in risks), ["DOC-003", "FIN-012"])
+
+
+class Run1020cTest(unittest.TestCase):
+    """Закупки 1001, 1387, 1399 после правок 20.10.2026 (второй прогон): оставшиеся ложные риски."""
+
+    def test_statutory_payment_and_refusal(self):
+        """Оплата в 7 рабочих дней (ч. 13.1 ст. 34) и отказ при несоответствии требованиям (ч. 15 ст. 95)."""
+        from risk_monitoring.document_risk_analyzer import rejected_by_rules
+
+        r = lambda c, f: {"code": c, "evidence": {"fragment": f}}  # noqa: E731
+        self.assertTrue(rejected_by_rules(r("FIN-012", "5.2.1. Заказчик перечисляет … в течение 7 (семи) рабочих дней с даты подписания Акта")))
+        self.assertTrue(rejected_by_rules(r("DOC-006", "4.3.2. … если Поставщик и (или) поставляемый Товар перестали соответствовать установленным извещением требованиям")))
+        self.assertFalse(rejected_by_rules(r("FIN-012", "Оплата производится в течение 60 календарных дней")))
+
+    def test_act_file_skipped(self):
+        """Старый риск из «Акт монтажа.pdf» в закупку не идёт, подтверждённый аналитиком — идёт."""
+        from risk_monitoring import contract_package as cp
+
+        files = [{"id": 3090, "file_name": "Акт монтажа.pdf", "risks": [
+            {"rule_id": "DOC-010", "level": 0.3, "confidence": 0.8, "evidence": [{"fragment": "Инструктаж проведён"}]}]}]
+        self.assertEqual(cp.file_risks(files, {})[0], [])
+        self.assertEqual(len(cp.file_risks(files, {(3090, "DOC-010"): 1})[0]), 1)
+
+    def test_absence_by_package(self):
+        """«Нет раздела о гарантиях» в доп. условиях снимается, если гарантийный срок есть в проекте контракта."""
+        from risk_monitoring import contract_package as cp
+
+        risk = {"rule_id": "DOC-001", "title": "Отсутствие раздела о гарантийных обязательствах",
+                "description": "В документе отсутствует раздел о гарантиях", "evidence": [{"fragment": "3.1. Поставщик доставляет"}]}
+        files = [{"id": 3077, "file_name": "Дополнительные условия.docx", "risks": [dict(risk)]},
+                 {"id": 3071, "file_name": "Проект контракта.docx", "risks": []}]
+        self.assertTrue(cp.absence_claims(files))
+        self.assertEqual(cp.drop_absence_contradicted(files, {3077: "3.1. Поставщик доставляет"}, {}), 0)
+        texts = {3077: "3.1. Поставщик доставляет", 3071: "7.1. Гарантийный срок на Товар — 24 месяца"}
+        self.assertEqual(cp.drop_absence_contradicted(files, texts, {(3077, "DOC-001"): 1}), 0)
+        self.assertEqual(cp.drop_absence_contradicted(files, texts, {}), 1)
+        self.assertEqual(files[0]["risks"], [])
+
+    def test_same_quote_counted_once(self):
+        """DOC-010 с той же цитатой, что и DOC-006, уходит в ``related_codes``; риск правила остаётся."""
+        from risk_monitoring import contract_package as cp
+
+        q = {"fragment": "4.1. Приемка … инструкциях Госарбитража П-6 и П-7", "src": "file:2807"}
+        risks = [
+            {"rule_id": "DOC-006", "level": 0.6, "confidence": 0.85, "sources": ["ai_file"],
+             "evidence": [q, {"fragment": "4.2. Иное", "src": "file:2807"}]},
+            {"rule_id": "DOC-010", "level": 0.6, "confidence": 0.8, "sources": ["ai_file"], "evidence": [dict(q)]},
+            {"rule_id": "FIN-004", "level": 0.4, "confidence": 1.0, "sources": ["rule"], "evidence": [{"src": "rule:pz_p1"}]},
+        ]
+        out = cp.drop_same_quote(risks)
+        self.assertEqual([r["rule_id"] for r in out], ["DOC-006", "FIN-004"])
+        self.assertEqual(out[0]["related_codes"], ["DOC-010"])
+        self.assertEqual(len(cp.drop_same_quote(risks, {"DOC-010"})), 3)

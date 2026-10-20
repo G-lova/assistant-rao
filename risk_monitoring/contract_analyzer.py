@@ -130,7 +130,31 @@ class ContractAnalyzer:
             f.update(rm_status="completed", source="internal", detected_type=(ai.get("doc_type") or {}).get("detected_type"),
                      resume=ai.get("resume"), total_doc_risk=ai.get("total_doc_risk"), risks=ai.get("risks"),
                      finances=(ai.get("raw_data") or {}).get("finances") if isinstance(ai.get("raw_data"), dict) else None,
-                     superseded_by=ai.get("superseded_by"))
+                     superseded_by=ai.get("superseded_by"), content_sha256=ai.get("content_sha256"))
+
+    async def _texts(self, files: List[Dict[str, Any]]) -> Dict[int, str]:
+        """Тексты действующих документов закупки из нашего хранилища (``ai_documents`` по ``content_sha256``).
+
+        Документ без хэша, с удалённым политикой хранения текстом или при сбое БД пропускается.
+
+        Returns:
+            Dict[int, str]: ``file_id → текст``.
+        """
+        if self.repo is None or not hasattr(self.repo, "get_document_by_sha"):
+            return {}
+        out: Dict[int, str] = {}
+        for f in files:
+            sha = f.get("content_sha256")
+            if f.get("superseded_by") or not sha or sha == "null":
+                continue
+            try:
+                row = await self.repo.get_document_by_sha(str(sha))
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Текст файла {f.get('id')} не получен: {type(e).__name__}: {e}")
+                continue
+            if row and row["text"]:
+                out[int(f["id"])] = row["text"]
+        return out
 
     async def _fill_xml_from_internal(self, xmls: List[Dict[str, Any]]) -> None:
         """XML без результата во внешней БД получают событие, резюме и риски из нашего хранилища."""
@@ -293,6 +317,11 @@ class ContractAnalyzer:
         progress.subject(f"Закупка {cid} ({card.get('number') or ''})")
         dataset = cp.as_json(card.get("dataset")) or {}
         inn = str((dataset.get("supplier") or {}).get("post_inn") or "").strip()
+        if cp.absence_claims(item["files"]):
+            async with progress.step("проверка «отсутствует …» по текстам документов закупки") as st:
+                texts = await self._texts(item["files"])
+                n = cp.drop_absence_contradicted(item["files"], texts, statuses)
+                st["detail"] = f"текстов {len(texts)}, снято рисков {n}"
         built = cp.build_contract_analysis(card=card, files=item["files"], xmls=item["xmls"], values=item["values"],
                                            black=black_by_inn.get(inn, []), statuses=statuses,
                                            previous_score=cp.num(card.get("prev_score")),

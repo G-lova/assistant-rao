@@ -219,16 +219,19 @@ def file_risks(files: Sequence[Dict[str, Any]], statuses: Dict[Tuple[int, str], 
     Returns:
         Tuple[List[Dict[str, Any]], set]: Риски (``source = ai_file``) и коды, подтверждённые аналитиком.
     """
+    from risk_monitoring.doc_kind import no_risk_by_name
     from risk_monitoring.document_risk_analyzer import rejected_by_rules
 
     out, confirmed = [], set()
     for f in files:
         if f.get("superseded_by"):
             continue
+        # акт монтажа, смета, платёжка …: риски по тексту в них больше не ищутся, старый результат не учитывается
+        skip_by_name = no_risk_by_name(f.get("file_name"))
         for r in as_json(f.get("risks")) or []:
             code = r.get("rule_id")
             st = statuses.get((int(f["id"]), code))
-            if not code or st in IGNORED_RISK_STATUSES:
+            if not code or st in IGNORED_RISK_STATUSES or (skip_by_name and st != CONFIRMED_STATUS):
                 continue
             # файл мог быть проанализирован до уточнения правил отбора: риск, все цитаты которого правила
             # отбрасывают, в закупку не идёт (подтверждённый аналитиком — остаётся)
@@ -241,6 +244,82 @@ def file_risks(files: Sequence[Dict[str, Any]], statuses: Dict[Tuple[int, str], 
                 confirmed.add(code)
             out.append(dict(_ev_src(r, f"file:{f['id']}", file_name=f.get("file_name")), source="ai_file"))
     return out, confirmed
+
+
+def absence_claims(files: Sequence[Dict[str, Any]]) -> bool:
+    """Есть ли среди рисков действующих файлов утверждение «в документе отсутствует …» об известной теме
+    (оплата, приёмка, гарантии, обеспечение, ответственность) — тогда анализатору нужны тексты документов."""
+    from risk_monitoring.document_risk_analyzer import absence_topics
+
+    return any(absence_topics(r) for f in files if not f.get("superseded_by") for r in as_json(f.get("risks")) or [])
+
+
+def drop_absence_contradicted(files: Sequence[Dict[str, Any]], texts: Dict[int, str],
+                              statuses: Dict[Tuple[int, str], int]) -> int:
+    """Снимает с файлов риски «отсутствует …», если названное есть в документах закупки.
+
+    Закупка — комплект: раздел о гарантиях может быть в проекте контракта, а «нет раздела о гарантиях» модель
+    находит в дополнительных условиях (1399, 20.10.2026: при этом в комплекте есть и «Гарантии.pdf»). Проверка
+    по объединённому тексту всех документов; подтверждённые аналитиком риски не трогаются.
+
+    Args:
+        files: Файлы закупки (``risks`` изменяются на месте).
+        texts: ``file_id → текст`` (документы без текста не участвуют).
+        statuses: Статусы рисков у аналитика.
+
+    Returns:
+        int: Сколько рисков снято.
+    """
+    from risk_monitoring.document_risk_analyzer import absence_contradicted
+
+    corpus = "\n".join(t for t in texts.values() if t)
+    if not corpus:
+        return 0
+    dropped = 0
+    for f in files:
+        risks = as_json(f.get("risks")) or []
+        keep = [r for r in risks if statuses.get((int(f["id"]), r.get("rule_id"))) == CONFIRMED_STATUS
+                or not absence_contradicted(r, corpus)]
+        if len(keep) < len(risks):
+            dropped += len(risks) - len(keep)
+            f["risks"] = keep
+    return dropped
+
+
+def _norm_fragment(e: Dict[str, Any]) -> str:
+    """Цитата для сравнения: без пробельных различий, первые 300 символов."""
+    return re.sub(r"\s+", " ", str(e.get("fragment") or "")).strip().lower()[:300]
+
+
+def drop_same_quote(risks: Sequence[Dict[str, Any]], confirmed: Iterable[str] = ()) -> List[Dict[str, Any]]:
+    """Риск модели, все цитаты которого уже приведены в более сильном риске, не учитывается отдельно.
+
+    Модель ставит на одну цитату два кода (1387: устаревшие инструкции Госарбитража — DOC-006 и DOC-010; 1001:
+    перечень телеканалов — DOC-002 и DOC-005), и балл растёт за один и тот же факт. Код-дубль переносится в
+    ``related_codes`` сохранённого риска. Риски правил, событий и подтверждённые аналитиком не трогаются.
+
+    Args:
+        risks: Риски закупки после ``merge_risks`` (по убыванию значимости).
+        confirmed: Коды, подтверждённые аналитиком.
+
+    Returns:
+        List[Dict[str, Any]]: Риски без дублей по цитатам.
+    """
+    keep_codes = set(confirmed)
+    out: List[Dict[str, Any]] = []
+    for r in sorted(risks, key=lambda x: -((x.get("level") or 0) * (x.get("confidence") or 0))):
+        frags = {_norm_fragment(e) for e in r.get("evidence") or [] if isinstance(e, dict) and e.get("fragment")}
+        only_ai = set(r.get("sources") or []) == {"ai_file"}
+        if only_ai and frags and r.get("rule_id") not in keep_codes:
+            host = next((k for k in out if set(k.get("sources") or []) & {"ai_file"}
+                         and frags <= {_norm_fragment(e) for e in k.get("evidence") or [] if isinstance(e, dict)}),
+                        None)
+            if host is not None:
+                host.setdefault("related_codes", []).append(r["rule_id"])
+                continue
+        out.append(r)
+    order = {id(r): i for i, r in enumerate(risks)}
+    return sorted(out, key=lambda r: order[id(r)])
 
 
 def _xml_key(x: Dict[str, Any]) -> Tuple[str, str]:
@@ -668,6 +747,7 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
         f_risks, event_risks(xmls), rule_values_risks(values), registry_risks(matches), dataset_risks(p),
         favourite_risks(p, fav),
         consistency_risks(cons), completeness_risks(comp, settings.COMPLETENESS_RISK), fz=fz)
+    risks = drop_same_quote(risks, confirmed)
     prof = profile(risks, previous_score, confirmed, settings.CONFIRMED_WEIGHT, tuple(settings.SCORE_ZONES),
                    settings.SCORE_DECAY, settings.AI_UNCONFIRMED_WEIGHT)
     events = events_feed(xmls)
