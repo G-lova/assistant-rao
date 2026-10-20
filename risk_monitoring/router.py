@@ -3,7 +3,8 @@
 * ``POST /risk-monitoring/files/analysis`` — анализ файлов по id → AI-паспорт документа;
 * ``POST /risk-monitoring/xml/analysis`` — анализ XML ЕИС по id → событие;
 * ``POST /risk-monitoring/contracts/analysis`` — анализ закупки/контракта по id карточки → паспорт, комплект, риски, балл;
-* ``POST /risk-monitoring/organisations/analysis`` — аналитика организации как заказчика и поставщика;
+* ``POST /risk-monitoring/organisations/analysis`` — аналитика организации как заказчика и поставщика
+  (принимается и написание ``/organizations/analysis``);
 * ``POST /risk-monitoring/typal-clauses/load`` и ``/typal-clauses/xml`` — загрузка типовых положений (223-ФЗ);
 * ``GET /risk-monitoring/typal-clauses/customer/{inn}`` — типовое положение заказчика;
 * статус задачи — существующий ``GET /task/{task_id}``.
@@ -163,6 +164,7 @@ async def analyze_contracts(req: PackageRequest, x_api_database: str = Header(de
 
 
 @router.post("/organisations/analysis", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/organizations/analysis", status_code=status.HTTP_202_ACCEPTED, include_in_schema=False)
 async def analyze_organisations(req: PackageRequest, x_api_database: str = Header(default="dev", alias="X-API-Database")):
     """Ставит в очередь аналитику организаций (``risk_monitoring_organisations``) как заказчика и поставщика.
 
