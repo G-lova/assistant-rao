@@ -170,7 +170,7 @@ class Config:
     LOG_PATH = os.getenv("LOG_PATH", "logs/")
     
     # Application
-    APP_ENV = os.getenv("APP_ENV", "development")
+    APP_ENV = os.getenv("APP_ENV", "stage")
     DEBUG = os.getenv("DEBUG", "False").lower() == "true"
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     LOG_FILE = os.getenv("LOG_FILE", "logs/app.log")

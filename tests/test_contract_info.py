@@ -102,6 +102,6 @@ class EnvLeftoversTest(unittest.TestCase):
         self.assertEqual(settings.normalize_env("Production"), "prod")
         self.assertEqual(settings.normalize_env("staging"), "stage")
         self.assertEqual(settings.normalize_env("stage"), "stage")
-        self.assertEqual(settings.normalize_env(""), "dev")
+        self.assertEqual(settings.normalize_env(""), "stage")
         self.assertEqual({settings.PE_LEGACY_ENV, settings.DAILY_ENVIRONMENT, settings.TYPAL_REGIONS_ENVIRONMENT},
                          {settings.ENVIRONMENT})

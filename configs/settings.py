@@ -12,7 +12,7 @@
 
 import os
 
-# Окружение установки из APP_ENV (.env): development → dev, staging → stage, production → prod,
+# Окружение установки из APP_ENV (.env; не задан — stage): development → dev, staging → stage, production → prod,
 # neuro_assistant_database → neuro; так же его понимает Config.get_database_config
 ENV_ALIASES = {"development": "dev", "develop": "dev", "staging": "stage", "production": "prod",
                "neuro_assistant_database": "neuro"}
@@ -28,7 +28,7 @@ def normalize_env(value: str) -> str:
         str: Короткое имя окружения в нижнем регистре.
     """
     v = (value or "").strip().lower()
-    return ENV_ALIASES.get(v, v or "dev")
+    return ENV_ALIASES.get(v, v or "stage")
 
 
 try:  # APP_ENV может быть только в файле .env (вне docker), а settings импортируется раньше Config
@@ -37,7 +37,7 @@ try:  # APP_ENV может быть только в файле .env (вне dock
     load_dotenv()
 except ImportError:  # pragma: no cover
     pass
-ENVIRONMENT = normalize_env(os.getenv("APP_ENV", "development"))
+ENVIRONMENT = normalize_env(os.getenv("APP_ENV", "stage"))
 
 
 # Хранилище знаний («РАО Эксперт»): запись результатов /evaluate-documents в pe_* таблицы
