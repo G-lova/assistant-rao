@@ -29,6 +29,15 @@ def now_iso() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
 
+def iso_tz(value: Optional[str] = None) -> Optional[str]:
+    """Время ISO 8601 с часовым поясом сервиса (API daily-runs требует пояс): ``2026-10-21T14:00:00`` →
+    ``2026-10-21T14:00:00+03:00``; без значения — текущее время; уже с поясом — как есть."""
+    if value is None:
+        return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    dt = datetime.datetime.fromisoformat(str(value))
+    return (dt if dt.tzinfo else dt.astimezone()).isoformat(timespec="seconds")
+
+
 def as_text_list(value: Any) -> List[str]:
     """Список строк из ответа модели: модель иногда отдаёт число, строку или ``null`` вместо массива
     (XML 3209, 15.10.2026: ``verification_needed = 1`` → ``TypeError: 'int' object is not iterable``).

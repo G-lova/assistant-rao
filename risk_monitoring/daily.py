@@ -32,7 +32,7 @@ logger = get_logger(__name__)
 SCHEMA_VERSION = "rm-daily-1"
 PROMPT_VERSION = "daily-resume-1"
 KIND = "daily"
-STAGES = ("files", "xml", "contracts", "customers", "summary")
+STAGES = ("files", "xml", "contracts", "customers", "suppliers", "summary")
 RED = "red"
 # «Выполняется» дольше этого — прогон считается оборванным (пересборка, падение воркера), его можно запустить заново
 RUNNING_STALE_SECONDS = 4 * 3600
@@ -121,6 +121,27 @@ def event_item(xml_id: int, card: Optional[Dict[str, Any]], ai: Dict[str, Any]) 
     }
 
 
+def supplier_rows(cards: Dict[int, Dict[str, Any]], monitored_only: bool = True) -> List[Dict[str, Any]]:
+    """Поставщики закупок прогона (юридические лица: ИНН 10 цифр, КПП 9 — так их принимает API организаций).
+
+    Args:
+        cards: ``card_id →`` строка ``daily_cards.sql`` (``supplier_inn``, ``supplier_kpp``, ``supplier_name``).
+        monitored_only: Только закупки заказчиков на мониторинге.
+
+    Returns:
+        List[Dict[str, Any]]: ``inn``, ``kpp``, ``name``, ``short_name`` без повторов.
+    """
+    out: Dict[tuple, Dict[str, Any]] = {}
+    for c in cards.values():
+        if monitored_only and not monitored(c):
+            continue
+        inn, kpp = str(c.get("supplier_inn") or "").strip(), str(c.get("supplier_kpp") or "").strip()
+        name = c.get("supplier_full_name") or c.get("supplier_name")
+        if inn.isdigit() and len(inn) == 10 and kpp.isdigit() and len(kpp) == 9 and name:
+            out.setdefault((inn, kpp), {"inn": inn, "kpp": kpp, "name": str(name), "short_name": c.get("supplier_name")})
+    return list(out.values())
+
+
 def monitored(card: Dict[str, Any]) -> bool:
     """Заказчик закупки на мониторинге (``monitoring = 1``; из MySQL приходит 1, 1.0, "1" или ``True``)."""
     try:
@@ -145,6 +166,11 @@ def choose_scope(total: int, cfg: Any = settings) -> str:
         return "monitored"
     limit = getattr(cfg, "DAILY_ALL_MAX_XML", None)
     return "monitored_auto" if limit and total > limit else "all"
+
+
+def _stage_states(stages: Dict[str, Any]) -> Dict[str, Any]:
+    """Этапы для ``risk_monitoring_daily_runs.stages``: статус, длительность и счётчики без текста ошибок."""
+    return {k: {kk: vv for kk, vv in (v or {}).items() if kk != "error"} for k, v in (stages or {}).items()}
 
 
 def slim_event(ai: Dict[str, Any]) -> Dict[str, Any]:
@@ -175,7 +201,8 @@ def _importance_rank(v: Optional[str]) -> int:
 def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[str, Any]],
                   contracts: Dict[int, Dict[str, Any]], changed: Iterable[int], events: Dict[int, Dict[str, Any]],
                   xml_cards: Dict[int, Optional[int]], customers: Sequence[Dict[str, Any]], scope: Dict[str, Any],
-                  stages: Dict[str, Any], cfg: Any = settings) -> Dict[str, Any]:
+                  stages: Dict[str, Any], cfg: Any = settings,
+                  suppliers: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
     """Собирает сводку за дату без модели (резюме добавляет :class:`DailyRun`).
 
     Args:
@@ -187,6 +214,7 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
         events: ``xml_id → ai_analysis`` события.
         xml_cards: ``xml_id → card_id``.
         customers: Результаты ``OrgAnalyzer`` по заказчикам на мониторинге.
+        suppliers: Результаты ``OrgAnalyzer`` по поставщикам их закупок (роль поставщика).
         scope: Счётчики охвата.
         stages: Состояние этапов.
         cfg: Настройки (``DAILY_*``, ``SCORE_ZONES``).
@@ -246,6 +274,18 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
                          "name": org.get("name"), "score": sec.get("score"), "zone": sec.get("zone"),
                          "delta": sec.get("delta"), "risks": [x.get("rule_id") for x in sec.get("risks") or []]})
     cust.sort(key=lambda c: -(c.get("score") or 0))
+    sups = []
+    for r in suppliers:
+        sec = ((r.get("ai_analysis") or {}).get("supplier")) or {}
+        org = (r.get("ai_analysis") or {}).get("organisation") or {}
+        if sec:
+            sups.append({"organisation_id": r.get("organisation_id"), "canonical_id": r.get("canonical_id"),
+                         "name": org.get("name"), "inn": org.get("inn"), "score": sec.get("score"),
+                         "zone": sec.get("zone"), "risks": [x.get("rule_id") for x in sec.get("risks") or []]})
+            if any(x.startswith("REG-") for x in sups[-1]["risks"]):
+                add("supplier_registry", {"card_id": None, "xml_id": None, "customer": org.get("name")},
+                    "Поставщик в реестре: " + ", ".join(x for x in sups[-1]["risks"] if x.startswith("REG-")))
+    sups.sort(key=lambda c: -(c.get("score") or 0))
     top = cfg.DAILY_TOP
     return {
         "date": export_date,
@@ -258,6 +298,7 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
         "events": {"total": len(ev_items), "by_type": dict(sorted(by_code.items(), key=lambda kv: -kv[1])),
                    "important": important[:top]},
         "customers": cust,
+        "suppliers": sups,
         "attention": attention,
     }
 
@@ -390,9 +431,11 @@ class DailyRun:
     async def save(self, export_date: str, ai: Dict[str, Any]) -> None:
         """Сохраняет сводку (или отметку «выполняется») у нас и в ``risk_monitoring_daily_runs`` внешней БД.
 
-        Во внешнюю БД — ``POST /api/risk-monitoring/daily-runs`` (upsert по дате выгрузки), если включены
-        ``DAILY_RUNS_PUSH_ENABLED`` и запись результатов прогона; сбой записи не останавливает прогон — сводка у нас
-        остаётся, отметка ``pushed`` в ``ai_rm_results`` показывает, дошла ли она.
+        Внешняя БД (API daily-runs, 21.10.2026): ``POST /api/risk-monitoring/daily-runs`` — состояние прогона
+        (статус, этапы, время с часовым поясом; upsert по дате выгрузки, ответ — ``id``), затем для готовой сводки —
+        ``PATCH /api/risk-monitoring/ai-analysis`` с ``table = risk_monitoring_daily_runs`` и этим ``id``. Включается
+        ``DAILY_RUNS_PUSH_ENABLED`` и записью результатов прогона; сбой записи не останавливает прогон — сводка у нас
+        остаётся, ``pushed`` / ``push_error`` в ``ai_rm_results`` показывают, дошла ли она.
         """
         pipe = ai.get("pipeline") or {}
         pushed, error = False, None
@@ -403,10 +446,14 @@ class DailyRun:
                     from risk_monitoring.risk_monitoring_api import RiskMonitoringAPI
 
                     api = self.risk_api = RiskMonitoringAPI(self.http_manager, self.environment)
-                done = pipe.get("status") in ("completed", "failed")
-                await api.upsert_daily_run(export_date, pipe.get("status") or "running", ai.get("stages") or {},
-                                           pipe.get("started_at"), pipe.get("finished_at"),
-                                           ai if done else None)
+                status = pipe.get("status") or "running"
+                done = status in ("completed", "failed")
+                row = await api.upsert_daily_run(
+                    export_date, status, stages=_stage_states(ai.get("stages")) if ai.get("stages") else None,
+                    started_at=passport.iso_tz(pipe["started_at"]) if pipe.get("started_at") else None,
+                    finished_at=passport.iso_tz(pipe["finished_at"]) if done and pipe.get("finished_at") else None)
+                if done and row.get("id") is not None:
+                    await api.patch_ai_analysis("risk_monitoring_daily_runs", int(row["id"]), ai)
                 pushed = True
             except Exception as e:  # noqa: BLE001 — сводка остаётся у нас
                 error = f"{type(e).__name__}: {e}"[:500]
@@ -534,6 +581,28 @@ class DailyRun:
                         f"запросов к внешней БД {cache.queries}")
         self.stages["files"], self.stages["xml"] = st_files, st_xml
 
+    async def _supplier_ids(self, found: List[Dict[str, Any]]) -> Any:
+        """id организаций-поставщиков: ``POST /api/risk-monitoring/organisations`` (upsert по году, ИНН и КПП).
+
+        Returns:
+            Tuple[List[int], int]: id и число поставщиков, для которых запрос не удался.
+        """
+        api = self.__dict__.get("risk_api")
+        if api is None:
+            from risk_monitoring.risk_monitoring_api import RiskMonitoringAPI
+
+            api = self.risk_api = RiskMonitoringAPI(self.http_manager, self.environment)
+        ids, failed = [], 0
+        for s in found:
+            try:
+                row = await api.upsert_organisation(s["inn"], s["kpp"], s["name"], short_name=s.get("short_name"))
+                if row.get("id") is not None:
+                    ids.append(int(row["id"]))
+            except Exception as e:  # noqa: BLE001 — поставщик без строки организации пропускается
+                failed += 1
+                logger.warning(f"Организация-поставщик {s['inn']}/{s['kpp']} не получена: {type(e).__name__}: {e}")
+        return list(dict.fromkeys(ids)), failed
+
     def _make_archives(self) -> Any:
         """Общий загрузчик архивов ЕИС прогона (удаляет скачанное в конце прогона)."""
         from configs.parsing import CloudStorageParser
@@ -611,8 +680,27 @@ class DailyRun:
             return res, self._counts(res)
 
         org_results = await self._stage("customers", customers) or []
+
+        async def suppliers() -> Any:
+            """S3c: поставщики затронутых закупок заказчиков на мониторинге — строка организации по API
+            (существующая или новая, ``is_external = 1``), затем профиль поставщика (``OrgAnalyzer``)."""
+            found = supplier_rows(cards, settings.DAILY_MONITORED_ONLY)
+            if not found or not settings.DAILY_SUPPLIERS_ENABLED:
+                return [], {"total": 0}
+            ids, failed = await self._supplier_ids(found)
+            if not ids:
+                return [], {"total": len(found), "org_failed": failed}
+            from risk_monitoring.org_analyzer import OrgAnalyzer
+
+            oa = OrgAnalyzer(self.http_manager, self.environment, self.repo, push_results=self.push,
+                             use_llm=self.use_llm, roles=("supplier",))
+            res = await oa.analyze_ids(ids)
+            return res, {**self._counts(res), "org_failed": failed}
+
+        sup_results = await self._stage("suppliers", suppliers) or []
         summary = build_summary(export_date=d, environment=self.env, cards=cards, contracts=contract_ai,
                                 changed=changed, events=events, xml_cards=xml_cards, customers=org_results,
+                                suppliers=sup_results,
                                 scope=scope, stages=self.stages)
         resume, used_llm = default_resume(summary), False
         if "summary" in self.stages_on and self.use_llm and settings.PACKAGE_LLM_RESUME:

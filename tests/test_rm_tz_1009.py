@@ -72,7 +72,8 @@ class DailyRunsPushTest(unittest.TestCase):
         self.assertEqual(api.daily_runs_url, "https://stage.x/api/risk-monitoring/daily-runs")
 
     def test_save_pushes(self):
-        """Отметка «выполняется» — без сводки, готовая — со сводкой; сбой записи — сводка у нас с ошибкой."""
+        """«Выполняется» — только POST состояния; готовая — POST (статус, этапы без ошибок, время с поясом),
+        затем PATCH сводки по полученному id; сбой записи — сводка у нас с ошибкой."""
         from risk_monitoring import daily
 
         saved = []
@@ -84,18 +85,64 @@ class DailyRunsPushTest(unittest.TestCase):
         run = object.__new__(daily.DailyRun)
         run.http_manager, run.environment, run.env, run.repo, run.push = object(), "stage", "stage", Repo(), True
         api = mock.MagicMock()
-        api.upsert_daily_run = mock.AsyncMock(return_value={"id": 1})
+        api.upsert_daily_run = mock.AsyncMock(return_value={"id": 12})
+        api.patch_ai_analysis = mock.AsyncMock(return_value={})
         run.risk_api = api
-        asyncio.run(run.save("2026-10-19", {"pipeline": {"status": "running", "started_at": "t"}}))
-        asyncio.run(run.save("2026-10-19", {"stages": {"xml": {}}, "pipeline": {"status": "completed"}}))
-        self.assertIsNone(api.upsert_daily_run.call_args_list[0].args[5])
-        self.assertEqual(api.upsert_daily_run.call_args_list[1].args[5]["stages"], {"xml": {}})
-        api.upsert_daily_run.side_effect = RuntimeError("404")
-        asyncio.run(run.save("2026-10-19", {"pipeline": {"status": "completed"}}))
+        asyncio.run(run.save("2026-10-19", {"pipeline": {"status": "running", "started_at": "2026-10-19T06:00:00"}}))
+        api.patch_ai_analysis.assert_not_called()
+        first = api.upsert_daily_run.call_args_list[0]
+        self.assertEqual(first.args[:2], ("2026-10-19", "running"))
+        self.assertRegex(first.kwargs["started_at"], r"T06:00:00[+-]\d\d:\d\d$")
+        self.assertIsNone(first.kwargs["finished_at"])
+        ai = {"stages": {"xml": {"status": "failed", "error": "длинный текст"}},
+              "pipeline": {"status": "completed", "started_at": "2026-10-19T06:00:00", "finished_at": "2026-10-19T07:00:00"}}
+        asyncio.run(run.save("2026-10-19", ai))
+        second = api.upsert_daily_run.call_args_list[1]
+        self.assertEqual(second.kwargs["stages"], {"xml": {"status": "failed"}})
+        self.assertTrue(second.kwargs["finished_at"])
+        api.patch_ai_analysis.assert_awaited_once_with("risk_monitoring_daily_runs", 12, ai)
+        api.upsert_daily_run.side_effect = RuntimeError("422")
+        asyncio.run(run.save("2026-10-19", ai))
         self.assertEqual(saved[:2], [(True, None), (True, None)])
         self.assertFalse(saved[2][0])
-        self.assertIn("404", saved[2][1])
+        self.assertIn("422", saved[2][1])
 
+
+class SuppliersTest(unittest.TestCase):
+    """Поставщики закупок прогона → организации по API → профиль поставщика."""
+
+    def test_supplier_rows(self):
+        """Юрлица заказчиков на мониторинге без повторов; ИП (12 цифр) и без КПП — нет."""
+        from risk_monitoring import daily
+
+        cards = {1: {"monitoring": 1, "supplier_inn": "1660331280", "supplier_kpp": "166001001", "supplier_name": "СК"},
+                 2: {"monitoring": 1, "supplier_inn": "1660331280", "supplier_kpp": "166001001", "supplier_name": "СК"},
+                 3: {"monitoring": 1, "supplier_inn": "615492698364", "supplier_kpp": None, "supplier_name": "ИП"},
+                 4: {"monitoring": 0, "supplier_inn": "7701234567", "supplier_kpp": "770101001", "supplier_name": "Х"}}
+        self.assertEqual([r["inn"] for r in daily.supplier_rows(cards)], ["1660331280"])
+        self.assertEqual(len(daily.supplier_rows(cards, monitored_only=False)), 2)
+
+    def test_organisation_validation(self):
+        """API организаций — только ИНН 10 и КПП 9 цифр."""
+        try:
+            from risk_monitoring.risk_monitoring_api import RiskMonitoringAPI
+        except ImportError as e:
+            raise unittest.SkipTest(f"нет зависимостей: {e}")
+        api = RiskMonitoringAPI.__new__(RiskMonitoringAPI)
+        with self.assertRaises(ValueError):
+            asyncio.run(api.upsert_organisation("615492698364", "", "ИП"))
+
+    def test_summary_suppliers(self):
+        """Поставщик с REG-002 — в списке поставщиков и во «внимании»."""
+        from risk_monitoring import daily
+
+        res = [{"organisation_id": 2082, "ai_analysis": {"organisation": {"name": "СК", "inn": "1660331280"},
+                                                         "supplier": {"score": 70, "zone": "red",
+                                                                      "risks": [{"rule_id": "REG-002"}]}}}]
+        s = daily.build_summary(export_date="2026-10-19", environment="stage", cards={}, contracts={}, changed=[],
+                                events={}, xml_cards={}, customers=[], scope={"xml": 1}, stages={}, suppliers=res)
+        self.assertEqual(s["suppliers"][0]["risks"], ["REG-002"])
+        self.assertEqual(s["attention"][0]["kind"], "supplier_registry")
 
 if __name__ == "__main__":
     unittest.main()

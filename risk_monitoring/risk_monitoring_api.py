@@ -121,31 +121,68 @@ class RiskMonitoringAPI:
         )
         return data["data"]
 
+    def _sibling(self, path: str) -> str:
+        """Адрес метода API рядом с ``/ai-analysis`` (``/daily-runs``, ``/organisations``)."""
+        base = self.url.rsplit("/ai-analysis", 1)[0] if "/ai-analysis" in self.url else self.url.rstrip("/")
+        return f"{base}/{path}"
+
     @property
     def daily_runs_url(self) -> str:
-        """Адрес ``POST /api/risk-monitoring/daily-runs`` рядом с ``/ai-analysis``."""
-        base = self.url.rsplit("/ai-analysis", 1)[0] if "/ai-analysis" in self.url else self.url.rstrip("/")
-        return f"{base}/daily-runs"
+        """Адрес ``POST /api/risk-monitoring/daily-runs``."""
+        return self._sibling("daily-runs")
 
-    async def upsert_daily_run(self, export_date: str, status: str, stages: Dict[str, Any] = None,
-                               started_at: str = None, finished_at: str = None,
-                               ai_analysis: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Создаёт или обновляет строку ``risk_monitoring_daily_runs`` по дате выгрузки (ТЗ 09.10.2026, п. 3).
+    async def upsert_daily_run(self, export_date: str, status: str = None, stages: Dict[str, Any] = None,
+                               started_at: str = None, finished_at: str = None) -> Dict[str, Any]:
+        """Создаёт строку ``risk_monitoring_daily_runs`` или обновляет её состояние (upsert по дате выгрузки).
+
+        Передаются только заданные поля: у существующей записи обновляются только они; ``stages`` заменяется
+        целиком. ``ai_analysis`` этим запросом не пишется — только :meth:`patch_ai_analysis` по полученному ``id``
+        (API daily-runs, 21.10.2026).
 
         Args:
-            export_date: Дата выгрузки ``ГГГГ-ММ-ДД`` (уникальный ключ).
-            status: ``running`` / ``completed`` / ``failed``.
-            stages: Состояние этапов.
-            started_at: Начало прогона (``ГГГГ-ММ-ДДTчч:мм:сс``).
-            finished_at: Окончание прогона.
-            ai_analysis: Сводка.
+            export_date: Дата выгрузки ``ГГГГ-ММ-ДД``.
+            status: Код статуса (строчные латинские буквы, цифры, ``_``): ``running`` / ``completed`` / ``failed``.
+            stages: Полный набор состояний этапов.
+            started_at: Начало прогона, ISO 8601 с часовым поясом.
+            finished_at: Окончание прогона (не раньше начала).
 
         Returns:
-            Dict[str, Any]: ``data`` ответа (``id`` строки).
+            Dict[str, Any]: ``data`` ответа (``id``, ``export_date``, ``status``).
         """
-        body = {"export_date": export_date, "status": status, "stages": stages or {}, "started_at": started_at,
-                "finished_at": finished_at}
-        if ai_analysis:
-            body["ai_analysis"] = ai_analysis
+        body: Dict[str, Any] = {"export_date": export_date}
+        for k, v in (("status", status), ("stages", stages), ("started_at", started_at), ("finished_at", finished_at)):
+            if v is not None:
+                body[k] = v
         data = await self._request("POST", url=self.daily_runs_url, json=body)
+        return data.get("data") or {}
+
+    async def upsert_organisation(self, inn: str, kpp: str, name: str, year: int = None, short_name: str = None,
+                                  full_name: str = None, ogrn: str = None) -> Dict[str, Any]:
+        """Организация-поставщик: существующая по ``year + inn + kpp`` или новая (``is_external = 1``,
+        ``monitoring = 0``) — ``POST /api/risk-monitoring/organisations`` (API, 21.10.2026).
+
+        Только юридические лица: ИНН — 10 цифр, КПП — 9 цифр. Реквизиты существующей записи не меняются.
+
+        Args:
+            inn: ИНН.
+            kpp: КПП.
+            name: Наименование (обязательно и при повторном запросе).
+            year: Год справочника (по умолчанию текущий на стороне API).
+            short_name: Краткое наименование.
+            full_name: Полное наименование.
+            ogrn: ОГРН (13 цифр).
+
+        Returns:
+            Dict[str, Any]: ``data`` ответа (``id``, ``year``, ``inn``, ``kpp``, ``is_external``, ``monitoring``).
+
+        Raises:
+            ValueError: ИНН/КПП не юридического лица.
+        """
+        if not (str(inn).isdigit() and len(str(inn)) == 10 and str(kpp).isdigit() and len(str(kpp)) == 9):
+            raise ValueError("API принимает только юридические лица: ИНН — 10 цифр, КПП — 9 цифр")
+        body: Dict[str, Any] = {"inn": str(inn), "kpp": str(kpp), "name": str(name)[:1000]}
+        for k, v in (("year", year), ("short_name", short_name), ("full_name", full_name), ("ogrn", ogrn)):
+            if v is not None:
+                body[k] = v
+        data = await self._request("POST", url=self._sibling("organisations"), json=body)
         return data.get("data") or {}

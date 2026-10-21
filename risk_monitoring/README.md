@@ -155,6 +155,7 @@
 | `xml` | события XML — `XmlEventAnalyzer` (с результатами файлов) |
 | `contracts` | затронутые закупки — `ContractAnalyzer` без повторного анализа документов |
 | `customers` | заказчики этих закупок с `monitoring = 1` — `OrgAnalyzer` (роль заказчика) |
+| `suppliers` | поставщики этих закупок (юрлица): строка организации — `POST /api/risk-monitoring/organisations` (существующая или новая, `is_external = 1`, `monitoring = 0`), затем `OrgAnalyzer` (роль поставщика); `DAILY_SUPPLIERS_ENABLED` |
 | `summary` | сводка по заказчикам на мониторинге; текст пишет модель по готовым фактам, без модели — шаблон |
 
 S0 — по дате, без списков id (подход `xml_processor`): `daily_xml.sql` (сведения о всех XML за дату),
@@ -173,7 +174,9 @@ S0 — по дате, без списков id (подход `xml_processor`): `
 Каждый этап сам пропускает уже проанализированное; сбой этапа отмечается `stages.<этап>.status = failed`, прогон
 продолжается. Сводка хранится у нас (`ai_rm_results`, `kind = daily`, `external_id = ГГГГММДД`) и пишется в
 `risk_monitoring_daily_runs` (`POST /api/risk-monitoring/daily-runs`, upsert по `export_date`; `DAILY_RUNS_PUSH_ENABLED`):
-в начале прогона — `status = running`, в конце — `completed` со сводкой в `ai_analysis`.
+в начале прогона — `POST` со `status = running` и `started_at`; в конце — `POST` со `status = completed`, `stages`,
+`finished_at` (время — ISO 8601 с часовым поясом), затем `PATCH /api/risk-monitoring/ai-analysis` со сводкой
+(`table = risk_monitoring_daily_runs`, `id` из ответа POST). Токен — тот же `SYSTEM_BEARER_KEY`.
 
 Сводка: `scope` (XML, файлы, закупки, из них на мониторинге), `stages`, `contracts` (зоны, `became_red`,
 `score_jump` — рост балла ≥ `DAILY_SCORE_JUMP`, `red`), `events` (по типам, `important` — важность из

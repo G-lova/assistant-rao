@@ -156,6 +156,9 @@ DAILY_ENVIRONMENT = ENVIRONMENT         # окружение текущей ус
 DAILY_PUSH = True                      # записывать результаты этапов во внешнюю БД
 # Сводка — и в risk_monitoring_daily_runs (POST /api/risk-monitoring/daily-runs, ТЗ 09.10.2026); у нас — всегда
 DAILY_RUNS_PUSH_ENABLED = True
+# Профили поставщиков закупок заказчиков на мониторинге: строка организации — POST /api/risk-monitoring/organisations
+# (существующая или новая с is_external = 1, monitoring = 0), затем секция supplier
+DAILY_SUPPLIERS_ENABLED = True
 # Сводка — только по заказчикам с risk_monitoring_organisations.monitoring = 1
 DAILY_MONITORED_ONLY = True
 DAILY_SCORE_JUMP = 15                  # рост балла закупки за прогон, с которого она попадает в «внимание»
