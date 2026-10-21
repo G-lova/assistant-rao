@@ -174,7 +174,7 @@ class DailyRunTest(unittest.TestCase):
         self.assertEqual(calls, [False])
         self.assertEqual(xa.file_results, {5: {"doc_type": {"detected_type": None}, "resume": None,
                                                "total_doc_risk": None}})
-        self.assertEqual(queried, ["daily_xml.sql", "daily_xml_previous.sql", "daily_files.sql", "daily_cards.sql"])
+        self.assertEqual(queried, ["daily_xml.sql", "xml_previous.sql", "daily_files.sql", "daily_cards.sql"])
         self.assertIn(5, run.cache.file_rows)
         self.assertIn(1, run.cache.covered_cards)
         self.assertEqual(s["stages"]["customers"]["status"], "failed")

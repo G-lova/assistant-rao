@@ -2,7 +2,8 @@
 
 Этапы (каждый сам пропускает уже проанализированное — повторный прогон за ту же дату дешёвый):
 
-* **S0 охват** — XML ЕИС архивов с ``exact_date = D`` (``queries/rm/daily_xml.sql``);
+* **S0 охват** — XML ЕИС архивов с ``exact_date = D`` (``queries/rm/daily_xml.sql``); их предыдущие версии и файлы
+  — пакетно по выбранным XML;
 * **S1b файлы** — ещё не проанализированные файлы этих XML (вложения, печатные формы) — ``AIFileAnalyzer``;
 * **S1a события** — XML как события — ``XmlEventAnalyzer`` (с результатами файлов);
 * **S2–S3a закупки** — затронутые закупки/контракты — ``ContractAnalyzer`` (документы уже проанализированы выше);
@@ -510,21 +511,38 @@ class DailyRun:
             cache.archives.close()
 
     async def _seed(self, d: str, xml_rows: List[Dict[str, Any]], xml_ids: List[int], cache: Any) -> None:
-        """Сведения о XML, их предыдущие версии и файлы за дату — тремя запросами по дате (без списков id, как
-        ``xml_processor``) в кэш прогона: анализаторы файлов и событий берут их оттуда, не обращаясь к внешней БД."""
-        async with progress.step("S0: предыдущие версии и файлы XML за дату (запросами по дате)") as st:
+        """Сведения о XML (из запроса S0), их предыдущие версии и файлы — в кэш прогона, пакетно по выбранным XML:
+        анализаторы файлов и событий берут их оттуда, не обращаясь к внешней БД.
+
+        Только по XML, которые будут анализироваться (не по всей дате): запрос предыдущих версий по всей дате —
+        соединение таблицы XML с собой — на выгрузке 2026-07-03 (21 907 XML) не уложился в таймаут шлюза (504),
+        хотя анализировать нужно было 111 XML. Сбой не останавливает прогон: недостающее анализаторы дозапросят.
+        """
+        from risk_monitoring.run_cache import chunks
+
+        async with progress.step("S0: предыдущие версии и файлы выбранных XML (пакетно)") as st:
             cache.seed("xml_meta.sql", xml_rows, "id", xml_ids)
-            prev_rows = await self._query("daily_xml_previous.sql", head=[self.storage_path, d])
-            cache.seed("xml_previous.sql", prev_rows, "current_id", xml_ids)
-            files = await self._query("daily_files.sql", head=[d, d])
-            linked = {int(r["id"]) for r in xml_rows if r.get("risk_monitoring_contract_id") is not None}
-            cards = {int(r["risk_monitoring_contract_id"]) for r in xml_rows if int(r["id"]) in linked}
-            # файлы предыдущих версий привязанных XML — среди файлов тех же закупок
-            prev_linked = [int(p["id"]) for p in prev_rows if p.get("id") is not None and _num(p.get("current_id")) is not None
-                           and int(_num(p["current_id"])) in linked]
-            cache.seed_files(files, list(xml_ids) + prev_linked, cards)
-            cache.queries.update({"daily_xml.sql": 1, "daily_xml_previous.sql": 1, "daily_files.sql": 1})
-            st["detail"] = f"предыдущих версий {len(prev_rows)}, файлов {len(files)}"
+            try:
+                prev = await cache.keyed(self._query, "xml_previous.sql", xml_ids, "current_id", head=[self.storage_path])
+                prev_rows = [r for rows in prev.values() for r in rows]
+                linked = {int(r["id"]) for r in xml_rows if r.get("risk_monitoring_contract_id") is not None}
+                cards = sorted({int(r["risk_monitoring_contract_id"]) for r in xml_rows if int(r["id"]) in linked})
+                files: List[Dict[str, Any]] = []
+                id_parts, card_parts = chunks(xml_ids), chunks(cards)
+                for n in range(max(len(id_parts), len(card_parts))):
+                    cache.count("daily_files.sql")
+                    files += await self._query("daily_files.sql", ids=id_parts[n] if n < len(id_parts) else [],
+                                               cards=card_parts[n] if n < len(card_parts) else [])
+                # файлы предыдущих версий привязанных XML — среди файлов тех же закупок
+                prev_linked = [int(p["id"]) for p in prev_rows if p.get("id") is not None
+                               and _num(p.get("current_id")) is not None and int(_num(p["current_id"])) in linked]
+                cache.seed_files(files, list(xml_ids) + prev_linked, cards)
+                st["detail"] = f"XML {len(xml_ids)}, предыдущих версий {len(prev_rows)}, файлов {len(files)}"
+            except Exception as e:  # noqa: BLE001 — анализаторы запросят сами
+                logger.warning(f"Ежедневный прогон {d}: предварительная загрузка не выполнена ({type(e).__name__}: "
+                               f"{str(e)[:200]}) — анализаторы запросят данные сами")
+                st["detail"] = "не выполнена"
+            cache.queries["daily_xml.sql"] = 1
 
     async def _documents(self, xml_ids: List[int], xa: Any, cache: Any, scope: Dict[str, Any],
                          file_results: Dict[int, Dict[str, Any]], events: Dict[int, Dict[str, Any]]) -> None:
