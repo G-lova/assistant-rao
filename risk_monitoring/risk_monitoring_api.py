@@ -23,6 +23,10 @@ ALLOWED_TABLES = {
 
 
 LIMITER_WAIT = 120   # наибольшее ожидание своей очереди к API, с
+# 422 на ссылку на предыдущую версию документа (pipeline.previous_scope_id)
+import re as _re
+
+PREVIOUS_REJECTED_RE = _re.compile(r"предыдущ\w*\s+верси|previous_scope", _re.IGNORECASE)
 
 
 class RiskAPIError(Exception):
@@ -96,8 +100,17 @@ class RiskMonitoringAPI:
                 raise RiskAPIRetryable(f"HTTP {resp.status}", resp.status)
 
             if resp.status != 200:
-                body = (await resp.text())[:300]
-                raise RiskAPIError(f"HTTP {resp.status}: {body}", resp.status)
+                raw = await resp.text()
+                try:   # сообщение API — JSON с \uXXXX: в журнал — читаемым текстом
+                    import json as _json
+
+                    parsed = _json.loads(raw)
+                    body = parsed.get("message") or raw
+                    if parsed.get("errors"):
+                        body = f"{body} {parsed['errors']}"
+                except Exception:  # noqa: BLE001
+                    body = raw
+                raise RiskAPIError(f"HTTP {resp.status}: {str(body)[:500]}", resp.status)
 
             data = await resp.json(content_type=None)
             if data.get("status") != "ok":
@@ -111,14 +124,34 @@ class RiskMonitoringAPI:
         return data["data"]
 
     async def patch_ai_analysis(self, table: str, record_id: int, ai_analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """Меняет только ai_analysis. Значение — непустой JSON-объект или непустая строка."""
+        """Меняет только ai_analysis. Значение — непустой JSON-объект или непустая строка.
+
+        API проверяет ``pipeline.previous_scope_id``: предыдущей версией может быть только более ранний документ
+        (422 «Предыдущая версия допустима только для более раннего …», файл 5367, 21.10.2026). Тогда результат
+        записывается без ссылки на предыдущую версию: кандидат и ответ API сохраняются в
+        ``pipeline.previous_scope_rejected`` — анализ не теряется из-за спорной связи версий.
+        """
         self._check_table(table)
         if not ai_analysis:
             raise ValueError("ai_analysis не может быть пустым")
-        data = await self._request(
-            "PATCH",
-            json={"table": table, "id": int(record_id), "ai_analysis": ai_analysis},
-        )
+        try:
+            data = await self._request(
+                "PATCH",
+                json={"table": table, "id": int(record_id), "ai_analysis": ai_analysis},
+            )
+        except RiskAPIError as e:
+            pipe = (ai_analysis or {}).get("pipeline") if isinstance(ai_analysis, dict) else None
+            if e.status != 422 or not isinstance(pipe, dict) or pipe.get("previous_scope_id") is None \
+                    or not PREVIOUS_REJECTED_RE.search(str(e)):
+                raise
+            logger.warning(f"{table} {record_id}: API отклонил previous_scope_id={pipe['previous_scope_id']} ({e}) — "
+                           f"запись без ссылки на предыдущую версию")
+            pipe.update(previous_scope_rejected={"id": pipe["previous_scope_id"], "reason": str(e)[:300]},
+                        previous_scope_id=None)
+            data = await self._request(
+                "PATCH",
+                json={"table": table, "id": int(record_id), "ai_analysis": ai_analysis},
+            )
         return data["data"]
 
     def _sibling(self, path: str) -> str:

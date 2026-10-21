@@ -344,6 +344,11 @@ def summary_facts(s: Dict[str, Any]) -> List[str]:
     if risky:
         facts.append("Заказчики с признаками риска: " + "; ".join(
             f"{x['name']} — балл {_sc(x['score'])} ({', '.join(x['risks'][:3])})" for x in risky[:5]) + ".")
+    partial = {k: v for k, v in (s.get("stages") or {}).items() if (v or {}).get("status") == "partial"}
+    if partial:
+        left = max((v or {}).get("xml_left") or 0 for v in partial.values())
+        facts.append(f"Прогон не успел обработать все документы (осталось XML: {left}) — сводка предварительная, "
+                     "прогон за эту дату нужно повторить.")
     failed = [k for k, v in (s.get("stages") or {}).items() if (v or {}).get("status") == "failed"]
     if failed:
         facts.append("Не завершились этапы: " + ", ".join(failed) + " — сводка может быть неполной.")
@@ -447,7 +452,7 @@ class DailyRun:
 
                     api = self.risk_api = RiskMonitoringAPI(self.http_manager, self.environment)
                 status = pipe.get("status") or "running"
-                done = status in ("completed", "failed")
+                done = status in ("completed", "failed", "partial")
                 row = await api.upsert_daily_run(
                     export_date, status, stages=_stage_states(ai.get("stages")) if ai.get("stages") else None,
                     started_at=passport.iso_tz(pipe["started_at"]) if pipe.get("started_at") else None,
@@ -544,7 +549,18 @@ class DailyRun:
             st_xml = {"status": "skipped"}
         fa = None
         parts = chunks(xml_ids, max(1, int(settings.DAILY_XML_BATCH)))
+        deadline = time.monotonic() + settings.DAILY_DOCUMENTS_BUDGET_SEC
         for n, part in enumerate(parts, 1):
+            if time.monotonic() > deadline:
+                # бюджет времени на документы исчерпан: остальное — следующим запуском за ту же дату (уже
+                # проанализированное пропускается), а этот прогон успевает собрать закупки и сводку до предела задачи
+                left = len(parts) - n + 1
+                for st in (st_files, st_xml):
+                    if st.get("status") == "completed":
+                        st.update(status="partial", batches_left=left, xml_left=sum(len(p) for p in parts[n - 1:]))
+                logger.warning(f"Ежедневный прогон: бюджет {settings.DAILY_DOCUMENTS_BUDGET_SEC} с на документы "
+                               f"исчерпан, не обработано пачек {left} — повторите прогон за эту дату")
+                break
             progress.subject(f"Ежедневный прогон, пачка XML {n}/{len(parts)}")
             if st_files.get("status") != "skipped":
                 t = time.monotonic()
@@ -709,7 +725,9 @@ class DailyRun:
         self.stages["summary"] = {"status": "completed", "llm": used_llm}
         summary["resume"] = resume
         summary["facts"] = summary_facts(summary)
-        summary["pipeline"] = {"schema_version": SCHEMA_VERSION, "stage": "S0-S4", "status": "completed",
+        partial = any((v or {}).get("status") == "partial" for v in self.stages.values())
+        summary["pipeline"] = {"schema_version": SCHEMA_VERSION, "stage": "S0-S4",
+                               "status": "partial" if partial else "completed",
                                "started_at": started, "finished_at": passport.now_iso(),
                                "prompt_versions": {"daily_resume": PROMPT_VERSION} if used_llm else {},
                                "llm": {"requests": CALLS["requests"] - before.get("requests", 0),
