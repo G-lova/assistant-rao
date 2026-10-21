@@ -105,3 +105,28 @@ class BudgetTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class XlsxRawTest(unittest.TestCase):
+    """Книга без обычных листов в workbook.xml: текст из XML листов."""
+
+    def test_raw_text(self):
+        """Общие строки, строки в ячейке и числа; не ZIP — пусто."""
+        import zipfile
+
+        from risk_monitoring.xlsx_raw import xlsx_raw_text
+
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "book.xlsx")
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("xl/workbook.xml", "<workbook><sheets/></workbook>")
+            zf.writestr("xl/sharedStrings.xml", "<sst><si><t>Ведомость объёмов</t></si><si><t>Бетон &amp; арматура</t></si></sst>")
+            zf.writestr("xl/worksheets/sheet1.xml",
+                        '<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row>'
+                        '<row r="2"><c r="A2" t="s"><v>1</v></c><c r="B2"><v>12.5</v></c>'
+                        '<c r="C2" t="inlineStr"><is><t>м3</t></is></c></row></sheetData></worksheet>')
+        self.assertEqual(xlsx_raw_text(path), "Лист 1:\nВедомость объёмов\nБетон & арматура | 12.5 | м3")
+        bad = os.path.join(tmp, "bad.xlsx")
+        with open(bad, "wb") as f:
+            f.write(b"not a zip")
+        self.assertEqual(xlsx_raw_text(bad), "")

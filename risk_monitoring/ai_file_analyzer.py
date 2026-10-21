@@ -877,7 +877,19 @@ class AIFileAnalyzer:
                     return res["text"]
             except Exception as e:  # noqa: BLE001 — переходим на общий FileReader
                 logger.warning(f"pdf_text: {file_name}: {type(e).__name__}: {e}; читаю через FileReader")
-        return await self.file_reader.read_file(path, file_name)
+        try:
+            return await self.file_reader.read_file(path, file_name)
+        except Exception as e:  # noqa: BLE001
+            if ext != ".xlsx":
+                raise
+            # книга без обычных листов («Sheet name is an empty list»): текст прямо из XML листов; пусто — файл
+            # получит результат «нет текста», а не ошибку при каждом запуске
+            from risk_monitoring.xlsx_raw import xlsx_raw_text
+
+            text = await asyncio.to_thread(xlsx_raw_text, path)
+            logger.warning(f"{file_name}: Excel не прочитан ({type(e).__name__}: {str(e)[:200]}); "
+                           f"текст из XML листов — {len(text)} символов")
+            return text
 
     def _bad_text_analysis(self, row: Dict[str, Any], quality: Dict[str, Any], print_kind: Optional[Dict[str, Any]],
                            prev_id: Optional[int], attempt: int, sha: str) -> Dict[str, Any]:
