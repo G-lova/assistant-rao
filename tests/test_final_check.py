@@ -87,11 +87,11 @@ class VerifyRawDataTest(unittest.TestCase):
         self.assertEqual([d["value"] for d in out["dates"]], ["2025-12-01", "02.09.2025", "с даты заключения"])
         self.assertEqual(out["contract_number"]["value"], "3А-8/487/25")   # З/3 — тот же номер
         self.assertEqual(out["organizations"][0]["inn"], "7021000043")
-        self.assertNotIn("ogrn", out["organizations"][0])
-        self.assertNotIn("inn", out["organizations"][1])
+        self.assertEqual(out["organizations"][0]["ogrn"], "")      # ключи остаются — форма raw_data прежняя
+        self.assertEqual(out["organizations"][1]["inn"], "")
         self.assertEqual(out["organizations"][1]["name"], "ООО «Горизонт»")   # сама сторона остаётся
-        self.assertNotIn("nmck_method", out)
-        self.assertNotIn("deadline", out["reporting_documentation"][0])
+        self.assertEqual(out["nmck_method"], {"method": "", "assessment": "", "evidence": None})
+        self.assertEqual(out["reporting_documentation"][0]["deadline"], "")
         self.assertEqual(out["reporting_documentation"][1]["deadline"], "в течение 10 дней")
         self.assertEqual(out["summary"], "Договор подряда")
         self.assertTrue(any("1500000" in x for x in dropped))
@@ -102,7 +102,7 @@ class VerifyRawDataTest(unittest.TestCase):
         text = CONTRACT_TEXT + " Итого 124,92 тыс.руб. 05.11.2025"
         for bad in ("124,92 тыс.руб.", "05.11.2025", "124,92"):
             out, _ = verify_raw_data({"contract_number": {"value": bad}}, text)
-            self.assertNotIn("contract_number", out, bad)
+            self.assertIsNone(out["contract_number"]["value"], bad)   # ключ остаётся, значение пустое
 
     def test_expected_number_replaces_other_number(self):
         """Документ упоминает договор экспертизы, а извлечён номер сметы — номер исправляется на номер экспертизы."""
@@ -117,7 +117,7 @@ class VerifyRawDataTest(unittest.TestCase):
     def test_contract_number_absent(self):
         """Номер, которого нет в тексте, убирается."""
         out, _ = verify_raw_data({"contract_number": {"value": "123/45"}}, CONTRACT_TEXT)
-        self.assertNotIn("contract_number", out)
+        self.assertEqual(out["contract_number"], {"value": None, "evidence": None})
 
     def test_nmck_method_kept_when_in_text(self):
         """Метод НМЦК остаётся, если документ его называет."""

@@ -223,6 +223,52 @@ class _TextIndex:
         return not n or n in self.norm
 
 
+def inn_valid(value: Any) -> bool:
+    """Контрольные числа ИНН (10 цифр — юрлицо, 12 — физлицо/ИП).
+
+    Заглушки вида «6301000000», «7001000000» их не проходят.
+
+    Args:
+        value: ИНН.
+
+    Returns:
+        bool: ``True`` — ИНН корректен.
+    """
+    d = [int(c) for c in _digits(value)]
+    if len(d) == 10:
+        return sum(a * b for a, b in zip((2, 4, 10, 3, 5, 9, 4, 6, 8), d)) % 11 % 10 == d[9]
+    if len(d) == 12:
+        n11 = sum(a * b for a, b in zip((7, 2, 4, 10, 3, 5, 9, 4, 6, 8), d)) % 11 % 10
+        n12 = sum(a * b for a, b in zip((3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8), d)) % 11 % 10
+        return n11 == d[10] and n12 == d[11]
+    return False
+
+
+def ogrn_valid(value: Any) -> bool:
+    """Контрольное число ОГРН (13 цифр) или ОГРНИП (15 цифр).
+
+    Args:
+        value: ОГРН / ОГРНИП.
+
+    Returns:
+        bool: ``True`` — номер корректен.
+    """
+    d = _digits(value)
+    if len(d) == 13:
+        return int(d[:12]) % 11 % 10 == int(d[12])
+    if len(d) == 15:
+        return int(d[:14]) % 13 % 10 == int(d[14])
+    return False
+
+
+def kpp_valid(value: Any) -> bool:
+    """Формат КПП: 9 знаков, 5–6-й могут быть буквами (``NNNNPPNNN``)."""
+    return bool(re.fullmatch(r"\d{4}[\dA-Z]{2}\d{3}", re.sub(r"\s", "", str(value or "")).upper()))
+
+
+REQUISITE_CHECKS = {"inn": inn_valid, "kpp": kpp_valid, "ogrn": ogrn_valid}
+
+
 def plausible_contract_number(value: Any) -> bool:
     """Похоже ли значение на номер договора: есть цифра, это не сумма и не дата, не слишком длинное.
 
@@ -285,7 +331,7 @@ def verify_raw_data(raw: Dict[str, Any], text: str,
     if isinstance(cn, dict) and cn.get("value"):
         if not plausible_contract_number(cn["value"]) or not idx.has_contract_number(cn["value"]):
             dropped.append(f"номер договора: {cn['value']}")
-            out.pop("contract_number")
+            out["contract_number"] = {"value": None, "evidence": None}   # форма как у пустого поля после объединения
     cn = out.get("contract_number")
     if expected_number and idx.has_contract_number(expected_number) and normalize_number(expected_number):
         current = cn.get("value") if isinstance(cn, dict) else None
@@ -297,9 +343,9 @@ def verify_raw_data(raw: Dict[str, Any], text: str,
         if not isinstance(org, dict):
             continue
         for key in ("inn", "kpp", "ogrn"):
-            if org.get(key) and not idx.has_number_id(org[key]):
+            if org.get(key) and (not idx.has_number_id(org[key]) or not REQUISITE_CHECKS[key](org[key])):
                 dropped.append(f"{key.upper()} {org.get('name') or ''}: {org[key]}".strip())
-                org.pop(key)
+                org[key] = ""
 
     nm = out.get("nmck_method")
     if isinstance(nm, dict) and nm.get("method"):
@@ -308,19 +354,19 @@ def verify_raw_data(raw: Dict[str, Any], text: str,
         mentions_nmck = "нмцк" in idx.low or re.search(r"начальн\w*\s*\(?\s*максимальн", idx.low)
         if not mentions_nmck or (stems and not any(s in idx.low for s in stems)):
             dropped.append(f"метод НМЦК: {nm['method']}")
-            out.pop("nmck_method")
+            out["nmck_method"] = {"method": "", "assessment": "", "evidence": None}
 
     pt = out.get("planned_timeline")
     if isinstance(pt, dict):
         for key in ("start_date", "end_date"):
             if pt.get(key) and not date_in_text(pt[key], idx.dates):
                 dropped.append(f"срок {key}: {pt[key]}")
-                pt.pop(key)
+                pt[key] = ""
 
     for rep in out.get("reporting_documentation") or []:
         if isinstance(rep, dict) and rep.get("deadline") and not date_in_text(rep["deadline"], idx.dates):
             dropped.append(f"срок отчётного документа: {rep['deadline']}")
-            rep.pop("deadline")
+            rep["deadline"] = ""
 
     return out, dropped
 
@@ -346,3 +392,36 @@ def verify_extraction(extracted: Any, text: str, filename: str = "", expected_nu
     result = dict(extracted)
     result["raw_data"] = raw
     return result
+
+
+# Поля, без которых запись списка (дата, сумма, сторона, закон…) не имеет смысла
+_KEY_FIELDS = ("value", "name", "document_name", "method", "description", "start_date", "end_date", "address", "inn")
+
+
+def drop_nulls(obj: Any) -> Any:
+    """Убирает ``null`` из ответа модели, чтобы дальше всё выглядело как раньше («поля нет», а не ``None``).
+
+    Схемы извлечения разрешают ``null`` для значений, которых нет в тексте (раньше модель была обязана написать
+    строку и придумывала ИНН, метод НМЦК и т. п.). Код объединения блоков и потребители ``raw_data`` рассчитаны на
+    отсутствующие ключи, а ``str(None)`` дал бы строку «None». Записи списков без ключевого значения
+    (``value``, ``name`` …) удаляются целиком.
+
+    Args:
+        obj: Ответ модели по блоку или его часть.
+
+    Returns:
+        Тот же объект без ``null``.
+    """
+    if isinstance(obj, dict):
+        return {k: drop_nulls(v) for k, v in obj.items() if v is not None}
+    if isinstance(obj, list):
+        out = []
+        for item in obj:
+            if item is None:
+                continue
+            if isinstance(item, dict) and any(k in item for k in _KEY_FIELDS) and not any(
+                    item.get(k) not in (None, "", [], {}) for k in _KEY_FIELDS):
+                continue   # запись без значения: только цитата/контекст
+            out.append(drop_nulls(item))
+        return out
+    return obj

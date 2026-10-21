@@ -1,6 +1,6 @@
 {
     "type": "object",
-    "description": "Структурированный анализ документа закупки. Все поля обязательны.",
+    "description": "Структурированный анализ документа закупки. Отсутствующие в тексте значения — null.",
     "required": [
         "type_compliance",
         "readability",
@@ -106,7 +106,7 @@
         },
         "raw_data": {
             "type": "object",
-            "description": "Извлечённые структурированные данные из документа.",
+            "description": "Извлечённые структурированные данные. Значения, которых нет в тексте, — null или пустой список; ничего не придумывай.",
             "required": [
                 "document_name",
                 "summary"
@@ -120,11 +120,17 @@
                     ],
                     "properties": {
                         "value": {
-                            "type": "string",
+                            "type": [
+                                "string",
+                                "null"
+                            ],
                             "description": "Наименование документа (как написано)"
                         },
                         "confidence": {
-                            "type": "number",
+                            "type": [
+                                "number",
+                                "null"
+                            ],
                             "minimum": 0,
                             "maximum": 1
                         }
@@ -141,25 +147,15 @@
                         "evidence"
                     ],
                     "properties": {
-                        "value": {
-                            "type": [
-                                "string",
-                                "null"
-                            ],
-                            "default": "",
-                            "description": "Номер контракта"
-                        },
                         "evidence": {
                             "type": "object",
-                            "default": {},
                             "required": [
-                                "fragment",
-                                "confidence"
+                                "fragment"
                             ],
                             "properties": {
-                                "fragment":  {
+                                "fragment": {
                                     "type": "string",
-                                    "description": "Посимвольный фрагмент документа (до 300 символов), содержащий извлеченное значение."
+                                    "description": "Сначала найди в тексте ТОЧНУЮ посимвольную цитату (до 300 символов) со значением и запиши её сюда; значение ниже бери только из этой цитаты. Нет цитаты — не создавай объект."
                                 },
                                 "section": {
                                     "type": [
@@ -176,11 +172,21 @@
                                     "description": "Номер страницы."
                                 },
                                 "confidence": {
-                                    "type": "number",
+                                    "type": [
+                                        "number",
+                                        "null"
+                                    ],
                                     "minimum": 0,
                                     "maximum": 1
                                 }
                             }
+                        },
+                        "value": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "description": "Номер контракта"
                         }
                     }
                 },
@@ -188,34 +194,16 @@
                     "type": "array",
                     "items": {
                         "type": "object",
-                        "requred": [
-                            "value",
-                            "context",
-                            "evidence"
-                        ],
                         "properties": {
-                            "value": {
-                                "type": [
-                                    "string",
-                                    "null"
-                                ],
-                                "description": "Дата в формате ГГГГ-ММ-ДД или как указана в документе."
-                            },
-                            "context": {
-                                "type": "string",
-                                "description": "Контекст упоминания даты: 'Дата извещения', 'Дата контракта' и т.п."
-                            },
                             "evidence": {
                                 "type": "object",
-                                "default": {},
                                 "required": [
-                                    "fragment",
-                                    "confidence"
+                                    "fragment"
                                 ],
                                 "properties": {
-                                    "fragment":  {
+                                    "fragment": {
                                         "type": "string",
-                                        "description": "Посимвольный фрагмент документа (до 300 символов), содержащий извлеченное значение."
+                                        "description": "Сначала найди в тексте ТОЧНУЮ посимвольную цитату (до 300 символов) со значением и запиши её сюда; значение ниже бери только из этой цитаты. Нет цитаты — не создавай объект."
                                     },
                                     "section": {
                                         "type": [
@@ -232,13 +220,35 @@
                                         "description": "Номер страницы."
                                     },
                                     "confidence": {
-                                        "type": "number",
+                                        "type": [
+                                            "number",
+                                            "null"
+                                        ],
                                         "minimum": 0,
                                         "maximum": 1
                                     }
                                 }
+                            },
+                            "value": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "description": "Дата в формате ГГГГ-ММ-ДД или как указана в документе."
+                            },
+                            "context": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "description": "Контекст упоминания даты: 'Дата извещения', 'Дата контракта' и т.п."
                             }
-                        }
+                        },
+                        "required": [
+                            "value",
+                            "context",
+                            "evidence"
+                        ]
                     },
                     "default": []
                 },
@@ -246,13 +256,41 @@
                     "type": "array",
                     "items": {
                         "type": "object",
-                        "requred": [
-                            "value",
-                            "currency",
-                            "context",
-                            "evidence"
-                        ],
                         "properties": {
+                            "evidence": {
+                                "type": "object",
+                                "required": [
+                                    "fragment"
+                                ],
+                                "properties": {
+                                    "fragment": {
+                                        "type": "string",
+                                        "description": "Сначала найди в тексте ТОЧНУЮ посимвольную цитату (до 300 символов) со значением и запиши её сюда; значение ниже бери только из этой цитаты. Нет цитаты — не создавай объект."
+                                    },
+                                    "section": {
+                                        "type": [
+                                            "string",
+                                            "null"
+                                        ],
+                                        "description": "Название раздела, пункт"
+                                    },
+                                    "page": {
+                                        "type": [
+                                            "integer",
+                                            "null"
+                                        ],
+                                        "description": "Номер страницы."
+                                    },
+                                    "confidence": {
+                                        "type": [
+                                            "number",
+                                            "null"
+                                        ],
+                                        "minimum": 0,
+                                        "maximum": 1
+                                    }
+                                }
+                            },
                             "value": {
                                 "type": [
                                     "number",
@@ -273,71 +311,29 @@
                                     "null"
                                 ],
                                 "description": "Контекст упоминания суммы: 'НМЦК', 'Цена контракта', 'Оплата по счёту'."
-                            },
-                            "evidence": {
-                                "type": "object",
-                                "default": {},
-                                "required": [
-                                    "fragment",
-                                    "confidence"
-                                ],
-                                "properties": {
-                                    "fragment":  {
-                                        "type": "string",
-                                        "description": "Посимвольный фрагмент документа (до 300 символов), содержащий извлеченное значение."
-                                    },
-                                    "section": {
-                                        "type": [
-                                            "string",
-                                            "null"
-                                        ],
-                                        "description": "Название раздела, пункт"
-                                    },
-                                    "page": {
-                                        "type": [
-                                            "integer",
-                                            "null"
-                                        ],
-                                        "description": "Номер страницы."
-                                    },
-                                    "confidence": {
-                                        "type": "number",
-                                        "minimum": 0,
-                                        "maximum": 1
-                                    }
-                                }
                             }
-                        }
+                        },
+                        "required": [
+                            "value",
+                            "currency",
+                            "context",
+                            "evidence"
+                        ]
                     },
                     "default": []
                 },
                 "nmck_method": {
                     "type": "object",
-                    "requred": [
-                        "method",
-                        "assessment",
-                        "evidence"
-                    ],
                     "properties": {
-                        "method": {
-                            "type": "string",
-                            "description": "Наименование метода обоснования НМЦК: 'среднерыночный', 'индексный', 'затратный', 'тарифный' и т.п."
-                        },
-                        "assessment": {
-                            "type": "string",
-                            "description": "Оценка корректности формул и входных параметров, соответствующих данному методу обоснования НМЦК."
-                        },
                         "evidence": {
                             "type": "object",
-                            "default": {},
                             "required": [
-                                "fragment",
-                                "confidence"
+                                "fragment"
                             ],
                             "properties": {
-                                "fragment":  {
+                                "fragment": {
                                     "type": "string",
-                                    "description": "Посимвольный фрагмент документа (до 300 символов), содержащий извлеченное значение."
+                                    "description": "Сначала найди в тексте ТОЧНУЮ посимвольную цитату (до 300 символов) со значением и запиши её сюда; значение ниже бери только из этой цитаты. Нет цитаты — не создавай объект."
                                 },
                                 "section": {
                                     "type": [
@@ -354,63 +350,50 @@
                                     "description": "Номер страницы."
                                 },
                                 "confidence": {
-                                    "type": "number",
+                                    "type": [
+                                        "number",
+                                        "null"
+                                    ],
                                     "minimum": 0,
                                     "maximum": 1
                                 }
                             }
+                        },
+                        "method": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "description": "Метод обоснования НМЦК, только если он прямо назван в тексте ('метод сопоставимых рыночных цен', 'проектно-сметный' и т.п.); иначе null."
+                        },
+                        "assessment": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "description": "Только если в документе есть расчёт НМЦК (формулы, таблица цен): кратко, корректен ли расчёт. Если расчёта нет — null."
                         }
-                    }
+                    },
+                    "required": [
+                        "method",
+                        "assessment",
+                        "evidence"
+                    ]
                 },
                 "organizations": {
                     "type": "array",
                     "items": {
                         "type": "object",
-                        "requred": [
-                            "role",
-                            "name",
-                            "inn",
-                            "kpp",
-                            "ogrn",
-                            "address",
-                            "evidence"
-                        ],
                         "properties": {
-                            "role": {
-                                "type": "string",
-                                "description": "Роль юрлица в закупке, например, 'заказчик', 'поставщик', 'участник'."
-                            },
-                            "name": {
-                                "type": "string",
-                                "description": "Полное наименование организации."
-                            },
-                            "inn": {
-                                "type": "string",
-                                "description": "ИНН организации (если указан)."
-                            },
-                            "kpp": {
-                                "type": "string",
-                                "description": "КПП (для российских юрлиц)."
-                            },
-                            "ogrn": {
-                                "type": "string",
-                                "description": "ОГРН."
-                            },
-                            "address": {
-                                "type": "string",
-                                "description": "Юридический или фактический адрес."
-                            },
                             "evidence": {
                                 "type": "object",
-                                "default": {},
                                 "required": [
-                                    "fragment",
-                                    "confidence"
+                                    "fragment"
                                 ],
                                 "properties": {
-                                    "fragment":  {
+                                    "fragment": {
                                         "type": "string",
-                                        "description": "Посимвольный фрагмент документа (до 300 символов), содержащий извлеченное значение."
+                                        "description": "Сначала найди в тексте ТОЧНУЮ посимвольную цитату (до 300 символов) со значением и запиши её сюда; значение ниже бери только из этой цитаты. Нет цитаты — не создавай объект."
                                     },
                                     "section": {
                                         "type": [
@@ -427,13 +410,67 @@
                                         "description": "Номер страницы."
                                     },
                                     "confidence": {
-                                        "type": "number",
+                                        "type": [
+                                            "number",
+                                            "null"
+                                        ],
                                         "minimum": 0,
                                         "maximum": 1
                                     }
                                 }
+                            },
+                            "role": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "description": "Роль юрлица в закупке, например, 'заказчик', 'поставщик', 'участник'."
+                            },
+                            "name": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "description": "Полное наименование организации."
+                            },
+                            "inn": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "description": "ИНН организации (если указан). Если в тексте нет — null."
+                            },
+                            "kpp": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "description": "КПП (для российских юрлиц). Если в тексте нет — null."
+                            },
+                            "ogrn": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "description": "ОГРН. Если в тексте нет — null."
+                            },
+                            "address": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "description": "Юридический или фактический адрес. Если в тексте нет — null."
                             }
-                        }
+                        },
+                        "required": [
+                            "role",
+                            "name",
+                            "inn",
+                            "kpp",
+                            "ogrn",
+                            "address",
+                            "evidence"
+                        ]
                     },
                     "default": []
                 },
@@ -441,27 +478,18 @@
                     "type": "array",
                     "items": {
                         "type": "object",
-                        "requred": [
-                            "value",
-                            "evidence"
-                        ],
                         "properties": {
-                            "value": {
-                                "type": "string",
-                                "description": "Упоминания законов и нормативных актов, сгруппированные по названию"
-                            },
                             "evidence": {
                                 "type": "array",
                                 "items": {
                                     "type": "object",
                                     "required": [
-                                        "fragment",
-                                        "confidence"
+                                        "fragment"
                                     ],
                                     "properties": {
-                                        "fragment":  {
+                                        "fragment": {
                                             "type": "string",
-                                            "description": "Посимвольный фрагмент документа (до 300 символов), содержащий извлеченное значение."
+                                            "description": "Сначала найди в тексте ТОЧНУЮ посимвольную цитату (до 300 символов) со значением и запиши её сюда; значение ниже бери только из этой цитаты. Нет цитаты — не создавай объект."
                                         },
                                         "section": {
                                             "type": [
@@ -478,40 +506,44 @@
                                             "description": "Номер страницы."
                                         },
                                         "confidence": {
-                                            "type": "number",
+                                            "type": [
+                                                "number",
+                                                "null"
+                                            ],
                                             "minimum": 0,
                                             "maximum": 1
                                         }
                                     }
                                 }
+                            },
+                            "value": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "description": "Упоминания законов и нормативных актов, сгруппированные по названию"
                             }
-                        }
+                        },
+                        "required": [
+                            "value",
+                            "evidence"
+                        ]
                     },
                     "default": []
                 },
                 "procurement_subject": {
                     "type": "object",
-                    "requred": [
-                        "description",
-                        "evidence"
-                    ],
                     "default": {},
                     "properties": {
-                        "description": {
-                            "type": "string",
-                            "description": "Цель заключения контракта. Предмет закупки."
-                        },
                         "evidence": {
                             "type": "object",
-                            "default": {},
                             "required": [
-                                "fragment",
-                                "confidence"
+                                "fragment"
                             ],
                             "properties": {
-                                "fragment":  {
+                                "fragment": {
                                     "type": "string",
-                                    "description": "Посимвольный фрагмент документа (до 300 символов), подтверждающий извлеченное значение."
+                                    "description": "Сначала найди в тексте ТОЧНУЮ посимвольную цитату (до 300 символов) со значением и запиши её сюда; значение ниже бери только из этой цитаты. Нет цитаты — не создавай объект."
                                 },
                                 "section": {
                                     "type": [
@@ -528,13 +560,27 @@
                                     "description": "Номер страницы."
                                 },
                                 "confidence": {
-                                    "type": "number",
+                                    "type": [
+                                        "number",
+                                        "null"
+                                    ],
                                     "minimum": 0,
                                     "maximum": 1
                                 }
                             }
+                        },
+                        "description": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "description": "Цель заключения контракта. Предмет закупки."
                         }
-                    }
+                    },
+                    "required": [
+                        "description",
+                        "evidence"
+                    ]
                 },
                 "items": {
                     "type": "array",
@@ -542,33 +588,15 @@
                     "items": {
                         "type": "object",
                         "properties": {
-                            "name": {
-                                "type": "string",
-                                "description": "Наименование конкретного товара/работы/услуги. С описанием брендов, если указаны."
-                            },
-                            "quantity": {
-                                "type": "number",
-                                "description": "Количество."
-                            },
-                            "unit": {
-                                "type": "string",
-                                "description": "Единица измерения."
-                            },
-                            "specifications": {
-                                "type": "string",
-                                "description": "Технические характеристики."
-                            },
                             "evidence": {
                                 "type": "object",
-                                "default": {},
                                 "required": [
-                                    "fragment",
-                                    "confidence"
+                                    "fragment"
                                 ],
                                 "properties": {
-                                    "fragment":  {
+                                    "fragment": {
                                         "type": "string",
-                                        "description": "Посимвольный фрагмент документа (до 300 символов), содержащий извлеченные значения."
+                                        "description": "Сначала найди в тексте ТОЧНУЮ посимвольную цитату (до 300 символов) со значением и запиши её сюда; значение ниже бери только из этой цитаты. Нет цитаты — не создавай объект."
                                     },
                                     "section": {
                                         "type": [
@@ -585,35 +613,103 @@
                                         "description": "Номер страницы."
                                     },
                                     "confidence": {
-                                        "type": "number",
+                                        "type": [
+                                            "number",
+                                            "null"
+                                        ],
                                         "minimum": 0,
                                         "maximum": 1
                                     }
                                 }
+                            },
+                            "name": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "description": "Наименование конкретного товара/работы/услуги. С описанием брендов, если указаны."
+                            },
+                            "quantity": {
+                                "type": [
+                                    "number",
+                                    "null"
+                                ],
+                                "description": "Количество."
+                            },
+                            "unit": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "description": "Единица измерения."
+                            },
+                            "specifications": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "description": "Технические характеристики."
                             }
                         }
                     }
                 },
                 "planned_timeline": {
                     "type": "object",
-                    "requred": [
-                        "start_date",
-                        "end_date",
-                        "milestones",
-                        "evidence"
-                    ],
                     "description": "Информация о сроках выполнения работ/поставки.",
                     "properties": {
+                        "evidence": {
+                            "type": "object",
+                            "required": [
+                                "fragment"
+                            ],
+                            "properties": {
+                                "fragment": {
+                                    "type": "string",
+                                    "description": "Сначала найди в тексте ТОЧНУЮ посимвольную цитату (до 300 символов) со значением и запиши её сюда; значение ниже бери только из этой цитаты. Нет цитаты — не создавай объект."
+                                },
+                                "section": {
+                                    "type": [
+                                        "string",
+                                        "null"
+                                    ],
+                                    "description": "Название раздела, пункт"
+                                },
+                                "page": {
+                                    "type": [
+                                        "integer",
+                                        "null"
+                                    ],
+                                    "description": "Номер страницы."
+                                },
+                                "confidence": {
+                                    "type": [
+                                        "number",
+                                        "null"
+                                    ],
+                                    "minimum": 0,
+                                    "maximum": 1
+                                }
+                            }
+                        },
                         "start_date": {
-                            "type": "string",
+                            "type": [
+                                "string",
+                                "null"
+                            ],
                             "description": "Дата начала в формате ГГГГ-ММ-ДД."
                         },
                         "end_date": {
-                            "type": "string",
+                            "type": [
+                                "string",
+                                "null"
+                            ],
                             "description": "Дата окончания в формате ГГГГ-ММ-ДД."
                         },
                         "total_duration": {
-                            "type": "string",
+                            "type": [
+                                "string",
+                                "null"
+                            ],
                             "description": "Общая продолжительность (например, '30 календарных дней')."
                         },
                         "milestones": {
@@ -626,51 +722,30 @@
                                 ],
                                 "properties": {
                                     "stage": {
-                                        "type": "string",
+                                        "type": [
+                                            "string",
+                                            "null"
+                                        ],
                                         "description": "Название этапа."
                                     },
                                     "deadline": {
-                                        "type": "string",
+                                        "type": [
+                                            "string",
+                                            "null"
+                                        ],
                                         "description": "Срок выполнения этапа."
                                     }
                                 }
                             },
                             "description": "Этапы выполнения работ (если есть)."
-                        },
-                        "evidence": {
-                            "type": "object",
-                            "default": {},
-                            "required": [
-                                "fragment",
-                                "confidence"
-                            ],
-                            "properties": {
-                                "fragment":  {
-                                    "type": "string",
-                                    "description": "Посимвольный фрагмент документа (до 300 символов), содержащий извлеченное значение."
-                                },
-                                "section": {
-                                    "type": [
-                                        "string",
-                                        "null"
-                                    ],
-                                    "description": "Название раздела, пункт"
-                                },
-                                "page": {
-                                    "type": [
-                                        "integer",
-                                        "null"
-                                    ],
-                                    "description": "Номер страницы."
-                                },
-                                "confidence": {
-                                    "type": "number",
-                                    "minimum": 0,
-                                    "maximum": 1
-                                }
-                            }
                         }
-                    }
+                    },
+                    "required": [
+                        "start_date",
+                        "end_date",
+                        "milestones",
+                        "evidence"
+                    ]
                 },
                 "reporting_documentation": {
                     "type": "array",
@@ -678,41 +753,16 @@
                     "description": "Требования к составу отчетной документации.",
                     "items": {
                         "type": "object",
-                        "requred": [
-                            "document_name",
-                            "evidence"
-                        ],
                         "properties": {
-                            "document_name": {
-                                "type": "string",
-                                "description": "Наименование отчета."
-                            },
-                            "frequency": {
-                                "type": "string",
-                                "default": "",
-                                "description": "Периодичность предоставления."
-                            },
-                            "deadline": {
-                                "type": "string",
-                                "default": "",
-                                "description": "Срок предоставления."
-                            },
-                            "format": {
-                                "type": "string",
-                                "default": "",
-                                "description": "Требуемый формат."
-                            },
                             "evidence": {
                                 "type": "object",
-                                "default": {},
                                 "required": [
-                                    "fragment",
-                                    "confidence"
+                                    "fragment"
                                 ],
                                 "properties": {
-                                    "fragment":  {
+                                    "fragment": {
                                         "type": "string",
-                                        "description": "Посимвольный фрагмент документа (до 300 символов), содержащий извлеченное значение."
+                                        "description": "Сначала найди в тексте ТОЧНУЮ посимвольную цитату (до 300 символов) со значением и запиши её сюда; значение ниже бери только из этой цитаты. Нет цитаты — не создавай объект."
                                     },
                                     "section": {
                                         "type": [
@@ -729,44 +779,63 @@
                                         "description": "Номер страницы."
                                     },
                                     "confidence": {
-                                        "type": "number",
+                                        "type": [
+                                            "number",
+                                            "null"
+                                        ],
                                         "minimum": 0,
                                         "maximum": 1
                                     }
                                 }
+                            },
+                            "document_name": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "description": "Наименование отчета."
+                            },
+                            "frequency": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "description": "Периодичность предоставления."
+                            },
+                            "deadline": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "description": "Срок предоставления."
+                            },
+                            "format": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "description": "Требуемый формат."
                             }
-                        }
+                        },
+                        "required": [
+                            "document_name",
+                            "evidence"
+                        ]
                     }
                 },
                 "execution_location": {
                     "type": "object",
-                    "requred": [
-                        "address",
-                        "evidence"
-                    ],
                     "description": "Место выполнения работ, услуг или поставки товара.",
                     "properties": {
-                        "address": {
-                            "type": "string",
-                            "default": "",
-                            "description": "Полный адрес (индекс, город, улица, дом)."
-                        },
-                        "special_conditions": {
-                            "type": "string",
-                            "default": "",
-                            "description": "Особые условия доставки/выполнения."
-                        },
                         "evidence": {
                             "type": "object",
-                            "default": {},
                             "required": [
-                                "fragment",
-                                "confidence"
+                                "fragment"
                             ],
                             "properties": {
-                                "fragment":  {
+                                "fragment": {
                                     "type": "string",
-                                    "description": "Посимвольный фрагмент документа (до 300 символов), содержащий извлеченное значение."
+                                    "description": "Сначала найди в тексте ТОЧНУЮ посимвольную цитату (до 300 символов) со значением и запиши её сюда; значение ниже бери только из этой цитаты. Нет цитаты — не создавай объект."
                                 },
                                 "section": {
                                     "type": [
@@ -783,39 +852,53 @@
                                     "description": "Номер страницы."
                                 },
                                 "confidence": {
-                                    "type": "number",
+                                    "type": [
+                                        "number",
+                                        "null"
+                                    ],
                                     "minimum": 0,
                                     "maximum": 1
                                 }
                             }
+                        },
+                        "address": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "description": "Полный адрес (индекс, город, улица, дом)."
+                        },
+                        "special_conditions": {
+                            "type": [
+                                "string",
+                                "null"
+                            ],
+                            "description": "Особые условия доставки/выполнения."
                         }
-                    }
+                    },
+                    "required": [
+                        "address",
+                        "evidence"
+                    ]
                 },
                 "other_data": {
                     "type": "array",
-                        "requred": [
-                            "value",
-                            "evidence"
-                        ],
+                    "requred": [
+                        "value",
+                        "evidence"
+                    ],
                     "items": {
                         "type": "object",
                         "properties": {
-                            "value": {
-                                "type": "string",
-                                "default": [],
-                                "description": "Другие важные данные для этого типа документа"
-                            },
                             "evidence": {
                                 "type": "object",
-                                "default": {},
                                 "required": [
-                                    "fragment",
-                                    "confidence"
+                                    "fragment"
                                 ],
                                 "properties": {
-                                    "fragment":  {
+                                    "fragment": {
                                         "type": "string",
-                                        "description": "Посимвольный фрагмент документа (до 300 символов), содержащий извлеченное значение."
+                                        "description": "Сначала найди в тексте ТОЧНУЮ посимвольную цитату (до 300 символов) со значением и запиши её сюда; значение ниже бери только из этой цитаты. Нет цитаты — не создавай объект."
                                     },
                                     "section": {
                                         "type": [
@@ -832,14 +915,25 @@
                                         "description": "Номер страницы."
                                     },
                                     "confidence": {
-                                        "type": "number",
+                                        "type": [
+                                            "number",
+                                            "null"
+                                        ],
                                         "minimum": 0,
                                         "maximum": 1
                                     }
                                 }
+                            },
+                            "value": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "default": [],
+                                "description": "Другие важные данные для этого типа документа"
                             }
-                        }                        
-                    }                            
+                        }
+                    }
                 }
             }
         }
