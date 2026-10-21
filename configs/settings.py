@@ -103,6 +103,10 @@ RETRY_BACKOFF = 2.0
 BOILERPLATE_ENABLED = True
 BOILERPLATE_MIN_SOURCES = 3
 
+# Риски модели в паспорте файла по кодам, которые внешняя система считает правилом (FIN-004…008, CTR-002 …), не
+# ставятся: решает правило по данным ЕИС (в закупке — drop_rule_covered)
+FILE_DROP_RULE_COVERED = True
+
 # Анализировать ли файл прошлой редакции, если уже известна новая (superseded_by); в режиме отладки (force) —
 # анализируется всегда
 ANALYZE_SUPERSEDED = False

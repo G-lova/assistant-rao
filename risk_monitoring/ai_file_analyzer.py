@@ -723,9 +723,16 @@ class AIFileAnalyzer:
             # правила отбора уточняются, а результат риск-анализа может быть из кэша — применяем их повторно
             from risk_monitoring.document_risk_analyzer import absence_contradicted, rejected_by_rules
 
+            from risk_monitoring.risk_catalog import RISKS as CATALOG
+
+            # коды, которые внешняя система считает правилом по данным ЕИС (FIN-004…008 ↔ pz_p1…p4, CTR-002 ↔ pz_p7):
+            # правило точнее модели, риск модели по ним в паспорте файла не ставится (прогон 21.10.2026: FIN-005
+            # «в соответствии с приложенным файлом», CTR-002 «30 дней с заключения»)
+            covered = {c for c, rec in CATALOG.items() if rec.get("indicator")} if settings.FILE_DROP_RULE_COVERED else set()
             before = len(risk["risks"])
             risk = {**risk, "risks": [r for r in risk["risks"]
-                                      if not rejected_by_rules(r) and not absence_contradicted(r, text)]}
+                                      if not rejected_by_rules(r) and not absence_contradicted(r, text)
+                                      and r.get("code") not in covered]}
             if len(risk["risks"]) < before:
                 progress.note(f"правила отбора сняли рисков: {before - len(risk['risks'])}")
         async with progress.step("фильтр типовых формулировок") as st:

@@ -169,3 +169,46 @@ class ArchiveVolumesTest(unittest.TestCase):
         self.assertEqual(ai["archive_volume"]["first_file_id"], 5285)
         self.assertEqual(ai["pipeline"]["result"], "archive_volume")
         self.assertEqual(ai["risks"], [])
+
+
+class Run1021FalsePositivesTest(unittest.TestCase):
+    """Ложные риски промежуточных итогов 21.10.2026 (журнал risk_monitoring_ai_analysis_log)."""
+
+    def test_rejected(self):
+        """ПП 1042 обеих сторон, ПП 2571 с «N», ПП 2604, реестры российской продукции, подсказка площадки, МНН,
+        Ethernet/RJ-45, приказы о методиках НМЦК, реестровые записи, шапка таблицы и итоги сметы."""
+        from risk_monitoring.document_risk_analyzer import rejected_by_rules
+
+        r = lambda c, f: rejected_by_rules({"code": c, "evidence": {"fragment": f}})  # noqa: E731
+        self.assertTrue(r("FIN-016", "7.2.1. Пеня начисляется за каждый день просрочки исполнения заказчиком обязательства"))
+        self.assertTrue(r("DOC-006", "9.3.2. Штрафы начисляются за неисполнение или ненадлежащее исполнение Поставщиком"))
+        self.assertTrue(r("DOC-004", "Подрядчик должен в соответствии с Постановлением Правительства РФ от 29.12.2021 N 2571"))
+        self.assertTrue(r("DOC-004", "Xmax - предельное максимальное значение характеристики квалификации участников"))
+        self.assertTrue(r("DOC-005", "номер реестровой записи из реестра российской промышленной продукции"))
+        self.assertTrue(r("DOC-006", "порядковый номер реестровой записи из единого реестра российских программ для ЭВМ"))
+        self.assertTrue(r("DOC-002", 'рекомендуется в поле "Товарный знак" экранной формы веб-интерфейса электронной площадки'))
+        self.assertTrue(r("DOC-002", "nameDrugProduct: ТИРОФИБАН, КОНЦЕНТРАТ ДЛЯ ПРИГОТОВЛЕНИЯ РАСТВОРА"))
+        self.assertTrue(r("DOC-002", "Тип абонентского порта: медный, ethernet, RJ-45."))
+        self.assertTrue(r("DOC-010", "Начальная (максимальная) цена контракта сформирована в соответствии с приказом Минздрава России"))
+        self.assertTrue(r("DOC-010", "Предложение 2: Реестровая запись: 2272400261625001102"))
+        self.assertTrue(r("DOC-007", "№ п/п Наименование товара Объем поставки Предложение 1 Предложение 2"))
+        self.assertTrue(r("DOC-007", "ИТОГИ ПО СМЕТЕ: ВСЕГО по смете Итого прямые затраты (справочно) 640133,30"))
+
+    def test_kept(self):
+        """Реальные признаки остаются: модель принтера, торговая марка штукатурки, совместимость с конкретным аппаратом."""
+        from risk_monitoring.document_risk_analyzer import rejected_by_rules
+
+        r = lambda c, f: rejected_by_rules({"code": c, "evidence": {"fragment": f}})  # noqa: E731
+        self.assertFalse(r("DOC-002", "Совместимость: Canon i-SENSYS MF752CDW"))
+        self.assertFalse(r("DOC-002", "Смесь штукатурная «Ротбанд», КНАУФ кг 340"))
+        self.assertFalse(r("DOC-007", "5.1. Срок оказания услуг: С 01.08.2026 по 31.07.2027. Дата окончания исполнения контракта 15.09.2027."))
+
+    def test_readability_extraction_failed(self):
+        """Сбой извлечения на всех блоках — «читаемость не оценена», а не deny."""
+        from risk_monitoring import passport
+
+        rd = passport.readability_block({"readability": {"status": "deny", "issues": ["Ошибка анализа документа"]},
+                                         "raw_data": {}}, 3, 5000)
+        self.assertIsNone(rd["status"])
+        self.assertTrue(rd["extraction_failed"])
+        self.assertEqual(passport.readability_block({"readability": {"status": "allow"}}, 1, 10)["status"], "allow")

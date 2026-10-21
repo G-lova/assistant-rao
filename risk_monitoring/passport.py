@@ -379,6 +379,11 @@ def readability_block(extraction: Optional[Dict[str, Any]], pages: Optional[int]
         Dict[str, Any]: ``status``, ``readability_score``, ``main_language``, ``pages``, ``text_chars``, ``ocr`` …
     """
     rd = dict((extraction or {}).get("readability") or {})
+    if rd.get("issues") == ["Ошибка анализа документа"] and not (extraction or {}).get("raw_data"):
+        # извлечение данных не выполнено (сбой модели на всех блоках) — читаемость не оценена, а не «документ
+        # нечитаем»: текст есть, риски по нему найдены (прогон 21.10.2026: deny у 8 файлов с рисками)
+        rd = {"status": None, "issues": ["Читаемость не оценена: извлечение данных не выполнено (сбой модели)"],
+              "extraction_failed": True}
     rd["pages"] = pages
     rd["text_chars"] = int(text_chars or 0)
     if ocr_used is not None:
