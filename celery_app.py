@@ -6,6 +6,7 @@ from celery.schedules import crontab
 
 from configs.config import Config
 from configs.retry_utils import sync_retry, async_retry, API_RETRY_CONFIG, EXPERTS_RETRY_CONFIG
+from configs import settings  # час страховки ежедневного прогона риск-мониторинга
 
 
 # Настройка логирования
@@ -89,7 +90,14 @@ celery_app.conf.update(
             'task': 'purge_expired_texts_task',
             'schedule': crontab(hour=3, minute=30),
         },
-        # Типовые положения о закупке (223-ФЗ) из ЕИС: новые редакции за последние дни (risk_monitoring.settings)
+        # Типовые положения о закупке (223-ФЗ) из ЕИС: новые редакции за последние дни (configs.settings)
+        # Страховка ежедневного прогона риск-мониторинга: если Laravel не вызвал POST /risk-monitoring/daily,
+        # прогон за последнюю дату выгрузки запускается сам (час — configs.settings.DAILY_WATCHDOG_HOUR)
+        'rm-daily-watchdog': {
+            'task': 'rm_daily_watchdog_task',
+            'schedule': crontab(hour=settings.DAILY_WATCHDOG_HOUR, minute=0),
+            'options': {'queue': 'risk_monitoring'},
+        },
         'typal-clauses-daily': {
             'task': 'rm_typal_clauses_task',
             'schedule': crontab(hour=5, minute=40),

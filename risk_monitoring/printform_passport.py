@@ -89,6 +89,17 @@ def _title(form: PrintForm) -> Optional[str]:
     return None
 
 
+LAW_LINE_RE = re.compile(r"закон\w*|\bфз\b|кодекс|постановлени\w+\s+правительства|\bот\s+\d{2}\.\d{2}\.\d{4}\s*(г\.?)?\s*(n|№)", re.I)
+
+
+def _not_brand_quote(hit: str) -> bool:
+    """Кавычки не товарный знак: строчное слово («триплекс») или название акта («О средствах массовой информации»)."""
+    if not (hit.startswith("«") or hit.startswith('"')):
+        return False
+    q = hit.strip("«»\" ")
+    return not q or not q[0].isupper() or bool(re.match(r"^(о|об|по)\s", q, re.I))
+
+
 def brand_candidates(form: PrintForm) -> List[str]:
     """Строки раздела «Объект закупки» и наименование объекта с признаками товарного знака.
 
@@ -106,10 +117,10 @@ def brand_candidates(form: PrintForm) -> List[str]:
     size = 0
     for line in lines:
         n = _norm(line)
-        if len(n) < 4 or ORG_RE.search(n) or re.fullmatch(r"[\d\s.,%-]+", n):
+        if len(n) < 4 or ORG_RE.search(n) or LAW_LINE_RE.search(n) or re.fullmatch(r"[\d\s.,%-]+", n):
             continue
         hits = [m.group(0) for m in BRAND_HINT_RE.finditer(KTRU_RE.sub(" ", n))]
-        hits = [h for h in hits if h.strip("«»\"").lower() not in NOT_BRAND]
+        hits = [h for h in hits if h.strip("«»\"").lower() not in NOT_BRAND and not _not_brand_quote(h)]
         if not hits or n in out:
             continue
         out.append(n)

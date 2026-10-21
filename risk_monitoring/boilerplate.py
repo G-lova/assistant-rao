@@ -57,7 +57,7 @@ def contains(fragment: str, chunk_text: str, share: float = CONTAIN_SHARE) -> bo
 
 def min_sources() -> int:
     """Порог числа разных заказчиков (``settings.BOILERPLATE_MIN_SOURCES``)."""
-    from risk_monitoring import settings
+    from configs import settings
 
     return max(2, int(settings.BOILERPLATE_MIN_SOURCES))
 

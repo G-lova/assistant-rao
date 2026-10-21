@@ -24,6 +24,40 @@ def _llm_summary(before: Dict[str, int], stats: Dict[str, Any]) -> Dict[str, Any
     return {"requests": CALLS["requests"] - before["requests"], "failed": CALLS["failed"] - before["failed"], **(stats or {})}
 
 
+PULSE_SECONDS = 60   # как часто задача пишет в журнал, что она жива и чем занята
+
+
+async def _pulsed(coro: Any, name: str, task_id: str) -> Any:
+    """Выполняет корутину задачи и раз в ``PULSE_SECONDS`` пишет в журнал «пульс».
+
+    Пульс показывает, что задача жива, даже когда долгий запрос к модели не пишет ничего: сколько она идёт, сколько
+    запросов к модели сделано, сколько выполняется сейчас, сколько сбоев и прерываний по пределу времени, и какие этапы
+    идут прямо сейчас и как долго («Файл 2805 «ТЗ.docx»: анализ рисков: запрос к модели 340 с»; ``progress``).
+    """
+    import time
+
+    from risk_monitoring import progress
+    from risk_monitoring.llm_json import CALLS
+
+    start, before = time.monotonic(), dict(CALLS)
+
+    async def pulse() -> None:
+        """Пишет пульс, пока задача не завершится."""
+        while True:
+            await asyncio.sleep(PULSE_SECONDS)
+            logger.info(f"{name}[{task_id}]: идёт {time.monotonic() - start:.0f} с; запросов к модели "
+                        f"{CALLS['requests'] - before.get('requests', 0)}, сейчас выполняется {CALLS.get('inflight', 0)}, "
+                        f"сбоев {CALLS['failed'] - before.get('failed', 0)}, прервано по времени "
+                        f"{CALLS.get('deadline', 0) - before.get('deadline', 0)}"
+                        + ("; сейчас: " + "; ".join(progress.active()) if progress.active() else ""))
+
+    beat = asyncio.ensure_future(pulse())
+    try:
+        return await coro
+    finally:
+        beat.cancel()
+
+
 def _strip(results: List[Dict[str, Any]], include_analysis: bool) -> List[Dict[str, Any]]:
     """Убирает ``ai_analysis`` из ответа задачи (он уже записан во внешнюю БД), если не просили вернуть."""
     if include_analysis:
@@ -69,7 +103,7 @@ def rm_analyze_files_task(self, file_ids: List[int], environment: str, force: bo
             finally:
                 stats.update(analyzer.stats)
 
-    results = asyncio.run(run())
+    results = asyncio.run(_pulsed(run(), self.name, self.request.id))
     summary = _summary(results)
     summary["llm"] = _llm_summary(before, stats)
     logger.info(f"Риск-мониторинг, файлы: {summary}")
@@ -141,7 +175,7 @@ def rm_analyze_xml_task(self, xml_ids: List[int], environment: str, force: bool 
             finally:
                 stats.update(getattr(analyzer, "stats", {}) or {})
 
-    results = asyncio.run(run())
+    results = asyncio.run(_pulsed(run(), self.name, self.request.id))
     summary = _summary(results)
     summary["llm"] = _llm_summary(before, stats)
     logger.info(f"Риск-мониторинг, XML: {summary}")
@@ -194,7 +228,7 @@ def rm_analyze_contracts_task(self, card_ids: List[int], environment: str, force
                 documents.update(analyzer.documents)
 
     documents: Dict[str, Any] = {}
-    results = asyncio.run(run())
+    results = asyncio.run(_pulsed(run(), self.name, self.request.id))
     summary = _summary(results)
     summary["llm"] = _llm_summary(before, stats)
     logger.info(f"Риск-мониторинг, закупки: {summary}; документы: {documents}")
@@ -240,7 +274,7 @@ def rm_analyze_orgs_task(self, org_ids: List[int], environment: str, roles: List
             finally:
                 stats.update(analyzer.stats)
 
-    results = asyncio.run(run())
+    results = asyncio.run(_pulsed(run(), self.name, self.request.id))
     summary = _summary(results)
     summary["llm"] = _llm_summary(before, stats)
     logger.info(f"Риск-мониторинг, организации: {summary}")
@@ -270,7 +304,7 @@ def rm_typal_clauses_task(self, environment: str = None, regions: List[str] = No
 
     if already_succeeded(self):
         return self.AsyncResult(self.request.id).result
-    from risk_monitoring import settings
+    from configs import settings
 
     if not settings.TYPAL_LOAD_ENABLED and not xml_base64:
         return {"skipped": "TYPAL_LOAD_ENABLED = False"}
@@ -303,6 +337,95 @@ def rm_typal_clauses_task(self, environment: str = None, regions: List[str] = No
             finally:
                 out["stats"] = loader.stats
 
-    asyncio.run(run())
+    asyncio.run(_pulsed(run(), self.name, self.request.id))
     logger.info(f"Типовые положения: {out.get('stats')}, версий {len(out['loaded'])}")
     return out
+
+
+async def _daily_run(environment: str, export_date: str, force: bool, push: bool, use_llm: bool,
+                     stages: List[str] = None) -> Dict[str, Any]:
+    """Прогон за дату с защитой от повтора: готовая сводка возвращается без пересчёта (кроме ``force``),
+    идущий прогон второй раз не запускается."""
+    from configs.ai_repo import AIRepo
+    from configs.http_client_manager import HTTPClientManager
+    from risk_monitoring import daily
+
+    d = daily.parse_date(export_date).isoformat()
+    async with HTTPClientManager(timeout=180.0) as mgr, AIRepo() as repo:
+        env = environment.lower()
+        stored = (await repo.get_rm_results(env, daily.KIND, [daily.run_key(d)])).get(daily.run_key(d))
+        if not force and daily.completed(stored):
+            logger.info(f"Ежедневный прогон {d} ({env}) уже выполнен — повтор не нужен")
+            return {"status": "already_done", "date": d, "summary": stored["ai_analysis"]}
+        if not force and daily.running_fresh(stored):
+            logger.info(f"Ежедневный прогон {d} ({env}) уже идёт — второй не запускается")
+            return {"status": "already_running", "date": d}
+        run = daily.DailyRun(mgr, environment, repo, push_results=push, use_llm=use_llm, stages=stages)
+        summary = await run.run(d)
+        return {"status": "done", "date": d, "summary": summary}
+
+
+@celery_app.task(bind=True, name="rm_daily_task", soft_time_limit=13500, time_limit=14100)
+def rm_daily_task(self, environment: str, export_date: str, force: bool = False, push: bool = None,
+                  use_llm: bool = True, stages: List[str] = None) -> Dict[str, Any]:
+    """Ежедневный прогон за дату выгрузки (S0–S4) и сводка (``risk_monitoring.daily``).
+
+    Args:
+        environment: Окружение внешней системы.
+        export_date: Дата выгрузки ЕИС ``ГГГГ-ММ-ДД``.
+        force: Пересобрать готовую сводку (режим отладки; документы всё равно повторно не анализируются).
+        push: Записывать результаты этапов во внешнюю БД (по умолчанию ``settings.DAILY_PUSH``).
+        use_llm: Резюме пишет модель.
+        stages: Этапы (по умолчанию все).
+
+    Returns:
+        Dict[str, Any]: ``status`` (``done`` / ``already_done`` / ``already_running``), ``date``, ``summary``.
+    """
+    from celery_app import already_succeeded
+
+    if already_succeeded(self):
+        return self.AsyncResult(self.request.id).result
+    from configs import settings
+
+    push = settings.DAILY_PUSH if push is None else push
+    return asyncio.run(_pulsed(_daily_run(environment, export_date, force, push, use_llm, stages),
+                               self.name, self.request.id))
+
+
+@celery_app.task(bind=True, name="rm_daily_watchdog_task", soft_time_limit=13500, time_limit=14100)
+def rm_daily_watchdog_task(self) -> Dict[str, Any]:
+    """Страховка по расписанию: если Laravel не вызвал прогон за последнюю дату выгрузки, запускает его сам.
+
+    Окружение — ``settings.DAILY_ENVIRONMENT``; дата — последняя ``exact_date`` архивов ЕИС не позже сегодня.
+    Готовую или идущую сводку не трогает (``_daily_run``).
+
+    Returns:
+        Dict[str, Any]: Результат прогона или причина пропуска.
+    """
+    from celery_app import already_succeeded
+
+    if already_succeeded(self):
+        return self.AsyncResult(self.request.id).result
+    from configs import settings
+
+    if not settings.DAILY_WATCHDOG_ENABLED:
+        return {"skipped": "DAILY_WATCHDOG_ENABLED = False"}
+
+    async def run() -> Dict[str, Any]:
+        """Последняя дата выгрузки и прогон за неё."""
+        from datetime import date
+
+        from configs.http_client_manager import HTTPClientManager
+        from risk_monitoring import daily
+
+        async with HTTPClientManager(timeout=60.0) as mgr:
+            probe = daily.DailyRun(mgr, settings.DAILY_ENVIRONMENT, None)
+            rows = await probe._query("latest_export_date.sql", head=[date.today().isoformat()])
+        last = rows[0].get("exact_date") if rows else None
+        if not last:
+            return {"skipped": "нет выгрузок ЕИС"}
+        logger.info(f"Страховка ежедневного прогона: последняя выгрузка {str(last)[:10]} ({settings.DAILY_ENVIRONMENT})")
+        return await _daily_run(settings.DAILY_ENVIRONMENT, str(last)[:10], False, settings.DAILY_PUSH, True)
+
+    out = asyncio.run(_pulsed(run(), self.name, self.request.id))
+    return {k: v for k, v in out.items() if k != "summary"} if isinstance(out, dict) else out

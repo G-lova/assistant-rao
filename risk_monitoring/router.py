@@ -3,14 +3,17 @@
 * ``POST /risk-monitoring/files/analysis`` — анализ файлов по id → AI-паспорт документа;
 * ``POST /risk-monitoring/xml/analysis`` — анализ XML ЕИС по id → событие;
 * ``POST /risk-monitoring/contracts/analysis`` — анализ закупки/контракта по id карточки → паспорт, комплект, риски, балл;
-* ``POST /risk-monitoring/organisations/analysis`` — аналитика организации как заказчика и поставщика;
+* ``POST /risk-monitoring/organisations/analysis`` — аналитика организации как заказчика и поставщика
+  (принимается и написание ``/organizations/analysis``);
 * ``POST /risk-monitoring/typal-clauses/load`` и ``/typal-clauses/xml`` — загрузка типовых положений (223-ФЗ);
 * ``GET /risk-monitoring/typal-clauses/customer/{inn}`` — типовое положение заказчика;
+* ``POST /risk-monitoring/daily`` — ежедневный прогон за дату выгрузки и сводка; ``GET /risk-monitoring/daily/{date}`` —
+  готовая сводка;
 * статус задачи — существующий ``GET /task/{task_id}``.
 
 Окружение внешней системы — заголовок ``X-API-Database`` (как в остальных эндпоинтах).
 Повторный анализ уже проанализированных документов (``force``, ``recompute``) разрешён только
-в режиме отладки (``risk_monitoring.settings.RISK_MONITORING_DEBUG``).
+в режиме отладки (``configs.settings.RISK_MONITORING_DEBUG``).
 """
 from typing import List, Optional
 
@@ -163,6 +166,7 @@ async def analyze_contracts(req: PackageRequest, x_api_database: str = Header(de
 
 
 @router.post("/organisations/analysis", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/organizations/analysis", status_code=status.HTTP_202_ACCEPTED, include_in_schema=False)
 async def analyze_organisations(req: PackageRequest, x_api_database: str = Header(default="dev", alias="X-API-Database")):
     """Ставит в очередь аналитику организаций (``risk_monitoring_organisations``) как заказчика и поставщика.
 
@@ -293,3 +297,92 @@ async def customer_typal_clause(inn: str, kpp: Optional[str] = None, on: Optiona
     if not found:
         raise HTTPException(status_code=404, detail="Заказчик не найден в загруженных типовых положениях")
     return found
+
+
+class DailyRequest(BaseModel):
+    """Ежедневный прогон за дату выгрузки ЕИС.
+
+    Attributes:
+        date: Дата выгрузки ``ГГГГ-ММ-ДД`` (``risk_monitoring_eis_archives.exact_date``).
+        stages: Этапы (``files``, ``xml``, ``contracts``, ``customers``, ``summary``); пусто — все.
+        force: Пересобрать готовую сводку (только в режиме отладки; документы повторно не анализируются).
+        push: Записывать результаты этапов во внешнюю БД; ``None`` — ``settings.DAILY_PUSH``.
+        use_llm: Резюме пишет модель.
+    """
+
+    date: str
+    stages: List[str] = Field(default_factory=list)
+    force: bool = False
+    push: Optional[bool] = None
+    use_llm: bool = True
+
+    @validator("date")
+    def _check_date(cls, v: str) -> str:
+        """Дата ``ГГГГ-ММ-ДД``."""
+        from datetime import date
+
+        return date.fromisoformat(str(v)[:10]).isoformat()
+
+    @validator("stages", each_item=True)
+    def _check_stage(cls, v: str) -> str:
+        """Этап из списка ``daily.STAGES``."""
+        from risk_monitoring.daily import STAGES
+
+        if v not in STAGES:
+            raise ValueError(f"этап — один из {', '.join(STAGES)}")
+        return v
+
+
+@router.post("/daily", status_code=status.HTTP_202_ACCEPTED)
+async def run_daily(req: DailyRequest, x_api_database: str = Header(default="dev", alias="X-API-Database")):
+    """Ставит в очередь ежедневный прогон за дату выгрузки: файлы и события XML за дату, затронутые закупки,
+    заказчики на мониторинге, сводка (``risk_monitoring.daily``).
+
+    Вызывается Laravel-командой после загрузки ЕИС; повторный вызов за ту же дату вернёт готовую сводку, а идущий
+    прогон второй раз не запустит. Если вызова не было, прогон запускает расписание (``rm_daily_watchdog_task``).
+
+    Args:
+        req: Дата, этапы, режимы.
+        x_api_database: Окружение внешней системы.
+
+    Returns:
+        dict: ``task_id``, ``date``.
+    """
+    if req.force and not Config.risk_monitoring_debug():
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Пересборка готовой сводки (force) доступна только в режиме отладки (RISK_MONITORING_DEBUG)")
+    from risk_monitoring.tasks import rm_daily_task
+
+    task = rm_daily_task.apply_async(
+        args=[x_api_database, req.date],
+        kwargs={"force": req.force, "push": req.push, "use_llm": req.use_llm, "stages": req.stages or None},
+        queue="risk_monitoring")
+    return {"task_id": task.id, "date": req.date, "status": "queued"}
+
+
+@router.get("/daily/{export_date}")
+async def get_daily(export_date: str, x_api_database: str = Header(default="dev", alias="X-API-Database")):
+    """Сводка ежедневного прогона за дату выгрузки (или отметка, что прогон идёт).
+
+    Args:
+        export_date: Дата ``ГГГГ-ММ-ДД``.
+        x_api_database: Окружение внешней системы.
+
+    Returns:
+        dict: Сводка (``scope``, ``contracts``, ``events``, ``customers``, ``attention``, ``resume``, ``pipeline``).
+
+    Raises:
+        HTTPException: 400 — неверная дата; 404 — прогона за дату не было.
+    """
+    from configs.ai_repo import AIRepo
+    from risk_monitoring import daily
+
+    try:
+        key = daily.run_key(export_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Дата — ГГГГ-ММ-ДД")
+    async with AIRepo() as repo:
+        stored = (await repo.get_rm_results(x_api_database.lower(), daily.KIND, [key])).get(key)
+    if not stored:
+        raise HTTPException(status_code=404, detail="Прогона за эту дату не было")
+    return stored["ai_analysis"]

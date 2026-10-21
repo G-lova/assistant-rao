@@ -97,6 +97,23 @@ class VerifyRawDataTest(unittest.TestCase):
         self.assertTrue(any("1500000" in x for x in dropped))
         self.assertEqual(raw["finances"][1]["value"], 1500000.0)   # исходные данные не меняются
 
+    def test_contract_number_not_a_number(self):
+        """Сумма или дата в поле номера договора убираются, даже если они есть в тексте."""
+        text = CONTRACT_TEXT + " Итого 124,92 тыс.руб. 05.11.2025"
+        for bad in ("124,92 тыс.руб.", "05.11.2025", "124,92"):
+            out, _ = verify_raw_data({"contract_number": {"value": bad}}, text)
+            self.assertNotIn("contract_number", out, bad)
+
+    def test_expected_number_replaces_other_number(self):
+        """Документ упоминает договор экспертизы, а извлечён номер сметы — номер исправляется на номер экспертизы."""
+        text = "Локальный сметный расчёт ПД-2406-24. Договор подряда (контракт) номер 3А-8/487/25 дата 15 09 25"
+        out, dropped = verify_raw_data({"contract_number": {"value": "ПД-2406-24"}}, text, expected_number="ЗА-8/487/25")
+        self.assertEqual(out["contract_number"]["value"], "ЗА-8/487/25")
+        self.assertTrue(any("ПД-2406-24 → ЗА-8/487/25" in x for x in dropped))
+        # документ о договоре экспертизы не упоминает — номер остаётся как есть
+        out, _ = verify_raw_data({"contract_number": {"value": "ПД-2406-24"}}, "Смета ПД-2406-24", expected_number="ЗА-8/487/25")
+        self.assertEqual(out["contract_number"]["value"], "ПД-2406-24")
+
     def test_contract_number_absent(self):
         """Номер, которого нет в тексте, убирается."""
         out, _ = verify_raw_data({"contract_number": {"value": "123/45"}}, CONTRACT_TEXT)
@@ -189,6 +206,26 @@ class PackageFactsTest(unittest.TestCase):
         self.assertIn("КС-2-07.10.pdf: ЗА-9/100/25", facts["номер договора"])
         self.assertIn("превышает НМЦК на 3 728 698,15", facts["цена и НМЦК"])
         self.assertIn("возможна просрочка", facts["сроки"])
+
+    def test_other_number_in_act_is_question_not_contradiction(self):
+        """Другой номер в акте — вопрос для проверки; в самом договоре — противоречие."""
+        pkg = _package()
+        pkg["documents"][2]["raw_data"][0]["contract_number"] = {"value": "ПД-2406-24"}
+        facts = package_facts(pkg, today=date(2026, 10, 19))
+        self.assertIn("требует проверки", facts["номер договора"])
+        self.assertIn("ПД-2406-24", facts["номер договора"])
+        self.assertNotIn("противоречие»", facts["номер договора"])
+        pkg["documents"][1]["raw_data"][0]["contract_number"] = {"value": "ЗА-9/1/25"}
+        self.assertIn("в договоре указан другой номер", package_facts(pkg)["номер договора"])
+
+    def test_payment_without_amount(self):
+        """Платёжка без суммы — итог с ценой договора не сравнивается."""
+        pkg = _package()
+        pkg["documents"][4]["raw_data"][3]["finances"] = []
+        line = package_facts(pkg, today=date(2026, 10, 19))["платёжные поручения"]
+        self.assertIn("2 шт.", line)
+        self.assertIn("сумма не извлечена (платежка-2.pdf)", line)
+        self.assertNotIn("меньше цены", line)
 
     def test_no_data_no_facts(self):
         """Нет сведений — нет фактов (кроме отсутствия НМЦК при известной цене)."""

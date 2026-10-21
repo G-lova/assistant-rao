@@ -94,6 +94,7 @@ def common_metrics(contracts: Sequence[Dict[str, Any]], demping_pct: float) -> D
         "contracts": n,
         "with_contract": sum(1 for c in contracts if c.get("contract_number")),
         "nmck_sum": round(sum(cp.num(c.get("nmck")) or 0 for c in contracts), 2),
+        "nmck_missing": sum(1 for c in contracts if cp.num(c.get("nmck")) is None),
         "contract_sum": round(sum(cp.num(c.get("contract_price")) or 0 for c in contracts), 2),
         "noncompetitive": len(noncomp),
         "noncompetitive_share": _share(len(noncomp), len(comp) + len(noncomp)),
@@ -138,7 +139,7 @@ def customer_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
     Args:
         contracts: Закупки заказчика за период.
         black: Записи реестра 19.28 по ИНН его поставщиков.
-        settings: Пороги (``risk_monitoring.settings``).
+        settings: Пороги (``configs.settings``).
         previous_score: Прошлый балл.
 
     Returns:
@@ -148,6 +149,7 @@ def customer_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
     with_supplier = [c for c in contracts if c.get("supplier_inn")]
     top = _top(with_supplier, "supplier_inn", "supplier_name")
     m["suppliers"] = len({str(c["supplier_inn"]).strip() for c in with_supplier})
+    m["with_supplier"] = len(with_supplier)
     m["hhi"] = _hhi(with_supplier, "supplier_inn")
     m["top_supplier_share"] = top[0]["share"] if top else None
     repeated = {code: n for code, n in _risk_codes(contracts).items() if n >= settings.REPEAT_RISK_MIN}
@@ -207,6 +209,7 @@ def supplier_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
     m = common_metrics(contracts, settings.DEMPING_PCT)
     top = _top(contracts, "customer_inn", "customer_name")
     m["customers"] = len({str(c.get("customer_inn")).strip() for c in contracts if c.get("customer_inn")})
+    m["with_customer"] = sum(1 for c in contracts if c.get("customer_inn"))
     m["top_customer_share"] = top[0]["share"] if top else None
     m["smp"] = next((c.get("supplier_status") for c in contracts if c.get("supplier_status")), None)
     active = cp.registry_matches(black, {"inn": inn}, today)
@@ -238,24 +241,81 @@ def _finish(metrics: Dict[str, Any], risks: List[Dict[str, Any]], previous_score
             **extra: Any) -> Dict[str, Any]:
     """Объединение рисков, балл и зона секции."""
     merged = passport.merge_risks(risks)
-    prof = cp.profile(merged, previous_score, (), settings.CONFIRMED_WEIGHT, tuple(settings.SCORE_ZONES))
+    prof = cp.profile(merged, previous_score, (), settings.CONFIRMED_WEIGHT, tuple(settings.SCORE_ZONES),
+                      settings.SCORE_DECAY, settings.AI_UNCONFIRMED_WEIGHT)
     return {"metrics": metrics, **extra, "risks": merged, "score": prof["score"], "zone": prof["zone"],
             "delta": prof["delta"], "previous_score": previous_score, "components": prof["components"],
             "top_factors": prof["top_factors"]}
 
 
-def default_resume(role: str, name: str, section: Dict[str, Any]) -> str:
-    """Резюме секции шаблоном (без модели)."""
+def _pct(share: Optional[float]) -> str:
+    """Доля в процентах без лишних знаков: 0.333 → «33 %»."""
+    return f"{round(100 * (share or 0))} %"
+
+
+def resume_facts(role: str, section: Dict[str, Any], settings: Any) -> List[str]:
+    """Факты секции готовыми фразами — из них модель пишет резюме, ничего не вычисляя сама.
+
+    По сырым метрикам модель путала смысл: «способ закупки не указан» — как «закупка без конкурса», три поставщика
+    с равной долей — как «доминирует первый», а при трёх контрактах делала выводы о концентрации (20.10.2026).
+
+    Args:
+        role: ``customer`` / ``supplier``.
+        section: Секция (``metrics``, ``top_suppliers`` / ``top_customers``, ``risks``, ``score``).
+        settings: Пороги (``ORG_MIN_CONTRACTS``).
+
+    Returns:
+        List[str]: Фразы в порядке: объём, конкуренция, цены, исполнение, контрагенты, риски, балл.
+    """
     m = section["metrics"]
-    who = "Заказчик" if role == "customer" else "Поставщик"
-    parts = [f"{who} {name}: {m['contracts']} закупок за период, сумма контрактов {cp.money(m['contract_sum'])} руб."]
-    if role == "customer" and section.get("top_suppliers"):
-        t = section["top_suppliers"][0]
-        parts.append(f"Крупнейший поставщик — {t['name'] or t['inn']} ({t['contracts']} контрактов).")
-    if role == "supplier" and section.get("top_customers"):
-        t = section["top_customers"][0]
-        parts.append(f"Основной заказчик — {t['name'] or t['inn']} ({t['contracts']} контрактов).")
-    parts.append(f"Балл риска {section['score']}" + (f", изменение {section['delta']:+}" if section.get("delta") else "") + ".")
+    n = m["contracts"]
+    facts = [f"Закупок за период: {n}, из них с заключённым контрактом: {m['with_contract']}; сумма контрактов "
+             f"{cp.money(m['contract_sum'])} руб., сумма НМЦК {cp.money(m['nmck_sum'])} руб"
+             + (f" (закупок без НМЦК в данных: {m['nmck_missing']} — суммы не сопоставимы)" if m.get("nmck_missing") else "")
+             + "."]
+    known = n - m["method_unknown"]
+    if known:
+        facts.append("Все закупки с известным способом — конкурентные." if not m["noncompetitive"] else
+                     f"У единственного поставщика: {m['noncompetitive']} из {known} закупок с известным способом.")
+    if m["method_unknown"]:
+        facts.append(f"Закупок, у которых способ в данных не указан: {m['method_unknown']} (это не означает закупку "
+                     "без конкурса).")
+    if m["single_application_share"] is not None:
+        facts.append(f"Конкурентных закупок с одной заявкой: {m['single_application']} ({_pct(m['single_application_share'])}).")
+    if m["avg_discount_pct"] is not None:
+        facts.append(f"Среднее снижение цены победителем {m['avg_discount_pct']} %; снижение ≥ {settings.DEMPING_PCT} % "
+                     f"(антидемпинговые меры) — закупок: {m['demping']} из тех, где снижение известно.")
+    if m["modified"] or m["terminated"]:
+        facts.append(f"Контрактов изменено: {m['modified']}, расторгнуто: {m['terminated']}.")
+    if m["penalties"]:
+        facts.append(f"Контрактов с начисленными неустойками: {m['penalties']}.")
+    top = section.get("top_suppliers") if role == "customer" else section.get("top_customers")
+    linked = m.get("with_supplier") if role == "customer" else m.get("with_customer")
+    other = "поставщик" if role == "customer" else "заказчик"
+    if top and linked:
+        if linked < settings.ORG_MIN_CONTRACTS:
+            facts.append(f"{other.capitalize()} указан в данных только у {linked} из {n} закупок — для выводов о концентрации и "
+                         f"«любимом {other}е» данных мало (нужно не меньше {settings.ORG_MIN_CONTRACTS}).")
+        elif len(top) > 1 and top[0]["contracts"] == top[1]["contracts"]:
+            facts.append(f"Контрагентов: {len(top)}; у нескольких одинаковое число контрактов — ни один не преобладает.")
+        else:
+            t = top[0]
+            facts.append(f"Крупнейший {other} — {t['name'] or t['inn']}: {t['contracts']} из {linked} контрактов ({_pct(t['share'])}).")
+    if m.get("analyzed"):
+        facts.append(f"Проанализировано закупок: {m['analyzed']}, средний балл {m['avg_score']}, в красной зоне {m['red_zone']}.")
     if section["risks"]:
-        parts.append("Факторы: " + "; ".join(f"{r['rule_id']} {r['title']}" for r in section["risks"][:3]) + ".")
-    return " ".join(parts)
+        facts.append("Признаки риска: " + "; ".join(f"{r['rule_id']} — {r['description'] or r['title']}"
+                                                   for r in section["risks"][:4]) + ".")
+    else:
+        facts.append("Признаков риска по правилам не выявлено.")
+    zones = {"green": "зелёная зона", "yellow": "жёлтая зона", "red": "красная зона"}
+    facts.append(f"Балл риска {section['score']} ({zones.get(section['zone'], section['zone'])}).")
+    return facts
+
+
+def default_resume(role: str, name: str, section: Dict[str, Any], settings: Any = None) -> str:
+    """Резюме секции шаблоном (без модели): название и факты :func:`resume_facts`."""
+    if settings is None:
+        from configs import settings
+    who = "Заказчик" if role == "customer" else "Поставщик"
+    return f"{who} {name}. " + " ".join(resume_facts(role, section, settings))

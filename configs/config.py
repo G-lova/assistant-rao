@@ -4,7 +4,6 @@ from dotenv import load_dotenv
 from dataclasses import dataclass
 
 from configs import settings
-from risk_monitoring import settings as rm_settings
 
 
 load_dotenv()
@@ -162,8 +161,8 @@ class Config:
     EVAL_LINK_CONCURRENCY = settings.EVAL_LINK_CONCURRENCY
     # Срок ссылок риск-мониторинга на общий документ: закрытие закупки/контракта + RM_TEXT_AFTER_CLOSE_DAYS,
     # но не дольше RM_TEXT_MAX_RETENTION_DAYS от загрузки (решение 13.10.2026)
-    RM_TEXT_AFTER_CLOSE_DAYS = rm_settings.RM_TEXT_AFTER_CLOSE_DAYS
-    RM_TEXT_MAX_RETENTION_DAYS = rm_settings.RM_TEXT_MAX_RETENTION_DAYS
+    RM_TEXT_AFTER_CLOSE_DAYS = settings.RM_TEXT_AFTER_CLOSE_DAYS
+    RM_TEXT_MAX_RETENTION_DAYS = settings.RM_TEXT_MAX_RETENTION_DAYS
 
     # Paths
     SQL_QUERIES_PATH = os.getenv("SQL_QUERIES_PATH", "queries/")
@@ -171,7 +170,7 @@ class Config:
     LOG_PATH = os.getenv("LOG_PATH", "logs/")
     
     # Application
-    APP_ENV = os.getenv("APP_ENV", "development")
+    APP_ENV = os.getenv("APP_ENV", "prod")
     DEBUG = os.getenv("DEBUG", "False").lower() == "true"
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     LOG_FILE = os.getenv("LOG_FILE", "logs/app.log")
@@ -374,11 +373,9 @@ class Config:
     def risk_monitoring_debug(cls) -> bool:
         """Включён ли режим отладки риск-мониторинга (повторный анализ уже проанализированных документов).
 
-        Флаг — ``risk_monitoring/settings.py`` (``RISK_MONITORING_DEBUG``).
+        Флаг — ``configs/settings.py`` (``RISK_MONITORING_DEBUG``).
 
         Returns:
             bool: ``True`` — повторный анализ разрешён.
         """
-        from risk_monitoring import settings as rm
-
-        return bool(rm.RISK_MONITORING_DEBUG)
+        return bool(settings.RISK_MONITORING_DEBUG)

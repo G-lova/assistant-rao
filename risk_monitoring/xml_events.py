@@ -569,6 +569,15 @@ def document_changes(old: Optional[List[Dict[str, Any]]], new: List[Dict[str, An
 
 # ------------------------------------------------------------------------ классификация
 
+PRICE_SUBTYPES = {"PUR-003", "CON-002"}
+
+
+def _price_changed(c: Dict[str, Any]) -> bool:
+    """Изменение цены — оба значения числа и они различаются."""
+    old, new = _num(c.get("old")), _num(c.get("new"))
+    return old is not None and new is not None and abs(old - new) > 0.005
+
+
 def subtypes(tag: str, changes: Sequence[Dict[str, Any]]) -> List[str]:
     """Подтипы события по путям изменений (концепция, гл. 11.4–11.5).
 
@@ -584,6 +593,8 @@ def subtypes(tag: str, changes: Sequence[Dict[str, Any]]) -> List[str]:
     for c in changes:
         p = c["path"].lower()
         for rx, code in rules:
+            if code in PRICE_SUBTYPES and re.search(rx, p) and not _price_changed(c):
+                break   # цена «появилась» или «исчезла» при перестройке XML, а не изменилась (2893, 20.10.2026)
             if re.search(rx, p) and code not in found:
                 found.append(code)
                 break
@@ -848,6 +859,9 @@ def event_allows(code: str, event: Optional[Dict[str, Any]]) -> bool:
     return True
 
 
+EVENT_MIN_LEVEL = 0.3   # риски события ниже этого уровня модель сама считает несущественными
+
+
 def to_external_event_risks(llm_risks: Sequence[Dict[str, Any]], event: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Риски из ответа ``EventAnalyzer`` → внешний формат.
 
@@ -857,6 +871,7 @@ def to_external_event_risks(llm_risks: Sequence[Dict[str, Any]], event: Optional
     Returns:
         List[Dict[str, Any]]: Риски с ``source = ai_event``.
     """
+    from risk_monitoring.document_risk_analyzer import SELF_DENIAL_RE
     from risk_monitoring.passport import as_text_list, clamp01
 
     out = []
@@ -865,6 +880,11 @@ def to_external_event_risks(llm_risks: Sequence[Dict[str, Any]], event: Optional
             continue
         code = r.get("rule_id")
         if code not in risk_catalog.RISKS or not event_allows(code, event):
+            continue
+        # модель перечисляет и риски, которых нет («…что исключает риск», уровень 0.1) — это не риски
+        level = clamp01(r.get("level"))
+        if (level is not None and level < EVENT_MIN_LEVEL) or SELF_DENIAL_RE.search(
+                f"{r.get('title') or ''} {r.get('description') or ''}"):
             continue
         out.append({"rule_id": code, "title": r.get("title") or risk_catalog.title(code),
                     "description": r.get("description") or "", "level": clamp01(r.get("level")) or 0.5,

@@ -45,11 +45,25 @@ class ContextOverflowTest(unittest.TestCase):
     """Обработка переполнения в ResilientClient и в TypeDataExtractor."""
 
     def test_reduce_output(self):
-        """Запрос 13385 из 16384: ответ уменьшается до 2967 и запрос повторяется сразу."""
+        """«at least 13385» = 16384 − 3000 + 1 — нижняя граница, длина неизвестна: ответ уменьшается вдвое (1500)."""
         fake = Fake(10 ** 6, room_needed=2967)
         client = r.ResilientClient(fake, retries=1)
         asyncio.run(client.chat.completions.create(model="m", max_tokens=3000, messages=[{"role": "user", "content": "x"}]))
-        self.assertEqual([c[1] for c in fake.calls], [3000, 2967])
+        self.assertEqual([c[1] for c in fake.calls], [3000, 1500])
+
+    def test_known_length(self):
+        """Точная длина запроса (не нижняя граница) — ответ уменьшается до остатка контекста."""
+        kw = {"max_tokens": 3000}
+
+        class E(Exception):
+            status_code = 400
+
+            def __str__(self):
+                return ("maximum context length is 16384 tokens. However, you requested 3000 output tokens and your "
+                        "prompt contains at least 14000 input tokens")
+
+        self.assertTrue(r.fit_output(E(), kw))
+        self.assertEqual(kw["max_tokens"], 16384 - 14000 - r.CONTEXT_MARGIN)
 
     def test_overflow_raises(self):
         """На ответ остаётся меньше MIN_OUTPUT_TOKENS — ContextOverflow (без пауз и повторов)."""
@@ -90,3 +104,33 @@ class ContextOverflowTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AskTextTest(unittest.TestCase):
+    """``LLMJson.ask_text``: резюме обычным текстом, <think> и JSON-обёртка убираются."""
+
+    def test_ask_text(self):
+        """Ответ с рассуждением и в JSON → чистый текст."""
+        try:
+            from risk_monitoring.llm_json import LLMJson
+        except ImportError as e:
+            raise unittest.SkipTest(f"нет зависимостей: {e}")
+        answers = iter(["<think>думаю</think>Закупка бокса; риски DOC-003.", '{"resume": "Текст резюме."}'])
+
+        class C:
+            def __init__(self):
+                self.chat = type("X", (), {})()
+                self.chat.completions = self
+
+            async def create(self, **kw):
+                msg = type("M", (), {"content": next(answers)})()
+                return type("R", (), {"choices": [type("Ch", (), {"message": msg})()]})()
+
+        llm = LLMJson(C(), "m")
+        from configs import llm_resilience as lr
+        lr.STREAM, saved = False, lr.STREAM
+        try:
+            self.assertEqual(asyncio.run(llm.ask_text("s", "u")), "Закупка бокса; риски DOC-003.")
+            self.assertEqual(asyncio.run(llm.ask_text("s", "u")), "Текст резюме.")
+        finally:
+            lr.STREAM = saved

@@ -16,7 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from configs.config import Config
 from configs.logger import get_logger
 from risk_monitoring import contract_package as cp
-from risk_monitoring import passport, rm_sql, settings
+from configs import settings
+from risk_monitoring import passport, progress, rm_sql
 
 logger = get_logger(__name__)
 
@@ -28,12 +29,20 @@ RESUME_SYSTEM = (
     "Ты — аналитик риск-мониторинга госзакупок (44-ФЗ, 223-ФЗ). По паспорту закупки, её рискам и событиям напиши "
     "резюме для аналитика: 4–7 предложений, по-русски, без вступлений. Что закупают и на какой стадии, главные риски "
     "со ссылкой на источник (документ, событие ЕИС, правило, реестр), что проверить в первую очередь. Не придумывай "
-    "фактов, которых нет во входных данных; не делай вывод о нарушении — только о признаках риска.")
+    "фактов, которых нет во входных данных; не делай вывод о нарушении — только о признаках риска. Ответ — обычный "
+    "текст, без JSON, списков и разметки.")
 RESUME_SCHEMA = {"type": "object", "properties": {"resume": {"type": "string"}}, "required": ["resume"]}
 
 
 def _none(v: Any) -> Any:
-    """NaN/NaT из DataFrame → ``None``."""
+    """NaN/NaT из DataFrame и JSON ``null`` → ``None``.
+
+    ``JSON_UNQUOTE(JSON_EXTRACT(...))`` над значением ``null`` возвращает строку ``"null"``: без замены она
+    считалась признаком изменения/расторжения контракта и «поставщиком» с ИНН ``null`` (аналитика организаций
+    20.10.2026: изменено и расторгнуто 60 % контрактов у всех трёх заказчиков, HHI по поставщику ``null``).
+    """
+    if isinstance(v, str) and v.strip().lower() == "null":
+        return None
     try:
         import pandas as pd
 
@@ -129,7 +138,31 @@ class ContractAnalyzer:
             f.update(rm_status="completed", source="internal", detected_type=(ai.get("doc_type") or {}).get("detected_type"),
                      resume=ai.get("resume"), total_doc_risk=ai.get("total_doc_risk"), risks=ai.get("risks"),
                      finances=(ai.get("raw_data") or {}).get("finances") if isinstance(ai.get("raw_data"), dict) else None,
-                     superseded_by=ai.get("superseded_by"))
+                     superseded_by=ai.get("superseded_by"), content_sha256=ai.get("content_sha256"))
+
+    async def _texts(self, files: List[Dict[str, Any]]) -> Dict[int, str]:
+        """Тексты действующих документов закупки из нашего хранилища (``ai_documents`` по ``content_sha256``).
+
+        Документ без хэша, с удалённым политикой хранения текстом или при сбое БД пропускается.
+
+        Returns:
+            Dict[int, str]: ``file_id → текст``.
+        """
+        if self.repo is None or not hasattr(self.repo, "get_document_by_sha"):
+            return {}
+        out: Dict[int, str] = {}
+        for f in files:
+            sha = f.get("content_sha256")
+            if f.get("superseded_by") or not sha or sha == "null":
+                continue
+            try:
+                row = await self.repo.get_document_by_sha(str(sha))
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Текст файла {f.get('id')} не получен: {type(e).__name__}: {e}")
+                continue
+            if row and row["text"]:
+                out[int(f["id"])] = row["text"]
+        return out
 
     async def _fill_xml_from_internal(self, xmls: List[Dict[str, Any]]) -> None:
         """XML без результата во внешней БД получают событие, резюме и риски из нашего хранилища."""
@@ -154,6 +187,7 @@ class ContractAnalyzer:
         file_ids = [int(f["id"]) for f in data["files"] if f.get("rm_status") != "completed"]
         xml_ids = [int(x["id"]) for x in data["xmls"] if x.get("rm_status") != "completed"]
         if not (file_ids or xml_ids) or self.repo is None:
+            progress.note("все файлы и XML закупок уже проанализированы")
             return False
         logger.info(f"Закупки: анализ недостающих документов — файлов {len(file_ids)}, XML {len(xml_ids)}")
         fresh: Dict[int, Dict[str, Any]] = {}
@@ -248,9 +282,15 @@ class ContractAnalyzer:
             ``error``), ``pushed``, ``ai_analysis``.
         """
         ids = list(dict.fromkeys(int(i) for i in card_ids))
-        data = await self._load(ids)
+        progress.subject(f"Закупки ({len(ids)})")
+        async with progress.step("чтение закупок, файлов, XML, правил и реестра 19.28") as st:
+            data = await self._load(ids)
+            st["detail"] = (f"закупок {len(data['cards'])}, файлов {len(data['files'])}, XML {len(data['xmls'])}, "
+                            f"расчётов правил {len(data['rules'])}")
         if self.analyze_documents and await self._analyze_missing(data):
-            data = await self._load(ids)   # результаты документов — во внешней БД или у нас
+            progress.subject(f"Закупки ({len(ids)})")
+            async with progress.step("повторное чтение данных закупок после анализа документов"):
+                data = await self._load(ids)   # результаты документов — во внешней БД или у нас
         by = self._group(data)
         statuses: Dict[Tuple[int, str], int] = {}
         for s in data["statuses"]:
@@ -282,16 +322,25 @@ class ContractAnalyzer:
         """Анализ одной закупки: сборка, резюме, запись."""
         card = item["card"]
         cid = int(card["id"])
+        progress.subject(f"Закупка {cid} ({card.get('number') or ''})")
         dataset = cp.as_json(card.get("dataset")) or {}
         inn = str((dataset.get("supplier") or {}).get("post_inn") or "").strip()
+        if cp.absence_claims(item["files"]):
+            async with progress.step("проверка «отсутствует …» по текстам документов закупки") as st:
+                texts = await self._texts(item["files"])
+                n = cp.drop_absence_contradicted(item["files"], texts, statuses)
+                st["detail"] = f"текстов {len(texts)}, снято рисков {n}"
         built = cp.build_contract_analysis(card=card, files=item["files"], xmls=item["xmls"], values=item["values"],
                                            black=black_by_inn.get(inn, []), statuses=statuses,
                                            previous_score=cp.num(card.get("prev_score")),
                                            supplier_counts=supplier_counts)
         h = built.pop("input_hash")
+        progress.note(f"сборка: рисков {len(built['risks'])}, балл {built['profile']['score']} ({built['profile']['zone']})")
         if not self.force and card.get("rm_status") == "completed" and card.get("prev_hash") == h:
+            progress.note("входные данные не изменились — пересчёт не нужен")
             return {"card_id": cid, "status": "unchanged", "pushed": False}
-        resume, used_llm = await self._resume(built)
+        async with progress.step("резюме закупки" + (" (модель)" if self.llm else " (шаблон)")):
+            resume, used_llm = await self._resume(built)
         pipeline = passport.pipeline_block(STAGE, "completed", self.model if used_llm else None,
                                            {"contract_resume": PROMPT_VERSION} if used_llm else {}, debug=self.force)
         pipeline.update(schema_version=cp.SCHEMA_VERSION, input_hash=h,
@@ -302,12 +351,14 @@ class ContractAnalyzer:
                   "zone": built["profile"]["zone"], "risks": len(built["risks"]), "ai_analysis": ai}
         if self.push_results:
             try:
-                await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, cid, ai)
+                async with progress.step("запись результата во внешнюю БД"):
+                    await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, cid, ai)
                 result["pushed"] = True
             except Exception as e:  # noqa: BLE001 — результат сохранён у нас
                 logger.error(f"Не удалось записать ai_analysis закупки {cid}: {e}")
                 result["push_error"] = str(e)
-        await self._save_internal(cid, ai, result["pushed"], result.get("push_error"))
+        async with progress.step("сохранение результата во внутренней БД"):
+            await self._save_internal(cid, ai, result["pushed"], result.get("push_error"))
         return result
 
     async def _resume(self, built: Dict[str, Any]) -> Tuple[str, bool]:
@@ -330,9 +381,8 @@ class ContractAnalyzer:
         import json
 
         try:
-            data = await self.llm.ask(RESUME_SYSTEM, json.dumps(payload, ensure_ascii=False, default=str),
-                                      RESUME_SCHEMA, max_tokens=800, temperature=0.2)
-            text = str(data.get("resume") or "").strip()
+            text = await self.llm.ask_text(RESUME_SYSTEM, json.dumps(payload, ensure_ascii=False, default=str),
+                                           max_tokens=1500, temperature=0.2)
             self.stats["llm_resume"] += 1
             return (text, True) if text else (fallback, False)
         except Exception as e:  # noqa: BLE001 — резюме не обязательно

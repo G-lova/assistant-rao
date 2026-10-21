@@ -197,15 +197,27 @@ def package_facts(data: Dict[str, Any], today: Optional[date] = None) -> Dict[st
     expected = data.get("contract_number")
     if expected:
         norm = normalize_number(expected)
-        differ = []
+        differ, in_contract, matched = [], [], 0
         for code, raw in files:
             num = _value(raw.get("contract_number"))
-            if num and (code in NUMBER_CHECK_CODES or _is_payment(raw)) and normalize_number(num) != norm:
-                differ.append(f"{raw.get('filename')}: {num}")
-        facts["номер договора"] = (
-            f"в документах договора, актов, допсоглашений и платёжных поручений совпадает с номером экспертизы "
-            f"«{expected}» (различия вида «З»/«3», «О»/«0» — ошибки распознавания, не противоречие)"
-            if not differ else f"отличается от номера экспертизы «{expected}» в: {'; '.join(differ[:5])}")
+            if not num or not (code in NUMBER_CHECK_CODES or _is_payment(raw)):
+                continue
+            if normalize_number(num) == norm:
+                matched += 1
+            else:
+                (in_contract if code in CONTRACT_CODES else differ).append(f"{raw.get('filename')}: {num}")
+        same = (f"совпадает с номером экспертизы «{expected}» в {matched} документ(ах) договора, актов, допсоглашений "
+                f"и платёжных поручений (различия вида «З»/«3», «О»/«0» — ошибки распознавания, не противоречие)")
+        if in_contract:
+            facts["номер договора"] = (f"в договоре указан другой номер, чем в экспертизе «{expected}»: "
+                                       f"{'; '.join(in_contract[:3])} — противоречие")
+        elif differ:
+            facts["номер договора"] = (f"{same if matched else 'номер экспертизы в документах не найден'}; в "
+                                       f"{len(differ)} документ(ах) извлечён другой номер ({'; '.join(differ[:3])}) — "
+                                       f"это может быть номер сметы, акта или счёта, требует проверки, но не является "
+                                       f"подтверждённым противоречием")
+        else:
+            facts["номер договора"] = same
 
     # Цена договора и НМЦК
     price_values = [v for code, raw in files if code in CONTRACT_CODES for v in _amounts(raw, PRICE_RE, NMCK_RE)]
@@ -244,17 +256,22 @@ def package_facts(data: Dict[str, Any], today: Optional[date] = None) -> Dict[st
                               f"последний акт/справка о выполненных работах ({last.isoformat()}) позже срока "
                               f"окончания работ ({deadline.isoformat()}) — возможна просрочка")
 
-    # Платёжные поручения: одна сумма на файл
-    payments = []
+    # Платёжные поручения: одна сумма на файл; без суммы хотя бы в одном — итог с ценой не сравнивается
+    payments, no_amount = [], []
     for _, raw in files:
         if _is_payment(raw):
             vals = _amounts(raw, re.compile(r"платеж|платёж|сумм", re.I)) or _amounts(raw, re.compile(r"", re.S))
             if vals:
                 payments.append(vals[0])
-    if payments:
+            else:
+                no_amount.append(str(raw.get("filename")))
+    if payments or no_amount:
         total = round(sum(payments), 2)
-        line = f"{len(payments)} шт. на сумму {_money(total)}"
-        if price is not None:
+        line = f"{len(payments) + len(no_amount)} шт.; сумма по {len(payments)} с извлечённой суммой — {_money(total)}"
+        if no_amount:
+            line += (f"; в {len(no_amount)} сумма не извлечена ({'; '.join(no_amount[:3])}) — сравнение с ценой "
+                     f"договора не выполнялось")
+        elif price is not None:
             diff = round(total - price, 2)
             line += ("; совпадает с ценой договора" if abs(diff) <= 0.01 else
                      f"; {'больше' if diff > 0 else 'меньше'} цены договора на {_money(abs(diff))}")

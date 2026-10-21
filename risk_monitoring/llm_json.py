@@ -150,6 +150,32 @@ class LLMJson:
         self.retries = max(1, retries)
         self.guided = True
 
+    async def ask_text(self, system: str, user: str, max_tokens: int = 1500, temperature: float = 0.2) -> str:
+        """Запрос к модели за обычным текстом (без JSON): резюме, пояснения.
+
+        Модели рассуждений на guided JSON с одним текстовым полем иногда отвечают без JSON («В ответе модели нет
+        JSON», резюме закупки 20.10.2026), а текст им писать проще. Ответ очищается от ``<think>`` и обрамления.
+
+        Returns:
+            str: Текст ответа (пустая строка — модель ничего не написала).
+        """
+        import re
+
+        async with self.semaphore:
+            await self.rate_limiter.acquire()
+            content = await call_llm(self.client, model=self.model, max_tokens=max_tokens, temperature=temperature,
+                                     messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
+        text = re.sub(r"(?s)<think>.*?</think>", "", content or "").strip()
+        text = re.sub(r"^```\w*\s*|\s*```$", "", text).strip()
+        if text.startswith("{"):   # модель всё же ответила JSON
+            try:
+                data = parse_json(text)
+                if isinstance(data, dict):
+                    text = str(data.get("resume") or next(iter(data.values()), "") or "").strip()
+            except Exception:  # noqa: BLE001
+                pass
+        return text
+
     async def ask(self, system: str, user: str, schema: Optional[Dict[str, Any]] = None,
                   max_tokens: int = 3000, temperature: float = 0.1) -> Dict[str, Any]:
         """Запрос к модели с guided JSON и разбором ответа.

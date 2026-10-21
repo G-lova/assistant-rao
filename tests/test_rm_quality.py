@@ -741,8 +741,11 @@ class Run1015bTest(unittest.TestCase):
             """Внешняя БД."""
             if name == "xml_meta.sql":
                 return [{"id": 3209, "archive_url": "a", "entry_name": "e"}]
+            if name == "xml_previous.sql":
+                return []
             seen.update(lists)
-            return [{"id": 3198, "rm_status": None}, {"id": 3199, "rm_status": "completed"}]
+            return [{"id": 3198, "xml_source_id": 3209, "rm_status": None},
+                    {"id": 3199, "source_url": "https://z/print?id=1", "rm_status": "completed"}]
 
         class Arch:
             async def read(self, url, entry):
@@ -910,7 +913,7 @@ class InternalResultsTest(unittest.TestCase):
         xa.semaphore = asyncio.Semaphore(1)
 
         async def query(name, head=(), **lists):
-            return [{"id": 11, "file_name": "контракт.docx", "detected_type": None, "resume": None}]
+            return [{"id": 11, "xml_source_id": 5, "file_name": "контракт.docx", "detected_type": None, "resume": None}]
 
         xa._query = query
         files = asyncio.run(xa._files(5, None, []))
@@ -922,3 +925,182 @@ class InternalResultsTest(unittest.TestCase):
         self.assertEqual(repo.marked, [("xml", 5)])
         asyncio.run(xa._save_internal(6, {}, False, "500"))
         self.assertEqual(repo.saved, [("xml", 6, False)])
+
+
+class Run1020Test(unittest.TestCase):
+    """Ложные риски прогона 20.10.2026 (файлы 1, 2805, 2807, 2808, 2809)."""
+
+    def test_doc002_not_brand(self):
+        """Название закона, материал в кавычках, класс по ГОСТ — не товарный знак."""
+        from risk_monitoring.document_risk_analyzer import brand_like
+
+        self.assertFalse(brand_like("РФ от 27.12.1991 N 2124-1 «О средствах массовой информации» телеканал"))
+        self.assertFalse(brand_like("Лицевое стекло –распашное, материал стекла «триплекс»"))
+        self.assertFalse(brand_like("Тип бокса Тип А2 Значение характеристики не может меняться"))
+        self.assertTrue(brand_like("Бокс «Ламинар-С» или эквивалент"))
+
+    def test_statutory_and_security(self):
+        """ПП 1042, страна происхождения, ЕАЭС, диапазоны ≥ ≤, обеспечение 5 % — не риски."""
+        from risk_monitoring.document_risk_analyzer import security_in_range, statutory
+
+        r = lambda c, f: {"code": c, "evidence": {"fragment": f}}  # noqa: E731
+        self.assertTrue(statutory(r("DOC-007", "7.4.3. За каждый факт неисполнения или ненадлежащего исполнения поставщиком")))
+        self.assertTrue(statutory(r("DOC-005", "подтверждение страны происхождения товаров из евразийского реестра")))
+        self.assertTrue(statutory(r("DOC-003", "Уровень шума ≥ 54 и ≤ 65 Децибел")))
+        self.assertTrue(statutory(r("DOC-006", "должно содержать конкретные значения показателей")))
+        self.assertTrue(security_in_range(r("FIN-005", "обеспечение его исполнения в размере 5 % от начальной (максимальной) цены")))
+        self.assertFalse(security_in_range(r("FIN-005", "обеспечение исполнения 0,1 % цены контракта")))
+
+    def test_print_form_law_line(self):
+        """Строка со ссылкой на закон не кандидат товарного знака печатной формы."""
+        from risk_monitoring.printform_passport import LAW_LINE_RE, _not_brand_quote
+
+        self.assertTrue(LAW_LINE_RE.search("закон РФ от 27.12.1991 N 2124-1 «О средствах массовой информации»"))
+        self.assertTrue(_not_brand_quote("«триплекс»"))
+        self.assertFalse(_not_brand_quote("«Ламинар-С»"))
+
+
+class Run1020bTest(unittest.TestCase):
+    """Второй прогон 20.10.2026: проект контракта 2807, закупки 1001 / 1387 / 1399."""
+
+    def test_absence_contradicted(self):
+        """«Отсутствует обеспечение исполнения» при п. 8.1 с 5 % — отбросить; без п. 8.1 — оставить."""
+        from risk_monitoring.document_risk_analyzer import absence_contradicted
+
+        r = {"title": "Отсутствие обеспечения исполнения контракта",
+             "explanation": "В проекте контракта отсутствует требование об обеспечении исполнения контракта"}
+        text = "8.1. Контракт предусматривает обеспечение его исполнения в размере 5 % от НМЦК. 13.4. Контракт составлен"
+        self.assertTrue(absence_contradicted(r, text))
+        self.assertFalse(absence_contradicted(r, "13.4. Контракт составлен в письменной форме"))
+
+    def test_more_statutory(self):
+        """Штраф заказчика по ПП 1042, обеспечение 5 % для FIN-007, стадии производства в ЕАЭС."""
+        from risk_monitoring.document_risk_analyzer import rejected_by_rules
+
+        r = lambda c, f: {"code": c, "evidence": {"fragment": f}}  # noqa: E731
+        self.assertTrue(rejected_by_rules(r("FIN-016", "7.2.2. За каждый факт неисполнения Заказчиком обязательств")))
+        self.assertTrue(rejected_by_rules(r("FIN-007", "8.1. Контракт предусматривает обеспечение его исполнения в размере 5 % от НМЦК")))
+        self.assertTrue(rejected_by_rules(r("DOC-006", "сведения о стадиях производства лекарственного средства на территории ЕАЭС")))
+
+    def test_contract_reapplies_rules(self):
+        """Риск файла, проанализированного до уточнения правил, в закупку не идёт; подтверждённый — идёт."""
+        from risk_monitoring import contract_package as cp
+
+        files = [{"id": 3077, "file_name": "Доп. условия.docx", "risks": [
+            {"rule_id": "FIN-012", "level": 0.6, "confidence": 0.8, "description": "Необычные условия оплаты",
+             "evidence": [{"fragment": "2.9. … в части казначейского сопровождения авансовых платежей"}]},
+            {"rule_id": "DOC-003", "level": 0.9, "confidence": 0.9, "evidence": [{"fragment": "внутренний диаметр 1800 мм"}]}]}]
+        risks, _ = cp.file_risks(files, {})
+        self.assertEqual([x["rule_id"] for x in risks], ["DOC-003"])
+        risks, confirmed = cp.file_risks(files, {(3077, "FIN-012"): 1})
+        self.assertEqual(sorted(x["rule_id"] for x in risks), ["DOC-003", "FIN-012"])
+
+
+class Run1020cTest(unittest.TestCase):
+    """Закупки 1001, 1387, 1399 после правок 20.10.2026 (второй прогон): оставшиеся ложные риски."""
+
+    def test_statutory_payment_and_refusal(self):
+        """Оплата в 7 рабочих дней (ч. 13.1 ст. 34) и отказ при несоответствии требованиям (ч. 15 ст. 95)."""
+        from risk_monitoring.document_risk_analyzer import rejected_by_rules
+
+        r = lambda c, f: {"code": c, "evidence": {"fragment": f}}  # noqa: E731
+        self.assertTrue(rejected_by_rules(r("FIN-012", "5.2.1. Заказчик перечисляет … в течение 7 (семи) рабочих дней с даты подписания Акта")))
+        self.assertTrue(rejected_by_rules(r("DOC-006", "4.3.2. … если Поставщик и (или) поставляемый Товар перестали соответствовать установленным извещением требованиям")))
+        self.assertFalse(rejected_by_rules(r("FIN-012", "Оплата производится в течение 60 календарных дней")))
+
+    def test_act_file_skipped(self):
+        """Старый риск из «Акт монтажа.pdf» в закупку не идёт, подтверждённый аналитиком — идёт."""
+        from risk_monitoring import contract_package as cp
+
+        files = [{"id": 3090, "file_name": "Акт монтажа.pdf", "risks": [
+            {"rule_id": "DOC-010", "level": 0.3, "confidence": 0.8, "evidence": [{"fragment": "Инструктаж проведён"}]}]}]
+        self.assertEqual(cp.file_risks(files, {})[0], [])
+        self.assertEqual(len(cp.file_risks(files, {(3090, "DOC-010"): 1})[0]), 1)
+
+    def test_absence_by_package(self):
+        """«Нет раздела о гарантиях» в доп. условиях снимается, если гарантийный срок есть в проекте контракта."""
+        from risk_monitoring import contract_package as cp
+
+        risk = {"rule_id": "DOC-001", "title": "Отсутствие раздела о гарантийных обязательствах",
+                "description": "В документе отсутствует раздел о гарантиях", "evidence": [{"fragment": "3.1. Поставщик доставляет"}]}
+        files = [{"id": 3077, "file_name": "Дополнительные условия.docx", "risks": [dict(risk)]},
+                 {"id": 3071, "file_name": "Проект контракта.docx", "risks": []}]
+        self.assertTrue(cp.absence_claims(files))
+        self.assertEqual(cp.drop_absence_contradicted(files, {3077: "3.1. Поставщик доставляет"}, {}), 0)
+        texts = {3077: "3.1. Поставщик доставляет", 3071: "7.1. Гарантийный срок на Товар — 24 месяца"}
+        self.assertEqual(cp.drop_absence_contradicted(files, texts, {(3077, "DOC-001"): 1}), 0)
+        self.assertEqual(cp.drop_absence_contradicted(files, texts, {}), 1)
+        self.assertEqual(files[0]["risks"], [])
+
+    def test_same_quote_counted_once(self):
+        """DOC-010 с той же цитатой, что и DOC-006, уходит в ``related_codes``; риск правила остаётся."""
+        from risk_monitoring import contract_package as cp
+
+        q = {"fragment": "4.1. Приемка … инструкциях Госарбитража П-6 и П-7", "src": "file:2807"}
+        risks = [
+            {"rule_id": "DOC-006", "level": 0.6, "confidence": 0.85, "sources": ["ai_file"],
+             "evidence": [q, {"fragment": "4.2. Иное", "src": "file:2807"}]},
+            {"rule_id": "DOC-010", "level": 0.6, "confidence": 0.8, "sources": ["ai_file"], "evidence": [dict(q)]},
+            {"rule_id": "FIN-004", "level": 0.4, "confidence": 1.0, "sources": ["rule"], "evidence": [{"src": "rule:pz_p1"}]},
+        ]
+        out = cp.drop_same_quote(risks)
+        self.assertEqual([r["rule_id"] for r in out], ["DOC-006", "FIN-004"])
+        self.assertEqual(out[0]["related_codes"], ["DOC-010"])
+        self.assertEqual(len(cp.drop_same_quote(risks, {"DOC-010"})), 3)
+
+
+class JsonNullTest(unittest.TestCase):
+    """JSON ``null`` из ``JSON_UNQUOTE`` не считается значением (аналитика организаций 20.10.2026)."""
+
+    def test_null_string(self):
+        """``"null"`` → ``None``; обычные строки и NaN обрабатываются как раньше."""
+        from risk_monitoring.contract_analyzer import _none
+
+        self.assertIsNone(_none("null"))
+        self.assertIsNone(_none(" NULL "))
+        self.assertIsNone(_none(float("nan")))
+        self.assertEqual(_none("1660331280"), "1660331280")
+
+    def test_customer_metrics_without_nulls(self):
+        """Без строк ``"null"`` изменения, расторжения и поставщики считаются по реальным значениям."""
+        from configs import settings
+        from risk_monitoring import org_profile
+        from risk_monitoring.contract_analyzer import _none
+
+        raw = [{"id": i, "contract_number": "1", "nmck": "100", "contract_price": "90", "mod_reason_code": "null",
+                "term_code": "null", "supplier_inn": "1660331280" if i < 3 else "null", "supplier_name": "СК"}
+               for i in range(5)]
+        rows = [{k: _none(v) for k, v in r.items()} for r in raw]
+        sec = org_profile.customer_section(rows, [], settings, None)
+        self.assertEqual(sec["metrics"]["modified"], 0)
+        self.assertEqual(sec["metrics"]["terminated"], 0)
+        self.assertEqual([t["inn"] for t in sec["top_suppliers"]], ["1660331280"])
+
+
+class OrgResumeFactsTest(unittest.TestCase):
+    """Факты для резюме организации (аналитика 20.10.2026: выводы модели по трём контрактам)."""
+
+    def test_small_sample_and_unknown_method(self):
+        """Мало контрактов с известным поставщиком — без выводов о концентрации; неизвестный способ — не «без конкурса»."""
+        from configs import settings
+        from risk_monitoring import org_profile
+
+        rows = [{"id": i, "contract_number": "1", "nmck": None if i == 0 else "100", "contract_price": "90",
+                 "method_code": None if i == 0 else "EA20", "supplier_inn": "1" if i < 2 else None} for i in range(5)]
+        sec = org_profile.customer_section(rows, [], settings, None)
+        facts = " ".join(org_profile.resume_facts("customer", sec, settings))
+        self.assertIn("данных мало", facts)
+        self.assertIn("не означает закупку без конкурса", facts)
+        self.assertIn("закупок без НМЦК в данных: 1", facts)
+        self.assertIn("Признаков риска по правилам не выявлено", facts)
+        self.assertNotIn("..", facts)
+
+    def test_tie_not_dominant(self):
+        """Равные доли контрагентов — ни один не преобладает."""
+        from configs import settings
+        from risk_monitoring import org_profile
+
+        rows = [{"id": i, "contract_number": "1", "nmck": "100", "contract_price": "90", "method_code": "EA20",
+                 "supplier_inn": str(i)} for i in range(5)]
+        facts = " ".join(org_profile.resume_facts("customer", org_profile.customer_section(rows, [], settings, None), settings))
+        self.assertIn("ни один не преобладает", facts)

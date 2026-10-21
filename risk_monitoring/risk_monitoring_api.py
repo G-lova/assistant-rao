@@ -19,6 +19,9 @@ ALLOWED_TABLES = {
 }
 
 
+LIMITER_WAIT = 120   # наибольшее ожидание своей очереди к API, с
+
+
 class RiskAPIError(Exception):
     """Ошибка, повторять которую бессмысленно (401, 404, 422 ...)."""
 
@@ -70,8 +73,11 @@ class RiskMonitoringAPI:
 
     @async_retry(RISK_API_RETRY_CONFIG)
     async def _request(self, method: str, **kwargs) -> Dict[str, Any]:
-        """Запрос к API с лимитом частоты и повторами на 429/503/5xx (с учётом ``Retry-After``)."""
-        await self.rate_limiter.acquire()
+        """Запрос к API с лимитом частоты и повторами на 429/503/5xx (с учётом ``Retry-After``).
+
+        Ожидание лимита частоты ограничено ``LIMITER_WAIT`` секундами: зависнуть на нём задача не может.
+        """
+        await asyncio.wait_for(self.rate_limiter.acquire(), timeout=LIMITER_WAIT)
         session = self.http_manager.get_session()
 
         async with session.request(

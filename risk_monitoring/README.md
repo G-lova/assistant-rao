@@ -12,6 +12,8 @@
 | POST | `/risk-monitoring/xml/analysis` | `{"ids": [812345], "push": true, "force": false, "include_analysis": false}` | `202 {"task_id", "count", "status": "queued"}` |
 | POST | `/risk-monitoring/contracts/analysis` | `{"ids": [26], "push": true, "use_llm": true, "analyze_documents": true, "force": false, "include_analysis": false}` | `202 {"task_id", "count", "status": "queued"}` |
 | POST | `/risk-monitoring/organisations/analysis` | `{"ids": [7], "roles": ["customer", "supplier"], "period_months": 12, "use_llm": true, "include_analysis": true}` | `202 {"task_id", "count", "status": "queued"}` |
+| POST | `/risk-monitoring/daily` | `{"date": "2026-10-20"}` (необязательно: `stages`, `push`, `use_llm`; `force` — только в отладке) | `202 {"task_id", "date", "status": "queued"}` |
+| GET | `/risk-monitoring/daily/{date}` | — | сводка за дату (или `pipeline.status = running`); 404 — прогона не было |
 | POST | `/risk-monitoring/typal-clauses/load` | `{"regions": ["34"], "dates": ["2026-10-15"], "read_files": true}` (пусто — по настройкам) | `202 {"task_id"}` |
 | POST | `/risk-monitoring/typal-clauses/xml?read_files=true` | тело — XML `typalOrderClause` | `202 {"task_id", "versions"}` |
 | GET | `/risk-monitoring/typal-clauses/customer/{inn}?kpp=&on=` | — | действующая редакция типового положения заказчика и его файл-положение |
@@ -19,7 +21,7 @@
 
 - `ids` — до 500 id; повторы убираются.
 - **Повторного анализа нет.** Запись с `ai_analysis.pipeline.status = completed` пропускается (`skipped: already_analyzed`). Неудачная (`failed`) берётся повторно до 3 попыток.
-- `force` (анализировать заново) и `recompute` (игнорировать кэш LLM) — только при `RISK_MONITORING_DEBUG = True` в `risk_monitoring/settings.py`; иначе 403.
+- `force` (анализировать заново) и `recompute` (игнорировать кэш LLM) — только при `RISK_MONITORING_DEBUG = True` в `configs/settings.py`; иначе 403.
 - `analyze_files` (только `/xml/analysis`): сначала анализируются ещё не проанализированные файлы, указанные
   в XML (вложения, печатная форма) или привязанные к нему по `xml_source_id`; результаты — в `files` ответа задачи.
 - Порядок редакций: если в одном запуске есть и прошлая, и новая редакция файла, прошлая анализируется первой
@@ -76,6 +78,26 @@
 | `link` | Только для XML без `risk_monitoring_contract_id`: `method` (`purchase_number` / `contract_number` / `ikz` / `ikz_customer` / `none`), `risk_monitoring_contract_id`, `organisation_id`, `ambiguous`, `candidates[]`, `customer_inn`, `customer_kpp`. **PHP применяет привязку**, если `method ≠ none` и `ambiguous = false` |
 | `pipeline` | Как у файлов, `stage = "S1a"`, `export_date` — дата выгрузки архива |
 
+## Журнал хода задачи
+
+Каждый этап пишет в журнал воркера `celery_worker_rm` строку начала и итога с длительностью (`risk_monitoring/progress.py`):
+
+```
+Файл 2805 «ТЗ.docx» ▶ скачивание файла и чтение текста
+Файл 2805 «ТЗ.docx»: файл скачан: 412 КБ, .docx
+Файл 2805 «ТЗ.docx» ✓ скачивание файла и чтение текста — 3.1 с (документ 812, 48210 символов)
+Файл 2805 «ТЗ.docx» ▶ поиск похожих документов
+Файл 2805 «ТЗ.docx» ✓ поиск похожих документов — 0.4 с (найдено 3)
+Файл 2805 «ТЗ.docx»: извлечение данных: из кэша
+Файл 2805 «ТЗ.docx» ▶ анализ рисков: запрос к модели …
+Файл 2805 «ТЗ.docx» ✗ анализ рисков: запрос к модели … — 420.0 с: TimeoutError
+Файл 2805 «ТЗ.docx» ▶ запись результата во внешнюю БД
+```
+
+Раз в минуту задача пишет пульс: время работы, число запросов к модели (всего, выполняется сейчас, сбоев, прервано
+по пределу 420 с) и этапы, которые идут прямо сейчас, с их длительностью. Посмотреть:
+`docker logs -f rao_celery_worker_rm | grep -E "▶|✓|✗|идёт"`.
+
 ## Анализ закупки/контракта (`risk_monitoring_contracts.ai_analysis`)
 
 `schema_version = "rm-contract-1"`, `pipeline.stage = "S2"`. Документы повторно **не** анализируются: берутся
@@ -101,7 +123,7 @@
 (одна заявка на конкурентной закупке → PROC-001, расторжение → CTR-020), согласованность (DOC-009), комплект (DOC-015),
 «любимый поставщик» (BEH-006: поставщик закупки — крупнейший у заказчика за 12 месяцев, не меньше 3 контрактов и 40 %
 контрактов заказчика; доля — в `customer_supplier`).
-Пороги — `risk_monitoring/settings.py`.
+Пороги — `configs/settings.py`.
 
 ## Аналитика организаций (заказчик и поставщик)
 
@@ -118,6 +140,37 @@
 `ai_analysis` организаций**: результат хранится у нас (`ai_rm_results`, `kind = organisation`) и возвращается в задаче.
 Когда API разрешит `risk_monitoring_organisations`, включить `ORG_PUSH_ENABLED` — запись будет «прочитать → слить
 секции → записать».
+
+## Ежедневный прогон и сводка (S0–S4)
+
+`POST /risk-monitoring/daily {"date": D}` вызывает Laravel после загрузки ЕИС. Если до `DAILY_WATCHDOG_HOUR`
+(06:00) вызова не было, Celery beat (`rm_daily_watchdog_task`) запускает прогон сам — за последнюю `exact_date`
+окружения `DAILY_ENVIRONMENT`. Повторный вызов за ту же дату возвращает готовую сводку, а идущий прогон второй раз
+не запускается.
+
+| Этап | Что делает |
+|---|---|
+| S0 | XML архивов с `exact_date = D` (`queries/rm/daily_xml.sql`) |
+| `files` | ещё не проанализированные файлы этих XML — `AIFileAnalyzer` |
+| `xml` | события XML — `XmlEventAnalyzer` (с результатами файлов) |
+| `contracts` | затронутые закупки — `ContractAnalyzer` без повторного анализа документов |
+| `customers` | заказчики этих закупок с `monitoring = 1` — `OrgAnalyzer` (роль заказчика) |
+| `summary` | сводка по заказчикам на мониторинге; текст пишет модель по готовым фактам, без модели — шаблон |
+
+Внешняя БД — пакетно: общий кэш прогона (`risk_monitoring/run_cache.py`) запрашивает каждый XML, его предыдущую
+версию, файлы событий, заказчиков карточек и привязку XML без закупки по одному запросу на шаг для всех документов
+сразу (пачками по 500), а архив ЕИС скачивает один раз для анализаторов файлов и событий. Число запросов по видам —
+в `pipeline.external_queries` сводки. Если за дату XML нет, в `scope.nearest_exports` — выгрузки в окне ±7 дней:
+дата прогона — `exact_date` выгрузки, а не дата публикации документов.
+
+Каждый этап сам пропускает уже проанализированное; сбой этапа отмечается `stages.<этап>.status = failed`, прогон
+продолжается. Сводка хранится у нас (`ai_rm_results`, `kind = daily`, `external_id = ГГГГММДД`) — таблицы сводок во
+внешней БД пока нет.
+
+Сводка: `scope` (XML, файлы, закупки, из них на мониторинге), `stages`, `contracts` (зоны, `became_red`,
+`score_jump` — рост балла ≥ `DAILY_SCORE_JUMP`, `red`), `events` (по типам, `important` — важность из
+`DAILY_EVENT_IMPORTANCE` или с рисками), `customers` (баллы заказчиков), `attention` (реестр 19.28, переход в
+красную зону, рост балла, важные события), `facts`, `resume`, `pipeline`.
 
 ## Типовые положения о закупке (223-ФЗ)
 

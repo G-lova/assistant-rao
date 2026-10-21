@@ -62,7 +62,8 @@ class RisksTests(unittest.TestCase):
         self.assertAlmostEqual(passport.total_risk(one), 0.9)
         self.assertEqual(passport.total_risk([]), 0.0)
         two = passport.merge_risks(one, [{"rule_id": "FIN-005", "level": 0.6, "confidence": 1.0}])
-        self.assertAlmostEqual(passport.total_risk(two), 1 - 0.1 * 0.4, places=4)
+        # затухание: второй риск весит вдвое меньше (0.6 × 0.5) — 1 − 0.1 × 0.7
+        self.assertAlmostEqual(passport.total_risk(two), 1 - 0.1 * 0.7, places=4)
 
     def test_risk_profile(self):
         """Профиль по категориям: число, максимум, балл."""

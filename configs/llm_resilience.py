@@ -26,13 +26,18 @@ MAX_INFLIGHT = 4        # одновременных запросов к одн�
 STREAM = True           # потоковый ответ в call_llm (шлюз не обрывает долгую генерацию)
 PROXY_RETRIES = 2       # попыток в ResilientClient по умолчанию (у вызовов экспертизы есть свои повторы)
 RESILIENT = True        # оборачивать ли клиент get_llm() в ResilientClient
+# Предел одного запроса к модели целиком, с. Таймаут клиента (300 с) — это пауза между порциями ответа: поток, который
+# медленно идёт (модель зациклилась до max_tokens), им не обрывается, и задача «молчит» десятки минут (20.10.2026).
+# По пределу запрос прерывается как временный сбой (asyncio.TimeoutError) — с записью в журнал и повтором.
+REQUEST_DEADLINE = 420
 
 
 RETRY_DELAYS = (5.0, 15.0, 45.0)    # паузы между попытками при сбое сервера, с
 BREAKER_FAILS = 3                    # подряд сбоев до срабатывания предохранителя
 BREAKER_PAUSE = (30.0, 300.0)        # пауза предохранителя: начальная и предельная, с
 _gates: Dict[Tuple[int, str], asyncio.Semaphore] = {}
-CALLS: Dict[str, int] = {"requests": 0, "failed": 0}   # счётчик запросов к модели в процессе (для сводки задачи)
+# счётчики запросов к модели в процессе: для сводки задачи и пульса (inflight — выполняются сейчас)
+CALLS: Dict[str, int] = {"requests": 0, "failed": 0, "inflight": 0, "deadline": 0}
 _breaker: Dict[str, Dict[str, float]] = {}
 
 
@@ -47,6 +52,7 @@ CONTEXT_RE = __import__("re").compile(
     r"\D*(\d+) input tokens", __import__("re").I | __import__("re").S)
 MIN_OUTPUT_TOKENS = 1024     # меньше — ответ JSON не поместится, запрос делится вызывающим
 CONTEXT_MARGIN = 32          # запас: сервер считает «at least» и добавляет служебные токены
+MAX_FITS = 3                 # уменьшений ответа на один запрос, дальше — ContextOverflow (текст нужно делить)
 
 
 class ContextOverflow(ValueError):
@@ -89,13 +95,26 @@ def fit_output(error: BaseException, kwargs: Dict[str, Any]) -> bool:
     sizes = context_overflow(error)
     if not sizes:
         return False
-    limit, _, used = sizes
-    room = limit - used - CONTEXT_MARGIN
-    if room >= MIN_OUTPUT_TOKENS and room < int(kwargs.get("max_tokens") or limit):
-        logger.warning(f"LLM: запрос {used} токенов из {limit}, ответ уменьшен с {kwargs.get('max_tokens')} до {room}")
+    limit, requested, used = sizes
+    current = int(kwargs.get("max_tokens") or requested or limit)
+    fits = int(kwargs.pop("_fits", 0)) + 1
+    # vLLM пишет «at least N input tokens», где N = контекст − запрошенный ответ + 1, — это нижняя граница, а не
+    # длина запроса (20.10.2026: 8385 = 16384 − 8000 + 1, затем 8418, 8451… — уменьшение на 33 токена по кругу).
+    # Тогда длина неизвестна, и ответ уменьшается вдвое.
+    lower_bound = requested and used == limit - requested + 1
+    room = current // 2 if lower_bound else limit - used - CONTEXT_MARGIN
+    if fits <= MAX_FITS and MIN_OUTPUT_TOKENS <= room < current:
+        logger.warning(f"LLM: запрос {'не меньше ' if lower_bound else ''}{used} токенов из {limit}, "
+                       f"ответ уменьшен с {current} до {room}")
         kwargs["max_tokens"] = room
+        kwargs["_fits"] = fits
         return True
     raise ContextOverflow(limit, used, f"запрос {used} токенов не помещается в контекст {limit}: разделите текст") from error
+
+
+def _sdk(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Параметры запроса без служебных ключей (``_fits`` — счётчик уменьшений ответа)."""
+    return {k: v for k, v in kwargs.items() if not k.startswith("_")}
 
 
 def split_halves(text: str) -> List[str]:
@@ -183,6 +202,23 @@ def _breaker_record(key: str, ok: bool) -> None:
         state["fails"] = 0
 
 
+async def _bounded(coro: Any, what: str) -> Any:
+    """Выполняет запрос к модели не дольше ``REQUEST_DEADLINE``; учитывает выполняющиеся запросы (``inflight``).
+
+    Raises:
+        asyncio.TimeoutError: Запрос превысил предел (временный сбой — вызывающий повторяет его).
+    """
+    CALLS["inflight"] += 1
+    try:
+        return await asyncio.wait_for(coro, timeout=REQUEST_DEADLINE)
+    except asyncio.TimeoutError:
+        CALLS["deadline"] += 1
+        logger.warning(f"LLM {what}: запрос дольше {REQUEST_DEADLINE} с — прерван")
+        raise
+    finally:
+        CALLS["inflight"] -= 1
+
+
 async def _create(client: Any, stream: bool, kwargs: Dict[str, Any]) -> str:
     """Один запрос ``chat.completions.create`` без повторов SDK; при потоке собирает текст из чанков."""
     c = client.with_options(max_retries=0) if hasattr(client, "with_options") else client
@@ -231,7 +267,7 @@ async def call_llm(client: Any, retries: int = len(RETRY_DELAYS) + 1, **kwargs: 
         CALLS["requests"] += 1
         try:
             async with _gate(key):
-                text = await _create(client, stream, kwargs)
+                text = await _bounded(_create(client, stream, _sdk(kwargs)), key)
             _breaker_record(key, True)
             return text
         except Exception as e:  # noqa: BLE001
@@ -290,7 +326,7 @@ class _Completions:
             CALLS["requests"] += 1
             try:
                 async with _gate(key):
-                    resp = await self._raw.chat.completions.create(**kwargs)
+                    resp = await _bounded(self._raw.chat.completions.create(**_sdk(kwargs)), key)
                 _breaker_record(key, True)
                 return resp
             except Exception as e:  # noqa: BLE001
@@ -317,7 +353,7 @@ class ResilientClient:
     Args:
         raw: ``AsyncOpenAI``.
         retries: Попыток на запрос при 5xx / 404 перезапуска модели / таймауте (``None`` — ``PROXY_RETRIES``,
-            по умолчанию 2). Ночной риск-мониторинг ждёт дольше (``risk_monitoring.settings.LLM_PROXY_RETRIES``, 6): перезапуск
+            по умолчанию 2). Ночной риск-мониторинг ждёт дольше (``configs.settings.LLM_PROXY_RETRIES``, 6): перезапуск
             модели длится минуты, и с двумя попытками страницы OCR и блоки извлечения терялись.
     """
 

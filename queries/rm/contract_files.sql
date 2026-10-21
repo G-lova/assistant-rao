@@ -1,4 +1,5 @@
--- Файлы закупок с кратким результатом анализа (тип, резюме, риски, суммы, замена новой редакцией).
+-- Файлы закупок с кратким результатом анализа (тип, резюме, риски, суммы, замена новой редакцией, хэш содержимого
+-- — по нему берётся текст из нашего хранилища для проверки «отсутствует …»).
 -- Биндинги: id карточек ({ids}).
 SELECT
     f.id,
@@ -14,6 +15,7 @@ SELECT
     JSON_EXTRACT(f.ai_analysis, '$.total_doc_risk') AS total_doc_risk,
     JSON_EXTRACT(f.ai_analysis, '$.risks') AS risks,
     JSON_EXTRACT(f.ai_analysis, '$.raw_data.finances') AS finances,
-    JSON_EXTRACT(f.ai_analysis, '$.superseded_by') AS superseded_by
+    JSON_EXTRACT(f.ai_analysis, '$.superseded_by') AS superseded_by,
+    JSON_UNQUOTE(JSON_EXTRACT(f.ai_analysis, '$.content_sha256')) AS content_sha256
 FROM risk_monitoring_files f
 WHERE f.risk_monitoring_contract_id IN ({ids})
