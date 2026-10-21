@@ -741,8 +741,11 @@ class Run1015bTest(unittest.TestCase):
             """Внешняя БД."""
             if name == "xml_meta.sql":
                 return [{"id": 3209, "archive_url": "a", "entry_name": "e"}]
+            if name == "xml_previous.sql":
+                return []
             seen.update(lists)
-            return [{"id": 3198, "rm_status": None}, {"id": 3199, "rm_status": "completed"}]
+            return [{"id": 3198, "xml_source_id": 3209, "rm_status": None},
+                    {"id": 3199, "source_url": "https://z/print?id=1", "rm_status": "completed"}]
 
         class Arch:
             async def read(self, url, entry):
@@ -910,7 +913,7 @@ class InternalResultsTest(unittest.TestCase):
         xa.semaphore = asyncio.Semaphore(1)
 
         async def query(name, head=(), **lists):
-            return [{"id": 11, "file_name": "контракт.docx", "detected_type": None, "resume": None}]
+            return [{"id": 11, "xml_source_id": 5, "file_name": "контракт.docx", "detected_type": None, "resume": None}]
 
         xa._query = query
         files = asyncio.run(xa._files(5, None, []))

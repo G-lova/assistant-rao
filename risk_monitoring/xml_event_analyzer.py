@@ -13,6 +13,11 @@
 7. запись ``ai_analysis`` в ``risk_monitoring_eis_xml_sources`` через API.
 
 Повторного анализа нет: XML с ``pipeline.status = completed`` пропускается (кроме режима отладки).
+
+Внешняя БД — пакетно, один раз на запуск: метаданные всех XML, их предыдущие версии, файлы всех событий, привязка
+всех XML без закупки (номера закупок → номера контрактов → ИКЗ → заказчики) — по запросу на шаг для всех XML сразу
+(``RunCache``; раньше — запросы на каждый XML). Общий ``RunCache`` ежедневного прогона делит эти данные и архивы
+с анализатором файлов.
 """
 import asyncio
 import datetime
@@ -24,6 +29,7 @@ from configs.config import Config
 from configs.logger import get_logger
 from risk_monitoring import progress
 from risk_monitoring import passport, risk_catalog, rm_sql, xml_events
+from risk_monitoring.run_cache import RunCache, chunks
 
 logger = get_logger(__name__)
 
@@ -149,7 +155,8 @@ class XmlEventAnalyzer:
     """
 
     def __init__(self, http_manager: Any, environment: str, push_results: bool = True, force: bool = False,
-                 use_llm: bool = True, concurrency: int = 3, repo: Any = None, results_repo: Any = None):
+                 use_llm: bool = True, concurrency: int = 3, repo: Any = None, results_repo: Any = None,
+                 run_cache: Optional[RunCache] = None):
         """Создаёт компоненты: доступ к внешней БД, загрузчик архивов, LLM, API записи.
 
         ``repo`` (``configs.ai_repo.AIRepo``) нужен для срока хранения текстов: закрытие закупки/контракта
@@ -158,6 +165,8 @@ class XmlEventAnalyzer:
         ``results_repo`` (``AIRepo``) — внутреннее хранилище результатов (``ai_rm_results``): ``ai_analysis``
         XML сохраняется у нас; если во внешней БД результата нет, а у нас он есть — дозаписывается без анализа;
         резюме и тип файлов, которых нет во внешней БД, берутся из сохранённых у нас результатов файлов.
+
+        ``run_cache`` — общий кэш прогона (строки внешней БД, архивы); без него — свой на запуск.
         """
         from configs.data_fetcher import DataFetcher
         from configs.llm_client import get_llm
@@ -173,7 +182,11 @@ class XmlEventAnalyzer:
         self.internal: Dict[int, Dict[str, Any]] = {}
         self.storage_path = db.storage_path
         self.data_fetcher = DataFetcher(db.url, db.headers, http_manager)
-        self.archives = ArchiveCache(CloudStorageParser(http_manager, None))
+        self.cache = run_cache or RunCache()
+        self.own_archives = self.cache.archives is None
+        if self.own_archives:
+            self.cache.archives = ArchiveCache(CloudStorageParser(http_manager, None))
+        self.archives = self.cache.archives
         from risk_monitoring.llm_json import reasoning_llm
 
         # события разбирает модель для смысловых задач (RM_REASONING_MODEL), по умолчанию — get_llm()
@@ -208,12 +221,16 @@ class XmlEventAnalyzer:
         try:
             progress.subject(f"XML ({len(ids)})")
             async with progress.step("чтение сведений о XML из внешней БД") as st:
-                rows = await self._query("xml_meta.sql", head=[self.storage_path], ids=ids)
+                rows = await self._meta(ids)
                 st["detail"] = f"найдено {len(rows)} из {len(ids)}"
             found = {int(r["id"]): r for r in rows}
             async with progress.step("поиск предыдущих версий XML"):
                 previous = await self._previous(list(found)) if found else {}
             self.internal = await self._internal("xml", list(found))
+            todo = [found[i] for i in ids if i in found and self._will_prepare(found[i])]
+            async with progress.step("чтение XML, файлы событий и привязка — пакетно") as st:
+                await self.prefetch(todo, previous)
+                st["detail"] = f"XML к разбору {len(todo)}; запросов к внешней БД: {self._cache().queries}"
             # 1) разбор XML, diff, правила — без модели
             prepared = await asyncio.gather(*(self._guarded(found[i], previous.get(i)) for i in ids if i in found))
             ctxs = [p for p in prepared if p.get("status") == "prepared"]
@@ -228,7 +245,8 @@ class XmlEventAnalyzer:
             results = [finished.get(p["xml_id"], p) for p in prepared]
             return list(results) + [{"xml_id": i, "status": "not_found"} for i in ids if i not in found]
         finally:
-            self.archives.close()
+            if getattr(self, "own_archives", True):
+                self.archives.close()
 
     async def pending_files(self, xml_ids: List[int], include_done: bool = False) -> List[int]:
         """Файлы, указанные в XML (вложения и печатная форма) или привязанные к нему, ещё не проанализированные.
@@ -243,33 +261,161 @@ class XmlEventAnalyzer:
         Returns:
             List[int]: id файлов ``risk_monitoring_files`` без повторов.
         """
-        from risk_monitoring import file_versions
-
-        rows = await self._query("xml_meta.sql", head=[self.storage_path], ids=list(xml_ids))
-        urls: List[str] = []
+        rows = await self._meta(list(xml_ids))
+        previous = await self._previous([int(r["id"]) for r in rows]) if rows else {}
+        await self.prefetch(rows, previous)
+        ids = {int(r["id"]) for r in rows}
+        urls = set()
         for r in rows:
-            try:
-                _, _, body = xml_events.parse_xml(await self.archives.read(r["archive_url"], r["entry_name"]))
-            except Exception as e:  # noqa: BLE001 — остаются файлы, привязанные по xml_source_id
-                logger.warning(f"XML {r['id']}: не прочитан при поиске файлов: {e}")
-                continue
-            urls += [a["url"] for a in xml_events.attachments(body)] + file_versions.print_form_urls(body)
-        files = await self._query("xml_files.sql", ids=[int(r["id"]) for r in rows], urls=list(dict.fromkeys(urls))[:500])
-        out = [int(f["id"]) for f in files if include_done or f.get("rm_status") != "completed"]
+            urls |= self._urls(int(r["id"]), print_forms=True)
+        files = [f for f in self._cache().file_rows.values()
+                 if _int(f.get("xml_source_id")) in ids or f.get("source_url") in urls]
+        out = [int(f["id"]) for f in sorted(files, key=lambda f: int(f["id"]))
+               if include_done or f.get("rm_status") != "completed"]
         return list(dict.fromkeys(out))
 
-    async def _previous(self, ids: List[int]) -> Dict[int, Dict[str, Any]]:
-        """Предыдущая версия каждого XML (максимальная версия меньше текущей)."""
+    # ------------------------------------------------------------------ пакетная загрузка (RunCache)
+    def _cache(self) -> RunCache:
+        """Кэш прогона (создаётся при первом обращении — и у объектов, собранных без ``__init__``)."""
+        c = self.__dict__.get("cache")
+        if c is None:
+            c = self.cache = RunCache(self.__dict__.get("archives"))
+        return c
+
+    def _will_prepare(self, row: Dict[str, Any]) -> bool:
+        """XML будет разбираться в этом запуске (не пропущен как проанализированный или исчерпавший попытки)."""
+        if self.force:
+            return True
+        if row.get("rm_status") == "completed":
+            return False
+        stored = self.internal.get(int(row["id"]))
+        if stored and stored.get("status") == "completed" and not stored.get("debug"):
+            return False
+        return not (row.get("rm_status") == "failed" and (_int(row.get("rm_attempt")) or 0) + 1 > MAX_ATTEMPTS)
+
+    async def _meta(self, ids: List[int]) -> List[Dict[str, Any]]:
+        """Строки ``xml_meta.sql`` — каждый XML запрашивается один раз за прогон."""
+        got = await self._cache().one_each(self._query, "xml_meta.sql", ids, "id", head=[self.storage_path])
+        return [got[int(i)] for i in ids if int(i) in got]
+
+    async def _parse(self, x: Dict[str, Any]) -> Tuple[str, Any, Any, int]:
+        """Разобранный XML (тег, версия, тело, размер) — из архива один раз за прогон.
+
+        Raises:
+            Exception: XML не прочитан или не разобран (ошибка сохраняется и повторяется без нового чтения).
+        """
+        c = self._cache()
+        key = int(x["id"])
+        if key not in c.parsed:
+            try:
+                raw = await self.archives.read(x["archive_url"], x["entry_name"])
+                tag, version, body = xml_events.parse_xml(raw)
+                c.parsed[key] = (tag, version, body, len(raw))
+            except Exception as e:  # noqa: BLE001 — запоминаем: повторное чтение даст то же
+                c.parsed[key] = e
+        got = c.parsed[key]
+        if isinstance(got, Exception):
+            raise got
+        return got
+
+    def _urls(self, xml_id: int, print_forms: bool = False) -> set:
+        """Ссылки вложений (и печатных форм) разобранного XML."""
+        from risk_monitoring import file_versions
+
+        got = self._cache().parsed.get(int(xml_id))
+        if not got or isinstance(got, Exception):
+            return set()
+        body = got[2]
+        urls = {a["url"] for a in xml_events.attachments(body)}
+        return urls | set(file_versions.print_form_urls(body)) if print_forms else urls
+
+    async def prefetch(self, rows: List[Dict[str, Any]], previous: Dict[int, Dict[str, Any]]) -> None:
+        """Пакетно готовит всё, что нужно для разбора XML: читает XML и предыдущие версии, одним запросом — файлы
+        всех событий, одним обращением — их результаты у нас, по запросу на шаг — привязку XML без закупки.
+
+        Args:
+            rows: Строки ``xml_meta.sql``, которые будут разбираться.
+            previous: ``id XML → предыдущая версия``.
+        """
+        if not rows:
+            return
+        sem = asyncio.Semaphore(8)
+
+        async def parse(x: Dict[str, Any]) -> None:
+            """Чтение одного XML (ошибка остаётся в кэше и всплывёт при разборе)."""
+            async with sem:
+                try:
+                    await self._parse(x)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        prevs = [previous[int(r["id"])] for r in rows if previous.get(int(r["id"]))]
+        await asyncio.gather(*(parse(x) for x in list(rows) + prevs))
+        ids = [int(r["id"]) for r in rows] + [int(p["id"]) for p in prevs]
+        urls = set()
+        for r in rows:
+            urls |= self._urls(int(r["id"]), print_forms=True)
         try:
-            rows = await self._query("xml_previous.sql", head=[self.storage_path], ids=ids)
+            await self._load_files(ids, sorted(urls))
+            await self._load_file_internal()
+        except Exception as e:  # noqa: BLE001 — файлы событий не обязательны
+            logger.warning(f"Файлы XML не получены: {type(e).__name__}: {e}")
+        orphans = []
+        for r in rows:
+            if r.get("risk_monitoring_contract_id") is not None or int(r["id"]) in self._cache().links:
+                continue
+            try:
+                tag, _, body, _ = await self._parse(r)
+            except Exception:  # noqa: BLE001
+                continue
+            orphans.append((int(r["id"]), xml_events.extract_facts(tag, body), r))
+        if orphans:
+            await self._link_batch(orphans)
+
+    async def _load_files(self, xml_ids: List[int], urls: List[str]) -> None:
+        """Файлы по ``xml_source_id`` и по ссылкам — только ещё не запрошенные, пачками (``xml_files.sql``)."""
+        c = self._cache()
+        ids = [i for i in dict.fromkeys(int(i) for i in xml_ids) if i not in c.file_ids]
+        new_urls = [u for u in dict.fromkeys(urls) if u and u not in c.file_urls]
+        id_parts, url_parts = chunks(ids), chunks(new_urls)
+        for n in range(max(len(id_parts), len(url_parts))):
+            part_ids = id_parts[n] if n < len(id_parts) else []
+            part_urls = url_parts[n] if n < len(url_parts) else []
+            c.count("xml_files.sql")
+            for r in await self._query("xml_files.sql", ids=part_ids, urls=part_urls):
+                if r.get("id") is not None:
+                    c.file_rows[int(r["id"])] = r
+            c.file_ids.update(part_ids)
+            c.file_urls.update(part_urls)
+
+    async def _load_file_internal(self) -> None:
+        """Наши результаты файлов, у которых во внешней БД нет анализа, — одним обращением за все файлы."""
+        c = self._cache()
+        checked = c.__dict__.setdefault("file_internal_checked", set())
+        found = c.__dict__.setdefault("file_internal", {})
+        fresh = getattr(self, "file_results", None) or {}
+        missing = [i for i, r in c.file_rows.items() if i not in checked and i not in fresh
+                   and not (r.get("detected_type") or r.get("resume"))]
+        if not missing:
+            return
+        for fid, stored in (await self._internal("file", missing)).items():
+            if stored.get("status") == "completed":
+                found[fid] = stored["ai_analysis"]
+        checked.update(missing)
+
+    async def _previous(self, ids: List[int]) -> Dict[int, Dict[str, Any]]:
+        """Предыдущая версия каждого XML (максимальная версия меньше текущей) — один запрос на все XML прогона."""
+        try:
+            grouped = await self._cache().keyed(self._query, "xml_previous.sql", ids, "current_id",
+                                                head=[self.storage_path])
         except Exception as e:  # noqa: BLE001 — без предыдущей версии событие всё равно анализируется
             logger.warning(f"Предыдущие версии XML не получены: {e}")
             return {}
         best: Dict[int, Dict[str, Any]] = {}
-        for r in rows:
-            cur = int(r["current_id"])
-            if cur not in best or (_int(r.get("eis_version")) or -1) > (_int(best[cur].get("eis_version")) or -1):
-                best[cur] = r
+        for cur, rows in grouped.items():
+            for r in rows:
+                if cur not in best or (_int(r.get("eis_version")) or -1) > (_int(best[cur].get("eis_version")) or -1):
+                    best[int(cur)] = r
         return best
 
     async def _guarded(self, row: Dict[str, Any], previous: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -421,9 +567,8 @@ class XmlEventAnalyzer:
         xml_id = int(row["id"])
         progress.subject(f"XML {xml_id} «{row.get('entry_name') or ''}»")
         async with progress.step("чтение XML из архива ЕИС") as st:
-            raw = await self.archives.read(row["archive_url"], row["entry_name"])
-            tag, xml_version, body = xml_events.parse_xml(raw)
-            st["detail"] = f"{tag}, {len(raw) // 1024} КБ"
+            tag, xml_version, body, size = await self._parse(row)
+            st["detail"] = f"{tag}, {size // 1024} КБ"
         version = _int(row.get("eis_version"))
         version = xml_version if version is None else version
 
@@ -431,8 +576,7 @@ class XmlEventAnalyzer:
         if previous:
             try:
                 progress.note(f"предыдущая версия: XML {previous.get('id')} (версия {previous.get('eis_version')})")
-                prev_raw = await self.archives.read(previous["archive_url"], previous["entry_name"])
-                _, _, prev_body = xml_events.parse_xml(prev_raw)
+                _, _, prev_body, _ = await self._parse(previous)
             except Exception as e:  # noqa: BLE001 — нет предыдущей версии: событие без изменений
                 logger.warning(f"XML {xml_id}: предыдущая версия {previous.get('id')} не прочитана: {e}")
                 previous = None
@@ -536,22 +680,24 @@ class XmlEventAnalyzer:
             return None
 
     async def _files(self, xml_id: int, previous: Optional[Dict[str, Any]], atts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Файлы текущей и предыдущей версии XML (по ``xml_source_id`` и по ссылкам), с кратким результатом анализа."""
+        """Файлы текущей и предыдущей версии XML (по ``xml_source_id`` и по ссылкам), с кратким результатом анализа.
+
+        Строки берутся из кэша прогона (``prefetch`` запросил их сразу для всех XML); недостающие — дозапрашиваются.
+        """
         ids = [xml_id] + ([int(previous["id"])] if previous else [])
         urls = [a["url"] for a in atts][:200]
         try:
-            rows = await self._query("xml_files.sql", ids=ids, urls=urls)
+            await self._load_files(ids, urls)
+            await self._load_file_internal()
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Файлы XML {xml_id} не получены: {e}")
             return []
+        c = self._cache()
+        id_set, url_set = set(ids), set(urls)
+        rows = [r for _, r in sorted(c.file_rows.items())
+                if _int(r.get("xml_source_id")) in id_set or r.get("source_url") in url_set]
+        fresh = {**c.__dict__.get("file_internal", {}), **dict(getattr(self, "file_results", None) or {})}
         out = []
-        fresh = dict(getattr(self, "file_results", None) or {})
-        # во внешней БД анализа файла нет (прогон без записи, сбой записи) — берём сохранённый у нас
-        missing = [int(r["id"]) for r in rows if r.get("id") is not None and int(r["id"]) not in fresh
-                   and not (r.get("detected_type") or r.get("resume"))]
-        for fid, stored in (await self._internal("file", missing)).items():
-            if stored.get("status") == "completed":
-                fresh[fid] = stored["ai_analysis"]
         for r in rows:
             item = {"file_id": _int(r.get("id")), "xml_source_id": _int(r.get("xml_source_id")),
                     "file_name": r.get("file_name"), "source_url": r.get("source_url"),
@@ -569,6 +715,8 @@ class XmlEventAnalyzer:
     async def _link_orphan(self, facts: Dict[str, Any], row: Dict[str, Any]) -> Dict[str, Any]:
         """Предложение привязки XML без закупки (лестница: номер закупки → номер контракта → ИКЗ → заказчик).
 
+        Обычно уже готово: ``prefetch`` привязывает все XML запуска пакетно (:meth:`_link_batch`).
+
         Args:
             facts: Сведения XML.
             row: Строка ``xml_meta.sql`` (номера из колонок таблицы — дополнительный источник).
@@ -577,41 +725,100 @@ class XmlEventAnalyzer:
             Dict[str, Any]: ``method``, ``risk_monitoring_contract_id``, ``organisation_id``, ``ambiguous``,
             ``candidates``, ``customer_inn``, ``customer_kpp``. ``method = none`` — привязать не удалось.
         """
-        link: Dict[str, Any] = {"method": "none", "risk_monitoring_contract_id": None, "organisation_id": None,
-                                "ambiguous": False, "candidates": []}
-        purchase_nums = [n for n in {facts.get("purchase_number"), row.get("purchase_number")} if n]
-        contract_nums = [n for n in {facts.get("contract_reg_number"), row.get("contract_number")} if n]
+        xml_id = _int(row.get("id"))
+        links = self._cache().links
+        if xml_id is None or xml_id not in links:
+            await self._link_batch([(xml_id, facts, row)])
+        return links.get(xml_id) or {"method": "none", "risk_monitoring_contract_id": None, "organisation_id": None,
+                                     "ambiguous": False, "candidates": []}
+
+    async def _link_batch(self, items: List[Tuple[Optional[int], Dict[str, Any], Dict[str, Any]]]) -> None:
+        """Привязка многих XML без закупки: по одному запросу к внешней БД на шаг лестницы для всех XML сразу.
+
+        Шаги: карточки по номерам закупок (``link_by_number``) → карточки по номерам контрактов через другие XML
+        (``link_by_contract_number``) → карточки по ИКЗ (``link_by_ikz``, полный просмотр JSON — один раз на запуск)
+        → заказчик по ИНН/КПП из ИКЗ (``org_group``). Результат — в ``RunCache.links``.
+
+        Args:
+            items: ``(xml_id, сведения XML, строка xml_meta.sql)``.
+        """
+        links = self._cache().links
+
+        def blank() -> Dict[str, Any]:
+            """Пустая привязка."""
+            return {"method": "none", "risk_monitoring_contract_id": None, "organisation_id": None,
+                    "ambiguous": False, "candidates": []}
+
+        todo: Dict[Any, Dict[str, Any]] = {}
+        for xml_id, facts, row in items:
+            todo[xml_id] = {"facts": facts, "link": blank(),
+                            "purchase": sorted({str(n).strip() for n in (facts.get("purchase_number"), row.get("purchase_number")) if n}),
+                            "contract": sorted({str(n).strip() for n in (facts.get("contract_reg_number"), row.get("contract_number")) if n})}
         try:
-            if purchase_nums:
-                cards = await self._query("link_by_number.sql", nums=[str(n).strip() for n in purchase_nums])
-                if cards:
-                    link.update(method="purchase_number", risk_monitoring_contract_id=_int(cards[0]["id"]),
-                                organisation_id=_int(cards[0].get("risk_monitoring_organisation_id")),
-                                ambiguous=len(cards) > 1, candidates=[_int(c["id"]) for c in cards])
-                    return link
-            if contract_nums:
-                rows = await self._query("link_by_contract_number.sql", nums=[str(n).strip() for n in contract_nums])
-                if rows:
-                    rows.sort(key=lambda r: -(_int(r.get("n")) or 0))
-                    link.update(method="contract_number", risk_monitoring_contract_id=_int(rows[0]["risk_monitoring_contract_id"]),
-                                ambiguous=len({r["risk_monitoring_contract_id"] for r in rows}) > 1,
-                                candidates=[_int(r["risk_monitoring_contract_id"]) for r in rows])
-                    return link
-            parts = facts.get("ikz_parts")
-            if parts:
-                cards = await self._query("link_by_ikz.sql", nums=[parts["ikz"]])
-                card, ambiguous = xml_events.pick_by_ikz(cards, facts.get("published_at") or facts.get("sign_date"))
-                if card:
-                    link.update(method="ikz", risk_monitoring_contract_id=_int(card["id"]),
-                                organisation_id=_int(card.get("risk_monitoring_organisation_id")), ambiguous=ambiguous,
-                                candidates=[_int(c["id"]) for c in cards])
-                    return link
-                link.update(customer_inn=parts["customer_inn"], customer_kpp=parts["customer_kpp"])
-                orgs = await self._query("org_by_inn_kpp.sql", head=[parts["customer_inn"], parts["customer_kpp"]])
-                org = xml_events.canonical_org(orgs, datetime.date.today().year)
-                if org:
-                    link.update(method="ikz_customer", organisation_id=_int(org["id"]))
+            nums = sorted({n for t in todo.values() for n in t["purchase"]})
+            if nums:
+                by_num: Dict[str, List[Dict[str, Any]]] = {}
+                for part in chunks(nums):
+                    self._cache().count("link_by_number.sql")
+                    for c in await self._query("link_by_number.sql", nums=part):
+                        by_num.setdefault(str(c.get("number")).strip(), []).append(c)
+                for t in todo.values():
+                    cards = [c for n in t["purchase"] for c in by_num.get(n, [])]
+                    if cards:
+                        t["link"].update(method="purchase_number", risk_monitoring_contract_id=_int(cards[0]["id"]),
+                                         organisation_id=_int(cards[0].get("risk_monitoring_organisation_id")),
+                                         ambiguous=len(cards) > 1, candidates=[_int(c["id"]) for c in cards])
+            rest = [t for t in todo.values() if t["link"]["method"] == "none"]
+            nums = sorted({n for t in rest for n in t["contract"]})
+            if nums:
+                by_num = {}
+                for part in chunks(nums):
+                    self._cache().count("link_by_contract_number.sql")
+                    for r in await self._query("link_by_contract_number.sql", nums=part):
+                        by_num.setdefault(str(r.get("contract_number")).strip(), []).append(r)
+                for t in rest:
+                    rows = sorted((r for n in t["contract"] for r in by_num.get(n, [])), key=lambda r: -(_int(r.get("n")) or 0))
+                    if rows:
+                        t["link"].update(method="contract_number",
+                                         risk_monitoring_contract_id=_int(rows[0]["risk_monitoring_contract_id"]),
+                                         ambiguous=len({r["risk_monitoring_contract_id"] for r in rows}) > 1,
+                                         candidates=[_int(r["risk_monitoring_contract_id"]) for r in rows])
+            rest = [t for t in todo.values() if t["link"]["method"] == "none" and t["facts"].get("ikz_parts")]
+            ikzs = sorted({t["facts"]["ikz_parts"]["ikz"] for t in rest})
+            if ikzs:
+                by_ikz: Dict[str, List[Dict[str, Any]]] = {}
+                for part in chunks(ikzs):
+                    self._cache().count("link_by_ikz.sql")
+                    for c in await self._query("link_by_ikz.sql", nums=part):
+                        by_ikz.setdefault(str(c.get("ikz")).strip(), []).append(c)
+                for t in rest:
+                    f = t["facts"]
+                    cards = by_ikz.get(f["ikz_parts"]["ikz"], [])
+                    card, ambiguous = xml_events.pick_by_ikz(cards, f.get("published_at") or f.get("sign_date"))
+                    if card:
+                        t["link"].update(method="ikz", risk_monitoring_contract_id=_int(card["id"]),
+                                         organisation_id=_int(card.get("risk_monitoring_organisation_id")),
+                                         ambiguous=ambiguous, candidates=[_int(c["id"]) for c in cards])
+            rest = [t for t in rest if t["link"]["method"] == "none"]
+            inns = sorted({t["facts"]["ikz_parts"]["customer_inn"] for t in rest if t["facts"]["ikz_parts"].get("customer_inn")})
+            if inns:
+                orgs: List[Dict[str, Any]] = []
+                for part in chunks(inns):
+                    self._cache().count("org_group.sql")
+                    orgs += await self._query("org_group.sql", inns=part)
+                for t in rest:
+                    parts = t["facts"]["ikz_parts"]
+                    t["link"].update(customer_inn=parts["customer_inn"], customer_kpp=parts["customer_kpp"])
+                    mine = [o for o in orgs if str(o.get("inn") or "").strip() == str(parts["customer_inn"]).strip()
+                            and str(o.get("kpp") or "").strip() == str(parts["customer_kpp"] or "").strip()]
+                    org = xml_events.canonical_org(mine, datetime.date.today().year)
+                    if org:
+                        t["link"].update(method="ikz_customer", organisation_id=_int(org["id"]))
         except Exception as e:  # noqa: BLE001 — привязка не обязательна для события
             logger.warning(f"Привязка XML не выполнена: {e}")
-            link["error"] = str(e)
-        return link
+            for t in todo.values():
+                if t["link"]["method"] == "none":
+                    t["link"]["error"] = str(e)
+        for xml_id, t in todo.items():
+            links[xml_id] = t["link"]
+

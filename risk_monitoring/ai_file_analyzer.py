@@ -165,8 +165,12 @@ class AIFileAnalyzer:
     """
 
     def __init__(self, http_manager: Any, environment: str, repo: Any, push_results: bool = True,
-                 force: bool = False, recompute: bool = False, concurrency: int = 3):
-        """Создаёт компоненты конвейера (LLM, ридер, экстракторы, API внешней БД, эмбеддинги)."""
+                 force: bool = False, recompute: bool = False, concurrency: int = 3, run_cache: Any = None):
+        """Создаёт компоненты конвейера (LLM, ридер, экстракторы, API внешней БД, эмбеддинги).
+
+        ``run_cache`` (``risk_monitoring.run_cache.RunCache``) — общий кэш прогона: XML, их предыдущие версии,
+        архивы ЕИС и заказчики карточек запрашиваются один раз и для анализатора событий.
+        """
         from configs.data_fetcher import DataFetcher
         from configs.embedding_client import EmbeddingClient
         from configs.file_reader import FileReader
@@ -187,6 +191,9 @@ class AIFileAnalyzer:
         self.force = force
         self.recompute = recompute
         self.data_fetcher = DataFetcher(db.url, db.headers, http_manager)
+        from risk_monitoring.run_cache import RunCache
+
+        self.cache = run_cache or RunCache()
 
         from risk_monitoring.llm_json import reasoning_llm
 
@@ -274,16 +281,19 @@ class AIFileAnalyzer:
         resolved: set = set()
         if not hasattr(self, "lookups"):
             self.lookups: Dict[int, Dict[str, Any]] = {}
-        archives = ArchiveCache(self.parser)
+        cache = self._run_cache()
+        own_archives = cache.archives is None
+        archives = ArchiveCache(self.parser) if own_archives else cache.archives
         try:
             xml_of = await self._current_xml(rows, archives)
             xml_ids = sorted({x["id"] for x in xml_of.values()})
-            prev_rows = await self._query("xml_previous.sql", head=[self.storage_path], ids=xml_ids) if xml_ids else []
+            grouped = await cache.keyed(self._query, "xml_previous.sql", xml_ids, "current_id",
+                                        head=[self.storage_path]) if xml_ids else {}
             prev_xml: Dict[int, Dict[str, Any]] = {}
-            for p in prev_rows:
-                cur = int(p["current_id"])
-                if cur not in prev_xml or (p.get("eis_version") or -1) > (prev_xml[cur].get("eis_version") or -1):
-                    prev_xml[cur] = p
+            for cur, prev_rows in grouped.items():
+                for p in prev_rows:
+                    if cur not in prev_xml or (p.get("eis_version") or -1) > (prev_xml[cur].get("eis_version") or -1):
+                        prev_xml[int(cur)] = p
             refs: Dict[int, Dict[str, Any]] = {}
             for r in rows:
                 fid = int(r["id"])
@@ -333,7 +343,8 @@ class AIFileAnalyzer:
         except Exception as e:  # noqa: BLE001 — без предыдущей версии анализ всё равно возможен
             logger.warning(f"Предыдущие версии файлов через XML не найдены: {type(e).__name__}: {e}")
         finally:
-            archives.close()
+            if own_archives:
+                archives.close()
 
         rest = [int(r["id"]) for r in rows if int(r["id"]) not in resolved]
         if rest:
@@ -365,7 +376,7 @@ class AIFileAnalyzer:
         out: Dict[int, Dict[str, Any]] = {}
         linked = sorted({int(r["xml_source_id"]) for r in rows if r.get("xml_source_id")})
         if linked:
-            meta = {int(x["id"]): x for x in await self._query("xml_meta.sql", head=[self.storage_path], ids=linked)}
+            meta = await self._run_cache().one_each(self._query, "xml_meta.sql", linked, "id", head=[self.storage_path])
             for r in rows:
                 if r.get("xml_source_id") and int(r["xml_source_id"]) in meta:
                     out[int(r["id"])] = meta[int(r["xml_source_id"])]
@@ -393,13 +404,26 @@ class AIFileAnalyzer:
                 x["newer"] = file_versions.newer_versions(x, cands)
         return out
 
+    def _run_cache(self) -> Any:
+        """Кэш прогона (создаётся при первом обращении — и у объектов, собранных без ``__init__``)."""
+        c = self.__dict__.get("cache")
+        if c is None:
+            from risk_monitoring.run_cache import RunCache
+
+            c = self.cache = RunCache()
+        return c
+
     async def _xml_body(self, archives: Any, x: Dict[str, Any]) -> Dict[str, Any]:
-        """Тело XML с кэшем на время запуска (одни и те же XML нужны нескольким файлам)."""
-        cache = self.__dict__.setdefault("_xml_cache", {})
+        """Тело XML с кэшем на прогон: одни и те же XML нужны нескольким файлам и анализатору событий
+        (``RunCache.parsed`` — разобранный им XML, ``RunCache.bodies`` — прочитанный здесь)."""
+        cache = self._run_cache()
         key = int(x["id"])
-        if key not in cache:
-            cache[key] = await self._read_xml(archives, x)
-        return cache[key]
+        parsed = cache.parsed.get(key)
+        if parsed is not None and not isinstance(parsed, Exception):
+            return parsed[2]
+        if key not in cache.bodies:
+            cache.bodies[key] = await self._read_xml(archives, x)
+        return cache.bodies[key]
 
     async def analyze_ids(self, file_ids: List[int]) -> List[Dict[str, Any]]:
         """Анализирует файлы по id.
@@ -731,9 +755,9 @@ class AIFileAnalyzer:
         frags = [((r.get("evidence") or {}).get("fragment") or "") for r in risk["risks"]]
 
         async def fetch_orgs(cards: List[int]) -> Dict[int, Any]:
-            """Заказчики карточек из внешней БД."""
-            rows = await self._query("card_orgs.sql", ids=cards)
-            return {int(r["id"]): r.get("org_id") for r in rows}
+            """Заказчики карточек из внешней БД — каждая карточка один раз за прогон."""
+            got = await self._run_cache().one_each(self._query, "card_orgs.sql", cards, "id")
+            return {int(k): r.get("org_id") for k, r in got.items()}
 
         try:
             counts = await boilerplate.typical_fragments(

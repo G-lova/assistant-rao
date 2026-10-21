@@ -238,6 +238,11 @@ def summary_facts(s: Dict[str, Any]) -> List[str]:
     facts = [f"Выгрузка ЕИС за {s['date']}: документов XML {sc.get('xml', 0)}, файлов к анализу {sc.get('files', 0)}, "
              f"затронуто закупок {sc.get('contracts', 0)}, из них у заказчиков на мониторинге "
              f"{sc.get('contracts_monitored', 0)} (заказчиков: {sc.get('customers_monitored', 0)})."]
+    if not sc.get("xml") and sc.get("nearest_exports") is not None:
+        near = [n for n in sc["nearest_exports"] if n.get("xml")]
+        facts.append(f"Выгрузок ЕИС с датой {s['date']} нет (дата прогона — день выгрузки, а не публикации документов)"
+                     + ("; ближайшие выгрузки с XML: " + ", ".join(f"{n['date']} (XML {n['xml']})" for n in near[:6])
+                        if near else "; в соседние ±7 дней выгрузок с XML тоже нет") + ".")
     if not sc.get("contracts_monitored") and not ev["total"]:
         facts.append("По заказчикам на мониторинге за эту дату новых документов нет.")
     else:
@@ -368,12 +373,51 @@ class DailyRun:
             xml_ids = [int(r["id"]) for r in xml_rows]
             st["detail"] = f"XML {len(xml_ids)}"
         scope: Dict[str, Any] = {"xml": len(xml_ids), "files": 0, "contracts": 0}
+        if not xml_ids:
+            scope["nearest_exports"] = await self._nearest(d)
+            progress.note(f"за дату выгрузки {d} XML нет; выгрузки рядом: {scope['nearest_exports']}")
         file_results: Dict[int, Dict[str, Any]] = {}
 
+        from risk_monitoring.run_cache import RunCache
+
+        # общий кэш прогона: каждый XML, его предыдущая версия, файлы и архив ЕИС — один раз для обоих анализаторов
+        cache = self.cache = RunCache(self._make_archives())
+        try:
+            return await self._run(d, xml_rows, xml_ids, scope, file_results, cache, started, before)
+        finally:
+            cache.archives.close()
+
+    def _make_archives(self) -> Any:
+        """Общий загрузчик архивов ЕИС прогона (удаляет скачанное в конце прогона)."""
+        from configs.parsing import CloudStorageParser
+        from risk_monitoring.xml_event_analyzer import ArchiveCache
+
+        return ArchiveCache(CloudStorageParser(self.http_manager, None))
+
+    async def _nearest(self, d: str, days: int = 7) -> List[Dict[str, Any]]:
+        """Выгрузки ЕИС в окне ±``days`` дней (когда за дату XML нет: дата — это ``exact_date`` выгрузки, а не дата
+        публикации документов)."""
+        from datetime import timedelta
+
+        day = parse_date(d)
+        try:
+            rows = await self._query("daily_dates_near.sql", head=[(day - timedelta(days=days)).isoformat(),
+                                                                   (day + timedelta(days=days)).isoformat()])
+        except Exception as e:  # noqa: BLE001 — только диагностика
+            logger.warning(f"Выгрузки рядом с {d} не получены: {type(e).__name__}: {e}")
+            return []
+        return [{"date": str(r.get("exact_date"))[:10], "archives": int(_num(r.get("archives")) or 0),
+                 "xml": int(_num(r.get("xml")) or 0)} for r in rows]
+
+    async def _run(self, d: str, xml_rows: List[Dict[str, Any]], xml_ids: List[int], scope: Dict[str, Any],
+                   file_results: Dict[int, Dict[str, Any]], cache: Any, started: str,
+                   before: Dict[str, int]) -> Dict[str, Any]:
+        """Этапы S1–S4 с общим кэшем прогона (см. :meth:`run`)."""
+        from risk_monitoring.llm_json import CALLS
         from risk_monitoring.xml_event_analyzer import XmlEventAnalyzer
 
         xa = XmlEventAnalyzer(self.http_manager, self.environment, push_results=self.push, use_llm=self.use_llm,
-                              results_repo=self.repo)
+                              results_repo=self.repo, run_cache=cache)
 
         async def files() -> Any:
             """S1b: ещё не проанализированные файлы XML за дату."""
@@ -383,7 +427,7 @@ class DailyRun:
             scope["files"] = len(ids)
             if not ids:
                 return None, {"total": 0}
-            fa = AIFileAnalyzer(self.http_manager, self.environment, self.repo, push_results=self.push)
+            fa = AIFileAnalyzer(self.http_manager, self.environment, self.repo, push_results=self.push, run_cache=cache)
             res = await fa.analyze_ids(ids)
             file_results.update({int(r["file_id"]): r["ai_analysis"] for r in res
                                  if r.get("ai_analysis") and r.get("file_id") is not None})
@@ -399,10 +443,14 @@ class DailyRun:
 
         await self._stage("files", files)
         events = await self._stage("xml", xml) or {}
-        # привязка XML к закупкам могла измениться на этапе событий — охват закупок перечитывается
-        xml_rows = await self._query("daily_xml.sql", head=[d]) if xml_ids else []
-        xml_cards = {int(r["id"]): (int(r["card_id"]) if r.get("card_id") is not None else None) for r in xml_rows}
         events = {**await self._internal("xml", [i for i in xml_ids if i not in events]), **events}
+        # закупка XML: привязка из внешней БД, иначе — найденная на этапе событий (ai_analysis.link) без нового запроса
+        xml_cards: Dict[int, Optional[int]] = {}
+        for r in xml_rows:
+            card = r.get("card_id")
+            if card is None:
+                card = ((events.get(int(r["id"])) or {}).get("link") or {}).get("risk_monitoring_contract_id")
+            xml_cards[int(r["id"])] = int(card) if card is not None else None
         card_ids = sorted({c for c in xml_cards.values() if c is not None})
         scope["contracts"] = len(card_ids)
         scope["xml_unlinked"] = sum(1 for c in xml_cards.values() if c is None)
@@ -452,7 +500,8 @@ class DailyRun:
                                "started_at": started, "finished_at": passport.now_iso(),
                                "prompt_versions": {"daily_resume": PROMPT_VERSION} if used_llm else {},
                                "llm": {"requests": CALLS["requests"] - before.get("requests", 0),
-                                       "failed": CALLS["failed"] - before.get("failed", 0)}}
+                                       "failed": CALLS["failed"] - before.get("failed", 0)},
+                               "external_queries": dict(cache.queries)}
         await self.save(d, summary)
         logger.info(f"Ежедневный прогон {d}: {json.dumps(summary['scope'], ensure_ascii=False)}; "
                     f"этапы {json.dumps(self.stages, ensure_ascii=False, default=str)}")

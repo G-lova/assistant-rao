@@ -135,6 +135,16 @@ class DailyRunTest(unittest.TestCase):
             return []
 
         run._query = query
+
+        class Arch:
+            """Архивы без скачивания."""
+            closed = False
+
+            def close(self):
+                """Отметка удаления архивов."""
+                Arch.closed = True
+
+        run._make_archives = Arch
         calls = []
         xa = mock.MagicMock()
         xa.pending_files = mock.AsyncMock(return_value=[5])
@@ -164,6 +174,69 @@ class DailyRunTest(unittest.TestCase):
         self.assertEqual([a["kind"] for a in s["attention"]], ["became_red", "score_jump", "event"])
         self.assertEqual(saved, [("daily", 20261020, "running"), ("daily", 20261020, "completed")])
         self.assertTrue(s["resume"])
+        self.assertTrue(Arch.closed)
+        self.assertIn("external_queries", s["pipeline"])
+
+    def test_no_exports_fact(self):
+        """За дату выгрузок нет — сводка называет ближайшие выгрузки с XML."""
+        s = daily.build_summary(export_date="2026-05-08", environment="stage", cards={}, contracts={}, changed=[],
+                                events={}, xml_cards={}, customers=[], stages={},
+                                scope={"xml": 0, "files": 0, "contracts": 0,
+                                       "nearest_exports": [{"date": "2026-05-12", "archives": 2, "xml": 40}]})
+        facts = " ".join(daily.summary_facts(s))
+        self.assertIn("день выгрузки, а не публикации", facts)
+        self.assertIn("2026-05-12 (XML 40)", facts)
+
+
+class XmlBatchTest(unittest.TestCase):
+    """Пакетные запросы анализатора событий: один запрос на шаг для всех XML, повтор — из кэша."""
+
+    def test_prefetch_batches(self):
+        """Три XML без закупки: файлы — один запрос, привязка — по запросу на шаг; второй раз — без запросов."""
+        try:
+            from risk_monitoring.xml_event_analyzer import XmlEventAnalyzer
+        except ImportError as e:
+            raise unittest.SkipTest(f"нет зависимостей: {e}")
+        from risk_monitoring.run_cache import RunCache
+
+        xa = XmlEventAnalyzer.__new__(XmlEventAnalyzer)
+        xa.storage_path, xa.force, xa.internal, xa.results_repo = "s", False, {}, None
+        body = (b'<contract><commonInfo><number>N</number></commonInfo>'
+                b'<foundation><purchaseNumber>{n}</purchaseNumber></foundation></contract>')
+        bodies = {f"e{i}": body.replace(b"{n}", f"037310000{i}".encode()) for i in range(3)}
+
+        class Arch:
+            async def read(self, url, entry):
+                return bodies[entry]
+
+            def close(self):
+                pass
+
+        xa.cache = RunCache(Arch())
+        xa.archives = xa.cache.archives
+        calls = []
+
+        async def query(name, head=(), **lists):
+            """Внешняя БД: запоминает запросы."""
+            calls.append(name)
+            if name == "link_by_number.sql":
+                return [{"id": 70, "number": "0373100001", "risk_monitoring_organisation_id": 5}]
+            return []
+
+        xa._query = query
+        rows = [{"id": 10 + i, "archive_url": "a", "entry_name": f"e{i}", "risk_monitoring_contract_id": None,
+                 "purchase_number": f"037310000{i}"} for i in range(3)]
+        asyncio.run(xa.prefetch(rows, {}))
+        self.assertEqual(calls.count("xml_files.sql"), 1)
+        self.assertEqual(calls.count("link_by_number.sql"), 1)
+        self.assertLessEqual(calls.count("link_by_contract_number.sql"), 1)
+        self.assertEqual(xa.cache.links[11]["risk_monitoring_contract_id"], 70)
+        self.assertEqual(xa.cache.links[10]["method"], "none")
+        before = len(calls)
+        link = asyncio.run(xa._link_orphan({}, rows[1]))
+        asyncio.run(xa._files(11, None, []))
+        self.assertEqual(link["risk_monitoring_contract_id"], 70)
+        self.assertEqual(len(calls), before)
 
 
 if __name__ == "__main__":
