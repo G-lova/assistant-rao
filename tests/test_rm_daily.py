@@ -123,17 +123,21 @@ class DailyRunTest(unittest.TestCase):
                 saved.append((kind, ext_id, ai["pipeline"]["status"]))
 
         run = object.__new__(daily.DailyRun)
-        run.http_manager, run.environment, run.env, run.repo = None, "stage", "stage", Repo()
+        run.http_manager, run.environment, run.env, run.repo, run.storage_path = None, "stage", "stage", Repo(), "s"
         run.push, run.use_llm, run.stages_on, run.stages, run.llm_stats = False, False, daily.STAGES, {}, {}
 
         async def query(name, head=(), **lists):
             """Ответы внешней БД."""
+            queried.append(name)
             if name == "daily_xml.sql":
-                return [{"id": 101, "card_id": 1}]
+                return [{"id": 101, "card_id": 1, "risk_monitoring_contract_id": 1, "monitoring": 1}]
+            if name == "daily_files.sql":
+                return [{"id": 5, "xml_source_id": 101, "card_id": 1}]
             if name == "daily_cards.sql":
                 return [{"id": 1, "number": "N1", "organisation_id": 10, "monitoring": 1, "customer_name": "ЗГУ"}]
             return []
 
+        queried = []
         run._query = query
 
         class Arch:
@@ -168,7 +172,11 @@ class DailyRunTest(unittest.TestCase):
                 mock.patch("risk_monitoring.org_analyzer.OrgAnalyzer", return_value=oa):
             s = asyncio.run(run.run("2026-10-20"))
         self.assertEqual(calls, [False])
-        self.assertEqual(xa.file_results, {5: {"risks": []}})
+        self.assertEqual(xa.file_results, {5: {"doc_type": {"detected_type": None}, "resume": None,
+                                               "total_doc_risk": None}})
+        self.assertEqual(queried, ["daily_xml.sql", "daily_xml_previous.sql", "daily_files.sql", "daily_cards.sql"])
+        self.assertIn(5, run.cache.file_rows)
+        self.assertIn(1, run.cache.covered_cards)
         self.assertEqual(s["stages"]["customers"]["status"], "failed")
         self.assertEqual(s["stages"]["contracts"]["status"], "completed")
         self.assertEqual([a["kind"] for a in s["attention"]], ["became_red", "score_jump", "event"])
@@ -186,6 +194,32 @@ class DailyRunTest(unittest.TestCase):
         facts = " ".join(daily.summary_facts(s))
         self.assertIn("день выгрузки, а не публикации", facts)
         self.assertIn("2026-05-12 (XML 40)", facts)
+
+
+class RunCacheTest(unittest.TestCase):
+    """Кэш прогона: запрашиваются только новые id; засеянные запросом по дате — не запрашиваются."""
+
+    def test_keyed_and_seed(self):
+        """Второй запрос тех же id — из кэша; засеянные id — без запроса; пачки по CHUNK."""
+        from risk_monitoring import run_cache
+        from risk_monitoring.run_cache import RunCache
+
+        calls = []
+
+        async def fetch(name, head=(), **lists):
+            calls.append(list(lists["ids"]))
+            return [{"id": i} for i in lists["ids"]]
+
+        c = RunCache()
+        c.seed("xml_meta.sql", [{"id": 1}], "id", [1, 2])
+        got = asyncio.run(c.one_each(fetch, "xml_meta.sql", [1, 2, 3], "id"))
+        self.assertEqual(calls, [[3]])
+        self.assertEqual(sorted(got), [1, 3])
+        asyncio.run(c.one_each(fetch, "xml_meta.sql", [3, 1], "id"))
+        self.assertEqual(len(calls), 1)
+        with mock.patch.object(run_cache, "CHUNK", 2):
+            asyncio.run(c.keyed(fetch, "other.sql", [10, 11, 12], "id"))
+        self.assertEqual(calls[1:], [[10, 11], [12]])
 
 
 class XmlBatchTest(unittest.TestCase):

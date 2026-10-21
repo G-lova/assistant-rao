@@ -93,6 +93,9 @@ class ArchiveCache:
         self.parser = parser
         self.paths: Dict[str, str] = {}
         self.locks: Dict[str, asyncio.Lock] = {}
+        # открытый ZIP и указатель «имя → запись» на архив: в выгрузке за день — до десятков тысяч XML в одном
+        # архиве, и открывать его заново (с разбором оглавления) на каждый XML — квадратичная работа
+        self.zips: Dict[str, Tuple[zipfile.ZipFile, Dict[str, str], Any]] = {}
 
     async def read(self, url: str, entry_name: str) -> bytes:
         """Байты XML из архива.
@@ -116,7 +119,28 @@ class ArchiveCache:
                     raise FileNotFoundError(f"архив не скачан: {(res or {}).get('error')}")
                 self.paths[url] = res["file_path"]
         path = self.paths[url]
-        return await asyncio.to_thread(self._read_entry, path, entry_name)
+        return await asyncio.to_thread(self._read_cached, path, entry_name)
+
+    def _read_cached(self, path: str, entry_name: str) -> bytes:
+        """Читает XML из уже открытого архива (открывается один раз; чтение под блокировкой архива)."""
+        import threading
+
+        if path not in self.zips:
+            zf = zipfile.ZipFile(path)
+            index: Dict[str, str] = {}
+            for n in zf.namelist():
+                index.setdefault(n, n)
+                index.setdefault(n.rsplit("/", 1)[-1], n)
+            self.zips[path] = (zf, index, threading.Lock())
+        zf, index, lock = self.zips[path]
+        name = index.get(entry_name) or index.get(entry_name.rsplit("/", 1)[-1])
+        if name is None:
+            raise FileNotFoundError(f"в архиве нет {entry_name}")
+        with lock:
+            info = zf.getinfo(name)
+            if info.file_size > xml_events.MAX_XML_BYTES:
+                raise ValueError(f"{entry_name}: XML больше {xml_events.MAX_XML_BYTES} байт")
+            return zf.read(name)
 
     @staticmethod
     def _read_entry(path: str, entry_name: str) -> bytes:
@@ -133,7 +157,13 @@ class ArchiveCache:
             return zf.read(name)
 
     def close(self) -> None:
-        """Удаляет скачанные архивы."""
+        """Закрывает открытые архивы и удаляет скачанные."""
+        for zf, _, _ in self.zips.values():
+            try:
+                zf.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self.zips.clear()
         for p in self.paths.values():
             try:
                 os.unlink(p)
@@ -351,10 +381,13 @@ class XmlEventAnalyzer:
 
         prevs = [previous[int(r["id"])] for r in rows if previous.get(int(r["id"]))]
         await asyncio.gather(*(parse(x) for x in list(rows) + prevs))
+        covered = self._cache().covered_cards
         ids = [int(r["id"]) for r in rows] + [int(p["id"]) for p in prevs]
         urls = set()
         for r in rows:
-            urls |= self._urls(int(r["id"]), print_forms=True)
+            # файлы закупки уже загружены целиком (ежедневный прогон: daily_files.sql) — ссылки не запрашиваются
+            if _int(r.get("risk_monitoring_contract_id")) not in covered:
+                urls |= self._urls(int(r["id"]), print_forms=True)
         try:
             await self._load_files(ids, sorted(urls))
             await self._load_file_internal()

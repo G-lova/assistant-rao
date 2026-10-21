@@ -17,9 +17,10 @@ CHUNK = 500   # значений в одном IN (...)
 Fetch = Callable[..., Awaitable[List[Dict[str, Any]]]]
 
 
-def chunks(values: Sequence[Any], size: int = CHUNK) -> List[List[Any]]:
-    """Список пачками не больше ``size``."""
+def chunks(values: Sequence[Any], size: Optional[int] = None) -> List[List[Any]]:
+    """Список пачками не больше ``size`` (по умолчанию ``CHUNK``)."""
     values = list(values)
+    size = size or CHUNK
     return [values[i:i + size] for i in range(0, len(values), size)]
 
 
@@ -42,6 +43,38 @@ class RunCache:
         self.file_ids: Set[int] = set()
         self.file_urls: Set[str] = set()
         self.queries: Dict[str, int] = {}
+        # закупки, все файлы которых уже в file_rows (запросом по дате): по ссылкам их вложения не дозапрашиваются
+        self.covered_cards: Set[int] = set()
+
+    def seed(self, name: str, rows: Iterable[Dict[str, Any]], key: str, ids: Iterable[Any]) -> None:
+        """Кладёт в кэш строки, полученные одним запросом по дате (``daily_xml.sql`` …), и отмечает ``ids`` как
+        запрошенные: :meth:`keyed` по ним во внешнюю БД больше не обращается.
+
+        Args:
+            name: Запрос, вместо которого получены строки (``xml_meta.sql``, ``xml_previous.sql``).
+            rows: Строки.
+            key: Колонка-ключ.
+            ids: Значения, для которых строки получены полностью (в т. ч. те, у кого строк нет).
+        """
+        store = self.rows.setdefault(name, {})
+        for r in rows:
+            k = _norm(r.get(key))
+            if k is not None:
+                store.setdefault(k, []).append(r)
+        self.fetched.setdefault(name, set()).update(_norm(i) for i in ids if i is not None)
+
+    def seed_files(self, rows: Iterable[Dict[str, Any]], xml_ids: Iterable[int], cards: Iterable[int]) -> None:
+        """Файлы, полученные запросом по дате: XML ``xml_ids`` и закупки ``cards`` покрыты полностью."""
+        for r in rows:
+            if r.get("id") is not None:
+                self.file_rows[int(r["id"])] = r
+        self.file_ids.update(int(i) for i in xml_ids)
+        self.covered_cards.update(int(c) for c in cards)
+
+    def release_xml(self) -> None:
+        """Освобождает память под разобранные XML (после пачки ежедневного прогона)."""
+        self.parsed.clear()
+        self.bodies.clear()
 
     def count(self, name: str) -> None:
         """Учёт запросов к внешней БД (для журнала и тестов)."""

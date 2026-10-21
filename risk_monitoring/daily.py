@@ -128,6 +128,24 @@ def monitored(card: Dict[str, Any]) -> bool:
         return str(card.get("monitoring")).lower() == "true"
 
 
+def slim_event(ai: Dict[str, Any]) -> Dict[str, Any]:
+    """Из ``ai_analysis`` события — только то, что нужно сводке (за день бывают десятки тысяч событий)."""
+    return {"event": ai.get("event"), "resume": str(ai.get("resume") or "")[:500], "link": ai.get("link"),
+            "risks": [{"rule_id": r.get("rule_id")} for r in ai.get("risks") or [] if r.get("rule_id")]}
+
+
+def slim_file(ai: Dict[str, Any]) -> Dict[str, Any]:
+    """Из ``ai_analysis`` файла — только то, что нужно событиям (тип, резюме, риск документа)."""
+    return {"doc_type": {"detected_type": (ai.get("doc_type") or {}).get("detected_type")}, "resume": ai.get("resume"),
+            "total_doc_risk": ai.get("total_doc_risk")}
+
+
+def _add_counts(acc: Dict[str, Any], counts: Dict[str, int]) -> None:
+    """Складывает счётчики пачек."""
+    for k, v in counts.items():
+        acc[k] = acc.get(k, 0) + v
+
+
 def _importance_rank(v: Optional[str]) -> int:
     """Ранг важности события (``low`` → 0 … ``critical`` → 3)."""
     from risk_monitoring.risk_catalog import IMPORTANCE_ORDER
@@ -296,6 +314,7 @@ class DailyRun:
         self.http_manager = http_manager
         self.environment = environment
         self.env = (environment or cfg.APP_ENV).lower()
+        self.storage_path = db.storage_path
         self.repo = repo
         self.push = push_results
         self.use_llm = use_llm
@@ -369,9 +388,11 @@ class DailyRun:
         await self.save(d, {"date": d, "pipeline": {"schema_version": SCHEMA_VERSION, "stage": "S0-S4",
                                                     "status": "running", "started_at": started}})
         async with progress.step("S0: XML за дату выгрузки") as st:
-            xml_rows = await self._query("daily_xml.sql", head=[d])
+            xml_rows = await self._query("daily_xml.sql", head=[self.storage_path, d])
+            if settings.DAILY_SCOPE == "monitored":
+                xml_rows = [r for r in xml_rows if monitored(r)]
             xml_ids = [int(r["id"]) for r in xml_rows]
-            st["detail"] = f"XML {len(xml_ids)}"
+            st["detail"] = f"XML {len(xml_ids)}" + (" (заказчики на мониторинге)" if settings.DAILY_SCOPE == "monitored" else "")
         scope: Dict[str, Any] = {"xml": len(xml_ids), "files": 0, "contracts": 0}
         if not xml_ids:
             scope["nearest_exports"] = await self._nearest(d)
@@ -382,10 +403,89 @@ class DailyRun:
 
         # общий кэш прогона: каждый XML, его предыдущая версия, файлы и архив ЕИС — один раз для обоих анализаторов
         cache = self.cache = RunCache(self._make_archives())
+        if xml_ids:
+            await self._seed(d, xml_rows, xml_ids, cache)
         try:
             return await self._run(d, xml_rows, xml_ids, scope, file_results, cache, started, before)
         finally:
             cache.archives.close()
+
+    async def _seed(self, d: str, xml_rows: List[Dict[str, Any]], xml_ids: List[int], cache: Any) -> None:
+        """Сведения о XML, их предыдущие версии и файлы за дату — тремя запросами по дате (без списков id, как
+        ``xml_processor``) в кэш прогона: анализаторы файлов и событий берут их оттуда, не обращаясь к внешней БД."""
+        async with progress.step("S0: предыдущие версии и файлы XML за дату (запросами по дате)") as st:
+            cache.seed("xml_meta.sql", xml_rows, "id", xml_ids)
+            prev_rows = await self._query("daily_xml_previous.sql", head=[self.storage_path, d])
+            cache.seed("xml_previous.sql", prev_rows, "current_id", xml_ids)
+            files = await self._query("daily_files.sql", head=[d, d])
+            linked = {int(r["id"]) for r in xml_rows if r.get("risk_monitoring_contract_id") is not None}
+            cards = {int(r["risk_monitoring_contract_id"]) for r in xml_rows if int(r["id"]) in linked}
+            # файлы предыдущих версий привязанных XML — среди файлов тех же закупок
+            prev_linked = [int(p["id"]) for p in prev_rows if p.get("id") is not None and _num(p.get("current_id")) is not None
+                           and int(_num(p["current_id"])) in linked]
+            cache.seed_files(files, list(xml_ids) + prev_linked, cards)
+            cache.queries.update({"daily_xml.sql": 1, "daily_xml_previous.sql": 1, "daily_files.sql": 1})
+            st["detail"] = f"предыдущих версий {len(prev_rows)}, файлов {len(files)}"
+
+    async def _documents(self, xml_ids: List[int], xa: Any, cache: Any, scope: Dict[str, Any],
+                         file_results: Dict[int, Dict[str, Any]], events: Dict[int, Dict[str, Any]]) -> None:
+        """S1b файлы и S1a события пачками по ``DAILY_XML_BATCH`` XML: память под разобранные XML освобождается
+        после каждой пачки (в выгрузке за день бывает больше 20 000 XML). Сбой пачки не останавливает прогон.
+
+        Args:
+            xml_ids: XML за дату.
+            xa: ``XmlEventAnalyzer`` с общим кэшем.
+            cache: ``RunCache``.
+            scope: Счётчики охвата (``files``).
+            file_results: Результаты файлов (сокращённые) для событий — дополняются.
+            events: ``xml_id → сокращённый ai_analysis`` события — дополняется.
+        """
+        from risk_monitoring.run_cache import chunks
+
+        st_files = {"status": "completed", "seconds": 0, "total": 0}
+        st_xml = {"status": "completed", "seconds": 0, "total": 0}
+        if "files" not in self.stages_on:
+            st_files = {"status": "skipped"}
+        if "xml" not in self.stages_on:
+            st_xml = {"status": "skipped"}
+        fa = None
+        parts = chunks(xml_ids, max(1, int(settings.DAILY_XML_BATCH)))
+        for n, part in enumerate(parts, 1):
+            progress.subject(f"Ежедневный прогон, пачка XML {n}/{len(parts)}")
+            if st_files.get("status") != "skipped":
+                t = time.monotonic()
+                try:
+                    ids = await xa.pending_files(part)
+                    scope["files"] += len(ids)
+                    if ids:
+                        if fa is None:
+                            from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
+
+                            fa = AIFileAnalyzer(self.http_manager, self.environment, self.repo,
+                                                push_results=self.push, run_cache=cache)
+                        res = await fa.analyze_ids(ids)
+                        _add_counts(st_files, self._counts(res))
+                        file_results.update({int(r["file_id"]): slim_file(r["ai_analysis"]) for r in res
+                                             if r.get("ai_analysis") and r.get("file_id") is not None})
+                except Exception as e:  # noqa: BLE001 — сбой пачки не останавливает прогон
+                    logger.error(f"Ежедневный прогон, файлы пачки {n}: {type(e).__name__}: {e}", exc_info=True)
+                    st_files.update(status="failed", error=f"{type(e).__name__}: {e}"[:500])
+                st_files["seconds"] += round(time.monotonic() - t)
+            if st_xml.get("status") != "skipped":
+                t = time.monotonic()
+                try:
+                    xa.file_results = file_results
+                    res = await xa.analyze_ids(part)
+                    _add_counts(st_xml, self._counts(res))
+                    events.update({int(r["xml_id"]): slim_event(r["ai_analysis"]) for r in res if r.get("ai_analysis")})
+                except Exception as e:  # noqa: BLE001
+                    logger.error(f"Ежедневный прогон, события пачки {n}: {type(e).__name__}: {e}", exc_info=True)
+                    st_xml.update(status="failed", error=f"{type(e).__name__}: {e}"[:500])
+                st_xml["seconds"] += round(time.monotonic() - t)
+            cache.release_xml()
+            logger.info(f"Ежедневный прогон: пачка {n}/{len(parts)} — файлы {st_files}, события {st_xml}; "
+                        f"запросов к внешней БД {cache.queries}")
+        self.stages["files"], self.stages["xml"] = st_files, st_xml
 
     def _make_archives(self) -> Any:
         """Общий загрузчик архивов ЕИС прогона (удаляет скачанное в конце прогона)."""
@@ -419,30 +519,8 @@ class DailyRun:
         xa = XmlEventAnalyzer(self.http_manager, self.environment, push_results=self.push, use_llm=self.use_llm,
                               results_repo=self.repo, run_cache=cache)
 
-        async def files() -> Any:
-            """S1b: ещё не проанализированные файлы XML за дату."""
-            from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
-
-            ids = await xa.pending_files(xml_ids) if xml_ids else []
-            scope["files"] = len(ids)
-            if not ids:
-                return None, {"total": 0}
-            fa = AIFileAnalyzer(self.http_manager, self.environment, self.repo, push_results=self.push, run_cache=cache)
-            res = await fa.analyze_ids(ids)
-            file_results.update({int(r["file_id"]): r["ai_analysis"] for r in res
-                                 if r.get("ai_analysis") and r.get("file_id") is not None})
-            return None, self._counts(res)
-
-        async def xml() -> Any:
-            """S1a: события XML."""
-            if not xml_ids:
-                return {}, {"total": 0}
-            xa.file_results = file_results
-            res = await xa.analyze_ids(xml_ids)
-            return {int(r["xml_id"]): r["ai_analysis"] for r in res if r.get("ai_analysis")}, self._counts(res)
-
-        await self._stage("files", files)
-        events = await self._stage("xml", xml) or {}
+        events: Dict[int, Dict[str, Any]] = {}
+        await self._documents(xml_ids, xa, cache, scope, file_results, events)
         events = {**await self._internal("xml", [i for i in xml_ids if i not in events]), **events}
         # закупка XML: привязка из внешней БД, иначе — найденная на этапе событий (ai_analysis.link) без нового запроса
         xml_cards: Dict[int, Optional[int]] = {}
