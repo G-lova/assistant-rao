@@ -30,11 +30,11 @@ SCHEMA_VERSION = "rm-org-1"
 
 
 def _risk(code: str, description: str, level: float, evidence: List[Dict[str, Any]],
-          verification: List[str], confidence: float = 0.8) -> Dict[str, Any]:
-    """Риск аналитики во внешнем формате (``source = aggregate``)."""
+          verification: List[str], confidence: float = 0.8, source: Optional[str] = None) -> Dict[str, Any]:
+    """Риск аналитики во внешнем формате (``source``: ``aggregate``, для REG-* — ``registry``)."""
     return {"rule_id": code, "title": risk_catalog.title(code), "description": description, "level": level,
             "confidence": confidence, "law": None, "evidence": evidence, "verification_needed": verification,
-            "source": "aggregate"}
+            "source": source or ("registry" if code.startswith("REG-") else "aggregate")}
 
 
 def _share(part: int, total: int) -> Optional[float]:
@@ -192,7 +192,8 @@ def customer_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
 
 
 def supplier_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[str, Any]], inn: str, settings: Any,
-                     previous_score: Optional[float] = None, today: Optional[date] = None) -> Dict[str, Any]:
+                     previous_score: Optional[float] = None, today: Optional[date] = None,
+                     rnp: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
     """Секция ``supplier``: метрики, риски, балл поставщика.
 
     Args:
@@ -202,6 +203,7 @@ def supplier_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
         settings: Пороги.
         previous_score: Прошлый балл.
         today: Дата проверки реестра (по умолчанию — сегодня).
+        rnp: Записи РНП по ИНН поставщика → REG-002 (действующие на сегодня).
 
     Returns:
         Dict[str, Any]: Как у :func:`customer_section`, с ``top_customers`` и ``registry``.
@@ -221,6 +223,14 @@ def supplier_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
                            [{"src": f"black_list:{b.get('id')}", "deal_number": b.get("deal_number"),
                              "date_begin": str(b.get("date_begin"))[:10]} for b in active],
                            ["Проверить, не заключались ли контракты в период действия записи"], confidence=1.0))
+    rnp_active = cp.rnp_matches(rnp, {"inn": inn}, today)
+    if rnp_active:
+        e = rnp_active[0]
+        risks.append(_risk("REG-002", f"Поставщик в реестре недобросовестных поставщиков (запись {e.get('reg_number')}, "
+                                      f"с {str(e.get('first_published_at') or e.get('published_at') or '')[:10]})", 0.8,
+                           [{"src": f"rnp:{x.get('id')}", "reg_number": x.get("reg_number"), "fz": x.get("fz")}
+                            for x in rnp_active],
+                           ["Проверить контракты, заключённые в период включения в РНП"], confidence=1.0))
     enough = m["contracts"] >= settings.ORG_MIN_CONTRACTS
     # «Любимый поставщик» (BEH-006) — поведение заказчика, считается в его секции; здесь только метрика
     # top_customer_share (в БД — закупки заказчиков на мониторинге, поэтому у поставщика она завышена)
@@ -234,7 +244,9 @@ def supplier_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
                            ["Проверить исполнение демпинговых контрактов и антидемпинговые меры"]))
     return _finish(m, risks, previous_score, settings, top_customers=top,
                    registry=[{"black_list_id": b.get("id"), "deal_number": b.get("deal_number"),
-                              "date_begin": str(b.get("date_begin"))[:10]} for b in active])
+                              "date_begin": str(b.get("date_begin"))[:10]} for b in active],
+                   rnp=[{"rnp_entry_id": e.get("id"), "reg_number": e.get("reg_number"), "fz": e.get("fz"),
+                         "published_at": str(e.get("published_at") or "")[:10]} for e in rnp_active])
 
 
 def _finish(metrics: Dict[str, Any], risks: List[Dict[str, Any]], previous_score: Optional[float], settings: Any,

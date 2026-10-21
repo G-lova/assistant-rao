@@ -220,8 +220,9 @@ class ContractAnalyzer:
         statuses_rows = await self._safe_query("file_risk_statuses.sql", ids=[int(f["id"]) for f in files]) if files else []
         inns = sorted({str(i) for i in ((cp.as_json(c.get("dataset")) or {}).get("supplier", {}).get("post_inn") for c in cards) if i})
         black = await self._safe_query("black_list.sql", inns=inns) if inns else []
+        rnp = await self._safe_query("rnp_entries.sql", inns=inns) if inns else []
         supplier_counts = await self._supplier_counts(cards)
-        return {"cards": cards, "files": files, "xmls": xmls, "rules": rules, "statuses": statuses_rows, "black": black,
+        return {"cards": cards, "files": files, "xmls": xmls, "rules": rules, "statuses": statuses_rows, "black": black, "rnp": rnp,
                 "supplier_counts": supplier_counts}
 
     async def _supplier_counts(self, cards: List[Dict[str, Any]]) -> Dict[int, Dict[str, int]]:
@@ -301,6 +302,9 @@ class ContractAnalyzer:
         black_by_inn: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         for b in data["black"]:
             black_by_inn[str(b.get("inn") or "").strip()].append(b)
+        self.rnp_by_inn: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for e in data.get("rnp") or []:
+            self.rnp_by_inn[str(e.get("inn") or "").strip()].append(e)
         sem = asyncio.Semaphore(3)
 
         async def one(cid: int) -> Dict[str, Any]:
@@ -333,7 +337,8 @@ class ContractAnalyzer:
         built = cp.build_contract_analysis(card=card, files=item["files"], xmls=item["xmls"], values=item["values"],
                                            black=black_by_inn.get(inn, []), statuses=statuses,
                                            previous_score=cp.num(card.get("prev_score")),
-                                           supplier_counts=supplier_counts)
+                                           supplier_counts=supplier_counts,
+                                           rnp=getattr(self, "rnp_by_inn", {}).get(inn, []))
         h = built.pop("input_hash")
         progress.note(f"сборка: рисков {len(built['risks'])}, балл {built['profile']['score']} ({built['profile']['zone']})")
         if not self.force and card.get("rm_status") == "completed" and card.get("prev_hash") == h:

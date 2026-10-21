@@ -144,8 +144,8 @@ CUSTOMER_HHI = 2500                    # индекс Херфиндаля–Х�
 SUPPLIER_TERMINATION_SHARE = 0.2       # доля расторгнутых контрактов поставщика → BEH-002
 DEMPING_PCT = 25                       # снижение цены на торгах, %, с которого контракт считается демпинговым
 REPEAT_RISK_MIN = 3                    # риск одного кода в стольких закупках заказчика → HIST-001
-# Внешняя система пока не принимает ai_analysis организаций (нет таблицы в API): результат хранится у нас
-ORG_PUSH_ENABLED = False
+# ai_analysis организаций (секции customer / supplier) — в risk_monitoring_organisations.ai_analysis (ТЗ 09.10.2026)
+ORG_PUSH_ENABLED = True
 
 # ---------------------------------------------------------------- ежедневный прогон и сводка (S0–S4)
 # Прогон за дату выгрузки запускает Laravel (POST /risk-monitoring/daily); если до DAILY_WATCHDOG_HOUR вызова не было,
@@ -154,6 +154,8 @@ DAILY_WATCHDOG_ENABLED = True
 DAILY_WATCHDOG_HOUR = 6
 DAILY_ENVIRONMENT = ENVIRONMENT         # окружение текущей установки (APP_ENV)
 DAILY_PUSH = True                      # записывать результаты этапов во внешнюю БД
+# Сводка — и в risk_monitoring_daily_runs (POST /api/risk-monitoring/daily-runs, ТЗ 09.10.2026); у нас — всегда
+DAILY_RUNS_PUSH_ENABLED = True
 # Сводка — только по заказчикам с risk_monitoring_organisations.monitoring = 1
 DAILY_MONITORED_ONLY = True
 DAILY_SCORE_JUMP = 15                  # рост балла закупки за прогон, с которого она попадает в «внимание»

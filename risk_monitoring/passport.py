@@ -178,11 +178,30 @@ def apply_catalog(risk: Dict[str, Any], fz: Any = None) -> Dict[str, Any]:
     return risk
 
 
+# Источник риска для ``risk_monitoring_document_risks.source`` (ТЗ 09.10.2026): один на риск, по надёжности
+SOURCE_PRIORITY = ("registry", "rule", "package", "aggregate", "ai_event", "ai_file")
+SOURCE_ALIASES = {"print_form": "rule", "version_diff": "ai_file", "eis": "rule"}
+
+
+def primary_source(sources: Iterable[str]) -> Optional[str]:
+    """Главный источник риска из ``sources``: реестр → правило → комплект → аналитика → событие → файл.
+
+    Args:
+        sources: Источники риска (``ai_file``, ``rule``, ``print_form`` …).
+
+    Returns:
+        Optional[str]: Значение из ``SOURCE_PRIORITY`` или ``None``, если источников нет.
+    """
+    norm = {SOURCE_ALIASES.get(s, s) for s in sources or [] if s}
+    return next((s for s in SOURCE_PRIORITY if s in norm), next(iter(sorted(norm)), None))
+
+
 def merge_risks(*lists: Iterable[Dict[str, Any]], fz: Any = None) -> List[Dict[str, Any]]:
     """Объединяет списки рисков по ``rule_id`` и дополняет их сведениями каталога.
 
     Уровень и уверенность — максимум; описания — первое непустое (остальные не теряются в evidence);
-    цитаты и действия эксперта — объединение без повторов; ``sources`` — все источники риска.
+    цитаты и действия эксперта — объединение без повторов; ``sources`` — все источники риска, ``source`` — главный
+    из них (:func:`primary_source`).
     Риски, неприменимые к закону закупки (ст. 111 44-ФЗ для 223-ФЗ), отбрасываются.
 
     Args:
@@ -228,7 +247,7 @@ def merge_risks(*lists: Iterable[Dict[str, Any]], fz: Any = None) -> List[Dict[s
     out = [r for r in merged.values() if risk_catalog.applicable(r["rule_id"], fz)]
     for r in out:
         r["evidence"] = r["evidence"][:MAX_EVIDENCE_PER_RISK]
-        r.pop("source", None)
+        r["source"] = primary_source(r["sources"])   # колонка source в risk_monitoring_document_risks
         apply_catalog(r, fz)
     out.sort(key=lambda r: (r.get("level") or 0) * (r.get("confidence") or 0), reverse=True)
     return out

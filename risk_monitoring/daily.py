@@ -10,8 +10,9 @@
 * **S4 сводка** — по закупкам заказчиков на мониторинге: зоны, попавшие в красную зону, рост балла, важные события,
   реестр 19.28 и резюме (модель пересказывает готовые факты; без модели — шаблон).
 
-Сводка хранится у нас (``ai_rm_results``, ``kind = daily``, ``external_id = ГГГГММДД``): таблицы сводок во внешней
-БД пока нет. Отдаётся ``GET /risk-monitoring/daily/{date}``.
+Сводка хранится у нас (``ai_rm_results``, ``kind = daily``, ``external_id = ГГГГММДД``) и пишется во внешнюю БД —
+``risk_monitoring_daily_runs`` (``POST /api/risk-monitoring/daily-runs``, ТЗ 09.10.2026; ``DAILY_RUNS_PUSH_ENABLED``).
+Отдаётся и ``GET /risk-monitoring/daily/{date}``.
 
 Сбой этапа не останавливает прогон: этап получает ``status = failed``, следующие работают с тем, что есть.
 """
@@ -387,9 +388,31 @@ class DailyRun:
         return {i: r["ai_analysis"] for i, r in rows.items() if r.get("ai_analysis")}
 
     async def save(self, export_date: str, ai: Dict[str, Any]) -> None:
-        """Сохраняет сводку (или отметку «выполняется») у нас."""
+        """Сохраняет сводку (или отметку «выполняется») у нас и в ``risk_monitoring_daily_runs`` внешней БД.
+
+        Во внешнюю БД — ``POST /api/risk-monitoring/daily-runs`` (upsert по дате выгрузки), если включены
+        ``DAILY_RUNS_PUSH_ENABLED`` и запись результатов прогона; сбой записи не останавливает прогон — сводка у нас
+        остаётся, отметка ``pushed`` в ``ai_rm_results`` показывает, дошла ли она.
+        """
+        pipe = ai.get("pipeline") or {}
+        pushed, error = False, None
+        if self.push and settings.DAILY_RUNS_PUSH_ENABLED and self.http_manager is not None:
+            try:
+                api = self.__dict__.get("risk_api")
+                if api is None:
+                    from risk_monitoring.risk_monitoring_api import RiskMonitoringAPI
+
+                    api = self.risk_api = RiskMonitoringAPI(self.http_manager, self.environment)
+                done = pipe.get("status") in ("completed", "failed")
+                await api.upsert_daily_run(export_date, pipe.get("status") or "running", ai.get("stages") or {},
+                                           pipe.get("started_at"), pipe.get("finished_at"),
+                                           ai if done else None)
+                pushed = True
+            except Exception as e:  # noqa: BLE001 — сводка остаётся у нас
+                error = f"{type(e).__name__}: {e}"[:500]
+                logger.warning(f"Сводка {export_date} не записана в risk_monitoring_daily_runs: {error}")
         if hasattr(self.repo, "save_rm_result"):
-            await self.repo.save_rm_result(self.env, KIND, run_key(export_date), ai, False, None)
+            await self.repo.save_rm_result(self.env, KIND, run_key(export_date), ai, pushed, error)
 
     async def run(self, export_date: str) -> Dict[str, Any]:
         """Выполняет этапы за дату и возвращает сводку.

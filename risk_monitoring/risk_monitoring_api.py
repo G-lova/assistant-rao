@@ -16,6 +16,9 @@ ALLOWED_TABLES = {
     "risk_monitoring_contracts",
     "risk_monitoring_eis_xml_sources",
     "risk_monitoring_files",
+    # ТЗ 09.10.2026, п. 3: профиль организации (секции customer / supplier) и сводка ежедневного прогона
+    "risk_monitoring_organisations",
+    "risk_monitoring_daily_runs",
 }
 
 
@@ -49,6 +52,7 @@ class RiskMonitoringAPI:
 
     GET   /api/risk-monitoring/ai-analysis?table=...&id=...
     PATCH /api/risk-monitoring/ai-analysis  {table, id, ai_analysis}
+    POST  /api/risk-monitoring/daily-runs   {export_date, status, stages, started_at, finished_at, ai_analysis} → id
     """
 
     def __init__(self, http_manager: HTTPClientManager, environment: str = None, rate: float = 0.9):
@@ -72,7 +76,7 @@ class RiskMonitoringAPI:
             raise ValueError(f"Недопустимая таблица: {table}")
 
     @async_retry(RISK_API_RETRY_CONFIG)
-    async def _request(self, method: str, **kwargs) -> Dict[str, Any]:
+    async def _request(self, method: str, url: str = None, **kwargs) -> Dict[str, Any]:
         """Запрос к API с лимитом частоты и повторами на 429/503/5xx (с учётом ``Retry-After``).
 
         Ожидание лимита частоты ограничено ``LIMITER_WAIT`` секундами: зависнуть на нём задача не может.
@@ -81,7 +85,7 @@ class RiskMonitoringAPI:
         session = self.http_manager.get_session()
 
         async with session.request(
-            method, self.url, headers=self.headers,
+            method, url or self.url, headers=self.headers,
             timeout=aiohttp.ClientTimeout(total=30), **kwargs
         ) as resp:
             if resp.status in (429, 503) or resp.status >= 500:
@@ -116,3 +120,32 @@ class RiskMonitoringAPI:
             json={"table": table, "id": int(record_id), "ai_analysis": ai_analysis},
         )
         return data["data"]
+
+    @property
+    def daily_runs_url(self) -> str:
+        """Адрес ``POST /api/risk-monitoring/daily-runs`` рядом с ``/ai-analysis``."""
+        base = self.url.rsplit("/ai-analysis", 1)[0] if "/ai-analysis" in self.url else self.url.rstrip("/")
+        return f"{base}/daily-runs"
+
+    async def upsert_daily_run(self, export_date: str, status: str, stages: Dict[str, Any] = None,
+                               started_at: str = None, finished_at: str = None,
+                               ai_analysis: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Создаёт или обновляет строку ``risk_monitoring_daily_runs`` по дате выгрузки (ТЗ 09.10.2026, п. 3).
+
+        Args:
+            export_date: Дата выгрузки ``ГГГГ-ММ-ДД`` (уникальный ключ).
+            status: ``running`` / ``completed`` / ``failed``.
+            stages: Состояние этапов.
+            started_at: Начало прогона (``ГГГГ-ММ-ДДTчч:мм:сс``).
+            finished_at: Окончание прогона.
+            ai_analysis: Сводка.
+
+        Returns:
+            Dict[str, Any]: ``data`` ответа (``id`` строки).
+        """
+        body = {"export_date": export_date, "status": status, "stages": stages or {}, "started_at": started_at,
+                "finished_at": finished_at}
+        if ai_analysis:
+            body["ai_analysis"] = ai_analysis
+        data = await self._request("POST", url=self.daily_runs_url, json=body)
+        return data.get("data") or {}
