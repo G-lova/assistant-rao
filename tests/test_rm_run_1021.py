@@ -130,3 +130,42 @@ class XlsxRawTest(unittest.TestCase):
         with open(bad, "wb") as f:
             f.write(b"not a zip")
         self.assertEqual(xlsx_raw_text(bad), "")
+
+
+class ArchiveVolumesTest(unittest.TestCase):
+    """Многотомные архивы: первый том читается со всеми томами, остальные — ссылка на первый."""
+
+    def test_volume_info(self):
+        """partNN.rar и .zip.001; обычный архив — не том."""
+        from risk_monitoring.archive_volumes import volume_info
+
+        self.assertEqual(volume_info("Проектная документация.part04.rar")[:2], ("Проектная документация", 4))
+        self.assertEqual(volume_info("Проектная документация.part04.rar")[2], "Проектная документация.part%.rar")
+        self.assertEqual(volume_info("ПД_1.zip.002")[:2], ("ПД_1.zip", 2))
+        self.assertEqual(volume_info("ПД_1.zip.002")[2], "ПД\\_1.zip.%")
+        self.assertIsNone(volume_info("Рабочая документация.rar"))
+
+    def test_siblings_and_complete(self):
+        """Тома одной основы по порядку; пропуск тома — неполный набор."""
+        from risk_monitoring.archive_volumes import complete, siblings
+
+        rows = [{"id": 5283, "file_name": "ПД.part02.rar"}, {"id": 5285, "file_name": "ПД.part01.rar"},
+                {"id": 9, "file_name": "Другое.part01.rar"}, {"id": 5282, "file_name": "ПД.part03.rar"}]
+        vols = siblings(rows, "ПД")
+        self.assertEqual([v["id"] for v in vols], [5285, 5283, 5282])
+        self.assertTrue(complete(vols))
+        self.assertFalse(complete([vols[0], vols[2]]))
+
+    def test_volume_passport(self):
+        """Том 2+ — паспорт без анализа со ссылкой на первый том."""
+        try:
+            from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
+        except ImportError as e:
+            raise unittest.SkipTest(f"нет зависимостей: {e}")
+        fa = AIFileAnalyzer.__new__(AIFileAnalyzer)
+        fa.versions, fa.force = {}, False
+        vols = [{"id": 5285, "file_name": "ПД.part01.rar"}, {"id": 5283, "file_name": "ПД.part02.rar"}]
+        ai = fa._volume_analysis({"id": 5283, "file_name": "ПД.part02.rar"}, None, 1, vols)
+        self.assertEqual(ai["archive_volume"]["first_file_id"], 5285)
+        self.assertEqual(ai["pipeline"]["result"], "archive_volume")
+        self.assertEqual(ai["risks"], [])
