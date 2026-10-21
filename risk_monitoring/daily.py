@@ -128,6 +128,24 @@ def monitored(card: Dict[str, Any]) -> bool:
         return str(card.get("monitoring")).lower() == "true"
 
 
+def choose_scope(total: int, cfg: Any = settings) -> str:
+    """Охват анализа за дату: ``all`` — все XML; ``monitored`` — только закупки заказчиков на мониторинге
+    (настройкой ``DAILY_SCOPE``); ``monitored_auto`` — XML больше ``DAILY_ALL_MAX_XML`` (массовая загрузка:
+    2026-07-03 — 21 907 XML в 457 архивах при обычных 100–4000), анализ всех не уложится в сутки.
+
+    Args:
+        total: XML за дату.
+        cfg: Настройки.
+
+    Returns:
+        str: ``all`` / ``monitored`` / ``monitored_auto``.
+    """
+    if cfg.DAILY_SCOPE == "monitored":
+        return "monitored"
+    limit = getattr(cfg, "DAILY_ALL_MAX_XML", None)
+    return "monitored_auto" if limit and total > limit else "all"
+
+
 def slim_event(ai: Dict[str, Any]) -> Dict[str, Any]:
     """Из ``ai_analysis`` события — только то, что нужно сводке (за день бывают десятки тысяч событий)."""
     return {"event": ai.get("event"), "resume": str(ai.get("resume") or "")[:500], "link": ai.get("link"),
@@ -261,6 +279,9 @@ def summary_facts(s: Dict[str, Any]) -> List[str]:
         facts.append(f"Выгрузок ЕИС с датой {s['date']} нет (дата прогона — день выгрузки, а не публикации документов)"
                      + ("; ближайшие выгрузки с XML: " + ", ".join(f"{n['date']} (XML {n['xml']})" for n in near[:6])
                         if near else "; в соседние ±7 дней выгрузок с XML тоже нет") + ".")
+    if sc.get("scope_mode") == "monitored_auto":
+        facts.append(f"Выгрузка большая (XML {sc.get('xml_total')}): проанализированы только документы закупок заказчиков "
+                     "на мониторинге, остальные — нет.")
     if not sc.get("contracts_monitored") and not ev["total"]:
         facts.append("По заказчикам на мониторинге за эту дату новых документов нет.")
     else:
@@ -389,11 +410,14 @@ class DailyRun:
                                                     "status": "running", "started_at": started}})
         async with progress.step("S0: XML за дату выгрузки") as st:
             xml_rows = await self._query("daily_xml.sql", head=[self.storage_path, d])
-            if settings.DAILY_SCOPE == "monitored":
+            total = len(xml_rows)
+            mode = choose_scope(total, settings)
+            if mode != "all":
                 xml_rows = [r for r in xml_rows if monitored(r)]
             xml_ids = [int(r["id"]) for r in xml_rows]
-            st["detail"] = f"XML {len(xml_ids)}" + (" (заказчики на мониторинге)" if settings.DAILY_SCOPE == "monitored" else "")
-        scope: Dict[str, Any] = {"xml": len(xml_ids), "files": 0, "contracts": 0}
+            st["detail"] = f"XML {len(xml_ids)}" + (f" из {total} (охват {mode})" if mode != "all" else "")
+        scope: Dict[str, Any] = {"xml": len(xml_ids), "files": 0, "contracts": 0, "xml_total": total,
+                                 "scope_mode": mode}
         if not xml_ids:
             scope["nearest_exports"] = await self._nearest(d)
             progress.note(f"за дату выгрузки {d} XML нет; выгрузки рядом: {scope['nearest_exports']}")

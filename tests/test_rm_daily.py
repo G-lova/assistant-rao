@@ -196,6 +196,20 @@ class DailyRunTest(unittest.TestCase):
         self.assertIn("2026-05-12 (XML 40)", facts)
 
 
+class ScopeTest(unittest.TestCase):
+    """Охват анализа за дату."""
+
+    def test_choose_scope(self):
+        """Обычная дата — все XML; массовая загрузка — только заказчики на мониторинге; настройка — всегда они."""
+        with mock.patch.object(settings, "DAILY_SCOPE", "all"), mock.patch.object(settings, "DAILY_ALL_MAX_XML", 5000):
+            self.assertEqual(daily.choose_scope(3773), "all")
+            self.assertEqual(daily.choose_scope(21907), "monitored_auto")
+        with mock.patch.object(settings, "DAILY_SCOPE", "all"), mock.patch.object(settings, "DAILY_ALL_MAX_XML", None):
+            self.assertEqual(daily.choose_scope(21907), "all")
+        with mock.patch.object(settings, "DAILY_SCOPE", "monitored"):
+            self.assertEqual(daily.choose_scope(10), "monitored")
+
+
 class RunCacheTest(unittest.TestCase):
     """Кэш прогона: запрашиваются только новые id; засеянные запросом по дате — не запрашиваются."""
 
