@@ -17,6 +17,7 @@
 
 Сбой этапа не останавливает прогон: этап получает ``status = failed``, следующие работают с тем, что есть.
 """
+import asyncio
 import json
 import time
 from datetime import date, datetime
@@ -36,7 +37,11 @@ KIND = "daily"
 STAGES = ("files", "xml", "contracts", "customers", "suppliers", "summary")
 RED = "red"
 # «Выполняется» дольше этого — прогон считается оборванным (пересборка, падение воркера), его можно запустить заново
-RUNNING_STALE_SECONDS = 4 * 3600
+# Пульс идущего прогона: отметка «выполняется» обновляется у нас каждые HEARTBEAT_SECONDS; без обновления дольше
+# RUNNING_STALE_SECONDS прогон считается оборванным (пересборка контейнера, падение воркера) — новый запуск за ту же
+# дату не блокируется (раньше отметка без пульса блокировала повтор на 4 часа, 21.10.2026)
+HEARTBEAT_SECONDS = 120
+RUNNING_STALE_SECONDS = 10 * 60
 
 RESUME_SYSTEM = (
     "Ты — аналитик риск-мониторинга госзакупок. Тебе дан список фактов ежедневной сводки за дату выгрузки ЕИС по "
@@ -443,6 +448,13 @@ class DailyRun:
         ``DAILY_RUNS_PUSH_ENABLED`` и записью результатов прогона; сбой записи не останавливает прогон — сводка у нас
         остаётся, ``pushed`` / ``push_error`` в ``ai_rm_results`` показывают, дошла ли она.
         """
+        async with self._save_lock():
+            await self._save(export_date, ai)
+            if (ai.get("pipeline") or {}).get("status") not in (None, "running"):
+                self._finished = True
+
+    async def _save(self, export_date: str, ai: Dict[str, Any]) -> None:
+        """Запись сводки или отметки (под блокировкой :meth:`save`)."""
         pipe = ai.get("pipeline") or {}
         pushed, error = False, None
         if self.push and settings.DAILY_RUNS_PUSH_ENABLED and self.http_manager is not None:
@@ -482,8 +494,38 @@ class DailyRun:
         before = dict(CALLS)
         started = passport.now_iso()
         progress.subject(f"Ежедневный прогон {d} ({self.env})")
-        await self.save(d, {"date": d, "pipeline": {"schema_version": SCHEMA_VERSION, "stage": "S0-S4",
-                                                    "status": "running", "started_at": started}})
+        marker = {"date": d, "pipeline": {"schema_version": SCHEMA_VERSION, "stage": "S0-S4", "status": "running",
+                                          "started_at": started, "heartbeat_at": started}}
+        await self.save(d, marker)
+        beat = asyncio.ensure_future(self._heartbeat(d, marker))
+        try:
+            return await self._run_from_s0(d, started, before)
+        finally:
+            beat.cancel()
+
+    async def _heartbeat(self, d: str, marker: Dict[str, Any]) -> None:
+        """Пока прогон идёт — обновляет у нас ``pipeline.heartbeat_at`` отметки «выполняется» (во внешнюю БД не
+        пишет). Итоговая сводка под той же блокировкой: пульс её не перезапишет."""
+        while True:
+            await asyncio.sleep(HEARTBEAT_SECONDS)
+            async with self._save_lock():
+                if self.__dict__.get("_finished") or not hasattr(self.repo, "save_rm_result"):
+                    return
+                marker["pipeline"]["heartbeat_at"] = passport.now_iso()
+                try:
+                    await self.repo.save_rm_result(self.env, KIND, run_key(d), marker, False, None)
+                except Exception as e:  # noqa: BLE001 — пульс не обязателен
+                    logger.warning(f"Пульс прогона {d} не записан: {type(e).__name__}: {e}")
+
+    def _save_lock(self) -> asyncio.Lock:
+        """Блокировка записи отметки и сводки (создаётся в event loop прогона)."""
+        lock = self.__dict__.get("_lock")
+        if lock is None:
+            lock = self._lock = asyncio.Lock()
+        return lock
+
+    async def _run_from_s0(self, d: str, started: str, before: Dict[str, int]) -> Dict[str, Any]:
+        """S0 и дальнейшие этапы (см. :meth:`run`)."""
         async with progress.step("S0: XML за дату выгрузки") as st:
             xml_rows = await self._query("daily_xml.sql", head=[self.storage_path, d])
             total = len(xml_rows)
@@ -773,12 +815,13 @@ class DailyRun:
 
 
 def running_fresh(stored: Optional[Dict[str, Any]], now: Optional[datetime] = None) -> bool:
-    """Прогон за дату уже идёт (отметка «выполняется» моложе ``RUNNING_STALE_SECONDS``)."""
+    """Прогон за дату уже идёт: отметка «выполняется» с пульсом (``heartbeat_at``, иначе ``started_at``) моложе
+    ``RUNNING_STALE_SECONDS``."""
     pipe = ((stored or {}).get("ai_analysis") or {}).get("pipeline") or {}
     if pipe.get("status") != "running":
         return False
     try:
-        started = datetime.fromisoformat(str(pipe.get("started_at")))
+        started = datetime.fromisoformat(str(pipe.get("heartbeat_at") or pipe.get("started_at")))
     except ValueError:
         return False
     now = now or (datetime.now(started.tzinfo) if started.tzinfo else datetime.now())

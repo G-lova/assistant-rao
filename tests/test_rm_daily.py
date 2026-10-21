@@ -85,10 +85,13 @@ class DailyStateTest(unittest.TestCase):
             daily.run_key("20.10.2026")
 
     def test_running(self):
-        """Свежая отметка «выполняется» блокирует второй запуск, старая — нет; готовая сводка — completed."""
+        """Отметка «выполняется» со свежим пульсом блокирует второй запуск, без пульса 10+ минут (контейнер
+        перезапущен) — нет; готовая сводка — completed."""
         now = datetime(2026, 10, 20, 7, 0)
-        fresh = {"ai_analysis": {"pipeline": {"status": "running", "started_at": (now - timedelta(hours=1)).isoformat()}}}
-        stale = {"ai_analysis": {"pipeline": {"status": "running", "started_at": (now - timedelta(hours=5)).isoformat()}}}
+        fresh = {"ai_analysis": {"pipeline": {"status": "running", "started_at": (now - timedelta(hours=3)).isoformat(),
+                                              "heartbeat_at": (now - timedelta(minutes=2)).isoformat()}}}
+        stale = {"ai_analysis": {"pipeline": {"status": "running", "started_at": (now - timedelta(hours=1)).isoformat(),
+                                              "heartbeat_at": (now - timedelta(minutes=30)).isoformat()}}}
         self.assertTrue(daily.running_fresh(fresh, now))
         self.assertFalse(daily.running_fresh(stale, now))
         self.assertFalse(daily.running_fresh(None, now))
@@ -181,6 +184,7 @@ class DailyRunTest(unittest.TestCase):
         self.assertEqual(s["stages"]["contracts"]["status"], "completed")
         self.assertEqual([a["kind"] for a in s["attention"]], ["became_red", "score_jump", "event"])
         self.assertEqual(saved, [("daily", 20261020, "running"), ("daily", 20261020, "completed")])
+        self.assertTrue(run._finished)
         self.assertTrue(s["resume"])
         self.assertTrue(Arch.closed)
         self.assertIn("external_queries", s["pipeline"])
@@ -289,3 +293,35 @@ class XmlBatchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HeartbeatTest(unittest.TestCase):
+    """Пульс отметки «выполняется»: обновляется, пока прогон идёт, и не перезаписывает итоговую сводку."""
+
+    def test_heartbeat(self):
+        """Пульс пишет heartbeat_at; после итоговой сводки — больше не пишет."""
+        saved = []
+
+        class Repo:
+            async def save_rm_result(self, env, kind, ext_id, ai, pushed, err):
+                saved.append(dict(ai["pipeline"]))
+
+        run = object.__new__(daily.DailyRun)
+        run.repo, run.env, run.push, run.http_manager = Repo(), "stage", False, None
+        marker = {"pipeline": {"status": "running", "started_at": "2026-10-21T18:38:49", "heartbeat_at": "x"}}
+
+        async def go():
+            with mock.patch.object(daily, "HEARTBEAT_SECONDS", 0.01):
+                beat = asyncio.ensure_future(run._heartbeat("2026-07-03", marker))
+                await asyncio.sleep(0.05)
+                await run.save("2026-07-03", {"pipeline": {"status": "completed"}})
+                n = len(saved)
+                await asyncio.sleep(0.05)
+                beat.cancel()
+                return n
+
+        n = asyncio.run(go())
+        self.assertGreaterEqual(n, 2)
+        self.assertEqual(saved[n - 1]["status"], "completed")
+        self.assertEqual(len(saved), n)
+        self.assertNotEqual(saved[0]["heartbeat_at"], "x")
