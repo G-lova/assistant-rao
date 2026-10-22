@@ -192,6 +192,11 @@ TYPAL_REGIONS_ENVIRONMENT = ENVIRONMENT  # окружение, по заказч
 TYPAL_SUBSYSTEM = "TPOZ223"              # подсистема ЕИС для getDocsByOrgRegionRequest
 TYPAL_DOCUMENT_TYPE = "typalOrderClause"
 TYPAL_LOOKBACK_DAYS = 3                # ежедневная загрузка берёт столько прошедших дней (ЕИС выгружает с задержкой)
+# Лимит ЕИС — 90 запросов в 60 с на адрес (общий с загрузчиком внешней системы): пауза между запросами и повтор
+# после «Код 13» через минуту
+TYPAL_EIS_MIN_INTERVAL_SEC = 1.5
+TYPAL_EIS_LIMIT_WAIT_SEC = 61
+TYPAL_EIS_LIMIT_RETRIES = 2
 
 # Журнал воркеров Celery в файл (logs/celery_rm.log, logs/celery.log, logs/celery_beat.log) с ротацией: переживает
 # пересоздание контейнера (вывод `docker logs` — нет)

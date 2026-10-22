@@ -559,6 +559,18 @@ class DailyRun:
         beat = asyncio.ensure_future(self._heartbeat(d, marker))
         try:
             return await self._run_from_s0(d, started, before)
+        except Exception as e:
+            # прогон упал целиком (например, 401 внешней БД на S0): отметка «выполняется» не должна висеть —
+            # сохраняем failed с причиной, повторный запуск за дату не блокируется
+            failed = {"date": d, "pipeline": {**marker["pipeline"], "status": "failed", "finished_at": passport.now_iso(),
+                                              "error": f"{type(e).__name__}: {str(e)[:500]}"}}
+            failed["pipeline"]["runs"] = self.runs + [{"started_at": started, "finished_at": failed["pipeline"]["finished_at"],
+                                                       "status": "failed"}]
+            try:
+                await self.save(d, failed)
+            except Exception as se:  # noqa: BLE001
+                logger.warning(f"Отметка о сбое прогона {d} не сохранена: {type(se).__name__}: {se}")
+            raise
         finally:
             beat.cancel()
 

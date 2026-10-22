@@ -227,3 +227,29 @@ class WorkerLogTest(unittest.TestCase):
         self.assertTrue(celery_app.worker_log_path(rm).endswith("logs/celery_rm.log"))
         self.assertTrue(celery_app.worker_log_path(["celery", "-A", "celery_app", "worker", "-Q", "evaluation"]).endswith("logs/celery.log"))
         self.assertTrue(celery_app.worker_log_path(["celery", "-A", "celery_app", "beat"]).endswith("logs/celery_beat.log"))
+
+
+class TypalEisLimitTest(unittest.TestCase):
+    """Типовые положения: лимит запросов ЕИС («Код 13») — пауза и повтор; «нет архива» — не предупреждение."""
+
+    def test_retry_on_limit(self):
+        """Первый ответ — Код 13, второй — без документов; запросов два, результат пустой без ошибки."""
+        from risk_monitoring import typal_loader
+
+        calls = []
+
+        class Eis:
+            async def _parse_eis_soap_ip(self, *a, **kw):
+                calls.append(kw.get("org_region"))
+                if len(calls) == 1:
+                    return {"status": "error", "error": "Ошибка парсинга ЕИС: Код 13: Превышено количество допустимых запросов"}
+                return {"status": "error", "error": "Не удалось найти URL архива в ответе ЕИС"}
+
+        tl = typal_loader.TypalLoader.__new__(typal_loader.TypalLoader)
+        tl.eis = Eis()
+        with mock.patch.object(settings, "TYPAL_EIS_LIMIT_WAIT_SEC", 0), \
+                mock.patch.object(settings, "TYPAL_EIS_MIN_INTERVAL_SEC", 0):
+            out = asyncio.run(tl.load_region("78", "2026-10-21"))
+        self.assertEqual(out, [])
+        self.assertEqual(calls, ["78", "78"])
+        self.assertTrue(typal_loader.NO_DATA_RE.search("Не удалось найти URL архива в ответе ЕИС"))

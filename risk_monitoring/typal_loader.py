@@ -12,6 +12,8 @@
 из закупок заказчиков на мониторинге (``dataset.owner.region``) окружения задачи.
 """
 import hashlib
+import asyncio
+import re
 import os
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Sequence
@@ -22,6 +24,11 @@ from risk_monitoring import progress, typal_clauses
 from risk_monitoring.typal_clauses import TypalRepo
 
 logger = get_logger(__name__)
+
+# Лимит запросов ЕИС («Код 13: Превышено количество допустимых запросов к сервису») и ответ «нет документов» (нет
+# архива — обычный ответ на регион и дату без новых положений)
+EIS_LIMIT_RE = re.compile(r"код\s*13|превышено\s+количество\s+допустимых\s+запросов", re.IGNORECASE)
+NO_DATA_RE = re.compile(r"не\s+найден|нет\s+данных|url\s+архива", re.IGNORECASE)
 
 
 def lookback_dates(days: int, today: Optional[date] = None) -> List[str]:
@@ -88,6 +95,18 @@ class TypalLoader:
             return []
         return sorted({str(r).strip().zfill(2) for r in df.get("region", []) if str(r or "").strip().isdigit()})
 
+    async def _eis_pause(self) -> None:
+        """Не чаще одного запроса к ЕИС в ``TYPAL_EIS_MIN_INTERVAL_SEC`` секунд (лимит ЕИС — 90 запросов в минуту
+        на всех, кто ходит с этого адреса)."""
+        import time
+
+        last = self.__dict__.get("_eis_last")
+        if last is not None:
+            wait = settings.TYPAL_EIS_MIN_INTERVAL_SEC - (time.monotonic() - last)
+            if wait > 0:
+                await asyncio.sleep(wait)
+        self._eis_last = time.monotonic()
+
     async def load_region(self, region: str, exact_date: str) -> List[Dict[str, Any]]:
         """Типовые положения региона, опубликованные или изменённые за дату.
 
@@ -99,15 +118,24 @@ class TypalLoader:
             List[Dict[str, Any]]: Результаты по версиям (:meth:`load_xml`).
         """
         progress.subject(f"Типовые положения, регион {region}, {exact_date}")
-        async with progress.step(f"запрос в ЕИС (getDocsByOrgRegionRequest, {settings.TYPAL_SUBSYSTEM})") as st:
-            res = await self.eis._parse_eis_soap_ip("getDocsByOrgRegionRequest", subsystem_type=settings.TYPAL_SUBSYSTEM,
-                                                    org_region=str(region), fz=223, document_type=settings.TYPAL_DOCUMENT_TYPE,
-                                                    exact_date=exact_date)
-            st["detail"] = f"{res.get('status')}, файлов {len(res.get('files') or [])}"
-        if res.get("status") != "success":
+        for attempt in range(settings.TYPAL_EIS_LIMIT_RETRIES + 1):
+            await self._eis_pause()
+            async with progress.step(f"запрос в ЕИС (getDocsByOrgRegionRequest, {settings.TYPAL_SUBSYSTEM})") as st:
+                res = await self.eis._parse_eis_soap_ip("getDocsByOrgRegionRequest", subsystem_type=settings.TYPAL_SUBSYSTEM,
+                                                        org_region=str(region), fz=223,
+                                                        document_type=settings.TYPAL_DOCUMENT_TYPE, exact_date=exact_date)
+                st["detail"] = f"{res.get('status')}, файлов {len(res.get('files') or [])}"
             err = str(res.get("error") or "")
+            if res.get("status") == "success" or not EIS_LIMIT_RE.search(err) or attempt == settings.TYPAL_EIS_LIMIT_RETRIES:
+                break
+            # «Код 13: превышено количество допустимых запросов … 90 за 60 сек» — лимит ЕИС общий для всех запросов
+            # с адреса (в т. ч. ночной загрузки внешней системы): ждём окно и повторяем (22.10.2026: 15 из 54 запросов)
+            logger.info(f"Типовые положения {region} за {exact_date}: лимит запросов ЕИС — пауза "
+                        f"{settings.TYPAL_EIS_LIMIT_WAIT_SEC} с, повтор")
+            await asyncio.sleep(settings.TYPAL_EIS_LIMIT_WAIT_SEC)
+        if res.get("status") != "success":
             # «нет данных за дату» — обычный ответ ЕИС, а не сбой
-            level = logger.info if "не найден" in err.lower() or "нет данных" in err.lower() else logger.warning
+            level = logger.info if NO_DATA_RE.search(err) else logger.warning
             level(f"Типовые положения {region} за {exact_date}: {err[:300]}")
             return []
         out = []
