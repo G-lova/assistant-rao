@@ -212,3 +212,18 @@ class Run1021FalsePositivesTest(unittest.TestCase):
         self.assertIsNone(rd["status"])
         self.assertTrue(rd["extraction_failed"])
         self.assertEqual(passport.readability_block({"readability": {"status": "allow"}}, 1, 10)["status"], "allow")
+
+
+class WorkerLogTest(unittest.TestCase):
+    """Журнал воркеров в файл: имя по процессу Celery."""
+
+    def test_paths(self):
+        """Воркер риск-мониторинга, общий воркер и beat — разные файлы в logs/."""
+        try:
+            import celery_app
+        except ImportError as e:
+            raise unittest.SkipTest(f"нет celery: {e}")
+        rm = ["celery", "-A", "celery_app", "worker", "-Q", "risk_monitoring", "-n", "rm@%h"]
+        self.assertTrue(celery_app.worker_log_path(rm).endswith("logs/celery_rm.log"))
+        self.assertTrue(celery_app.worker_log_path(["celery", "-A", "celery_app", "worker", "-Q", "evaluation"]).endswith("logs/celery.log"))
+        self.assertTrue(celery_app.worker_log_path(["celery", "-A", "celery_app", "beat"]).endswith("logs/celery_beat.log"))

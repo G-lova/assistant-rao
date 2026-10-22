@@ -193,6 +193,13 @@ TYPAL_SUBSYSTEM = "TPOZ223"              # подсистема ЕИС для ge
 TYPAL_DOCUMENT_TYPE = "typalOrderClause"
 TYPAL_LOOKBACK_DAYS = 3                # ежедневная загрузка берёт столько прошедших дней (ЕИС выгружает с задержкой)
 
+# Журнал воркеров Celery в файл (logs/celery_rm.log, logs/celery.log, logs/celery_beat.log) с ротацией: переживает
+# пересоздание контейнера (вывод `docker logs` — нет)
+WORKER_LOG_ENABLED = True
+WORKER_LOG_DIR = "logs"
+WORKER_LOG_MAX_MB = 100
+WORKER_LOG_BACKUPS = 10
+
 # Переменные, которые раньше задавались в .env и теперь задаются здесь (имя в .env → имя здесь, модуль).
 # Если в окружении осталось другое значение, при старте пишется предупреждение (см. warn_env_leftovers)
 MOVED_FROM_ENV = {
