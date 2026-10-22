@@ -264,8 +264,11 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
     for i in registry:
         add("registry_1928", i, "Поставщик в реестре лиц, привлечённых по ст. 19.28 КоАП РФ")
     for i in became_red:
-        add("became_red", i, f"Закупка перешла в красную зону: балл {_sc(i['score'])}"
-                             + (f" (был {_sc(i['previous_score'])})" if i["previous_score"] is not None else " (первая оценка)"))
+        if i["previous_score"] is None:
+            # первая оценка закупки — «перешла в красную зону» вводило в заблуждение (21.10.2026: все 17 — первые)
+            add("red_first", i, f"В красной зоне при первой оценке: балл {_sc(i['score'])}")
+        else:
+            add("became_red", i, f"Закупка перешла в красную зону: балл {_sc(i['score'])} (был {_sc(i['previous_score'])})")
     for i in jumps:
         add("score_jump", i, f"Балл вырос на {_sc(i['delta'])} — до {_sc(i['score'])}")
     for e in important[:cfg.DAILY_TOP]:
@@ -339,6 +342,16 @@ def summary_facts(s: Dict[str, Any]) -> List[str]:
         if ev["total"]:
             types = "; ".join(f"{k} — {v}" for k, v in list(ev["by_type"].items())[:6])
             facts.append(f"Событий ЕИС по ним: {ev['total']} ({types}).")
+    kinds = {}
+    for a in s["attention"]:
+        kinds[a["kind"]] = kinds.get(a["kind"], 0) + 1
+    if kinds:
+        names = {"registry_1928": "поставщик в реестре 19.28", "became_red": "перешли в красную зону",
+                 "red_first": "в красной зоне при первой оценке", "score_jump": "резкий рост балла",
+                 "event": "важные события", "supplier_registry": "поставщики в реестрах"}
+        facts.append("Требуют внимания (всего " + str(len(s["attention"])) + "): " +
+                     "; ".join(f"{names.get(k, k)} — {v}" for k, v in kinds.items()) +
+                     ". Ниже перечислены первые из них; называй числа из этой строки, а не считай пункты.")
     for a in s["attention"][:10]:
         who = ", ".join(x for x in (f"закупка {a['purchase_number']}" if a.get("purchase_number") else None,
                                     a.get("customer")) if x)
@@ -579,6 +592,7 @@ class DailyRun:
                 prev_linked = [int(p["id"]) for p in prev_rows if p.get("id") is not None
                                and _num(p.get("current_id")) is not None and int(_num(p["current_id"])) in linked]
                 cache.seed_files(files, list(xml_ids) + prev_linked, cards)
+                cache.cover_xml(list(linked) + prev_linked)
                 st["detail"] = f"XML {len(xml_ids)}, предыдущих версий {len(prev_rows)}, файлов {len(files)}"
             except Exception as e:  # noqa: BLE001 — анализаторы запросят сами
                 logger.warning(f"Ежедневный прогон {d}: предварительная загрузка не выполнена ({type(e).__name__}: "

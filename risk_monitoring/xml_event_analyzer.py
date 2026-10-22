@@ -719,13 +719,16 @@ class XmlEventAnalyzer:
         """
         ids = [xml_id] + ([int(previous["id"])] if previous else [])
         urls = [a["url"] for a in atts][:200]
+        c = self._cache()
         try:
-            await self._load_files(ids, urls)
+            # XML привязанной закупки, файлы которой загружены целиком запросом прогона, — без запроса по ссылкам
+            # (прогон 21.10.2026: 81 запрос xml_files.sql на 111 XML)
+            covered = xml_id in c.covered_xml and (not previous or int(previous["id"]) in c.covered_xml)
+            await self._load_files([] if covered else ids, [] if covered else urls)
             await self._load_file_internal()
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Файлы XML {xml_id} не получены: {e}")
             return []
-        c = self._cache()
         id_set, url_set = set(ids), set(urls)
         rows = [r for _, r in sorted(c.file_rows.items())
                 if _int(r.get("xml_source_id")) in id_set or r.get("source_url") in url_set]

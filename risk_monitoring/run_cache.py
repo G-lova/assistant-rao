@@ -45,6 +45,8 @@ class RunCache:
         self.queries: Dict[str, int] = {}
         # закупки, все файлы которых уже в file_rows (запросом по дате): по ссылкам их вложения не дозапрашиваются
         self.covered_cards: Set[int] = set()
+        # XML, файлы которых (и их предыдущих версий) уже загружены целиком — по ссылкам вложений не дозапрашиваются
+        self.covered_xml: Set[int] = set()
 
     def seed(self, name: str, rows: Iterable[Dict[str, Any]], key: str, ids: Iterable[Any]) -> None:
         """Кладёт в кэш строки, полученные одним запросом по дате (``daily_xml.sql`` …), и отмечает ``ids`` как
@@ -70,6 +72,10 @@ class RunCache:
                 self.file_rows[int(r["id"])] = r
         self.file_ids.update(int(i) for i in xml_ids)
         self.covered_cards.update(int(c) for c in cards)
+
+    def cover_xml(self, xml_ids: Iterable[int]) -> None:
+        """XML привязанных закупок, все файлы которых уже в ``file_rows`` (вложения по ссылкам среди них)."""
+        self.covered_xml.update(int(i) for i in xml_ids)
 
     def release_xml(self) -> None:
         """Освобождает память под разобранные XML (после пачки ежедневного прогона)."""

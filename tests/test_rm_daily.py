@@ -325,3 +325,18 @@ class HeartbeatTest(unittest.TestCase):
         self.assertEqual(saved[n - 1]["status"], "completed")
         self.assertEqual(len(saved), n)
         self.assertNotEqual(saved[0]["heartbeat_at"], "x")
+
+
+class FirstEvaluationTest(unittest.TestCase):
+    """Первая оценка закупки в красной зоне — не «перешла в красную зону»; число пунктов — отдельным фактом."""
+
+    def test_red_first(self):
+        """Без прошлого балла — red_first; в фактах — сводная строка с числами."""
+        cards = {1: {"id": 1, "number": "N1", "organisation_id": 10, "monitoring": 1, "customer_name": "ЗГУ"}}
+        s = daily.build_summary(export_date="2026-07-03", environment="stage", cards=cards,
+                                contracts={1: _contract(72, "red")}, changed=[1], events={}, xml_cards={},
+                                customers=[], scope={"xml": 1}, stages={})
+        self.assertEqual([a["kind"] for a in s["attention"]], ["red_first"])
+        facts = " ".join(daily.summary_facts(s))
+        self.assertIn("в красной зоне при первой оценке — 1", facts)
+        self.assertNotIn("перешла в красную", facts)
