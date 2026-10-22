@@ -24,7 +24,7 @@ from risk_monitoring.xml_events import canonical_org
 logger = get_logger(__name__)
 
 EXTERNAL_TABLE = "risk_monitoring_organisations"
-PROMPT_VERSION = "org-resume-2"
+PROMPT_VERSION = "org-resume-3"
 ROLES = ("customer", "supplier")
 
 RESUME_SYSTEM = (
@@ -32,7 +32,7 @@ RESUME_SYSTEM = (
     "Перескажи их связным резюме: 3–5 предложений, по-русски, без вступлений — объём закупок, признаки риска "
     "(если есть), что проверить. Используй только эти факты: не добавляй цифр, сравнений и выводов, которых в них "
     "нет, не пересчитывай доли. Если признаков риска нет или данных мало — так и напиши, не ищи риски сам. "
-    "Ответ — обычный текст, без JSON и разметки.")
+    "Не используй коды рисков и правил (вида DOC-002, FIN-004, BEH-005, pz_p1) — называй риски словами, понятными заказчику. Ответ — обычный текст, без JSON и разметки.")
 ROLE_NAMES = {"customer": "заказчика", "supplier": "поставщика"}
 
 

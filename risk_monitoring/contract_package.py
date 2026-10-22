@@ -60,7 +60,7 @@ PRICE_CTX_RE = re.compile(r"цен\w*\s+(контракт|договор)|сто
 
 # Уровни детерминированных рисков закупки. Правила внешней системы — флаги 0/1 по одному полю ЕИС (например,
 # pz_n1 срабатывает на любую закупку лекарств), поэтому их уровень умеренный: балл поднимают сочетания признаков
-RULE_LEVEL = {"risk": 0.4, "violation": 0.55}
+# Уровень риска от сработавшего правила внешней системы — в configs/settings.py (RULE_RISK_LEVEL, RULE_VIOLATION_LEVEL)
 SINGLE_APPLICATION_LEVEL = 0.35
 TERMINATION_LEVEL = 0.5
 
@@ -388,6 +388,15 @@ def drop_rule_covered(risks: Sequence[Dict[str, Any]], values: Optional[Dict[str
     return [r for r in risks if r.get("rule_id") not in covered or r.get("rule_id") in keep]
 
 
+def rule_level(kind: Optional[str]) -> float:
+    """Уровень риска сработавшего правила: нарушение — ``RULE_VIOLATION_LEVEL``, признак риска —
+    ``RULE_RISK_LEVEL`` (по методике сводной аналитики нарушения весят больше рисков: много рисков при малом числе
+    нарушений — жёлтая зона)."""
+    from configs import settings
+
+    return settings.RULE_VIOLATION_LEVEL if kind == "violation" else settings.RULE_RISK_LEVEL
+
+
 def rule_values_risks(values: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Риски по сработавшим правилам внешней системы (значение показателя > 0 или истина).
 
@@ -406,7 +415,7 @@ def rule_values_risks(values: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
         kind = risk_catalog.kind(code)
         out.append({"rule_id": code, "title": risk_catalog.title(code),
                     "description": f"Сработал показатель {key} = {value}",
-                    "level": RULE_LEVEL["violation" if kind == "violation" else "risk"], "confidence": 1.0, "law": None,
+                    "level": rule_level(kind), "confidence": 1.0, "law": None,
                     "evidence": [{"src": f"rule:{key}", "value": value}],
                     "verification_needed": [], "source": "rule"})
     return out
@@ -712,7 +721,7 @@ def default_resume(p: Dict[str, Any], prof: Dict[str, Any], risks: Sequence[Dict
     parts.append(f"Балл риска {prof['score']} ({ {'green': 'зелёная', 'yellow': 'жёлтая', 'red': 'красная'}.get(prof['zone'], '') } зона)"
                  + (f", изменение {prof['delta']:+}" if prof.get("delta") else "") + ".")
     if risks:
-        parts.append("Основные факторы: " + "; ".join(f"{r['rule_id']} {r.get('title')}" for r in risks[:3]) + ".")
+        parts.append("Основные факторы: " + "; ".join(str(r.get('title') or r['rule_id']) for r in risks[:3]) + ".")
     if events:
         parts.append(f"Последнее событие: {events[0].get('title')} ({str(events[0].get('event_at') or '')[:10]}).")
     return " ".join(parts)

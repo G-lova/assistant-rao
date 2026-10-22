@@ -316,7 +316,7 @@ def resume_facts(role: str, section: Dict[str, Any], settings: Any) -> List[str]
     if m.get("analyzed"):
         facts.append(f"Проанализировано закупок: {m['analyzed']}, средний балл {m['avg_score']}, в красной зоне {m['red_zone']}.")
     if section["risks"]:
-        facts.append("Признаки риска: " + "; ".join(f"{r['rule_id']} — {r['description'] or r['title']}"
+        facts.append("Признаки риска: " + "; ".join(f"{r['title']}: {r['description']}" if r.get("description") else str(r["title"])
                                                    for r in section["risks"][:4]) + ".")
     else:
         facts.append("Признаков риска по правилам не выявлено.")

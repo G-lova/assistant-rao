@@ -32,7 +32,7 @@ from risk_monitoring.contract_analyzer import _none
 logger = get_logger(__name__)
 
 SCHEMA_VERSION = "rm-daily-1"
-PROMPT_VERSION = "daily-resume-1"
+PROMPT_VERSION = "daily-resume-2"
 KIND = "daily"
 STAGES = ("files", "xml", "contracts", "customers", "suppliers", "summary")
 RED = "red"
@@ -48,7 +48,7 @@ RESUME_SYSTEM = (
     "заказчикам на мониторинге. Напиши сводку для руководителя: 4–6 предложений, по-русски, без вступлений — что "
     "пришло за сутки, что требует внимания в первую очередь (назови закупки и заказчиков из фактов), что проверить. "
     "Используй только эти факты: не добавляй цифр и выводов, которых в них нет. Если внимания ничего не требует — "
-    "так и напиши. Ответ — обычный текст, без JSON и разметки.")
+    "так и напиши. Не используй коды рисков и правил (вида DOC-002, FIN-004, BEH-005, pz_p1) — называй риски словами, понятными заказчику. Ответ — обычный текст, без JSON и разметки.")
 
 
 def run_key(d: str) -> int:
@@ -75,6 +75,31 @@ def _num(v: Any) -> Optional[float]:
         return None if v is None else float(v)
     except (TypeError, ValueError):
         return None
+
+
+# Названия для заказчика там, где название каталога — профессиональный жаргон (аналитика организаций)
+PLAIN_NAMES = {
+    "BEH-001": "низкая конкуренция в закупках (одна заявка или единственный поставщик)",
+    "BEH-002": "расторжения или систематический демпинг у поставщика",
+    "BEH-005": "контракты сосредоточены у немногих поставщиков",
+    "BEH-006": "большая доля контрактов у одного поставщика",
+    "HIST-001": "одни и те же риски повторяются в закупках",
+    "REG-001": "поставщик в реестре лиц, привлечённых по ст. 19.28 КоАП РФ",
+    "REG-002": "поставщик в реестре недобросовестных поставщиков",
+}
+
+
+def risk_names(codes: Sequence[str]) -> str:
+    """Названия рисков по каталогу вместо кодов: сводку читает заказчик («BEH-005» → «Аномальное распределение
+    результатов»)."""
+    from risk_monitoring import risk_catalog
+
+    names = []
+    for c in codes or []:
+        t = PLAIN_NAMES.get(c) or risk_catalog.title(c) or "признак риска"
+        if t not in names:
+            names.append(t[:1].lower() + t[1:] if t[:2] != t[:2].upper() else t)
+    return ", ".join(names)
 
 
 def _sc(v: Optional[float]) -> str:
@@ -191,10 +216,13 @@ def slim_file(ai: Dict[str, Any]) -> Dict[str, Any]:
             "total_doc_risk": ai.get("total_doc_risk")}
 
 
-def _add_counts(acc: Dict[str, Any], counts: Dict[str, int]) -> None:
-    """Складывает счётчики пачек."""
+def _add_counts(acc: Dict[str, Any], counts: Dict[str, Any]) -> None:
+    """Складывает счётчики пачек (списки ошибок записи — без повторов, не больше трёх)."""
     for k, v in counts.items():
-        acc[k] = acc.get(k, 0) + v
+        if isinstance(v, list):
+            acc[k] = list(dict.fromkeys((acc.get(k) or []) + v))[:3]
+        else:
+            acc[k] = acc.get(k, 0) + v
 
 
 def _importance_rank(v: Optional[str]) -> int:
@@ -272,7 +300,7 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
     for i in jumps:
         add("score_jump", i, f"Балл вырос на {_sc(i['delta'])} — до {_sc(i['score'])}")
     for e in important[:cfg.DAILY_TOP]:
-        add("event", e, f"{e['title'] or e['code']}" + (f"; риски: {', '.join(e['risks'][:4])}" if e["risks"] else ""))
+        add("event", e, f"{e['title'] or 'событие ЕИС'}" + (f"; признаки риска: {risk_names(e['risks'][:4])}" if e["risks"] else ""))
 
     cust = []
     for r in customers:
@@ -293,7 +321,7 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
                          "zone": sec.get("zone"), "risks": [x.get("rule_id") for x in sec.get("risks") or []]})
             if any(x.startswith("REG-") for x in sups[-1]["risks"]):
                 add("supplier_registry", {"card_id": None, "xml_id": None, "customer": org.get("name")},
-                    "Поставщик в реестре: " + ", ".join(x for x in sups[-1]["risks"] if x.startswith("REG-")))
+                    risk_names([x for x in sups[-1]["risks"] if x.startswith("REG-")]))
     sups.sort(key=lambda c: -(c.get("score") or 0))
     top = cfg.DAILY_TOP
     return {
@@ -362,7 +390,7 @@ def summary_facts(s: Dict[str, Any]) -> List[str]:
     risky = [x for x in s["customers"] if x.get("risks")]
     if risky:
         facts.append("Заказчики с признаками риска: " + "; ".join(
-            f"{x['name']} — балл {_sc(x['score'])} ({', '.join(x['risks'][:3])})" for x in risky[:5]) + ".")
+            f"{x['name']} — балл {_sc(x['score'])} ({risk_names(x['risks'][:3])})" for x in risky[:5]) + ".")
     partial = {k: v for k, v in (s.get("stages") or {}).items() if (v or {}).get("status") == "partial"}
     if partial:
         left = max((v or {}).get("xml_left") or 0 for v in partial.values())
@@ -434,11 +462,25 @@ class DailyRun:
             return None
 
     @staticmethod
-    def _counts(results: Sequence[Dict[str, Any]]) -> Dict[str, int]:
-        """Число результатов по статусам."""
-        out: Dict[str, int] = {"total": len(results)}
+    def _counts(results: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        """Число результатов по статусам и записи во внешнюю БД (``pushed`` / ``push_failed`` и первые ошибки).
+
+        Анализ мог пройти, а запись — нет (прогон 21.10.2026: закупок 76 «done», во внешней БД — 4): без этих
+        счётчиков сводка показывала успех.
+        """
+        out: Dict[str, Any] = {"total": len(results)}
+        errors: List[str] = []
         for r in results:
             out[r.get("status", "unknown")] = out.get(r.get("status", "unknown"), 0) + 1
+            if r.get("pushed"):
+                out["pushed"] = out.get("pushed", 0) + 1
+            elif r.get("push_error"):
+                out["push_failed"] = out.get("push_failed", 0) + 1
+                err = str(r["push_error"])[:300]
+                if err not in errors and len(errors) < 3:
+                    errors.append(err)
+        if errors:
+            out["push_errors"] = errors
         return out
 
     async def _internal(self, kind: str, ids: Sequence[int]) -> Dict[int, Dict[str, Any]]:
@@ -507,8 +549,12 @@ class DailyRun:
         before = dict(CALLS)
         started = passport.now_iso()
         progress.subject(f"Ежедневный прогон {d} ({self.env})")
+        # история запусков за дату: started_at / finished_at строки — последнего запуска, прежние — в pipeline.runs
+        prev = (await self._internal(KIND, [run_key(d)])).get(run_key(d)) or {}
+        self.runs = previous_runs(prev)
         marker = {"date": d, "pipeline": {"schema_version": SCHEMA_VERSION, "stage": "S0-S4", "status": "running",
-                                          "started_at": started, "heartbeat_at": started}}
+                                          "started_at": started, "heartbeat_at": started, "runs": self.runs,
+                                          "attempt": len(self.runs) + 1}}
         await self.save(d, marker)
         beat = asyncio.ensure_future(self._heartbeat(d, marker))
         try:
@@ -807,6 +853,10 @@ class DailyRun:
                                "llm": {"requests": CALLS["requests"] - before.get("requests", 0),
                                        "failed": CALLS["failed"] - before.get("failed", 0)},
                                "external_queries": dict(cache.queries)}
+        summary["pipeline"]["runs"] = self.__dict__.get("runs", []) + [
+            {"started_at": started, "finished_at": summary["pipeline"]["finished_at"],
+             "status": summary["pipeline"]["status"]}]
+        summary["pipeline"]["attempt"] = len(summary["pipeline"]["runs"])
         await self.save(d, summary)
         logger.info(f"Ежедневный прогон {d}: {json.dumps(summary['scope'], ensure_ascii=False)}; "
                     f"этапы {json.dumps(self.stages, ensure_ascii=False, default=str)}")
@@ -826,6 +876,23 @@ class DailyRun:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Текст сводки шаблоном: {type(e).__name__}: {e}")
             return default_resume(summary), False
+
+
+def previous_runs(prev: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Прежние запуски прогона за дату из сохранённой сводки (или отметки оборванного запуска).
+
+    Args:
+        prev: Сохранённый ``ai_analysis`` за дату.
+
+    Returns:
+        List[Dict[str, Any]]: ``started_at``, ``finished_at``, ``status`` по порядку; оборванный — ``status = aborted``.
+    """
+    pipe = (prev or {}).get("pipeline") or {}
+    runs = [dict(r) for r in pipe.get("runs") or []]
+    if pipe.get("started_at") and not any(r.get("started_at") == pipe["started_at"] for r in runs):
+        runs.append({"started_at": pipe["started_at"], "finished_at": pipe.get("finished_at") or pipe.get("heartbeat_at"),
+                     "status": "aborted" if pipe.get("status") == "running" else pipe.get("status")})
+    return runs
 
 
 def running_fresh(stored: Optional[Dict[str, Any]], now: Optional[datetime] = None) -> bool:

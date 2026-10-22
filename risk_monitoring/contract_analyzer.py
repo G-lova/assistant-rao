@@ -23,14 +23,14 @@ logger = get_logger(__name__)
 
 EXTERNAL_TABLE = "risk_monitoring_contracts"
 STAGE = "S2"
-PROMPT_VERSION = "contract-resume-1"
+PROMPT_VERSION = "contract-resume-2"
 
 RESUME_SYSTEM = (
     "Ты — аналитик риск-мониторинга госзакупок (44-ФЗ, 223-ФЗ). По паспорту закупки, её рискам и событиям напиши "
     "резюме для аналитика: 4–7 предложений, по-русски, без вступлений. Что закупают и на какой стадии, главные риски "
     "со ссылкой на источник (документ, событие ЕИС, правило, реестр), что проверить в первую очередь. Не придумывай "
-    "фактов, которых нет во входных данных; не делай вывод о нарушении — только о признаках риска. Ответ — обычный "
-    "текст, без JSON, списков и разметки.")
+    "фактов, которых нет во входных данных; не делай вывод о нарушении — только о признаках риска. Не используй коды рисков и правил (вида DOC-002, FIN-004, BEH-005, pz_p1) — называй риски словами, понятными заказчику. Ответ — "
+    "обычный текст, без JSON, списков и разметки.")
 RESUME_SCHEMA = {"type": "object", "properties": {"resume": {"type": "string"}}, "required": ["resume"]}
 
 
@@ -377,7 +377,7 @@ class ContractAnalyzer:
                                                "nmck", "contract_price", "price_reduction_pct", "applications",
                                                "customer", "supplier", "modification", "termination")},
             "profile": {k: built["profile"].get(k) for k in ("score", "zone", "delta", "components")},
-            "risks": [{"rule_id": r["rule_id"], "title": r.get("title"), "description": (r.get("description") or "")[:300],
+            "risks": [{"title": r.get("title"), "description": (r.get("description") or "")[:300],
                        "level": r.get("level"), "sources": r.get("sources")} for r in built["risks"][:10]],
             "events": [{k: e.get(k) for k in ("title", "importance", "event_at")} for e in built["events"][:8]],
             "completeness": built["package"]["completeness"], "consistency": built["package"]["consistency"][:3],

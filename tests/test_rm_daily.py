@@ -340,3 +340,23 @@ class FirstEvaluationTest(unittest.TestCase):
         facts = " ".join(daily.summary_facts(s))
         self.assertIn("в красной зоне при первой оценке — 1", facts)
         self.assertNotIn("перешла в красную", facts)
+
+
+class PlainNamesTest(unittest.TestCase):
+    """В сводке — названия рисков, а не коды."""
+
+    def test_no_codes_in_facts(self):
+        """Заказчики с рисками и события с рисками — без кодов вида BEH-005, CTR-020."""
+        import re
+
+        cards = {1: {"id": 1, "number": "N1", "organisation_id": 10, "monitoring": 1, "customer_name": "ЗГУ"}}
+        events = {5: {"event": {"code": "CON-007", "title": "Расторжение контракта", "importance": "high"},
+                      "risks": [{"rule_id": "CTR-020"}]}}
+        cust = [{"organisation_id": 10, "ai_analysis": {"organisation": {"name": "ЗГУ"},
+                                                        "customer": {"score": 50, "zone": "yellow",
+                                                                     "risks": [{"rule_id": "BEH-005"}, {"rule_id": "BEH-001"}]}}}]
+        s = daily.build_summary(export_date="2026-07-03", environment="stage", cards=cards, contracts={},
+                                changed=[], events=events, xml_cards={5: 1}, customers=cust, scope={"xml": 1}, stages={})
+        facts = " ".join(daily.summary_facts(s))
+        self.assertIsNone(re.search(r"\b[A-Z]{2,5}-\d{3}\b", facts), facts)
+        self.assertIn("контракты сосредоточены у немногих поставщиков", facts)
