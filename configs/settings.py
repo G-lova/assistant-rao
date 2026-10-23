@@ -155,6 +155,19 @@ DEMPING_PCT = 25                       # снижение цены на торг
 REPEAT_RISK_MIN = 3                    # риск одного кода в стольких закупках заказчика → HIST-001
 # ai_analysis организаций (секции customer / supplier) — в risk_monitoring_organisations.ai_analysis (ТЗ 09.10.2026)
 ORG_PUSH_ENABLED = True
+# Балл заказчика (CUSTOMER_SCORE_MODEL = "blocks"): риски его закупок по стадиям — средняя по закупкам
+# интенсивность рисков стадии, блоки складываются с весами; поведение заказчика (BEH, HIST, REG по совокупности
+# закупок) добавляется сверху «шумовым ИЛИ» с весом CUSTOMER_BEHAVIOUR_WEIGHT. "aggregate" — прежний балл только по
+# поведенческим рискам. Веса блоков — по «Модели сводной аналитики», сверить с документом
+CUSTOMER_SCORE_MODEL = "blocks"
+CUSTOMER_STAGE_BLOCKS = (
+    # (блок, стадии каталога, вес)
+    ("procurement", ("pz", "док"), 0.2),    # проведение закупки и документация
+    ("conclusion", ("zc",), 0.5),           # заключение контракта
+    ("execution", ("ic", "pc"), 0.3),       # исполнение, приёмка и оплата
+)
+CUSTOMER_BEHAVIOUR_WEIGHT = 0.3
+CUSTOMER_VIOLATION_WEIGHT = 1.5        # нарушение (вид violation) весит больше риска того же уровня (не больше 1)
 
 # ---------------------------------------------------------------- ежедневный прогон и сводка (S0–S4)
 # Прогон за дату выгрузки запускает Laravel (POST /risk-monitoring/daily); если до DAILY_WATCHDOG_HOUR вызова не было,

@@ -368,3 +368,41 @@ class RuleCoveredTest(unittest.TestCase):
         self.assertEqual([r["rule_id"] for r in out], ["DOC-003"])
         self.assertEqual(len(cp.drop_rule_covered(risks, {"pz_p2": 0}, confirmed={"FIN-005"})), 3)
         self.assertEqual(len(cp.drop_rule_covered(risks, None)), 3)
+
+
+class CustomerBlocksTest(unittest.TestCase):
+    """Балл заказчика по блокам стадий: риски его закупок учитываются, нарушения весят больше."""
+
+    def _c(self, i, codes=(), levels=(), score=None):
+        """Закупка с рисками ``codes`` уровней ``levels``."""
+        return _contract(i, score=score, risk_codes=json.dumps(list(codes)), risk_levels=json.dumps(list(levels)),
+                         risk_confidences=json.dumps([1.0] * len(codes)), risk_sources=json.dumps([["rule"]] * len(codes)))
+
+    def test_red_contract_raises_customer(self):
+        """Заказчик с одной закупкой в красной зоне больше не получает 0 (прогон 02.07.2026, филиал СПбГЭУ)."""
+        cs = [self._c(1, ("DOC-002", "CTR-005", "CTR-014"), (0.8, 0.7, 0.7), score=71.2)]
+        sec = org_profile.customer_section(cs, [], settings)
+        model = sec["score_model"]
+        self.assertGreater(sec["score"], 0)
+        self.assertGreater(model["blocks"]["procurement"]["score"], 0)
+        self.assertGreater(model["blocks"]["execution"]["score"], 0)
+        self.assertEqual(model["blocks"]["conclusion"]["score"], 0)
+        self.assertEqual(model["analyzed"], 1)
+
+    def test_dilution_and_violation(self):
+        """Один рискованный контракт из десяти весит меньше, чем десять; нарушение — больше риска того же уровня."""
+        one = [self._c(i, ("CTR-005",) if i == 0 else (), (0.6,) if i == 0 else (), score=10) for i in range(10)]
+        all_ = [self._c(i, ("CTR-005",), (0.6,), score=50) for i in range(10)]
+        self.assertLess(org_profile.customer_section(one, [], settings)["score"],
+                        org_profile.customer_section(all_, [], settings)["score"])
+        risk = org_profile._stage_weight({"rule_id": "CTR-005", "level": 0.5, "confidence": 1.0}, settings)
+        from risk_monitoring import risk_catalog
+        violation_code = next(k for k, v in risk_catalog.RISKS.items()
+                              if v.get("kind") == "violation" and v.get("stage") == "ic")
+        violation = org_profile._stage_weight({"rule_id": violation_code, "level": 0.5, "confidence": 1.0}, settings)
+        self.assertGreater(violation, risk)
+
+    def test_no_analyzed(self):
+        """Нет проанализированных закупок — балл только по поведению."""
+        sec = org_profile.customer_section([_contract(i) for i in range(3)], [], settings)
+        self.assertEqual(sec["score_model"]["base"], 0)

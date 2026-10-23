@@ -27,7 +27,10 @@ SELECT
     JSON_UNQUOTE(JSON_EXTRACT(c.dataset, '$.supplier.post_stat')) AS supplier_status,
     JSON_EXTRACT(c.ai_analysis, '$.profile.score') AS score,
     JSON_UNQUOTE(JSON_EXTRACT(c.ai_analysis, '$.profile.zone')) AS zone,
-    JSON_EXTRACT(c.ai_analysis, '$.risks[*].rule_id') AS risk_codes
+    JSON_EXTRACT(c.ai_analysis, '$.risks[*].rule_id') AS risk_codes,
+    JSON_EXTRACT(c.ai_analysis, '$.risks[*].level') AS risk_levels,
+    JSON_EXTRACT(c.ai_analysis, '$.risks[*].confidence') AS risk_confidences,
+    JSON_EXTRACT(c.ai_analysis, '$.risks[*].sources') AS risk_sources
 FROM risk_monitoring_contracts c
 WHERE COALESCE(c.date_public, DATE(c.created_at)) >= ?
   AND c.risk_monitoring_organisation_id IN ({ids})
