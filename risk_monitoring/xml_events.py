@@ -651,6 +651,7 @@ def classify(tag: str, version: Optional[int], has_previous: bool, changes: Sequ
             importance = risk_catalog.max_importance(importance, "high")
     return {
         "code": card["code"],
+        "event_type": card["code"],
         "title": card["title"],
         "group": card["group"],
         "importance": importance,
@@ -894,6 +895,23 @@ def to_external_event_risks(llm_risks: Sequence[Dict[str, Any]], event: Optional
     return out
 
 
+def with_event_type(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Дополняет блок события обязательным для API полем ``event_type`` (код события из «Верхних тегов»).
+
+    API ``PATCH /ai-analysis`` для ``risk_monitoring_eis_xml_sources`` требует ``ai_analysis.event.event_type``
+    (422 с 23.10.2026). Значение — тот же код, что в ``code``; при отсутствии кода — тег корня XML.
+
+    Args:
+        event: Блок ``event`` (меняется на месте).
+
+    Returns:
+        Dict[str, Any]: Тот же блок.
+    """
+    if isinstance(event, dict) and not event.get("event_type"):
+        event["event_type"] = event.get("code") or event.get("xml_tag") or "unknown"
+    return event
+
+
 def build_xml_analysis(*, event: Dict[str, Any], facts: Dict[str, Any], changes: Sequence[Dict[str, Any]],
                        doc_changes: Dict[str, List], files: Sequence[Dict[str, Any]], link: Optional[Dict[str, Any]],
                        rule_risk_list: Sequence[Dict[str, Any]], llm: Optional[Dict[str, Any]],
@@ -922,7 +940,7 @@ def build_xml_analysis(*, event: Dict[str, Any], facts: Dict[str, Any], changes:
     llm = llm or {}
     lookup = list(all_files) if all_files is not None else list(files)
     risks = merge_risks(list(rule_risk_list or []), to_external_event_risks(llm.get("risks") or [], event), fz=fz)
-    event_out = dict(event)
+    event_out = with_event_type(dict(event))
     event_out["event_at"] = facts.get("published_at") or facts.get("sign_date")
     event_out["previous_xml_id"] = int(previous["id"]) if previous else None
     event_out["previous_eis_version"] = previous.get("eis_version") if previous else None

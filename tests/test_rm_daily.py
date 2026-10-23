@@ -360,3 +360,32 @@ class PlainNamesTest(unittest.TestCase):
         facts = " ".join(daily.summary_facts(s))
         self.assertIsNone(re.search(r"\b[A-Z]{2,5}-\d{3}\b", facts), facts)
         self.assertIn("контракты сосредоточены у немногих поставщиков", facts)
+
+
+class TestEventType(unittest.TestCase):
+    """``ai_analysis.event.event_type`` обязателен для API (422 от 23.10.2026)."""
+
+    def test_fills_from_code(self):
+        """Код события становится ``event_type``; уже заданный не перезаписывается."""
+        from risk_monitoring.xml_events import with_event_type
+        self.assertEqual(with_event_type({"code": "PUR-001"})["event_type"], "PUR-001")
+        self.assertEqual(with_event_type({"xml_tag": "epNotificationEZK2020"})["event_type"], "epNotificationEZK2020")
+        self.assertEqual(with_event_type({"code": "A", "event_type": "B"})["event_type"], "B")
+
+    def test_patch_adds_event_type_to_stored(self):
+        """Сохранённый до исправления результат дозаписывается с ``event_type``."""
+        import asyncio
+        from unittest import mock
+        from risk_monitoring.risk_monitoring_api import RiskMonitoringAPI
+        api = RiskMonitoringAPI.__new__(RiskMonitoringAPI)
+        sent = {}
+
+        async def fake(method, json=None, **kw):
+            """Запоминает тело запроса."""
+            sent.update(json)
+            return {"data": {}}
+
+        with mock.patch.object(RiskMonitoringAPI, "_check_table", lambda self, t: None), \
+                mock.patch.object(api, "_request", fake, create=True):
+            asyncio.run(api.patch_ai_analysis("risk_monitoring_eis_xml_sources", 1, {"event": {"code": "PUR-001"}}))
+        self.assertEqual(sent["ai_analysis"]["event"]["event_type"], "PUR-001")

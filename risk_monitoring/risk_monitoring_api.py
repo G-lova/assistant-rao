@@ -134,6 +134,11 @@ class RiskMonitoringAPI:
         self._check_table(table)
         if not ai_analysis:
             raise ValueError("ai_analysis не может быть пустым")
+        if table == "risk_monitoring_eis_xml_sources" and isinstance(ai_analysis, dict) \
+                and isinstance(ai_analysis.get("event"), dict):
+            # результаты, сохранённые до 23.10.2026, — без event_type; API его теперь требует
+            from risk_monitoring.xml_events import with_event_type
+            with_event_type(ai_analysis["event"])
         try:
             data = await self._request(
                 "PATCH",
