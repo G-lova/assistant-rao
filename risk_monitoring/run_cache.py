@@ -87,7 +87,7 @@ class RunCache:
         self.queries[name] = self.queries.get(name, 0) + 1
 
     async def keyed(self, fetch: Fetch, name: str, ids: Iterable[Any], key: str, head: Sequence[Any] = (),
-                    list_name: str = "ids") -> Dict[Any, List[Dict[str, Any]]]:
+                    list_name: str = "ids", size: Optional[int] = None) -> Dict[Any, List[Dict[str, Any]]]:
         """Строки запроса ``name`` по значениям ``ids``, сгруппированные по колонке ``key``.
 
         Запрашиваются только значения, которых ещё не было в этом прогоне (пачками по ``CHUNK``).
@@ -99,6 +99,7 @@ class RunCache:
             key: Колонка результата, по которой строки относятся к значению (``id``, ``current_id``).
             head: Одиночные параметры до списка.
             list_name: Имя маркера списка в запросе.
+            size: Значений в пачке (по умолчанию ``CHUNK``; тяжёлым запросам — меньше).
 
         Returns:
             Dict[Any, List[Dict[str, Any]]]: ``значение → строки`` (только для запрошенных ``ids``).
@@ -107,7 +108,7 @@ class RunCache:
         store = self.rows.setdefault(name, {})
         done = self.fetched.setdefault(name, set())
         missing = [i for i in want if i not in done]
-        for part in chunks(missing):
+        for part in chunks(missing, size):
             self.count(name)
             for r in await fetch(name, head=list(head), **{list_name: part}):
                 k = _norm(r.get(key))

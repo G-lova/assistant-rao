@@ -77,6 +77,28 @@ DOCUMENT_TYPE_KEYWORDS = {
 }
 
 
+
+def _as_obj(value, key: str) -> dict:
+    """Поле ответа модели как объект.
+
+    Модель иногда отдаёт строку вместо объекта (``"document_name": "Контракт"`` вместо
+    ``{"value": "Контракт", "confidence": ...}``), особенно в обрезанном и восстановленном JSON — объединение блоков
+    падало с «'str' object has no attribute 'get'» и терялись данные всего документа (прогон 02.07, 23.10.2026).
+
+    Args:
+        value: Значение поля из ответа.
+        key: Ключ, под которым строка кладётся в объект (``value`` / ``method``).
+
+    Returns:
+        dict: Объект поля (пустой, если значения нет).
+    """
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, (str, int, float)) and value != "":
+        return {key: value}
+    return {}
+
+
 class TypeDataExtractor:
     """
     Извлекает структурированные данные и оценивает читаемость документов с помощью LLM.
@@ -424,7 +446,9 @@ class TypeDataExtractor:
         summary = []
 
         # --- TYPE_COMPLIANCE ---
-        type_compliance = chunk_results[0].get("type_compliance", {})
+        first = next((c for c in chunk_results if isinstance(c, dict)), {})
+        type_compliance = first.get("type_compliance", {})
+        detected_type = ""
 
         if type_compliance:
     
@@ -442,9 +466,11 @@ class TypeDataExtractor:
 
         # ---- МЕРДЖ ЧАНКОВ ----
         for chunk in chunk_results:
+            if not isinstance(chunk, dict):
+                continue
 
             # --- RADABILITY ---
-            readability = chunk.get("readability", {})
+            readability = _as_obj(chunk.get("readability"), "status")
 
             if not merged["readability"]["image_description"]:
                 img = readability.get("image_description")
@@ -473,6 +499,8 @@ class TypeDataExtractor:
 
             # --- RAW DATA ---
             raw_data = chunk.get("raw_data", {})
+            if not isinstance(raw_data, dict):
+                raw_data = {}
 
 
             # summary
@@ -483,19 +511,19 @@ class TypeDataExtractor:
 
             # document_name, contract number, nmck_method": если найден в chunk — сохраняем первый
             logger.info(f"Объединение document_name")
-            dn = raw_data.get("document_name", {})
+            dn = _as_obj(raw_data.get("document_name"), "value")
             if dn.get("value", "") and not merged["raw_data"]["document_name"]["value"]:
                 merged["raw_data"]["document_name"]["value"] = dn["value"]
                 merged["raw_data"]["document_name"]["confidence"] = dn.get("confidence", None)
                     
             logger.info(f"Объединение contract_number")
-            cn = raw_data.get("contract_number", {})
+            cn = _as_obj(raw_data.get("contract_number"), "value")
             if cn.get("value", "") and not merged["raw_data"]["contract_number"]["value"]:
                 merged["raw_data"]["contract_number"]["value"] = cn["value"]
                 merged["raw_data"]["contract_number"]["evidence"] = cn.get("evidence", None)
 
             logger.info(f"Объединение nmck")
-            nmck = raw_data.get("nmck_method", {})
+            nmck = _as_obj(raw_data.get("nmck_method"), "method")
             if nmck and nmck.get("method", ""):
                 if not merged["raw_data"]["nmck_method"]["method"]:
                     merged["raw_data"]["nmck_method"]["method"] = nmck.get("method", "")
@@ -619,7 +647,7 @@ class TypeDataExtractor:
             # предмет закупки
             logger.info(f"Объединение procurement_subject")
             ps = raw_data.get("procurement_subject", {})
-            if isinstance(ps, dict) and ps.get("description", "") and ps.get("evidence", "") and merged["raw_data"]["procurement_subject"]["description"]:
+            if isinstance(ps, dict) and ps.get("description", "") and ps.get("evidence", "") and not merged["raw_data"]["procurement_subject"]["description"]:
                     merged["raw_data"]["procurement_subject"]["description"] = ps["description"]
                     merged["raw_data"]["procurement_subject"]["evidence"] = ps.get("evidence")
 
@@ -658,7 +686,7 @@ class TypeDataExtractor:
 
             # execution_location
             logger.info(f"Объединение execution_location")
-            el = raw_data.get("execution_location", {})
+            el = _as_obj(raw_data.get("execution_location"), "address")
             if el:
                 for k in ["address", "special_conditions"]:
                     if el.get(k) and not merged["raw_data"]["execution_location"].get(k):

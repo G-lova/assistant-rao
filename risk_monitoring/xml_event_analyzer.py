@@ -23,8 +23,9 @@ import asyncio
 import datetime
 import os
 import zipfile
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from configs import settings
 from configs.config import Config
 from configs.logger import get_logger
 from risk_monitoring import progress
@@ -226,6 +227,8 @@ class XmlEventAnalyzer:
         self.push_results = push_results
         self.force = force
         self.semaphore = asyncio.Semaphore(concurrency)
+        # кому из событий нужна модель (ежедневный прогон: заказчики на мониторинге); None — всем
+        self.llm_filter: Optional[Callable[[Dict[str, Any]], bool]] = None
         self.versions = {"event_analyzer": self.event_analyzer.prompt_version if self.event_analyzer else None,
                          "catalog": risk_catalog.CATALOG_VERSION}
 
@@ -264,6 +267,7 @@ class XmlEventAnalyzer:
             # 1) разбор XML, diff, правила — без модели
             prepared = await asyncio.gather(*(self._guarded(found[i], previous.get(i)) for i in ids if i in found))
             ctxs = [p for p in prepared if p.get("status") == "prepared"]
+            self._defer_llm(ctxs)
             # 2) модель — одним запросом на закупку (контракт) для событий, где она нужна
             llm = await self._llm_by_purchase([c for c in ctxs if c["needs_llm"]])
             # 3) сборка ai_analysis и запись
@@ -440,7 +444,7 @@ class XmlEventAnalyzer:
         """Предыдущая версия каждого XML (максимальная версия меньше текущей) — один запрос на все XML прогона."""
         try:
             grouped = await self._cache().keyed(self._query, "xml_previous.sql", ids, "current_id",
-                                                head=[self.storage_path])
+                                                head=[self.storage_path], size=settings.RM_PREVIOUS_CHUNK)
         except Exception as e:  # noqa: BLE001 — без предыдущей версии событие всё равно анализируется
             logger.warning(f"Предыдущие версии XML не получены: {e}")
             return {}
@@ -456,7 +460,7 @@ class XmlEventAnalyzer:
         xml_id = int(row["id"])
         attempt = (_int(row.get("rm_attempt")) or 0) + 1
         progress.subject(f"XML {xml_id} «{row.get('entry_name') or ''}»")
-        if not self.force:
+        if not self.force and not self._deferred_now_needed(row):
             if row.get("rm_status") == "completed":
                 progress.note("уже проанализирован во внешней БД — пропуск")
                 return {"xml_id": xml_id, "status": "skipped", "reason": "already_analyzed"}
@@ -524,6 +528,27 @@ class XmlEventAnalyzer:
             except Exception as pe:  # noqa: BLE001
                 logger.error(f"Не удалось записать статус ошибки XML {xml_id}: {pe}")
         return result
+
+    def _defer_llm(self, ctxs: List[Dict[str, Any]]) -> None:
+        """Откладывает модель для событий, не прошедших ``llm_filter``: событие описывается правилами и шаблоном,
+        ``pipeline.llm.deferred`` — причина, по которой модель была бы нужна (для повторного разбора, когда
+        заказчик встанет на мониторинг)."""
+        if getattr(self, "llm_filter", None) is None:
+            return
+        n = 0
+        for c in ctxs:
+            if c.get("needs_llm") and not self.llm_filter(c):
+                c.update(needs_llm=False, llm_deferred=c["llm_reason"], llm_reason="not_monitored")
+                n += 1
+        if n:
+            logger.info(f"События XML: модель отложена для {n} (заказчик не на мониторинге)")
+
+    def _deferred_now_needed(self, row: Dict[str, Any]) -> bool:
+        """Разбор XML без модели был отложен, а теперь его закупка у заказчика на мониторинге."""
+        deferred = row.get("rm_llm_deferred")
+        if getattr(self, "llm_filter", None) is None or deferred in (None, "", "null", "None") or deferred != deferred:
+            return False
+        return bool(self.llm_filter({"row": row, "link": None}))
 
     async def _finish_guarded(self, ctx: Dict[str, Any], llm: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """Сборка и запись события с обработкой ошибок."""
@@ -661,6 +686,8 @@ class XmlEventAnalyzer:
                                            _int(previous["id"]) if previous else None, self.force, ctx["attempt"],
                                            export_date=str(row.get("exact_date"))[:10] if row.get("exact_date") else None)
         pipeline["llm"] = {"used": llm is not None, "reason": ctx["llm_reason"]}
+        if ctx.get("llm_deferred"):
+            pipeline["llm"]["deferred"] = ctx["llm_deferred"]
         ai = xml_events.build_xml_analysis(event=ctx["event"], facts=ctx["facts"], changes=ctx["changes"],
                                            doc_changes=ctx["doc_changes"], files=ctx["files"], link=ctx["link"],
                                            rule_risk_list=ctx["rules"], llm=llm,

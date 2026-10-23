@@ -414,6 +414,26 @@ def quiet_day(s: Dict[str, Any]) -> bool:
         and not s.get("attention") and not s.get("suppliers")
 
 
+def make_monitored_filter(cards: set, orgs: set) -> Any:
+    """Фильтр «закупка XML у заказчика на мониторинге» по множествам закупок и организаций.
+
+    Проверяются: признак ``monitoring`` строки XML (привязанные XML), закупка и организация из строки, закупка и
+    заказчик, найденные привязкой «сироты» (``ctx["link"]``).
+    """
+    def ok(ctx: Dict[str, Any]) -> bool:
+        """Нужна ли модель событию."""
+        row, link = ctx.get("row") or {}, ctx.get("link") or {}
+        if monitored(row):
+            return True
+        for v, pool in ((row.get("risk_monitoring_contract_id"), cards), (row.get("organisation_id"), orgs),
+                        (link.get("risk_monitoring_contract_id"), cards), (link.get("organisation_id"), orgs)):
+            n = _num(v)
+            if n is not None and int(n) in pool:
+                return True
+        return False
+    return ok
+
+
 def default_resume(s: Dict[str, Any]) -> str:
     """Текст сводки шаблоном (без модели)."""
     return " ".join(summary_facts(s))
@@ -648,7 +668,14 @@ class DailyRun:
         async with progress.step("S0: предыдущие версии и файлы выбранных XML (пакетно)") as st:
             cache.seed("xml_meta.sql", xml_rows, "id", xml_ids)
             try:
-                prev = await cache.keyed(self._query, "xml_previous.sql", xml_ids, "current_id", head=[self.storage_path])
+                prev = await cache.keyed(self._query, "xml_previous.sql", xml_ids, "current_id", head=[self.storage_path],
+                                         size=settings.RM_PREVIOUS_CHUNK)
+            except Exception as e:  # noqa: BLE001 — запрошенные пачки остались в кэше, остальные дозапросит анализатор
+                logger.warning(f"Ежедневный прогон {d}: предыдущие версии XML загружены не полностью "
+                               f"({type(e).__name__}: {str(e)[:200]})")
+                prev = {i: cache.rows.get("xml_previous.sql", {}).get(i, [])
+                        for i in cache.fetched.get("xml_previous.sql", set())}
+            try:
                 prev_rows = [r for rows in prev.values() for r in rows]
                 linked = {int(r["id"]) for r in xml_rows if r.get("risk_monitoring_contract_id") is not None}
                 cards = sorted({int(r["risk_monitoring_contract_id"]) for r in xml_rows if int(r["id"]) in linked})
@@ -669,6 +696,24 @@ class DailyRun:
                                f"{str(e)[:200]}) — анализаторы запросят данные сами")
                 st["detail"] = "не выполнена"
             cache.queries["daily_xml.sql"] = 1
+
+    async def _monitored_filter(self, cache: Any) -> Any:
+        """Фильтр событий для модели: закупка или заказчик XML (из внешней БД либо найденные привязкой «сироты») —
+        на мониторинге. Один запрос на прогон; при сбое — ``None`` (модель для всех, как раньше).
+
+        Returns:
+            Callable[[Dict[str, Any]], bool] | None: ``ctx → нужна ли модель``.
+        """
+        try:
+            cache.count("monitored_scope.sql")
+            rows = await self._query("monitored_scope.sql")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Закупки заказчиков на мониторинге не получены ({type(e).__name__}: {e}) — "
+                           f"модель разбирает все события")
+            return None
+        cards = {int(_num(r["card_id"])) for r in rows if _num(r.get("card_id")) is not None}
+        orgs = {int(_num(r["organisation_id"])) for r in rows if _num(r.get("organisation_id")) is not None}
+        return make_monitored_filter(cards, orgs)
 
     async def _documents(self, xml_ids: List[int], xa: Any, cache: Any, scope: Dict[str, Any],
                          file_results: Dict[int, Dict[str, Any]], events: Dict[int, Dict[str, Any]]) -> None:
@@ -794,6 +839,8 @@ class DailyRun:
 
         xa = XmlEventAnalyzer(self.http_manager, self.environment, push_results=self.push, use_llm=self.use_llm,
                               results_repo=self.repo, run_cache=cache)
+        if settings.DAILY_EVENT_LLM_MONITORED_ONLY:
+            xa.llm_filter = await self._monitored_filter(cache)
 
         events: Dict[int, Dict[str, Any]] = {}
         await self._documents(xml_ids, xa, cache, scope, file_results, events)

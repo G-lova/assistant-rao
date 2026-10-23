@@ -177,7 +177,8 @@ class DailyRunTest(unittest.TestCase):
         self.assertEqual(calls, [False])
         self.assertEqual(xa.file_results, {5: {"doc_type": {"detected_type": None}, "resume": None,
                                                "total_doc_risk": None}})
-        self.assertEqual(queried, ["daily_xml.sql", "xml_previous.sql", "daily_files.sql", "daily_cards.sql"])
+        self.assertEqual(queried, ["daily_xml.sql", "xml_previous.sql", "daily_files.sql", "monitored_scope.sql",
+                                   "daily_cards.sql"])
         self.assertIn(5, run.cache.file_rows)
         self.assertIn(1, run.cache.covered_cards)
         self.assertEqual(s["stages"]["customers"]["status"], "failed")
@@ -374,10 +375,7 @@ class TestEventType(unittest.TestCase):
 
     def test_patch_adds_event_type_to_stored(self):
         """Сохранённый до исправления результат дозаписывается с ``event_type``."""
-        import asyncio
-        from unittest import mock
-        from risk_monitoring.risk_monitoring_api import RiskMonitoringAPI
-        api = RiskMonitoringAPI.__new__(RiskMonitoringAPI)
+        from tests.stubs import stubbed_import
         sent = {}
 
         async def fake(method, json=None, **kw):
@@ -385,9 +383,11 @@ class TestEventType(unittest.TestCase):
             sent.update(json)
             return {"data": {}}
 
-        with mock.patch.object(RiskMonitoringAPI, "_check_table", lambda self, t: None), \
-                mock.patch.object(api, "_request", fake, create=True):
-            asyncio.run(api.patch_ai_analysis("risk_monitoring_eis_xml_sources", 1, {"event": {"code": "PUR-001"}}))
+        with stubbed_import("risk_monitoring.risk_monitoring_api") as m:
+            api = m.RiskMonitoringAPI.__new__(m.RiskMonitoringAPI)
+            with mock.patch.object(m.RiskMonitoringAPI, "_check_table", lambda self, t: None), \
+                    mock.patch.object(api, "_request", fake, create=True):
+                asyncio.run(api.patch_ai_analysis("risk_monitoring_eis_xml_sources", 1, {"event": {"code": "PUR-001"}}))
         self.assertEqual(sent["ai_analysis"]["event"]["event_type"], "PUR-001")
 
 
@@ -407,9 +407,7 @@ class RegistryFormatTest(unittest.TestCase):
 
     def test_running_clears_finished(self):
         """Отметка «выполняется» сбрасывает окончание прежнего запуска."""
-        from risk_monitoring.risk_monitoring_api import RiskMonitoringAPI
-        api = RiskMonitoringAPI.__new__(RiskMonitoringAPI)
-        api.url = "https://x/api/risk-monitoring/ai-analysis"
+        from tests.stubs import stubbed_import
         sent = {}
 
         async def fake(method, url=None, json=None, **kw):
@@ -417,8 +415,11 @@ class RegistryFormatTest(unittest.TestCase):
             sent.update(json)
             return {"data": {"id": 1}}
 
-        with mock.patch.object(api, "_request", fake, create=True):
-            asyncio.run(api.upsert_daily_run("2026-06-25", "running", started_at="2026-10-23T13:20:00+03:00"))
+        with stubbed_import("risk_monitoring.risk_monitoring_api") as m:
+            api = m.RiskMonitoringAPI.__new__(m.RiskMonitoringAPI)
+            api.url = "https://x/api/risk-monitoring/ai-analysis"
+            with mock.patch.object(api, "_request", fake, create=True):
+                asyncio.run(api.upsert_daily_run("2026-06-25", "running", started_at="2026-10-23T13:20:00+03:00"))
         self.assertIn("finished_at", sent)
         self.assertIsNone(sent["finished_at"])
 
@@ -434,3 +435,81 @@ class QuietDayTest(unittest.TestCase):
         s["attention"] = [{"kind": "supplier_registry"}]
         self.assertFalse(daily.quiet_day(s))
         self.assertFalse(daily.quiet_day({"scope": {"contracts_monitored": 2}}))
+
+
+class MergeStringFieldsTest(unittest.TestCase):
+    """Объединение блоков извлечения не падает, если модель отдала строку вместо объекта."""
+
+    def test_as_obj(self):
+        """Строка — в объект под ключом; объект — как есть; пусто — пустой объект."""
+        from tests.stubs import stubbed_import
+        with stubbed_import("evaluate_documents.type_data_extractor") as m:
+            self.assertEqual(m._as_obj("Контракт", "value"), {"value": "Контракт"})
+            self.assertEqual(m._as_obj({"value": 1}, "value"), {"value": 1})
+            self.assertEqual(m._as_obj(None, "value"), {})
+            self.assertEqual(m._as_obj("", "value"), {})
+
+
+class MonitoredLLMTest(unittest.TestCase):
+    """Модель разбирает события только по закупкам заказчиков на мониторинге."""
+
+    def test_filter(self):
+        """Привязанный XML с monitoring = 1, «сирота», найденная к закупке на мониторинге, — да; чужой — нет."""
+        ok = daily.make_monitored_filter({10}, {7})
+        self.assertTrue(ok({"row": {"monitoring": 1}}))
+        self.assertTrue(ok({"row": {"monitoring": None}, "link": {"risk_monitoring_contract_id": 10}}))
+        self.assertTrue(ok({"row": {}, "link": {"organisation_id": 7}}))
+        self.assertFalse(ok({"row": {"monitoring": 0, "risk_monitoring_contract_id": 11}, "link": None}))
+
+    def test_defer(self):
+        """Событию вне мониторинга модель откладывается, причина сохраняется."""
+        from tests.stubs import stubbed_import
+        with stubbed_import("risk_monitoring.xml_event_analyzer") as m:
+            xa = m.XmlEventAnalyzer.__new__(m.XmlEventAnalyzer)
+            xa.llm_filter = daily.make_monitored_filter(set(), set())
+            ctxs = [{"needs_llm": True, "llm_reason": "importance", "row": {"monitoring": 0}, "link": None},
+                    {"needs_llm": True, "llm_reason": "rule_risks", "row": {"monitoring": 1}, "link": None}]
+            xa._defer_llm(ctxs)
+            self.assertFalse(ctxs[0]["needs_llm"])
+            self.assertEqual((ctxs[0]["llm_reason"], ctxs[0]["llm_deferred"]), ("not_monitored", "importance"))
+            self.assertTrue(ctxs[1]["needs_llm"])
+            # отложенный XML закупки, которая теперь на мониторинге, разбирается повторно
+            self.assertTrue(xa._deferred_now_needed({"rm_llm_deferred": "importance", "monitoring": 1}))
+            self.assertFalse(xa._deferred_now_needed({"rm_llm_deferred": "importance", "monitoring": 0}))
+            self.assertFalse(xa._deferred_now_needed({"rm_llm_deferred": None, "monitoring": 1}))
+
+
+class ArchiveOcrShrinkTest(unittest.TestCase):
+    """OCR страниц из архивов: переполнение контекста — уменьшение изображения и повтор, а не «модель недоступна»."""
+
+    def test_shrink_and_retry(self):
+        """Первый ответ — 400 «exceeds context», второй — текст; изображение уменьшено."""
+        import os
+        import tempfile
+        from tests.stubs import stubbed_import
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("нет PIL")
+        with tempfile.TemporaryDirectory() as tmp, stubbed_import("evaluate_documents.ocr") as m:
+            path = os.path.join(tmp, "page_1.jpg")
+            Image.new("RGB", (3000, 3000), "white").save(path, "JPEG")
+            p = m.OCRProcessor.__new__(m.OCRProcessor)
+            p.ocr_prompt, p.OCR_SCHEMA, p.model = "", {}, "x"
+
+            async def acquire():
+                """Без ограничения скорости."""
+
+            p.rate_limiter = mock.Mock(acquire=acquire)
+            calls = []
+
+            async def once(image_path, name, image_name):
+                """Первый вызов — переполнение, второй — ответ."""
+                calls.append(Image.open(image_path).size)
+                return ("err", True) if len(calls) == 1 else ('{"raw_text": "ok"}', False)
+
+            p._ocr_once = once
+            out = asyncio.run(m.OCRProcessor.ocr_image_with_qwen_vl.__wrapped__(p, path, "ПСД.rar"))
+            self.assertEqual(out, '{"raw_text": "ok"}')
+            self.assertLessEqual(calls[0][0] * calls[0][1], m.OCR_MAX_PIXELS)
+            self.assertLess(calls[1][0], calls[0][0])

@@ -18,6 +18,7 @@ SELECT
     a.fz,
     JSON_UNQUOTE(JSON_EXTRACT(x.ai_analysis, '$.pipeline.status')) AS rm_status,
     JSON_EXTRACT(x.ai_analysis, '$.pipeline.attempt') AS rm_attempt,
+    JSON_UNQUOTE(JSON_EXTRACT(x.ai_analysis, '$.pipeline.llm.deferred')) AS rm_llm_deferred,
     c.number AS card_number,
     c.fz_type AS card_fz,
     c.risk_monitoring_organisation_id AS organisation_id,
