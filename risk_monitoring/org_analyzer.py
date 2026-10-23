@@ -24,7 +24,7 @@ from risk_monitoring.xml_events import canonical_org
 logger = get_logger(__name__)
 
 EXTERNAL_TABLE = "risk_monitoring_organisations"
-PROMPT_VERSION = "org-resume-3"
+PROMPT_VERSION = "org-resume-4"
 ROLES = ("customer", "supplier")
 
 RESUME_SYSTEM = (

@@ -310,7 +310,8 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
         if sec:
             cust.append({"organisation_id": r.get("organisation_id"), "canonical_id": r.get("canonical_id"),
                          "name": org.get("name"), "score": sec.get("score"), "zone": sec.get("zone"),
-                         "delta": sec.get("delta"), "risks": [x.get("rule_id") for x in sec.get("risks") or []]})
+                         "delta": sec.get("delta"), "quality_index": sec.get("quality_index"),
+                         "risks": [x.get("rule_id") for x in sec.get("risks") or []]})
     cust.sort(key=lambda c: -(c.get("score") or 0))
     sups = []
     for r in suppliers:
@@ -388,10 +389,18 @@ def summary_facts(s: Dict[str, Any]) -> List[str]:
     if not s["attention"]:
         facts.append("Закупок, перешедших в красную зону, резкого роста балла, важных событий и поставщиков из "
                      "реестра 19.28 нет.")
+    zone_names = {"red": "красная зона", "yellow": "жёлтая зона", "green": "зелёная зона"}
+    rated = [x for x in s["customers"] if x.get("quality_index") is not None]
+    if rated:
+        low = sorted((x for x in rated if x.get("zone") in ("red", "yellow")), key=lambda x: x["quality_index"])
+        facts.append("Сводный показатель качества закупочной деятельности заказчиков (модель сводной аналитики, "
+                     "100 — без замечаний): " + ("; ".join(
+                         f"{x['name']} — {_sc(x['quality_index'])} ({zone_names.get(x['zone'], x['zone'])})"
+                         for x in low[:5]) if low else f"у всех {len(rated)} — зелёная зона") + ".")
     risky = [x for x in s["customers"] if x.get("risks")]
     if risky:
-        facts.append("Заказчики с признаками риска: " + "; ".join(
-            f"{x['name']} — балл {_sc(x['score'])} ({risk_names(x['risks'][:3])})" for x in risky[:5]) + ".")
+        facts.append("Поведенческие признаки риска заказчиков: " + "; ".join(
+            f"{x['name']} — {risk_names(x['risks'][:3])}" for x in risky[:5]) + ".")
     partial = {k: v for k, v in (s.get("stages") or {}).items() if (v or {}).get("status") == "partial"}
     if partial:
         left = max((v or {}).get("xml_left") or 0 for v in partial.values())
