@@ -538,3 +538,27 @@ class ArchiveOcrShrinkTest(unittest.TestCase):
             self.assertEqual(out, '{"raw_text": "ok"}')
             self.assertLessEqual(calls[0][0] * calls[0][1], m.OCR_MAX_PIXELS)
             self.assertLess(calls[1][0], calls[0][0])
+
+
+class SummaryScopeFixTest(unittest.TestCase):
+    """Сводка: события только закупок системы, закупки в красной зоне — в фактах; delta заказчика при смене модели."""
+
+    def test_orphan_events_excluded(self):
+        """Событие XML без закупки не входит в сводку и во «внимание»."""
+        cards = {1: {"id": 1, "number": "N1", "organisation_id": 10, "monitoring": 0, "customer_name": "ЗГУ"}}
+        s = daily.build_summary(export_date="2026-07-02", environment="stage", cards=cards,
+                                contracts={1: _contract(80, "red")}, changed=[], xml_cards={1: 1, 2: None},
+                                events={1: {"event": {"title": "Доп. соглашение", "importance": "high"}, "risks": []},
+                                        2: {"event": {"title": "Заключён контракт", "importance": "high"}, "risks": []}},
+                                customers=[], scope={"xml": 2}, stages={})
+        self.assertEqual(s["events"]["total"], 1)
+        self.assertEqual([a["xml_id"] for a in s["attention"]], [1])
+        self.assertIn("В красной зоне (всего 1): закупка 0319", " ".join(daily.summary_facts(s)))
+
+    def test_previous_customer_score(self):
+        """Балл прежней модели не даёт delta; той же — даёт."""
+        from risk_monitoring import org_profile
+        with mock.patch.object(settings, "CUSTOMER_SCORE_MODEL", "quality"):
+            self.assertIsNone(org_profile.previous_customer_score({"customer": {"score": 32}}))
+            same = {"customer": {"score": 12, "score_model": {"version": org_profile.CUSTOMER_SCORE_VERSION}}}
+            self.assertEqual(org_profile.previous_customer_score(same), 12)

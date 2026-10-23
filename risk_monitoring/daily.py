@@ -39,7 +39,8 @@ logger = get_logger(__name__)
 # Версия правил охвата и сводки: готовая сводка прежней версии считается устаревшей, и прогон за дату выполняется
 # повторно без force (документы повторно не анализируются — только недостающее, отложенное и сводка).
 # rm-daily-2 (23.10.2026): охват — все закупки системы, а не только monitoring = 1
-SCHEMA_VERSION = "rm-daily-2"
+# rm-daily-3 (23.10.2026): события XML без привязки к закупкам системы не входят в сводку; красная зона — в фактах
+SCHEMA_VERSION = "rm-daily-3"
 PROMPT_VERSION = "daily-resume-4"
 KIND = "daily"
 STAGES = ("files", "xml", "contracts", "customers", "suppliers", "summary")
@@ -281,7 +282,9 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
 
     ev_items = [event_item(xid, cards.get(xml_cards.get(xid)) if xml_cards.get(xid) else None, ai)
                 for xid, ai in events.items()
-                if not cfg.DAILY_MONITORED_ONLY or (xml_cards.get(xid) in watched)]
+                # только события закупок системы: XML без привязки (документы других заказчиков из региональных
+                # архивов ЕИС) в сводку не входят (02.07.2026: 2965 из 2973 XML — «внимание» из чужих событий)
+                if xml_cards.get(xid) in watched]
     by_code: Dict[str, int] = {}
     for e in ev_items:
         key = e["title"] or e["code"] or "неизвестно"
@@ -390,6 +393,11 @@ def summary_facts(s: Dict[str, Any]) -> List[str]:
         if ev["total"]:
             types = "; ".join(f"{k} — {v}" for k, v in list(ev["by_type"].items())[:6])
             facts.append(f"Событий ЕИС по ним: {ev['total']} ({types}).")
+    if c.get("red"):
+        facts.append(f"В красной зоне (всего {c['by_zone']['red']}): " + "; ".join(
+            f"закупка {i['purchase_number']}, {i['customer']} — балл {_sc(i['score'])}"
+            + (" (заказчик с текущими задачами мониторинга)" if i.get("monitoring") else "")
+            for i in c["red"][:5]) + ".")
     kinds = {}
     for a in s["attention"]:
         kinds[a["kind"]] = kinds.get(a["kind"], 0) + 1

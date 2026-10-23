@@ -180,7 +180,7 @@ class OrgAnalyzer:
             ids = {int(g["id"]) for g in t["customer_rows"]}
             mine = [c for c in customer_contracts if c.get("organisation_id") is not None and int(c["organisation_id"]) in ids]
             if mine:
-                sec = org_profile.customer_section(mine, black, settings, (prev.get("customer") or {}).get("score"))
+                sec = org_profile.customer_section(mine, black, settings, org_profile.previous_customer_score(prev))
                 progress.note(f"заказчик: закупок {len(mine)}, рисков {len(sec['risks'])}, балл {sec['score']}")
                 async with progress.step("резюме заказчика"):
                     sec["resume"] = await self._resume("customer", name, sec)

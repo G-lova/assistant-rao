@@ -318,7 +318,7 @@ class XmlEventAnalyzer:
 
     def _will_prepare(self, row: Dict[str, Any]) -> bool:
         """XML будет разбираться в этом запуске (не пропущен как проанализированный или исчерпавший попытки)."""
-        if self.force:
+        if self.force or self._deferred_now_needed(row):
             return True
         if row.get("rm_status") == "completed":
             return False

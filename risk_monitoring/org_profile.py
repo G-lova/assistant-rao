@@ -301,6 +301,21 @@ def quality_zone(q: Optional[float], zones: Sequence[float]) -> Optional[str]:
     return "red" if q < zones[0] else "yellow" if q < zones[1] else "green"
 
 
+def previous_customer_score(prev_ai: Dict[str, Any]) -> Optional[float]:
+    """Прошлый балл заказчика для изменения (``delta``) — только если он посчитан той же моделью: балл прежней
+    модели (поведенческие признаки) с новым не сравним (02.07.2026: «−23,5» у РАНХиГС из-за смены модели)."""
+    prev = (prev_ai or {}).get("customer") or {}
+    current = CUSTOMER_SCORE_VERSION if _model_on() else None
+    return prev.get("score") if (prev.get("score_model") or {}).get("version") == current else None
+
+
+def _model_on() -> bool:
+    """Включена ли модель сводной аналитики (``CUSTOMER_SCORE_MODEL = "quality"``)."""
+    from configs import settings
+
+    return getattr(settings, "CUSTOMER_SCORE_MODEL", "aggregate") == "quality"
+
+
 def customer_quality(contracts: Sequence[Dict[str, Any]], behaviour_score: float, settings: Any) -> Dict[str, Any]:
     """Сводный показатель заказчика по «Модели сводной аналитики» (РАО, 2025).
 
