@@ -84,7 +84,7 @@ class ContractPackageTest(unittest.TestCase):
                                          statuses={}, previous_score=20.0, settings=settings)
         codes = {r["rule_id"] for r in out["risks"]}
         self.assertEqual(codes, {"PROC-001", "FIN-003", "REG-001"})
-        self.assertEqual(out["registry"]["matches"][0]["black_list_id"], 3)
+        self.assertEqual(out["registry"][0]["black_list_id"], 3)
         self.assertEqual(out["profile"]["zone"], "red")
         self.assertGreater(out["profile"]["delta"], 0)
         self.assertEqual(out["passport"]["stage"], "contract")

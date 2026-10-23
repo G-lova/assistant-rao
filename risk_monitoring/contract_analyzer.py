@@ -381,7 +381,7 @@ class ContractAnalyzer:
                        "level": r.get("level"), "sources": r.get("sources")} for r in built["risks"][:10]],
             "events": [{k: e.get(k) for k in ("title", "importance", "event_at")} for e in built["events"][:8]],
             "completeness": built["package"]["completeness"], "consistency": built["package"]["consistency"][:3],
-            "registry": built["registry"]["matches"],
+            "registry": built["registry"],
         }
         import json
 

@@ -770,6 +770,26 @@ def favourite_risks(p: Dict[str, Any], fav: Optional[Dict[str, Any]]) -> List[Di
              "source": "aggregate"}]
 
 
+def stored_registry(ai: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Совпадения с реестром 19.28 из ``ai_analysis`` закупки — и нового формата (список), и прежнего
+    (``{"checked", "matches", "rnp"}``, результаты до 23.10.2026)."""
+    reg = (ai or {}).get("registry")
+    if isinstance(reg, dict):
+        return list(reg.get("matches") or [])
+    return list(reg or [])
+
+
+def normalize_registry(ai: Dict[str, Any]) -> Dict[str, Any]:
+    """Приводит ``registry`` сохранённого результата к формату API (список совпадений); ``checked`` и ``rnp``
+    переносит в ``registry_checked`` и ``rnp``. Меняет ``ai`` на месте и возвращает его."""
+    reg = (ai or {}).get("registry") if isinstance(ai, dict) else None
+    if isinstance(reg, dict):
+        ai["registry"] = list(reg.get("matches") or [])
+        ai.setdefault("registry_checked", bool(reg.get("checked")))
+        ai.setdefault("rnp", list(reg.get("rnp") or []))
+    return ai
+
+
 def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, Any]], xmls: Sequence[Dict[str, Any]],
                             values: Optional[Dict[str, Any]], black: Sequence[Dict[str, Any]],
                             statuses: Dict[Tuple[int, str], int], previous_score: Optional[float] = None,
@@ -820,13 +840,15 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
         "passport": p,
         "package": {"completeness": comp, "consistency": cons, "files": files_brief,
                     "files_analyzed": sum(1 for f in files_brief if f["analyzed"]), "files_total": len(files_brief)},
-        "registry": {"checked": bool(p["supplier"].get("inn")), "matches": [
-            {"black_list_id": m.get("id"), "deal_number": m.get("deal_number"), "date_begin": str(m.get("date_begin"))[:10],
-             "name": m.get("name")} for m in matches],
-            "rnp": [{"rnp_entry_id": m.get("id"), "reg_number": m.get("reg_number"), "fz": m.get("fz"),
-                     "published_at": str(m.get("published_at") or "")[:10],
-                     "planned_exclusion_date": str(m.get("planned_exclusion_date") or "")[:10] or None}
-                    for m in rnp_found]},
+        # API: registry — список совпадений с реестром 19.28 (у каждого black_list_id), 422 от 23.10.2026;
+        # признак проверки и РНП — отдельными полями
+        "registry": [{"black_list_id": m.get("id"), "deal_number": m.get("deal_number"),
+                      "date_begin": str(m.get("date_begin"))[:10], "name": m.get("name")} for m in matches],
+        "registry_checked": bool(p["supplier"].get("inn")),
+        "rnp": [{"rnp_entry_id": m.get("id"), "reg_number": m.get("reg_number"), "fz": m.get("fz"),
+                 "published_at": str(m.get("published_at") or "")[:10],
+                 "planned_exclusion_date": str(m.get("planned_exclusion_date") or "")[:10] or None}
+                for m in rnp_found],
         "customer_supplier": fav,
         "events": events,
         "risks": risks,

@@ -28,6 +28,7 @@ from configs.logger import get_logger
 from configs import settings
 from risk_monitoring import passport, progress, rm_sql
 from risk_monitoring.contract_analyzer import _none
+from risk_monitoring.contract_package import stored_registry
 
 logger = get_logger(__name__)
 
@@ -131,7 +132,7 @@ def contract_item(card: Dict[str, Any], ai: Dict[str, Any], changed: bool) -> Di
         "delta": _num(prof.get("delta")) if changed else None,
         "changed": changed,
         "top": [{"rule_id": f.get("rule_id"), "title": f.get("title")} for f in (prof.get("top_factors") or [])[:3]],
-        "registry_1928": bool((ai.get("registry") or {}).get("matches")),
+        "registry_1928": bool(stored_registry(ai)),
     }
 
 
@@ -476,7 +477,7 @@ class DailyRun:
                 out["pushed"] = out.get("pushed", 0) + 1
             elif r.get("push_error"):
                 out["push_failed"] = out.get("push_failed", 0) + 1
-                err = str(r["push_error"])[:300]
+                err = str(r["push_error"])[:1500]
                 if err not in errors and len(errors) < 3:
                     errors.append(err)
         if errors:

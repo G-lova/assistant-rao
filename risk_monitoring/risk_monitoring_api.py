@@ -110,7 +110,7 @@ class RiskMonitoringAPI:
                         body = f"{body} {parsed['errors']}"
                 except Exception:  # noqa: BLE001
                     body = raw
-                raise RiskAPIError(f"HTTP {resp.status}: {str(body)[:500]}", resp.status)
+                raise RiskAPIError(f"HTTP {resp.status}: {str(body)[:2000]}", resp.status)
 
             data = await resp.json(content_type=None)
             if data.get("status") != "ok":
@@ -139,6 +139,10 @@ class RiskMonitoringAPI:
             # результаты, сохранённые до 23.10.2026, — без event_type; API его теперь требует
             from risk_monitoring.xml_events import with_event_type
             with_event_type(ai_analysis["event"])
+        if table == "risk_monitoring_contracts" and isinstance(ai_analysis, dict):
+            # результаты до 23.10.2026: registry — объект; API ждёт список совпадений
+            from risk_monitoring.contract_package import normalize_registry
+            normalize_registry(ai_analysis)
         try:
             data = await self._request(
                 "PATCH",
@@ -191,6 +195,10 @@ class RiskMonitoringAPI:
         for k, v in (("status", status), ("stages", stages), ("started_at", started_at), ("finished_at", finished_at)):
             if v is not None:
                 body[k] = v
+        if status == "running":
+            # повторный запуск за дату: окончание прежнего запуска раньше нового начала — сбрасываем
+            # (иначе 422 «Завершение прогона не может предшествовать началу», 23.10.2026)
+            body["finished_at"] = None
         data = await self._request("POST", url=self.daily_runs_url, json=body)
         return data.get("data") or {}
 

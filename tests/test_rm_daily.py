@@ -13,7 +13,7 @@ def _contract(score, zone, prev=None, delta=None, registry=False):
     return {"passport": {"purchase_number": "0319", "subject": "Поставка", "customer": {"name": "ЗГУ"}},
             "profile": {"score": score, "zone": zone, "previous_score": prev, "delta": delta,
                         "top_factors": [{"rule_id": "DOC-002", "title": "Товарный знак"}]},
-            "registry": {"matches": [{"black_list_id": 1}] if registry else []}}
+            "registry": [{"black_list_id": 1}] if registry else []}
 
 
 class DailySummaryTest(unittest.TestCase):
@@ -389,3 +389,35 @@ class TestEventType(unittest.TestCase):
                 mock.patch.object(api, "_request", fake, create=True):
             asyncio.run(api.patch_ai_analysis("risk_monitoring_eis_xml_sources", 1, {"event": {"code": "PUR-001"}}))
         self.assertEqual(sent["ai_analysis"]["event"]["event_type"], "PUR-001")
+
+
+class RegistryFormatTest(unittest.TestCase):
+    """``ai_analysis.registry`` закупки — список совпадений (422 API от 23.10.2026)."""
+
+    def test_normalize_old(self):
+        """Прежний объект превращается в список; признак проверки и РНП — отдельными полями."""
+        from risk_monitoring.contract_package import normalize_registry, stored_registry
+        ai = {"registry": {"checked": True, "matches": [{"black_list_id": 5}], "rnp": [{"rnp_entry_id": 1}]}}
+        self.assertEqual(stored_registry(ai), [{"black_list_id": 5}])
+        normalize_registry(ai)
+        self.assertEqual(ai["registry"], [{"black_list_id": 5}])
+        self.assertTrue(ai["registry_checked"])
+        self.assertEqual(ai["rnp"], [{"rnp_entry_id": 1}])
+        self.assertEqual(stored_registry(ai), [{"black_list_id": 5}])
+
+    def test_running_clears_finished(self):
+        """Отметка «выполняется» сбрасывает окончание прежнего запуска."""
+        from risk_monitoring.risk_monitoring_api import RiskMonitoringAPI
+        api = RiskMonitoringAPI.__new__(RiskMonitoringAPI)
+        api.url = "https://x/api/risk-monitoring/ai-analysis"
+        sent = {}
+
+        async def fake(method, url=None, json=None, **kw):
+            """Запоминает тело."""
+            sent.update(json)
+            return {"data": {"id": 1}}
+
+        with mock.patch.object(api, "_request", fake, create=True):
+            asyncio.run(api.upsert_daily_run("2026-06-25", "running", started_at="2026-10-23T13:20:00+03:00"))
+        self.assertIn("finished_at", sent)
+        self.assertIsNone(sent["finished_at"])
