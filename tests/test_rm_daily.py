@@ -116,7 +116,11 @@ class DailyStateTest(unittest.TestCase):
         self.assertTrue(daily.running_fresh(fresh, now))
         self.assertFalse(daily.running_fresh(stale, now))
         self.assertFalse(daily.running_fresh(None, now))
-        self.assertTrue(daily.completed({"ai_analysis": {"pipeline": {"status": "completed"}}}))
+        self.assertTrue(daily.completed({"ai_analysis": {"pipeline": {"status": "completed",
+                                                                      "schema_version": daily.SCHEMA_VERSION}}}))
+        # сводка прежних правил охвата устарела — прогон за дату выполняется снова без force
+        self.assertFalse(daily.completed({"ai_analysis": {"pipeline": {"status": "completed",
+                                                                       "schema_version": "rm-daily-1"}}}))
 
     def test_monitored_values(self):
         """``monitoring`` из MySQL: 1, 1.0, "1", True — на мониторинге; 0, None — нет."""

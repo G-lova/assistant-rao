@@ -36,7 +36,10 @@ from risk_monitoring.contract_package import stored_registry
 
 logger = get_logger(__name__)
 
-SCHEMA_VERSION = "rm-daily-1"
+# Версия правил охвата и сводки: готовая сводка прежней версии считается устаревшей, и прогон за дату выполняется
+# повторно без force (документы повторно не анализируются — только недостающее, отложенное и сводка).
+# rm-daily-2 (23.10.2026): охват — все закупки системы, а не только monitoring = 1
+SCHEMA_VERSION = "rm-daily-2"
 PROMPT_VERSION = "daily-resume-4"
 KIND = "daily"
 STAGES = ("files", "xml", "contracts", "customers", "suppliers", "summary")
@@ -1003,5 +1006,7 @@ def running_fresh(stored: Optional[Dict[str, Any]], now: Optional[datetime] = No
 
 
 def completed(stored: Optional[Dict[str, Any]]) -> bool:
-    """Сводка за дату уже готова."""
-    return (((stored or {}).get("ai_analysis") or {}).get("pipeline") or {}).get("status") == "completed"
+    """Сводка за дату уже готова и собрана по текущим правилам (``SCHEMA_VERSION``): сводка прежней версии
+    устарела — повторный запуск её пересобирает."""
+    pipe = (((stored or {}).get("ai_analysis") or {}).get("pipeline") or {})
+    return pipe.get("status") == "completed" and pipe.get("schema_version") == SCHEMA_VERSION
