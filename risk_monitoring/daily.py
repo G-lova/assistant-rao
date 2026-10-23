@@ -33,7 +33,7 @@ from risk_monitoring.contract_package import stored_registry
 logger = get_logger(__name__)
 
 SCHEMA_VERSION = "rm-daily-1"
-PROMPT_VERSION = "daily-resume-2"
+PROMPT_VERSION = "daily-resume-3"
 KIND = "daily"
 STAGES = ("files", "xml", "contracts", "customers", "suppliers", "summary")
 RED = "red"
@@ -49,7 +49,7 @@ RESUME_SYSTEM = (
     "заказчикам на мониторинге. Напиши сводку для руководителя: 4–6 предложений, по-русски, без вступлений — что "
     "пришло за сутки, что требует внимания в первую очередь (назови закупки и заказчиков из фактов), что проверить. "
     "Используй только эти факты: не добавляй цифр и выводов, которых в них нет. Если внимания ничего не требует — "
-    "так и напиши. Не используй коды рисков и правил (вида DOC-002, FIN-004, BEH-005, pz_p1) — называй риски словами, понятными заказчику. Ответ — обычный текст, без JSON и разметки.")
+    "напиши «Ничего не требует внимания.» Пиши грамотно, без двойного отрицания. Не используй коды рисков и правил (вида DOC-002, FIN-004, BEH-005, pz_p1) — называй риски словами, понятными заказчику. Ответ — обычный текст, без JSON и разметки.")
 
 
 def run_key(d: str) -> int:
@@ -401,6 +401,17 @@ def summary_facts(s: Dict[str, Any]) -> List[str]:
     if failed:
         facts.append("Не завершились этапы: " + ", ".join(failed) + " — сводка может быть неполной.")
     return facts
+
+
+def quiet_day(s: Dict[str, Any]) -> bool:
+    """За дату по заказчикам на мониторинге ничего нет: ни закупок, ни событий, ни поставщиков, ни пунктов внимания.
+
+    Тогда текст сводки — шаблон из фактов, модель не вызывается: ей нечего обобщать, а на пустых данных она
+    пишет неуклюже («Внимания требует ничего», прогон 29.06, 23.10.2026).
+    """
+    sc = s.get("scope") or {}
+    return not any(sc.get(k) for k in ("contracts_monitored", "events_monitored", "customers_monitored")) \
+        and not s.get("attention") and not s.get("suppliers")
 
 
 def default_resume(s: Dict[str, Any]) -> str:
@@ -852,7 +863,7 @@ class DailyRun:
                                 suppliers=sup_results,
                                 scope=scope, stages=self.stages)
         resume, used_llm = default_resume(summary), False
-        if "summary" in self.stages_on and self.use_llm and settings.PACKAGE_LLM_RESUME:
+        if "summary" in self.stages_on and self.use_llm and settings.PACKAGE_LLM_RESUME and not quiet_day(summary):
             async with progress.step("S4: текст сводки (модель)"):
                 resume, used_llm = await self._resume(summary)
         self.stages["summary"] = {"status": "completed", "llm": used_llm}

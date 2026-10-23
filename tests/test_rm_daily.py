@@ -421,3 +421,16 @@ class RegistryFormatTest(unittest.TestCase):
             asyncio.run(api.upsert_daily_run("2026-06-25", "running", started_at="2026-10-23T13:20:00+03:00"))
         self.assertIn("finished_at", sent)
         self.assertIsNone(sent["finished_at"])
+
+
+class QuietDayTest(unittest.TestCase):
+    """Пустой по мониторингу день — сводка шаблоном, без модели."""
+
+    def test_quiet(self):
+        """Нет закупок, событий и заказчиков на мониторинге — тихий день; есть пункт внимания — нет."""
+        s = {"scope": {"xml": 90, "contracts_monitored": 0, "events_monitored": 0, "customers_monitored": 0},
+             "attention": [], "suppliers": []}
+        self.assertTrue(daily.quiet_day(s))
+        s["attention"] = [{"kind": "supplier_registry"}]
+        self.assertFalse(daily.quiet_day(s))
+        self.assertFalse(daily.quiet_day({"scope": {"contracts_monitored": 2}}))
