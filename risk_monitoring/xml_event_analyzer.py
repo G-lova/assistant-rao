@@ -227,7 +227,7 @@ class XmlEventAnalyzer:
         self.push_results = push_results
         self.force = force
         self.semaphore = asyncio.Semaphore(concurrency)
-        # кому из событий нужна модель (ежедневный прогон: заказчики на мониторинге); None — всем
+        # кому из событий нужна модель (ежедневный прогон: закупки системы); None — всем
         self.llm_filter: Optional[Callable[[Dict[str, Any]], bool]] = None
         self.versions = {"event_analyzer": self.event_analyzer.prompt_version if self.event_analyzer else None,
                          "catalog": risk_catalog.CATALOG_VERSION}
@@ -532,19 +532,19 @@ class XmlEventAnalyzer:
     def _defer_llm(self, ctxs: List[Dict[str, Any]]) -> None:
         """Откладывает модель для событий, не прошедших ``llm_filter``: событие описывается правилами и шаблоном,
         ``pipeline.llm.deferred`` — причина, по которой модель была бы нужна (для повторного разбора, когда
-        заказчик встанет на мониторинг)."""
+        закупка появится в системе)."""
         if getattr(self, "llm_filter", None) is None:
             return
         n = 0
         for c in ctxs:
             if c.get("needs_llm") and not self.llm_filter(c):
-                c.update(needs_llm=False, llm_deferred=c["llm_reason"], llm_reason="not_monitored")
+                c.update(needs_llm=False, llm_deferred=c["llm_reason"], llm_reason="not_own")
                 n += 1
         if n:
-            logger.info(f"События XML: модель отложена для {n} (заказчик не на мониторинге)")
+            logger.info(f"События XML: модель отложена для {n} (XML не относится к закупкам системы)")
 
     def _deferred_now_needed(self, row: Dict[str, Any]) -> bool:
-        """Разбор XML без модели был отложен, а теперь его закупка у заказчика на мониторинге."""
+        """Разбор XML без модели был отложен, а теперь XML привязан к закупке системы."""
         deferred = row.get("rm_llm_deferred")
         if getattr(self, "llm_filter", None) is None or deferred in (None, "", "null", "None") or deferred != deferred:
             return False

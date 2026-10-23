@@ -40,9 +40,29 @@ class DailySummaryTest(unittest.TestCase):
         args.update(kw)
         return daily.build_summary(**args)
 
-    def test_monitored_only(self):
-        """Закупка заказчика вне мониторинга в сводку не попадает."""
+    def build_monitored(self, **kw):
+        """Сводка в прежнем режиме: только заказчики с monitoring = 1."""
+        cfg = mock.Mock(wraps=settings)
+        for k in dir(settings):
+            if k.isupper():
+                setattr(cfg, k, getattr(settings, k))
+        cfg.DAILY_MONITORED_ONLY = True
+        return self.build(cfg=cfg, **kw)
+
+    def test_all_system_purchases(self):
+        """Все закупки системы в сводке; заказчики с задачами мониторинга посчитаны и отмечены отдельно."""
         s = self.build()
+        self.assertEqual(s["scope"]["contracts_in_scope"], 3)
+        self.assertEqual(s["scope"]["contracts_monitored"], 2)
+        self.assertEqual(s["scope"]["customers_monitored"], 1)
+        self.assertEqual(s["contracts"]["by_zone"], {"green": 1, "yellow": 0, "red": 2})
+        self.assertEqual(s["events"]["total"], 3)
+        self.assertIn(3, [a["card_id"] for a in s["attention"]])
+        self.assertFalse(next(a for a in s["attention"] if a["card_id"] == 3)["monitoring"])
+
+    def test_monitored_only(self):
+        """С DAILY_MONITORED_ONLY закупка заказчика без задач мониторинга в сводку не попадает."""
+        s = self.build_monitored()
         self.assertEqual(s["scope"]["contracts_monitored"], 2)
         self.assertEqual(s["contracts"]["by_zone"], {"green": 1, "yellow": 0, "red": 1})
         self.assertEqual(s["events"]["total"], 2)
@@ -50,7 +70,7 @@ class DailySummaryTest(unittest.TestCase):
 
     def test_attention(self):
         """Реестр 19.28, переход в красную зону, рост балла, важное событие."""
-        kinds = [(a["kind"], a["card_id"]) for a in self.build()["attention"]]
+        kinds = [(a["kind"], a["card_id"]) for a in self.build_monitored()["attention"]]
         self.assertEqual(kinds, [("registry_1928", 2), ("became_red", 1), ("score_jump", 1), ("event", 1)])
 
     def test_unchanged_delta_hidden(self):
@@ -63,7 +83,8 @@ class DailySummaryTest(unittest.TestCase):
         """Факты: охват, зоны, внимание, сбой этапа; без внимания — явная фраза."""
         s = self.build(stages={"xml": {"status": "failed"}})
         facts = " ".join(daily.summary_facts(s))
-        self.assertIn("красная 1, жёлтая 0, зелёная 1", facts)
+        self.assertIn("красная 2, жёлтая 0, зелёная 1", facts)
+        self.assertIn("(заказчик с текущими задачами мониторинга)", facts)
         self.assertIn("перешла в красную зону: балл 75 (был 50)", facts)
         self.assertIn("Не завершились этапы: xml", facts)
         quiet = self.build(contracts={2: _contract(30, "green")}, events={})
@@ -177,7 +198,7 @@ class DailyRunTest(unittest.TestCase):
         self.assertEqual(calls, [False])
         self.assertEqual(xa.file_results, {5: {"doc_type": {"detected_type": None}, "resume": None,
                                                "total_doc_risk": None}})
-        self.assertEqual(queried, ["daily_xml.sql", "xml_previous.sql", "daily_files.sql", "monitored_scope.sql",
+        self.assertEqual(queried, ["daily_xml.sql", "xml_previous.sql", "daily_files.sql", "own_scope.sql",
                                    "daily_cards.sql"])
         self.assertIn(5, run.cache.file_rows)
         self.assertIn(1, run.cache.covered_cards)
@@ -205,14 +226,14 @@ class ScopeTest(unittest.TestCase):
     """Охват анализа за дату."""
 
     def test_choose_scope(self):
-        """Обычная дата — все XML; массовая загрузка — только заказчики на мониторинге; настройка — всегда они."""
+        """Обычная дата — все XML; массовая загрузка — только XML закупок системы; настройка — всегда они."""
         with mock.patch.object(settings, "DAILY_SCOPE", "all"), mock.patch.object(settings, "DAILY_ALL_MAX_XML", 5000):
             self.assertEqual(daily.choose_scope(3773), "all")
-            self.assertEqual(daily.choose_scope(21907), "monitored_auto")
+            self.assertEqual(daily.choose_scope(21907), "own_auto")
         with mock.patch.object(settings, "DAILY_SCOPE", "all"), mock.patch.object(settings, "DAILY_ALL_MAX_XML", None):
             self.assertEqual(daily.choose_scope(21907), "all")
-        with mock.patch.object(settings, "DAILY_SCOPE", "monitored"):
-            self.assertEqual(daily.choose_scope(10), "monitored")
+        with mock.patch.object(settings, "DAILY_SCOPE", "own"):
+            self.assertEqual(daily.choose_scope(10), "own")
 
 
 class RunCacheTest(unittest.TestCase):
@@ -450,33 +471,33 @@ class MergeStringFieldsTest(unittest.TestCase):
             self.assertEqual(m._as_obj("", "value"), {})
 
 
-class MonitoredLLMTest(unittest.TestCase):
-    """Модель разбирает события только по закупкам заказчиков на мониторинге."""
+class OwnLLMTest(unittest.TestCase):
+    """Модель разбирает события закупок системы (все подведомственные организации), а не только monitoring = 1."""
 
     def test_filter(self):
-        """Привязанный XML с monitoring = 1, «сирота», найденная к закупке на мониторинге, — да; чужой — нет."""
-        ok = daily.make_monitored_filter({10}, {7})
-        self.assertTrue(ok({"row": {"monitoring": 1}}))
-        self.assertTrue(ok({"row": {"monitoring": None}, "link": {"risk_monitoring_contract_id": 10}}))
+        """Привязанный XML, «сирота», найденная к закупке или к организации системы, — да; чужой заказчик — нет."""
+        ok = daily.make_own_filter({7})
+        self.assertTrue(ok({"row": {"risk_monitoring_contract_id": 11, "monitoring": 0}}))
+        self.assertTrue(ok({"row": {}, "link": {"risk_monitoring_contract_id": 10}}))
         self.assertTrue(ok({"row": {}, "link": {"organisation_id": 7}}))
-        self.assertFalse(ok({"row": {"monitoring": 0, "risk_monitoring_contract_id": 11}, "link": None}))
+        self.assertFalse(ok({"row": {"risk_monitoring_contract_id": None}, "link": {"organisation_id": 8}}))
 
     def test_defer(self):
-        """Событию вне мониторинга модель откладывается, причина сохраняется."""
+        """XML чужого заказчика — модель откладывается с причиной; появилась закупка — разбирается повторно."""
         from tests.stubs import stubbed_import
         with stubbed_import("risk_monitoring.xml_event_analyzer") as m:
             xa = m.XmlEventAnalyzer.__new__(m.XmlEventAnalyzer)
-            xa.llm_filter = daily.make_monitored_filter(set(), set())
-            ctxs = [{"needs_llm": True, "llm_reason": "importance", "row": {"monitoring": 0}, "link": None},
-                    {"needs_llm": True, "llm_reason": "rule_risks", "row": {"monitoring": 1}, "link": None}]
+            xa.llm_filter = daily.make_own_filter(set())
+            ctxs = [{"needs_llm": True, "llm_reason": "importance", "row": {}, "link": None},
+                    {"needs_llm": True, "llm_reason": "rule_risks", "row": {"risk_monitoring_contract_id": 5},
+                     "link": None}]
             xa._defer_llm(ctxs)
             self.assertFalse(ctxs[0]["needs_llm"])
-            self.assertEqual((ctxs[0]["llm_reason"], ctxs[0]["llm_deferred"]), ("not_monitored", "importance"))
+            self.assertEqual((ctxs[0]["llm_reason"], ctxs[0]["llm_deferred"]), ("not_own", "importance"))
             self.assertTrue(ctxs[1]["needs_llm"])
-            # отложенный XML закупки, которая теперь на мониторинге, разбирается повторно
-            self.assertTrue(xa._deferred_now_needed({"rm_llm_deferred": "importance", "monitoring": 1}))
-            self.assertFalse(xa._deferred_now_needed({"rm_llm_deferred": "importance", "monitoring": 0}))
-            self.assertFalse(xa._deferred_now_needed({"rm_llm_deferred": None, "monitoring": 1}))
+            self.assertTrue(xa._deferred_now_needed({"rm_llm_deferred": "importance", "risk_monitoring_contract_id": 5}))
+            self.assertFalse(xa._deferred_now_needed({"rm_llm_deferred": "importance"}))
+            self.assertFalse(xa._deferred_now_needed({"rm_llm_deferred": None, "risk_monitoring_contract_id": 5}))
 
 
 class ArchiveOcrShrinkTest(unittest.TestCase):

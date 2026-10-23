@@ -7,9 +7,13 @@
 * **S1b файлы** — ещё не проанализированные файлы этих XML (вложения, печатные формы) — ``AIFileAnalyzer``;
 * **S1a события** — XML как события — ``XmlEventAnalyzer`` (с результатами файлов);
 * **S2–S3a закупки** — затронутые закупки/контракты — ``ContractAnalyzer`` (документы уже проанализированы выше);
-* **S3b заказчики** — заказчики затронутых закупок с ``monitoring = 1`` — ``OrgAnalyzer``;
-* **S4 сводка** — по закупкам заказчиков на мониторинге: зоны, попавшие в красную зону, рост балла, важные события,
-  реестр 19.28 и резюме (модель пересказывает готовые факты; без модели — шаблон).
+* **S3b заказчики** — заказчики затронутых закупок — ``OrgAnalyzer``;
+* **S4 сводка** — по закупкам системы: зоны, попавшие в красную зону, рост балла, важные события, реестр 19.28 и
+  резюме (модель пересказывает готовые факты; без модели — шаблон).
+
+Заказчик системы — Минобрнауки: все организации ``risk_monitoring_organisations`` (кроме поставщиков,
+``is_external = 1``) — подведомственные, любая их закупка анализируется. ``monitoring = 1`` — организации с текущими
+задачами мониторинга: в сводке выделяются, охват ими не ограничивается (``DAILY_MONITORED_ONLY = False``).
 
 Сводка хранится у нас (``ai_rm_results``, ``kind = daily``, ``external_id = ГГГГММДД``) и пишется во внешнюю БД —
 ``risk_monitoring_daily_runs`` (``POST /api/risk-monitoring/daily-runs``, ТЗ 09.10.2026; ``DAILY_RUNS_PUSH_ENABLED``).
@@ -33,7 +37,7 @@ from risk_monitoring.contract_package import stored_registry
 logger = get_logger(__name__)
 
 SCHEMA_VERSION = "rm-daily-1"
-PROMPT_VERSION = "daily-resume-3"
+PROMPT_VERSION = "daily-resume-4"
 KIND = "daily"
 STAGES = ("files", "xml", "contracts", "customers", "suppliers", "summary")
 RED = "red"
@@ -45,8 +49,9 @@ HEARTBEAT_SECONDS = 120
 RUNNING_STALE_SECONDS = 10 * 60
 
 RESUME_SYSTEM = (
-    "Ты — аналитик риск-мониторинга госзакупок. Тебе дан список фактов ежедневной сводки за дату выгрузки ЕИС по "
-    "заказчикам на мониторинге. Напиши сводку для руководителя: 4–6 предложений, по-русски, без вступлений — что "
+    "Ты — аналитик риск-мониторинга госзакупок организаций, подведомственных Минобрнауки России. Тебе дан список "
+    "фактов ежедневной сводки за дату выгрузки ЕИС. Заказчиков с текущими задачами мониторинга упоминай особо. "
+    "Напиши сводку для руководителя: 4–6 предложений, по-русски, без вступлений — что "
     "пришло за сутки, что требует внимания в первую очередь (назови закупки и заказчиков из фактов), что проверить. "
     "Используй только эти факты: не добавляй цифр и выводов, которых в них нет. Если внимания ничего не требует — "
     "напиши «Ничего не требует внимания.» Пиши грамотно, без двойного отрицания. Не используй коды рисков и правил (вида DOC-002, FIN-004, BEH-005, pz_p1) — называй риски словами, понятными заказчику. Ответ — обычный текст, без JSON и разметки.")
@@ -125,6 +130,7 @@ def contract_item(card: Dict[str, Any], ai: Dict[str, Any], changed: bool) -> Di
         "contract_number": pas.get("contract_number"),
         "customer": card.get("customer_name") or (pas.get("customer") or {}).get("name"),
         "organisation_id": card.get("organisation_id"),
+        "monitoring": monitored(card),
         "subject": subject[:200],
         "score": _num(prof.get("score")),
         "zone": prof.get("zone"),
@@ -144,6 +150,7 @@ def event_item(xml_id: int, card: Optional[Dict[str, Any]], ai: Dict[str, Any]) 
         "card_id": int(card["id"]) if card else None,
         "purchase_number": (card or {}).get("number"),
         "customer": (card or {}).get("customer_name"),
+        "monitoring": monitored(card) if card else False,
         "code": ev.get("code"),
         "title": ev.get("title"),
         "importance": ev.get("importance"),
@@ -158,7 +165,7 @@ def supplier_rows(cards: Dict[int, Dict[str, Any]], monitored_only: bool = True)
 
     Args:
         cards: ``card_id →`` строка ``daily_cards.sql`` (``supplier_inn``, ``supplier_kpp``, ``supplier_name``).
-        monitored_only: Только закупки заказчиков на мониторинге.
+        monitored_only: Только закупки заказчиков с задачами мониторинга (``monitoring = 1``).
 
     Returns:
         List[Dict[str, Any]]: ``inn``, ``kpp``, ``name``, ``short_name`` без повторов.
@@ -175,7 +182,8 @@ def supplier_rows(cards: Dict[int, Dict[str, Any]], monitored_only: bool = True)
 
 
 def monitored(card: Dict[str, Any]) -> bool:
-    """Заказчик закупки на мониторинге (``monitoring = 1``; из MySQL приходит 1, 1.0, "1" или ``True``)."""
+    """У заказчика закупки текущие задачи мониторинга (``monitoring = 1``; из MySQL приходит 1, 1.0, "1" или
+    ``True``). Это не граница охвата: анализируются закупки всех организаций системы."""
     try:
         return float(card.get("monitoring")) == 1
     except (TypeError, ValueError):
@@ -183,8 +191,8 @@ def monitored(card: Dict[str, Any]) -> bool:
 
 
 def choose_scope(total: int, cfg: Any = settings) -> str:
-    """Охват анализа за дату: ``all`` — все XML; ``monitored`` — только закупки заказчиков на мониторинге
-    (настройкой ``DAILY_SCOPE``); ``monitored_auto`` — XML больше ``DAILY_ALL_MAX_XML`` (массовая загрузка:
+    """Охват анализа за дату: ``all`` — все XML; ``own`` — только XML, привязанные к закупкам системы
+    (настройкой ``DAILY_SCOPE``); ``own_auto`` — XML больше ``DAILY_ALL_MAX_XML`` (массовая загрузка:
     2026-07-03 — 21 907 XML в 457 архивах при обычных 100–4000), анализ всех не уложится в сутки.
 
     Args:
@@ -192,12 +200,12 @@ def choose_scope(total: int, cfg: Any = settings) -> str:
         cfg: Настройки.
 
     Returns:
-        str: ``all`` / ``monitored`` / ``monitored_auto``.
+        str: ``all`` / ``own`` / ``own_auto``.
     """
-    if cfg.DAILY_SCOPE == "monitored":
-        return "monitored"
+    if cfg.DAILY_SCOPE in ("own", "monitored"):   # "monitored" — прежнее имя
+        return "own"
     limit = getattr(cfg, "DAILY_ALL_MAX_XML", None)
-    return "monitored_auto" if limit and total > limit else "all"
+    return "own_auto" if limit and total > limit else "all"
 
 
 def _stage_states(stages: Dict[str, Any]) -> Dict[str, Any]:
@@ -248,7 +256,7 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
         changed: Закупки, пересчитанные в этом прогоне.
         events: ``xml_id → ai_analysis`` события.
         xml_cards: ``xml_id → card_id``.
-        customers: Результаты ``OrgAnalyzer`` по заказчикам на мониторинге.
+        customers: Результаты ``OrgAnalyzer`` по заказчикам затронутых закупок.
         suppliers: Результаты ``OrgAnalyzer`` по поставщикам их закупок (роль поставщика).
         scope: Счётчики охвата.
         stages: Состояние этапов.
@@ -288,7 +296,7 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
             seen.add(key)
             attention.append({"kind": kind, "card_id": item.get("card_id"), "xml_id": item.get("xml_id"),
                               "purchase_number": item.get("purchase_number"), "customer": item.get("customer"),
-                              "text": text})
+                              "monitoring": bool(item.get("monitoring")), "text": text})
 
     for i in registry:
         add("registry_1928", i, "Поставщик в реестре лиц, привлечённых по ст. 19.28 КоАП РФ")
@@ -329,8 +337,11 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
     return {
         "date": export_date,
         "environment": environment,
-        "scope": {**scope, "contracts_monitored": len(items), "events_monitored": len(ev_items),
-                  "customers_monitored": len({i["organisation_id"] for i in items if i.get("organisation_id")})},
+        "scope": {**scope, "contracts_in_scope": len(items), "events_in_scope": len(ev_items),
+                  "customers_in_scope": len({i["organisation_id"] for i in items if i.get("organisation_id")}),
+                  "contracts_monitored": sum(1 for i in items if i["monitoring"]),
+                  "customers_monitored": len({i["organisation_id"] for i in items
+                                              if i["monitoring"] and i.get("organisation_id")})},
         "stages": stages,
         "contracts": {"by_zone": by_zone, "changed": sum(1 for i in items if i["changed"]),
                       "became_red": became_red[:top], "score_jump": jumps[:top], "red": red[:top]},
@@ -353,21 +364,25 @@ def summary_facts(s: Dict[str, Any]) -> List[str]:
     """
     sc, c, ev = s["scope"], s["contracts"], s["events"]
     facts = [f"Выгрузка ЕИС за {s['date']}: документов XML {sc.get('xml', 0)}, файлов к анализу {sc.get('files', 0)}, "
-             f"затронуто закупок {sc.get('contracts', 0)}, из них у заказчиков на мониторинге "
+             f"затронуто закупок системы {sc.get('contracts_in_scope', sc.get('contracts', 0))} "
+             f"(заказчиков: {sc.get('customers_in_scope', 0)}), из них у заказчиков с текущими задачами мониторинга "
              f"{sc.get('contracts_monitored', 0)} (заказчиков: {sc.get('customers_monitored', 0)})."]
+    if sc.get("xml_unlinked"):
+        facts.append(f"XML без привязки к закупкам системы: {sc['xml_unlinked']} (извещения и документы других "
+                     "заказчиков из региональных архивов ЕИС) — описаны правилами, в сводку не входят.")
     if not sc.get("xml") and sc.get("nearest_exports") is not None:
         near = [n for n in sc["nearest_exports"] if n.get("xml")]
         facts.append(f"Выгрузок ЕИС с датой {s['date']} нет (дата прогона — день выгрузки, а не публикации документов)"
                      + ("; ближайшие выгрузки с XML: " + ", ".join(f"{n['date']} (XML {n['xml']})" for n in near[:6])
                         if near else "; в соседние ±7 дней выгрузок с XML тоже нет") + ".")
-    if sc.get("scope_mode") == "monitored_auto":
-        facts.append(f"Выгрузка большая (XML {sc.get('xml_total')}): проанализированы только документы закупок заказчиков "
-                     "на мониторинге, остальные — нет.")
-    if not sc.get("contracts_monitored") and not ev["total"]:
-        facts.append("По заказчикам на мониторинге за эту дату новых документов нет.")
+    if sc.get("scope_mode") in ("own_auto", "monitored_auto"):
+        facts.append(f"Выгрузка большая (XML {sc.get('xml_total')}): проанализированы только документы, привязанные к "
+                     "закупкам системы, остальные — нет.")
+    if not sc.get("contracts_in_scope", sc.get("contracts_monitored")) and not ev["total"]:
+        facts.append("По закупкам системы за эту дату новых документов нет.")
     else:
         z = c["by_zone"]
-        facts.append(f"Закупки заказчиков на мониторинге по зонам риска: красная {z['red']}, жёлтая {z['yellow']}, "
+        facts.append(f"Закупки по зонам риска: красная {z['red']}, жёлтая {z['yellow']}, "
                      f"зелёная {z['green']}; пересчитано в этом прогоне {c['changed']}.")
         if ev["total"]:
             types = "; ".join(f"{k} — {v}" for k, v in list(ev["by_type"].items())[:6])
@@ -385,7 +400,8 @@ def summary_facts(s: Dict[str, Any]) -> List[str]:
     for a in s["attention"][:10]:
         who = ", ".join(x for x in (f"закупка {a['purchase_number']}" if a.get("purchase_number") else None,
                                     a.get("customer")) if x)
-        facts.append(f"Внимание: {a['text']}" + (f" — {who}" if who else "") + ".")
+        facts.append(f"Внимание: {a['text']}" + (f" — {who}" if who else "")
+                     + (" (заказчик с текущими задачами мониторинга)" if a.get("monitoring") else "") + ".")
     if not s["attention"]:
         facts.append("Закупок, перешедших в красную зону, резкого роста балла, важных событий и поставщиков из "
                      "реестра 19.28 нет.")
@@ -413,31 +429,29 @@ def summary_facts(s: Dict[str, Any]) -> List[str]:
 
 
 def quiet_day(s: Dict[str, Any]) -> bool:
-    """За дату по заказчикам на мониторинге ничего нет: ни закупок, ни событий, ни поставщиков, ни пунктов внимания.
+    """За дату по закупкам системы ничего нет: ни закупок, ни событий, ни поставщиков, ни пунктов внимания.
 
     Тогда текст сводки — шаблон из фактов, модель не вызывается: ей нечего обобщать, а на пустых данных она
     пишет неуклюже («Внимания требует ничего», прогон 29.06, 23.10.2026).
     """
     sc = s.get("scope") or {}
-    return not any(sc.get(k) for k in ("contracts_monitored", "events_monitored", "customers_monitored")) \
+    return not any(sc.get(k) for k in ("contracts_in_scope", "events_in_scope", "customers_in_scope",
+                                        "contracts_monitored", "events_monitored", "customers_monitored")) \
         and not s.get("attention") and not s.get("suppliers")
 
 
-def make_monitored_filter(cards: set, orgs: set) -> Any:
-    """Фильтр «закупка XML у заказчика на мониторинге» по множествам закупок и организаций.
-
-    Проверяются: признак ``monitoring`` строки XML (привязанные XML), закупка и организация из строки, закупка и
-    заказчик, найденные привязкой «сироты» (``ctx["link"]``).
+def make_own_filter(orgs: set) -> Any:
+    """Фильтр «XML относится к закупке системы»: привязан к закупке (в строке XML или найденной привязкой «сироты»)
+    либо привязкой найден заказчик — организация системы (``orgs``: ``is_external = 0``).
     """
     def ok(ctx: Dict[str, Any]) -> bool:
         """Нужна ли модель событию."""
         row, link = ctx.get("row") or {}, ctx.get("link") or {}
-        if monitored(row):
+        if row.get("risk_monitoring_contract_id") is not None or link.get("risk_monitoring_contract_id") is not None:
             return True
-        for v, pool in ((row.get("risk_monitoring_contract_id"), cards), (row.get("organisation_id"), orgs),
-                        (link.get("risk_monitoring_contract_id"), cards), (link.get("organisation_id"), orgs)):
+        for v in (row.get("organisation_id"), link.get("organisation_id")):
             n = _num(v)
-            if n is not None and int(n) in pool:
+            if n is not None and int(n) in orgs:
                 return True
         return False
     return ok
@@ -643,7 +657,7 @@ class DailyRun:
             total = len(xml_rows)
             mode = choose_scope(total, settings)
             if mode != "all":
-                xml_rows = [r for r in xml_rows if monitored(r)]
+                xml_rows = [r for r in xml_rows if r.get("risk_monitoring_contract_id") is not None]
             xml_ids = [int(r["id"]) for r in xml_rows]
             st["detail"] = f"XML {len(xml_ids)}" + (f" из {total} (охват {mode})" if mode != "all" else "")
         scope: Dict[str, Any] = {"xml": len(xml_ids), "files": 0, "contracts": 0, "xml_total": total,
@@ -706,23 +720,20 @@ class DailyRun:
                 st["detail"] = "не выполнена"
             cache.queries["daily_xml.sql"] = 1
 
-    async def _monitored_filter(self, cache: Any) -> Any:
-        """Фильтр событий для модели: закупка или заказчик XML (из внешней БД либо найденные привязкой «сироты») —
-        на мониторинге. Один запрос на прогон; при сбое — ``None`` (модель для всех, как раньше).
+    async def _own_filter(self, cache: Any) -> Any:
+        """Фильтр событий для модели: XML закупки системы или подведомственной организации (см.
+        :func:`make_own_filter`). Один запрос на прогон; при сбое — ``None`` (модель для всех).
 
         Returns:
             Callable[[Dict[str, Any]], bool] | None: ``ctx → нужна ли модель``.
         """
         try:
-            cache.count("monitored_scope.sql")
-            rows = await self._query("monitored_scope.sql")
+            cache.count("own_scope.sql")
+            rows = await self._query("own_scope.sql")
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"Закупки заказчиков на мониторинге не получены ({type(e).__name__}: {e}) — "
-                           f"модель разбирает все события")
+            logger.warning(f"Организации системы не получены ({type(e).__name__}: {e}) — модель разбирает все события")
             return None
-        cards = {int(_num(r["card_id"])) for r in rows if _num(r.get("card_id")) is not None}
-        orgs = {int(_num(r["organisation_id"])) for r in rows if _num(r.get("organisation_id")) is not None}
-        return make_monitored_filter(cards, orgs)
+        return make_own_filter({int(_num(r["organisation_id"])) for r in rows if _num(r.get("organisation_id")) is not None})
 
     async def _documents(self, xml_ids: List[int], xa: Any, cache: Any, scope: Dict[str, Any],
                          file_results: Dict[int, Dict[str, Any]], events: Dict[int, Dict[str, Any]]) -> None:
@@ -848,8 +859,8 @@ class DailyRun:
 
         xa = XmlEventAnalyzer(self.http_manager, self.environment, push_results=self.push, use_llm=self.use_llm,
                               results_repo=self.repo, run_cache=cache)
-        if settings.DAILY_EVENT_LLM_MONITORED_ONLY:
-            xa.llm_filter = await self._monitored_filter(cache)
+        if settings.DAILY_EVENT_LLM_OWN_ONLY:
+            xa.llm_filter = await self._own_filter(cache)
 
         events: Dict[int, Dict[str, Any]] = {}
         await self._documents(xml_ids, xa, cache, scope, file_results, events)
@@ -882,10 +893,12 @@ class DailyRun:
         await self._stage("contracts", contracts)
         contract_ai = await self._internal("contract", card_ids)
         monitored_orgs = sorted({int(c["organisation_id"]) for c in cards.values()
-                                 if c.get("organisation_id") is not None and monitored(c)})
+                                 if c.get("organisation_id") is not None
+                                 and (not settings.DAILY_MONITORED_ONLY or monitored(c))})
 
         async def customers() -> Any:
-            """S3b: заказчики на мониторинге, чьи закупки затронуты."""
+            """S3b: заказчики затронутых закупок (все организации системы; при ``DAILY_MONITORED_ONLY`` — только
+            с ``monitoring = 1``)."""
             if not monitored_orgs:
                 return [], {"total": 0}
             from risk_monitoring.org_analyzer import OrgAnalyzer
@@ -898,7 +911,7 @@ class DailyRun:
         org_results = await self._stage("customers", customers) or []
 
         async def suppliers() -> Any:
-            """S3c: поставщики затронутых закупок заказчиков на мониторинге — строка организации по API
+            """S3c: поставщики затронутых закупок — строка организации по API
             (существующая или новая, ``is_external = 1``), затем профиль поставщика (``OrgAnalyzer``)."""
             found = supplier_rows(cards, settings.DAILY_MONITORED_ONLY)
             if not found or not settings.DAILY_SUPPLIERS_ENABLED:
