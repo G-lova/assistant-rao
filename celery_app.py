@@ -26,6 +26,53 @@ celery_app = Celery(
 )
 
 
+# Журнал воркеров — в файл на примонтированном каталоге проекта (logs/), а не только в stdout контейнера: вывод
+# `docker logs` пропадает при каждом пересоздании контейнера (`up --build`), и после пересборки логи прогона
+# не достать (22.10.2026). Файл — по имени воркера (-n rm@%h → logs/celery_rm.log; beat → logs/celery_beat.log),
+# с ротацией по размеру; имя и размеры — в configs/settings.py.
+from celery.signals import after_setup_logger
+
+
+def worker_log_path(argv=None) -> str:
+    """Файл журнала процесса Celery по его аргументам запуска.
+
+    Args:
+        argv: Аргументы командной строки (по умолчанию ``sys.argv``).
+
+    Returns:
+        str: ``logs/celery_rm.log`` (воркер риск-мониторинга, ``-n rm@…`` или очередь ``risk_monitoring``),
+        ``logs/celery_beat.log`` (beat) или ``logs/celery.log``.
+    """
+    import sys
+
+    args = " ".join(argv if argv is not None else sys.argv)
+    if " beat" in f" {args}":
+        name = "celery_beat"
+    elif "risk_monitoring" in args or "rm@" in args:
+        name = "celery_rm"
+    else:
+        name = "celery"
+    return os.path.join(settings.WORKER_LOG_DIR, f"{name}.log")
+
+
+@after_setup_logger.connect
+def _file_log(logger=None, format=None, **kwargs):  # noqa: A002 — имена аргументов задаёт сигнал Celery
+    """Добавляет к журналу процесса Celery файл с ротацией (``WORKER_LOG_*`` в ``configs/settings.py``)."""
+    from logging.handlers import RotatingFileHandler
+
+    if not settings.WORKER_LOG_ENABLED or logger is None:
+        return
+    path = worker_log_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        handler = RotatingFileHandler(path, maxBytes=settings.WORKER_LOG_MAX_MB * 1024 * 1024,
+                                      backupCount=settings.WORKER_LOG_BACKUPS, encoding="utf-8")
+        handler.setFormatter(logging.Formatter(format or "[%(asctime)s: %(levelname)s/%(processName)s] %(message)s"))
+        logger.addHandler(handler)
+    except OSError as e:  # нет прав или места — журнал остаётся в stdout
+        logger.warning(f"Журнал воркера в файл {path} не включён: {e}")
+
+
 # Конфигурация Celery
 celery_app.conf.update(
     task_serializer='json',

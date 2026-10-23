@@ -31,6 +31,12 @@ MIN_GOOD_SHARE = 0.85          # доля «нормальных» символ�
 OCR_DPI = 200
 OCR_MAX_TOKENS = 4096
 OCR_PENALTIES = (1.05, 1.15)   # repetition_penalty: первая попытка и повтор при цикле
+# Изображение страницы для модели — не больше стольких пикселей: крупный формат (чертёж, А3) в 200 dpi даёт больше
+# токенов, чем вмещает контекст (файл 5334, 21.10.2026: «Input length (16774) exceeds … (16384)»)
+OCR_MAX_PIXELS = 1700 * 2400
+OCR_SHRINK = 0.7               # во сколько раз уменьшать сторону при переполнении контекста
+OCR_SHRINK_TRIES = 3
+CONTEXT_RE = re.compile(r"maximum context length|exceeds .*context|context length", re.IGNORECASE)
 
 GOOD_CHARS_RE = re.compile(r"[А-Яа-яЁёA-Za-z0-9\s.,;:!?()\[\]{}«»\"'№%/\\+\-–—=*<>≤≥°_|#&@$€₽^~`]")
 CID_RE = re.compile(r"\(cid:\d+\)")
@@ -130,28 +136,62 @@ async def ocr_image(processor: Any, image_path: str, file_name: str, penalty: fl
     Returns:
         str: Распознанный текст; при ошибке — метка «[Ошибка при анализе изображения]».
     """
-    with open(image_path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode("ascii")
-    try:
-        if getattr(processor, "rate_limiter", None):
-            await processor.rate_limiter.acquire()
-        from risk_monitoring.llm_json import call_llm
+    for attempt in range(OCR_SHRINK_TRIES + 1):
+        with open(image_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+        try:
+            if getattr(processor, "rate_limiter", None):
+                await processor.rate_limiter.acquire()
+            from risk_monitoring.llm_json import call_llm
 
-        content = await call_llm(
-            processor.client, model=processor.model,
-            messages=[{"role": "user", "content": [
-                {"type": "text", "text": processor.ocr_prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-            ]}],
-            extra_body={"guided_json": ocr_schema(processor), "repetition_penalty": penalty},
-            max_tokens=OCR_MAX_TOKENS, temperature=0.0,
-        )
-        return ocr_text(content)
-    except Exception as e:  # noqa: BLE001 — страница остаётся пустой, документ читается дальше
-        logger.error(f"pdf_text: OCR {file_name}/{os.path.basename(image_path)}: {type(e).__name__}: {e}")
+            content = await call_llm(
+                processor.client, model=processor.model,
+                messages=[{"role": "user", "content": [
+                    {"type": "text", "text": processor.ocr_prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                ]}],
+                extra_body={"guided_json": ocr_schema(processor), "repetition_penalty": penalty},
+                max_tokens=OCR_MAX_TOKENS, temperature=0.0,
+            )
+            return ocr_text(content)
+        except Exception as e:  # noqa: BLE001 — страница остаётся пустой, документ читается дальше
+            from configs.llm_resilience import ContextOverflow
+
+            if (isinstance(e, ContextOverflow) or CONTEXT_RE.search(str(e))) and attempt < OCR_SHRINK_TRIES:
+                # изображение не помещается в контекст модели — уменьшаем и повторяем (это не сбой модели)
+                size = await asyncio.to_thread(shrink_image, image_path, OCR_SHRINK)
+                logger.warning(f"pdf_text: OCR {file_name}/{os.path.basename(image_path)}: изображение больше "
+                               f"контекста модели — уменьшено до {size[0]}×{size[1]}, повтор")
+                continue
+            logger.error(f"pdf_text: OCR {file_name}/{os.path.basename(image_path)}: {type(e).__name__}: {e}")
+            break
         # Метка ловится AIFileAnalyzer (OCR_ERROR_RE): файл с потерянными страницами не сохраняется и
         # анализируется повторно при следующем запуске
         return "[Ошибка при анализе изображения]"
+
+
+def shrink_image(path: str, factor: float) -> Tuple[int, int]:
+    """Уменьшает JPEG на месте (каждая сторона × ``factor``).
+
+    Returns:
+        Tuple[int, int]: Новый размер.
+    """
+    from PIL import Image
+
+    with Image.open(path) as im:
+        size = (max(1, int(im.width * factor)), max(1, int(im.height * factor)))
+        small = im.convert("RGB").resize(size)
+    small.save(path, "JPEG", quality=90)
+    return size
+
+
+def fit_image(image: Any, max_pixels: int = OCR_MAX_PIXELS) -> Any:
+    """Страница не больше ``max_pixels`` пикселей (пропорционально); меньшие — как есть."""
+    w, h = image.size
+    if w * h <= max_pixels:
+        return image
+    k = (max_pixels / float(w * h)) ** 0.5
+    return image.resize((max(1, int(w * k)), max(1, int(h * k))))
 
 
 async def ocr_page(processor: Any, image: Any, tmp: str, page_no: int, file_name: str) -> Tuple[str, str]:
@@ -168,6 +208,7 @@ async def ocr_page(processor: Any, image: Any, tmp: str, page_no: int, file_name
         Tuple[str, str]: Текст и статус качества (``ok`` / ``suspect`` / ``bad``).
     """
     path = os.path.join(tmp, f"page_{page_no}.jpg")
+    image = await asyncio.to_thread(fit_image, image)
     await asyncio.to_thread(image.convert("RGB").save, path, "JPEG", quality=90)
     text, status = "", "bad"
     for penalty in OCR_PENALTIES:

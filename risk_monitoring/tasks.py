@@ -357,7 +357,9 @@ async def _daily_run(environment: str, export_date: str, force: bool, push: bool
         if not force and daily.completed(stored):
             logger.info(f"Ежедневный прогон {d} ({env}) уже выполнен — повтор не нужен")
             return {"status": "already_done", "date": d, "summary": stored["ai_analysis"]}
-        if not force and daily.running_fresh(stored):
+        # и с force: два прогона одной даты параллельно делят документы и перезаписывают сводку друг друга
+        # (21.10.2026: прогоны 21:58 и 22:16 шли одновременно)
+        if daily.running_fresh(stored):
             logger.info(f"Ежедневный прогон {d} ({env}) уже идёт — второй не запускается")
             return {"status": "already_running", "date": d}
         run = daily.DailyRun(mgr, environment, repo, push_results=push, use_llm=use_llm, stages=stages)
@@ -388,6 +390,11 @@ def rm_daily_task(self, environment: str, export_date: str, force: bool = False,
     from configs import settings
 
     push = settings.DAILY_PUSH if push is None else push
+    if force and (self.request.delivery_info or {}).get("redelivered"):
+        # сообщение задачи, оборванной пересборкой, брокер вернул через несколько часов: его force относится к старому
+        # запросу — готовую с тех пор сводку не пересобираем (21.10.2026: лишние прогоны за 2026-07-03)
+        logger.info(f"rm_daily_task[{self.request.id}]: повторная доставка — force не применяется")
+        force = False
     return asyncio.run(_pulsed(_daily_run(environment, export_date, force, push, use_llm, stages),
                                self.name, self.request.id))
 

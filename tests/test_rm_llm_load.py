@@ -274,7 +274,12 @@ class FileModesTest(unittest.TestCase):
             (1, "risk_analysis", rv, "big"): {"risks": [old_risk, gone_risk], "risk_score": 10},
         })
         prev = {"id": 10, "eis_version": 0, "content_sha256": "old", "match": "replaced", "rule_ids": '["DOC-006","AI-003"]'}
-        ai = asyncio.run(self.an.analyze_file(self.row(), prev))
+        from unittest import mock
+
+        from configs import settings
+
+        with mock.patch.object(settings, "FILE_DROP_RULE_COVERED", False):   # CTR-002 — переносимый риск примера
+            ai = asyncio.run(self.an.analyze_file(self.row(), prev))
         c = self.calls
         self.assertEqual((c["extract"], c["type"], c["profile"], c["diff"]), (0, 0, 0, 1))
         self.assertEqual(len(c["risk"]), 1)

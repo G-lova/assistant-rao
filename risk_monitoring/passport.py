@@ -29,6 +29,15 @@ def now_iso() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
 
+def iso_tz(value: Optional[str] = None) -> Optional[str]:
+    """Время ISO 8601 с часовым поясом сервиса (API daily-runs требует пояс): ``2026-10-21T14:00:00`` →
+    ``2026-10-21T14:00:00+03:00``; без значения — текущее время; уже с поясом — как есть."""
+    if value is None:
+        return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    dt = datetime.datetime.fromisoformat(str(value))
+    return (dt if dt.tzinfo else dt.astimezone()).isoformat(timespec="seconds")
+
+
 def as_text_list(value: Any) -> List[str]:
     """Список строк из ответа модели: модель иногда отдаёт число, строку или ``null`` вместо массива
     (XML 3209, 15.10.2026: ``verification_needed = 1`` → ``TypeError: 'int' object is not iterable``).
@@ -178,11 +187,30 @@ def apply_catalog(risk: Dict[str, Any], fz: Any = None) -> Dict[str, Any]:
     return risk
 
 
+# Источник риска для ``risk_monitoring_document_risks.source`` (ТЗ 09.10.2026): один на риск, по надёжности
+SOURCE_PRIORITY = ("registry", "rule", "package", "aggregate", "ai_event", "ai_file")
+SOURCE_ALIASES = {"print_form": "rule", "version_diff": "ai_file", "eis": "rule"}
+
+
+def primary_source(sources: Iterable[str]) -> Optional[str]:
+    """Главный источник риска из ``sources``: реестр → правило → комплект → аналитика → событие → файл.
+
+    Args:
+        sources: Источники риска (``ai_file``, ``rule``, ``print_form`` …).
+
+    Returns:
+        Optional[str]: Значение из ``SOURCE_PRIORITY`` или ``None``, если источников нет.
+    """
+    norm = {SOURCE_ALIASES.get(s, s) for s in sources or [] if s}
+    return next((s for s in SOURCE_PRIORITY if s in norm), next(iter(sorted(norm)), None))
+
+
 def merge_risks(*lists: Iterable[Dict[str, Any]], fz: Any = None) -> List[Dict[str, Any]]:
     """Объединяет списки рисков по ``rule_id`` и дополняет их сведениями каталога.
 
     Уровень и уверенность — максимум; описания — первое непустое (остальные не теряются в evidence);
-    цитаты и действия эксперта — объединение без повторов; ``sources`` — все источники риска.
+    цитаты и действия эксперта — объединение без повторов; ``sources`` — все источники риска, ``source`` — главный
+    из них (:func:`primary_source`).
     Риски, неприменимые к закону закупки (ст. 111 44-ФЗ для 223-ФЗ), отбрасываются.
 
     Args:
@@ -228,7 +256,7 @@ def merge_risks(*lists: Iterable[Dict[str, Any]], fz: Any = None) -> List[Dict[s
     out = [r for r in merged.values() if risk_catalog.applicable(r["rule_id"], fz)]
     for r in out:
         r["evidence"] = r["evidence"][:MAX_EVIDENCE_PER_RISK]
-        r.pop("source", None)
+        r["source"] = primary_source(r["sources"])   # колонка source в risk_monitoring_document_risks
         apply_catalog(r, fz)
     out.sort(key=lambda r: (r.get("level") or 0) * (r.get("confidence") or 0), reverse=True)
     return out
@@ -351,6 +379,11 @@ def readability_block(extraction: Optional[Dict[str, Any]], pages: Optional[int]
         Dict[str, Any]: ``status``, ``readability_score``, ``main_language``, ``pages``, ``text_chars``, ``ocr`` …
     """
     rd = dict((extraction or {}).get("readability") or {})
+    if rd.get("issues") == ["Ошибка анализа документа"] and not (extraction or {}).get("raw_data"):
+        # извлечение данных не выполнено (сбой модели на всех блоках) — читаемость не оценена, а не «документ
+        # нечитаем»: текст есть, риски по нему найдены (прогон 21.10.2026: deny у 8 файлов с рисками)
+        rd = {"status": None, "issues": ["Читаемость не оценена: извлечение данных не выполнено (сбой модели)"],
+              "extraction_failed": True}
     rd["pages"] = pages
     rd["text_chars"] = int(text_chars or 0)
     if ocr_used is not None:

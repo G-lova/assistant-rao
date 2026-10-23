@@ -23,14 +23,14 @@ logger = get_logger(__name__)
 
 EXTERNAL_TABLE = "risk_monitoring_contracts"
 STAGE = "S2"
-PROMPT_VERSION = "contract-resume-1"
+PROMPT_VERSION = "contract-resume-2"
 
 RESUME_SYSTEM = (
     "Ты — аналитик риск-мониторинга госзакупок (44-ФЗ, 223-ФЗ). По паспорту закупки, её рискам и событиям напиши "
     "резюме для аналитика: 4–7 предложений, по-русски, без вступлений. Что закупают и на какой стадии, главные риски "
     "со ссылкой на источник (документ, событие ЕИС, правило, реестр), что проверить в первую очередь. Не придумывай "
-    "фактов, которых нет во входных данных; не делай вывод о нарушении — только о признаках риска. Ответ — обычный "
-    "текст, без JSON, списков и разметки.")
+    "фактов, которых нет во входных данных; не делай вывод о нарушении — только о признаках риска. Не используй коды рисков и правил (вида DOC-002, FIN-004, BEH-005, pz_p1) — называй риски словами, понятными заказчику. Ответ — "
+    "обычный текст, без JSON, списков и разметки.")
 RESUME_SCHEMA = {"type": "object", "properties": {"resume": {"type": "string"}}, "required": ["resume"]}
 
 
@@ -220,8 +220,9 @@ class ContractAnalyzer:
         statuses_rows = await self._safe_query("file_risk_statuses.sql", ids=[int(f["id"]) for f in files]) if files else []
         inns = sorted({str(i) for i in ((cp.as_json(c.get("dataset")) or {}).get("supplier", {}).get("post_inn") for c in cards) if i})
         black = await self._safe_query("black_list.sql", inns=inns) if inns else []
+        rnp = await self._safe_query("rnp_entries.sql", inns=inns) if inns else []
         supplier_counts = await self._supplier_counts(cards)
-        return {"cards": cards, "files": files, "xmls": xmls, "rules": rules, "statuses": statuses_rows, "black": black,
+        return {"cards": cards, "files": files, "xmls": xmls, "rules": rules, "statuses": statuses_rows, "black": black, "rnp": rnp,
                 "supplier_counts": supplier_counts}
 
     async def _supplier_counts(self, cards: List[Dict[str, Any]]) -> Dict[int, Dict[str, int]]:
@@ -301,6 +302,9 @@ class ContractAnalyzer:
         black_by_inn: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         for b in data["black"]:
             black_by_inn[str(b.get("inn") or "").strip()].append(b)
+        self.rnp_by_inn: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for e in data.get("rnp") or []:
+            self.rnp_by_inn[str(e.get("inn") or "").strip()].append(e)
         sem = asyncio.Semaphore(3)
 
         async def one(cid: int) -> Dict[str, Any]:
@@ -333,7 +337,8 @@ class ContractAnalyzer:
         built = cp.build_contract_analysis(card=card, files=item["files"], xmls=item["xmls"], values=item["values"],
                                            black=black_by_inn.get(inn, []), statuses=statuses,
                                            previous_score=cp.num(card.get("prev_score")),
-                                           supplier_counts=supplier_counts)
+                                           supplier_counts=supplier_counts,
+                                           rnp=getattr(self, "rnp_by_inn", {}).get(inn, []))
         h = built.pop("input_hash")
         progress.note(f"сборка: рисков {len(built['risks'])}, балл {built['profile']['score']} ({built['profile']['zone']})")
         if not self.force and card.get("rm_status") == "completed" and card.get("prev_hash") == h:
@@ -372,11 +377,11 @@ class ContractAnalyzer:
                                                "nmck", "contract_price", "price_reduction_pct", "applications",
                                                "customer", "supplier", "modification", "termination")},
             "profile": {k: built["profile"].get(k) for k in ("score", "zone", "delta", "components")},
-            "risks": [{"rule_id": r["rule_id"], "title": r.get("title"), "description": (r.get("description") or "")[:300],
+            "risks": [{"title": r.get("title"), "description": (r.get("description") or "")[:300],
                        "level": r.get("level"), "sources": r.get("sources")} for r in built["risks"][:10]],
             "events": [{k: e.get(k) for k in ("title", "importance", "event_at")} for e in built["events"][:8]],
             "completeness": built["package"]["completeness"], "consistency": built["package"]["consistency"][:3],
-            "registry": built["registry"]["matches"],
+            "registry": built["registry"],
         }
         import json
 

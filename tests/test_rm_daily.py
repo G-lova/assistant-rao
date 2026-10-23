@@ -13,7 +13,7 @@ def _contract(score, zone, prev=None, delta=None, registry=False):
     return {"passport": {"purchase_number": "0319", "subject": "Поставка", "customer": {"name": "ЗГУ"}},
             "profile": {"score": score, "zone": zone, "previous_score": prev, "delta": delta,
                         "top_factors": [{"rule_id": "DOC-002", "title": "Товарный знак"}]},
-            "registry": {"matches": [{"black_list_id": 1}] if registry else []}}
+            "registry": [{"black_list_id": 1}] if registry else []}
 
 
 class DailySummaryTest(unittest.TestCase):
@@ -40,9 +40,29 @@ class DailySummaryTest(unittest.TestCase):
         args.update(kw)
         return daily.build_summary(**args)
 
-    def test_monitored_only(self):
-        """Закупка заказчика вне мониторинга в сводку не попадает."""
+    def build_monitored(self, **kw):
+        """Сводка в прежнем режиме: только заказчики с monitoring = 1."""
+        cfg = mock.Mock(wraps=settings)
+        for k in dir(settings):
+            if k.isupper():
+                setattr(cfg, k, getattr(settings, k))
+        cfg.DAILY_MONITORED_ONLY = True
+        return self.build(cfg=cfg, **kw)
+
+    def test_all_system_purchases(self):
+        """Все закупки системы в сводке; заказчики с задачами мониторинга посчитаны и отмечены отдельно."""
         s = self.build()
+        self.assertEqual(s["scope"]["contracts_in_scope"], 3)
+        self.assertEqual(s["scope"]["contracts_monitored"], 2)
+        self.assertEqual(s["scope"]["customers_monitored"], 1)
+        self.assertEqual(s["contracts"]["by_zone"], {"green": 1, "yellow": 0, "red": 2})
+        self.assertEqual(s["events"]["total"], 3)
+        self.assertIn(3, [a["card_id"] for a in s["attention"]])
+        self.assertFalse(next(a for a in s["attention"] if a["card_id"] == 3)["monitoring"])
+
+    def test_monitored_only(self):
+        """С DAILY_MONITORED_ONLY закупка заказчика без задач мониторинга в сводку не попадает."""
+        s = self.build_monitored()
         self.assertEqual(s["scope"]["contracts_monitored"], 2)
         self.assertEqual(s["contracts"]["by_zone"], {"green": 1, "yellow": 0, "red": 1})
         self.assertEqual(s["events"]["total"], 2)
@@ -50,7 +70,7 @@ class DailySummaryTest(unittest.TestCase):
 
     def test_attention(self):
         """Реестр 19.28, переход в красную зону, рост балла, важное событие."""
-        kinds = [(a["kind"], a["card_id"]) for a in self.build()["attention"]]
+        kinds = [(a["kind"], a["card_id"]) for a in self.build_monitored()["attention"]]
         self.assertEqual(kinds, [("registry_1928", 2), ("became_red", 1), ("score_jump", 1), ("event", 1)])
 
     def test_unchanged_delta_hidden(self):
@@ -63,7 +83,8 @@ class DailySummaryTest(unittest.TestCase):
         """Факты: охват, зоны, внимание, сбой этапа; без внимания — явная фраза."""
         s = self.build(stages={"xml": {"status": "failed"}})
         facts = " ".join(daily.summary_facts(s))
-        self.assertIn("красная 1, жёлтая 0, зелёная 1", facts)
+        self.assertIn("красная 2, жёлтая 0, зелёная 1", facts)
+        self.assertIn("(заказчик с текущими задачами мониторинга)", facts)
         self.assertIn("перешла в красную зону: балл 75 (был 50)", facts)
         self.assertIn("Не завершились этапы: xml", facts)
         quiet = self.build(contracts={2: _contract(30, "green")}, events={})
@@ -85,14 +106,21 @@ class DailyStateTest(unittest.TestCase):
             daily.run_key("20.10.2026")
 
     def test_running(self):
-        """Свежая отметка «выполняется» блокирует второй запуск, старая — нет; готовая сводка — completed."""
+        """Отметка «выполняется» со свежим пульсом блокирует второй запуск, без пульса 10+ минут (контейнер
+        перезапущен) — нет; готовая сводка — completed."""
         now = datetime(2026, 10, 20, 7, 0)
-        fresh = {"ai_analysis": {"pipeline": {"status": "running", "started_at": (now - timedelta(hours=1)).isoformat()}}}
-        stale = {"ai_analysis": {"pipeline": {"status": "running", "started_at": (now - timedelta(hours=5)).isoformat()}}}
+        fresh = {"ai_analysis": {"pipeline": {"status": "running", "started_at": (now - timedelta(hours=3)).isoformat(),
+                                              "heartbeat_at": (now - timedelta(minutes=2)).isoformat()}}}
+        stale = {"ai_analysis": {"pipeline": {"status": "running", "started_at": (now - timedelta(hours=1)).isoformat(),
+                                              "heartbeat_at": (now - timedelta(minutes=30)).isoformat()}}}
         self.assertTrue(daily.running_fresh(fresh, now))
         self.assertFalse(daily.running_fresh(stale, now))
         self.assertFalse(daily.running_fresh(None, now))
-        self.assertTrue(daily.completed({"ai_analysis": {"pipeline": {"status": "completed"}}}))
+        self.assertTrue(daily.completed({"ai_analysis": {"pipeline": {"status": "completed",
+                                                                      "schema_version": daily.SCHEMA_VERSION}}}))
+        # сводка прежних правил охвата устарела — прогон за дату выполняется снова без force
+        self.assertFalse(daily.completed({"ai_analysis": {"pipeline": {"status": "completed",
+                                                                       "schema_version": "rm-daily-1"}}}))
 
     def test_monitored_values(self):
         """``monitoring`` из MySQL: 1, 1.0, "1", True — на мониторинге; 0, None — нет."""
@@ -123,17 +151,21 @@ class DailyRunTest(unittest.TestCase):
                 saved.append((kind, ext_id, ai["pipeline"]["status"]))
 
         run = object.__new__(daily.DailyRun)
-        run.http_manager, run.environment, run.env, run.repo = None, "stage", "stage", Repo()
+        run.http_manager, run.environment, run.env, run.repo, run.storage_path = None, "stage", "stage", Repo(), "s"
         run.push, run.use_llm, run.stages_on, run.stages, run.llm_stats = False, False, daily.STAGES, {}, {}
 
         async def query(name, head=(), **lists):
             """Ответы внешней БД."""
+            queried.append(name)
             if name == "daily_xml.sql":
-                return [{"id": 101, "card_id": 1}]
+                return [{"id": 101, "card_id": 1, "risk_monitoring_contract_id": 1, "monitoring": 1}]
+            if name == "daily_files.sql":
+                return [{"id": 5, "xml_source_id": 101, "card_id": 1}]
             if name == "daily_cards.sql":
                 return [{"id": 1, "number": "N1", "organisation_id": 10, "monitoring": 1, "customer_name": "ЗГУ"}]
             return []
 
+        queried = []
         run._query = query
 
         class Arch:
@@ -168,11 +200,17 @@ class DailyRunTest(unittest.TestCase):
                 mock.patch("risk_monitoring.org_analyzer.OrgAnalyzer", return_value=oa):
             s = asyncio.run(run.run("2026-10-20"))
         self.assertEqual(calls, [False])
-        self.assertEqual(xa.file_results, {5: {"risks": []}})
+        self.assertEqual(xa.file_results, {5: {"doc_type": {"detected_type": None}, "resume": None,
+                                               "total_doc_risk": None}})
+        self.assertEqual(queried, ["daily_xml.sql", "xml_previous.sql", "daily_files.sql", "own_scope.sql",
+                                   "daily_cards.sql"])
+        self.assertIn(5, run.cache.file_rows)
+        self.assertIn(1, run.cache.covered_cards)
         self.assertEqual(s["stages"]["customers"]["status"], "failed")
         self.assertEqual(s["stages"]["contracts"]["status"], "completed")
         self.assertEqual([a["kind"] for a in s["attention"]], ["became_red", "score_jump", "event"])
         self.assertEqual(saved, [("daily", 20261020, "running"), ("daily", 20261020, "completed")])
+        self.assertTrue(run._finished)
         self.assertTrue(s["resume"])
         self.assertTrue(Arch.closed)
         self.assertIn("external_queries", s["pipeline"])
@@ -186,6 +224,46 @@ class DailyRunTest(unittest.TestCase):
         facts = " ".join(daily.summary_facts(s))
         self.assertIn("день выгрузки, а не публикации", facts)
         self.assertIn("2026-05-12 (XML 40)", facts)
+
+
+class ScopeTest(unittest.TestCase):
+    """Охват анализа за дату."""
+
+    def test_choose_scope(self):
+        """Обычная дата — все XML; массовая загрузка — только XML закупок системы; настройка — всегда они."""
+        with mock.patch.object(settings, "DAILY_SCOPE", "all"), mock.patch.object(settings, "DAILY_ALL_MAX_XML", 5000):
+            self.assertEqual(daily.choose_scope(3773), "all")
+            self.assertEqual(daily.choose_scope(21907), "own_auto")
+        with mock.patch.object(settings, "DAILY_SCOPE", "all"), mock.patch.object(settings, "DAILY_ALL_MAX_XML", None):
+            self.assertEqual(daily.choose_scope(21907), "all")
+        with mock.patch.object(settings, "DAILY_SCOPE", "own"):
+            self.assertEqual(daily.choose_scope(10), "own")
+
+
+class RunCacheTest(unittest.TestCase):
+    """Кэш прогона: запрашиваются только новые id; засеянные запросом по дате — не запрашиваются."""
+
+    def test_keyed_and_seed(self):
+        """Второй запрос тех же id — из кэша; засеянные id — без запроса; пачки по CHUNK."""
+        from risk_monitoring import run_cache
+        from risk_monitoring.run_cache import RunCache
+
+        calls = []
+
+        async def fetch(name, head=(), **lists):
+            calls.append(list(lists["ids"]))
+            return [{"id": i} for i in lists["ids"]]
+
+        c = RunCache()
+        c.seed("xml_meta.sql", [{"id": 1}], "id", [1, 2])
+        got = asyncio.run(c.one_each(fetch, "xml_meta.sql", [1, 2, 3], "id"))
+        self.assertEqual(calls, [[3]])
+        self.assertEqual(sorted(got), [1, 3])
+        asyncio.run(c.one_each(fetch, "xml_meta.sql", [3, 1], "id"))
+        self.assertEqual(len(calls), 1)
+        with mock.patch.object(run_cache, "CHUNK", 2):
+            asyncio.run(c.keyed(fetch, "other.sql", [10, 11, 12], "id"))
+        self.assertEqual(calls[1:], [[10, 11], [12]])
 
 
 class XmlBatchTest(unittest.TestCase):
@@ -241,3 +319,246 @@ class XmlBatchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HeartbeatTest(unittest.TestCase):
+    """Пульс отметки «выполняется»: обновляется, пока прогон идёт, и не перезаписывает итоговую сводку."""
+
+    def test_heartbeat(self):
+        """Пульс пишет heartbeat_at; после итоговой сводки — больше не пишет."""
+        saved = []
+
+        class Repo:
+            async def save_rm_result(self, env, kind, ext_id, ai, pushed, err):
+                saved.append(dict(ai["pipeline"]))
+
+        run = object.__new__(daily.DailyRun)
+        run.repo, run.env, run.push, run.http_manager = Repo(), "stage", False, None
+        marker = {"pipeline": {"status": "running", "started_at": "2026-10-21T18:38:49", "heartbeat_at": "x"}}
+
+        async def go():
+            with mock.patch.object(daily, "HEARTBEAT_SECONDS", 0.01):
+                beat = asyncio.ensure_future(run._heartbeat("2026-07-03", marker))
+                await asyncio.sleep(0.05)
+                await run.save("2026-07-03", {"pipeline": {"status": "completed"}})
+                n = len(saved)
+                await asyncio.sleep(0.05)
+                beat.cancel()
+                return n
+
+        n = asyncio.run(go())
+        self.assertGreaterEqual(n, 2)
+        self.assertEqual(saved[n - 1]["status"], "completed")
+        self.assertEqual(len(saved), n)
+        self.assertNotEqual(saved[0]["heartbeat_at"], "x")
+
+
+class FirstEvaluationTest(unittest.TestCase):
+    """Первая оценка закупки в красной зоне — не «перешла в красную зону»; число пунктов — отдельным фактом."""
+
+    def test_red_first(self):
+        """Без прошлого балла — red_first; в фактах — сводная строка с числами."""
+        cards = {1: {"id": 1, "number": "N1", "organisation_id": 10, "monitoring": 1, "customer_name": "ЗГУ"}}
+        s = daily.build_summary(export_date="2026-07-03", environment="stage", cards=cards,
+                                contracts={1: _contract(72, "red")}, changed=[1], events={}, xml_cards={},
+                                customers=[], scope={"xml": 1}, stages={})
+        self.assertEqual([a["kind"] for a in s["attention"]], ["red_first"])
+        facts = " ".join(daily.summary_facts(s))
+        self.assertIn("в красной зоне при первой оценке — 1", facts)
+        self.assertNotIn("перешла в красную", facts)
+
+
+class PlainNamesTest(unittest.TestCase):
+    """В сводке — названия рисков, а не коды."""
+
+    def test_no_codes_in_facts(self):
+        """Заказчики с рисками и события с рисками — без кодов вида BEH-005, CTR-020."""
+        import re
+
+        cards = {1: {"id": 1, "number": "N1", "organisation_id": 10, "monitoring": 1, "customer_name": "ЗГУ"}}
+        events = {5: {"event": {"code": "CON-007", "title": "Расторжение контракта", "importance": "high"},
+                      "risks": [{"rule_id": "CTR-020"}]}}
+        cust = [{"organisation_id": 10, "ai_analysis": {"organisation": {"name": "ЗГУ"},
+                                                        "customer": {"score": 50, "zone": "yellow",
+                                                                     "risks": [{"rule_id": "BEH-005"}, {"rule_id": "BEH-001"}]}}}]
+        s = daily.build_summary(export_date="2026-07-03", environment="stage", cards=cards, contracts={},
+                                changed=[], events=events, xml_cards={5: 1}, customers=cust, scope={"xml": 1}, stages={})
+        facts = " ".join(daily.summary_facts(s))
+        self.assertIsNone(re.search(r"\b[A-Z]{2,5}-\d{3}\b", facts), facts)
+        self.assertIn("контракты сосредоточены у немногих поставщиков", facts)
+
+
+class TestEventType(unittest.TestCase):
+    """``ai_analysis.event.event_type`` обязателен для API (422 от 23.10.2026)."""
+
+    def test_fills_from_code(self):
+        """Код события становится ``event_type``; уже заданный не перезаписывается."""
+        from risk_monitoring.xml_events import with_event_type
+        self.assertEqual(with_event_type({"code": "PUR-001"})["event_type"], "PUR-001")
+        self.assertEqual(with_event_type({"xml_tag": "epNotificationEZK2020"})["event_type"], "epNotificationEZK2020")
+        self.assertEqual(with_event_type({"code": "A", "event_type": "B"})["event_type"], "B")
+
+    def test_patch_adds_event_type_to_stored(self):
+        """Сохранённый до исправления результат дозаписывается с ``event_type``."""
+        from tests.stubs import stubbed_import
+        sent = {}
+
+        async def fake(method, json=None, **kw):
+            """Запоминает тело запроса."""
+            sent.update(json)
+            return {"data": {}}
+
+        with stubbed_import("risk_monitoring.risk_monitoring_api") as m:
+            api = m.RiskMonitoringAPI.__new__(m.RiskMonitoringAPI)
+            with mock.patch.object(m.RiskMonitoringAPI, "_check_table", lambda self, t: None), \
+                    mock.patch.object(api, "_request", fake, create=True):
+                asyncio.run(api.patch_ai_analysis("risk_monitoring_eis_xml_sources", 1, {"event": {"code": "PUR-001"}}))
+        self.assertEqual(sent["ai_analysis"]["event"]["event_type"], "PUR-001")
+
+
+class RegistryFormatTest(unittest.TestCase):
+    """``ai_analysis.registry`` закупки — список совпадений (422 API от 23.10.2026)."""
+
+    def test_normalize_old(self):
+        """Прежний объект превращается в список; признак проверки и РНП — отдельными полями."""
+        from risk_monitoring.contract_package import normalize_registry, stored_registry
+        ai = {"registry": {"checked": True, "matches": [{"black_list_id": 5}], "rnp": [{"rnp_entry_id": 1}]}}
+        self.assertEqual(stored_registry(ai), [{"black_list_id": 5}])
+        normalize_registry(ai)
+        self.assertEqual(ai["registry"], [{"black_list_id": 5}])
+        self.assertTrue(ai["registry_checked"])
+        self.assertEqual(ai["rnp"], [{"rnp_entry_id": 1}])
+        self.assertEqual(stored_registry(ai), [{"black_list_id": 5}])
+
+    def test_running_clears_finished(self):
+        """Отметка «выполняется» сбрасывает окончание прежнего запуска."""
+        from tests.stubs import stubbed_import
+        sent = {}
+
+        async def fake(method, url=None, json=None, **kw):
+            """Запоминает тело."""
+            sent.update(json)
+            return {"data": {"id": 1}}
+
+        with stubbed_import("risk_monitoring.risk_monitoring_api") as m:
+            api = m.RiskMonitoringAPI.__new__(m.RiskMonitoringAPI)
+            api.url = "https://x/api/risk-monitoring/ai-analysis"
+            with mock.patch.object(api, "_request", fake, create=True):
+                asyncio.run(api.upsert_daily_run("2026-06-25", "running", started_at="2026-10-23T13:20:00+03:00"))
+        self.assertIn("finished_at", sent)
+        self.assertIsNone(sent["finished_at"])
+
+
+class QuietDayTest(unittest.TestCase):
+    """Пустой по мониторингу день — сводка шаблоном, без модели."""
+
+    def test_quiet(self):
+        """Нет закупок, событий и заказчиков на мониторинге — тихий день; есть пункт внимания — нет."""
+        s = {"scope": {"xml": 90, "contracts_monitored": 0, "events_monitored": 0, "customers_monitored": 0},
+             "attention": [], "suppliers": []}
+        self.assertTrue(daily.quiet_day(s))
+        s["attention"] = [{"kind": "supplier_registry"}]
+        self.assertFalse(daily.quiet_day(s))
+        self.assertFalse(daily.quiet_day({"scope": {"contracts_monitored": 2}}))
+
+
+class MergeStringFieldsTest(unittest.TestCase):
+    """Объединение блоков извлечения не падает, если модель отдала строку вместо объекта."""
+
+    def test_as_obj(self):
+        """Строка — в объект под ключом; объект — как есть; пусто — пустой объект."""
+        from tests.stubs import stubbed_import
+        with stubbed_import("evaluate_documents.type_data_extractor") as m:
+            self.assertEqual(m._as_obj("Контракт", "value"), {"value": "Контракт"})
+            self.assertEqual(m._as_obj({"value": 1}, "value"), {"value": 1})
+            self.assertEqual(m._as_obj(None, "value"), {})
+            self.assertEqual(m._as_obj("", "value"), {})
+
+
+class OwnLLMTest(unittest.TestCase):
+    """Модель разбирает события закупок системы (все подведомственные организации), а не только monitoring = 1."""
+
+    def test_filter(self):
+        """Привязанный XML, «сирота», найденная к закупке или к организации системы, — да; чужой заказчик — нет."""
+        ok = daily.make_own_filter({7})
+        self.assertTrue(ok({"row": {"risk_monitoring_contract_id": 11, "monitoring": 0}}))
+        self.assertTrue(ok({"row": {}, "link": {"risk_monitoring_contract_id": 10}}))
+        self.assertTrue(ok({"row": {}, "link": {"organisation_id": 7}}))
+        self.assertFalse(ok({"row": {"risk_monitoring_contract_id": None}, "link": {"organisation_id": 8}}))
+
+    def test_defer(self):
+        """XML чужого заказчика — модель откладывается с причиной; появилась закупка — разбирается повторно."""
+        from tests.stubs import stubbed_import
+        with stubbed_import("risk_monitoring.xml_event_analyzer") as m:
+            xa = m.XmlEventAnalyzer.__new__(m.XmlEventAnalyzer)
+            xa.llm_filter = daily.make_own_filter(set())
+            ctxs = [{"needs_llm": True, "llm_reason": "importance", "row": {}, "link": None},
+                    {"needs_llm": True, "llm_reason": "rule_risks", "row": {"risk_monitoring_contract_id": 5},
+                     "link": None}]
+            xa._defer_llm(ctxs)
+            self.assertFalse(ctxs[0]["needs_llm"])
+            self.assertEqual((ctxs[0]["llm_reason"], ctxs[0]["llm_deferred"]), ("not_own", "importance"))
+            self.assertTrue(ctxs[1]["needs_llm"])
+            self.assertTrue(xa._deferred_now_needed({"rm_llm_deferred": "importance", "risk_monitoring_contract_id": 5}))
+            self.assertFalse(xa._deferred_now_needed({"rm_llm_deferred": "importance"}))
+            self.assertFalse(xa._deferred_now_needed({"rm_llm_deferred": None, "risk_monitoring_contract_id": 5}))
+
+
+class ArchiveOcrShrinkTest(unittest.TestCase):
+    """OCR страниц из архивов: переполнение контекста — уменьшение изображения и повтор, а не «модель недоступна»."""
+
+    def test_shrink_and_retry(self):
+        """Первый ответ — 400 «exceeds context», второй — текст; изображение уменьшено."""
+        import os
+        import tempfile
+        from tests.stubs import stubbed_import
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("нет PIL")
+        with tempfile.TemporaryDirectory() as tmp, stubbed_import("evaluate_documents.ocr") as m:
+            path = os.path.join(tmp, "page_1.jpg")
+            Image.new("RGB", (3000, 3000), "white").save(path, "JPEG")
+            p = m.OCRProcessor.__new__(m.OCRProcessor)
+            p.ocr_prompt, p.OCR_SCHEMA, p.model = "", {}, "x"
+
+            async def acquire():
+                """Без ограничения скорости."""
+
+            p.rate_limiter = mock.Mock(acquire=acquire)
+            calls = []
+
+            async def once(image_path, name, image_name):
+                """Первый вызов — переполнение, второй — ответ."""
+                calls.append(Image.open(image_path).size)
+                return ("err", True) if len(calls) == 1 else ('{"raw_text": "ok"}', False)
+
+            p._ocr_once = once
+            out = asyncio.run(m.OCRProcessor.ocr_image_with_qwen_vl.__wrapped__(p, path, "ПСД.rar"))
+            self.assertEqual(out, '{"raw_text": "ok"}')
+            self.assertLessEqual(calls[0][0] * calls[0][1], m.OCR_MAX_PIXELS)
+            self.assertLess(calls[1][0], calls[0][0])
+
+
+class SummaryScopeFixTest(unittest.TestCase):
+    """Сводка: события только закупок системы, закупки в красной зоне — в фактах; delta заказчика при смене модели."""
+
+    def test_orphan_events_excluded(self):
+        """Событие XML без закупки не входит в сводку и во «внимание»."""
+        cards = {1: {"id": 1, "number": "N1", "organisation_id": 10, "monitoring": 0, "customer_name": "ЗГУ"}}
+        s = daily.build_summary(export_date="2026-07-02", environment="stage", cards=cards,
+                                contracts={1: _contract(80, "red")}, changed=[], xml_cards={1: 1, 2: None},
+                                events={1: {"event": {"title": "Доп. соглашение", "importance": "high"}, "risks": []},
+                                        2: {"event": {"title": "Заключён контракт", "importance": "high"}, "risks": []}},
+                                customers=[], scope={"xml": 2}, stages={})
+        self.assertEqual(s["events"]["total"], 1)
+        self.assertEqual([a["xml_id"] for a in s["attention"]], [1])
+        self.assertIn("В красной зоне (всего 1): закупка 0319", " ".join(daily.summary_facts(s)))
+
+    def test_previous_customer_score(self):
+        """Балл прежней модели не даёт delta; той же — даёт."""
+        from risk_monitoring import org_profile
+        with mock.patch.object(settings, "CUSTOMER_SCORE_MODEL", "quality"):
+            self.assertIsNone(org_profile.previous_customer_score({"customer": {"score": 32}}))
+            same = {"customer": {"score": 12, "score_model": {"version": org_profile.CUSTOMER_SCORE_VERSION}}}
+            self.assertEqual(org_profile.previous_customer_score(same), 12)

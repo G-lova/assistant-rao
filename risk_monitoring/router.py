@@ -170,8 +170,9 @@ async def analyze_contracts(req: PackageRequest, x_api_database: str = Header(de
 async def analyze_organisations(req: PackageRequest, x_api_database: str = Header(default="dev", alias="X-API-Database")):
     """Ставит в очередь аналитику организаций (``risk_monitoring_organisations``) как заказчика и поставщика.
 
-    Результат — секции ``customer`` / ``supplier`` (метрики за период, риски, балл, резюме). Пока внешняя система не
-    принимает ``ai_analysis`` организаций, результат хранится у нас и возвращается в задаче (``include_analysis``).
+    Результат — секции ``customer`` / ``supplier`` (метрики за период, риски, балл, резюме). Результат пишется в
+    ``risk_monitoring_organisations.ai_analysis`` (``settings.ORG_PUSH_ENABLED``), хранится у нас и возвращается
+    в задаче (``include_analysis``).
 
     Args:
         req: id организаций, ``roles``, ``period_months`` и режимы.

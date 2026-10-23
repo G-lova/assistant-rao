@@ -60,7 +60,7 @@ PRICE_CTX_RE = re.compile(r"цен\w*\s+(контракт|договор)|сто
 
 # Уровни детерминированных рисков закупки. Правила внешней системы — флаги 0/1 по одному полю ЕИС (например,
 # pz_n1 срабатывает на любую закупку лекарств), поэтому их уровень умеренный: балл поднимают сочетания признаков
-RULE_LEVEL = {"risk": 0.4, "violation": 0.55}
+# Уровень риска от сработавшего правила внешней системы — в configs/settings.py (RULE_RISK_LEVEL, RULE_VIOLATION_LEVEL)
 SINGLE_APPLICATION_LEVEL = 0.35
 TERMINATION_LEVEL = 0.5
 
@@ -388,6 +388,15 @@ def drop_rule_covered(risks: Sequence[Dict[str, Any]], values: Optional[Dict[str
     return [r for r in risks if r.get("rule_id") not in covered or r.get("rule_id") in keep]
 
 
+def rule_level(kind: Optional[str]) -> float:
+    """Уровень риска сработавшего правила: нарушение — ``RULE_VIOLATION_LEVEL``, признак риска —
+    ``RULE_RISK_LEVEL`` (по методике сводной аналитики нарушения весят больше рисков: много рисков при малом числе
+    нарушений — жёлтая зона)."""
+    from configs import settings
+
+    return settings.RULE_VIOLATION_LEVEL if kind == "violation" else settings.RULE_RISK_LEVEL
+
+
 def rule_values_risks(values: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Риски по сработавшим правилам внешней системы (значение показателя > 0 или истина).
 
@@ -406,7 +415,7 @@ def rule_values_risks(values: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
         kind = risk_catalog.kind(code)
         out.append({"rule_id": code, "title": risk_catalog.title(code),
                     "description": f"Сработал показатель {key} = {value}",
-                    "level": RULE_LEVEL["violation" if kind == "violation" else "risk"], "confidence": 1.0, "law": None,
+                    "level": rule_level(kind), "confidence": 1.0, "law": None,
                     "evidence": [{"src": f"rule:{key}", "value": value}],
                     "verification_needed": [], "source": "rule"})
     return out
@@ -458,6 +467,56 @@ def registry_risks(matches: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
              "evidence": [{"src": f"black_list:{m.get('id')}", "deal_number": m.get("deal_number"),
                            "date_begin": str(m.get("date_begin"))[:10], "sud": m.get("sud")}],
              "verification_needed": ["Проверить, распространяется ли запрет на дату заключения контракта"],
+             "source": "registry"} for m in matches]
+
+
+def _as_day(v: Any) -> Optional[date]:
+    """Дата из даты/времени РНП (``2026-07-03 10:00:00.000`` → ``date``)."""
+    return as_date(str(v)[:10]) if v not in (None, "") else None
+
+
+def rnp_matches(entries: Sequence[Dict[str, Any]], supplier: Dict[str, Any], on: Optional[date]) -> List[Dict[str, Any]]:
+    """Записи реестра недобросовестных поставщиков (``risk_monitoring_rnp_entries``), действующие на дату.
+
+    Действующая — включение есть (``has_inclusion``), опубликована не позже даты, не исключена до неё (``excluded_at``)
+    и плановая дата исключения не наступила. Совпадение — по ИНН и, если оба указаны, по КПП.
+
+    Args:
+        entries: Строки ``rnp_entries.sql`` с ИНН поставщика.
+        supplier: ``inn``, ``kpp``.
+        on: Дата (контракта; ``None`` — сегодня).
+
+    Returns:
+        List[Dict[str, Any]]: Действующие записи.
+    """
+    inn, kpp = str(supplier.get("inn") or "").strip(), str(supplier.get("kpp") or "").strip()
+    on = on or date.today()
+    out = []
+    for e in entries:
+        if not inn or str(e.get("inn") or "").strip() != inn:
+            continue
+        if kpp and str(e.get("kpp") or "").strip() and str(e["kpp"]).strip() != kpp:
+            continue
+        if not flag(e.get("has_inclusion")) and str(e.get("status") or "").lower() != "active":
+            continue
+        start = _as_day(e.get("first_published_at")) or _as_day(e.get("published_at"))
+        end = _as_day(e.get("excluded_at")) or _as_day(e.get("planned_exclusion_date"))
+        if (start is None or start <= on) and (end is None or on < end):
+            out.append(e)
+    return out
+
+
+def rnp_risks(matches: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """REG-002 по действующим записям РНП (нарушение — только если заказчик установил требование ч. 1.1 ст. 31)."""
+    return [{"rule_id": "REG-002", "title": risk_catalog.title("REG-002"),
+             "description": f"Поставщик в реестре недобросовестных поставщиков (запись {m.get('reg_number')}, "
+                            f"с {str(m.get('first_published_at') or m.get('published_at') or '')[:10]})",
+             "level": 0.6, "confidence": 1.0, "law": None,
+             "evidence": [{"src": f"rnp:{m.get('id')}", "reg_number": m.get("reg_number"), "fz": m.get("fz"),
+                           "reason_code": m.get("reason_code"), "published_at": str(m.get("published_at") or "")[:10],
+                           "planned_exclusion_date": str(m.get("planned_exclusion_date") or "")[:10] or None}],
+             "verification_needed": ["Проверить, установлено ли в извещении требование об отсутствии участника в РНП "
+                                     "(ч. 1.1 ст. 31 44-ФЗ / положение о закупке)"],
              "source": "registry"} for m in matches]
 
 
@@ -662,7 +721,7 @@ def default_resume(p: Dict[str, Any], prof: Dict[str, Any], risks: Sequence[Dict
     parts.append(f"Балл риска {prof['score']} ({ {'green': 'зелёная', 'yellow': 'жёлтая', 'red': 'красная'}.get(prof['zone'], '') } зона)"
                  + (f", изменение {prof['delta']:+}" if prof.get("delta") else "") + ".")
     if risks:
-        parts.append("Основные факторы: " + "; ".join(f"{r['rule_id']} {r.get('title')}" for r in risks[:3]) + ".")
+        parts.append("Основные факторы: " + "; ".join(str(r.get('title') or r['rule_id']) for r in risks[:3]) + ".")
     if events:
         parts.append(f"Последнее событие: {events[0].get('title')} ({str(events[0].get('event_at') or '')[:10]}).")
     return " ".join(parts)
@@ -711,10 +770,31 @@ def favourite_risks(p: Dict[str, Any], fav: Optional[Dict[str, Any]]) -> List[Di
              "source": "aggregate"}]
 
 
+def stored_registry(ai: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Совпадения с реестром 19.28 из ``ai_analysis`` закупки — и нового формата (список), и прежнего
+    (``{"checked", "matches", "rnp"}``, результаты до 23.10.2026)."""
+    reg = (ai or {}).get("registry")
+    if isinstance(reg, dict):
+        return list(reg.get("matches") or [])
+    return list(reg or [])
+
+
+def normalize_registry(ai: Dict[str, Any]) -> Dict[str, Any]:
+    """Приводит ``registry`` сохранённого результата к формату API (список совпадений); ``checked`` и ``rnp``
+    переносит в ``registry_checked`` и ``rnp``. Меняет ``ai`` на месте и возвращает его."""
+    reg = (ai or {}).get("registry") if isinstance(ai, dict) else None
+    if isinstance(reg, dict):
+        ai["registry"] = list(reg.get("matches") or [])
+        ai.setdefault("registry_checked", bool(reg.get("checked")))
+        ai.setdefault("rnp", list(reg.get("rnp") or []))
+    return ai
+
+
 def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, Any]], xmls: Sequence[Dict[str, Any]],
                             values: Optional[Dict[str, Any]], black: Sequence[Dict[str, Any]],
                             statuses: Dict[Tuple[int, str], int], previous_score: Optional[float] = None,
-                            settings: Any = None, supplier_counts: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+                            settings: Any = None, supplier_counts: Optional[Dict[str, int]] = None,
+                            rnp: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
     """Собирает ``ai_analysis`` закупки/контракта без модели (резюме добавляет анализатор).
 
     Args:
@@ -725,6 +805,7 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
         black: Записи реестра 19.28 по ИНН поставщика.
         statuses: Статусы рисков файлов у аналитика.
         supplier_counts: Контракты заказчика за период по ИНН поставщиков (для BEH-006); ``None`` — не проверять.
+        rnp: Записи РНП по ИНН поставщика (``risk_monitoring_rnp_entries``) → REG-002.
         previous_score: Прошлый балл.
         settings: Модуль ``configs.settings`` (пороги).
 
@@ -740,11 +821,12 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
     comp = completeness(p, files)
     cons = consistency(p, files, settings.CONSISTENCY_TOLERANCE)
     matches = registry_matches(black, p["supplier"], as_date(p["dates"]["contract"]))
+    rnp_found = rnp_matches(rnp, p["supplier"], as_date(p["dates"]["contract"]))
     f_risks, confirmed = file_risks(files, statuses)
     f_risks = drop_rule_covered(f_risks, values, confirmed)
     fav = favourite_supplier(p, supplier_counts, settings)
     risks = passport.merge_risks(
-        f_risks, event_risks(xmls), rule_values_risks(values), registry_risks(matches), dataset_risks(p),
+        f_risks, event_risks(xmls), rule_values_risks(values), registry_risks(matches), rnp_risks(rnp_found), dataset_risks(p),
         favourite_risks(p, fav),
         consistency_risks(cons), completeness_risks(comp, settings.COMPLETENESS_RISK), fz=fz)
     risks = drop_same_quote(risks, confirmed)
@@ -758,9 +840,15 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
         "passport": p,
         "package": {"completeness": comp, "consistency": cons, "files": files_brief,
                     "files_analyzed": sum(1 for f in files_brief if f["analyzed"]), "files_total": len(files_brief)},
-        "registry": {"checked": bool(p["supplier"].get("inn")), "matches": [
-            {"black_list_id": m.get("id"), "deal_number": m.get("deal_number"), "date_begin": str(m.get("date_begin"))[:10],
-             "name": m.get("name")} for m in matches]},
+        # API: registry — список совпадений с реестром 19.28 (у каждого black_list_id), 422 от 23.10.2026;
+        # признак проверки и РНП — отдельными полями
+        "registry": [{"black_list_id": m.get("id"), "deal_number": m.get("deal_number"),
+                      "date_begin": str(m.get("date_begin"))[:10], "name": m.get("name")} for m in matches],
+        "registry_checked": bool(p["supplier"].get("inn")),
+        "rnp": [{"rnp_entry_id": m.get("id"), "reg_number": m.get("reg_number"), "fz": m.get("fz"),
+                 "published_at": str(m.get("published_at") or "")[:10],
+                 "planned_exclusion_date": str(m.get("planned_exclusion_date") or "")[:10] or None}
+                for m in rnp_found],
         "customer_supplier": fav,
         "events": events,
         "risks": risks,

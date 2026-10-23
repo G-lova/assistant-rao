@@ -27,14 +27,16 @@ from risk_monitoring import contract_package as cp
 from risk_monitoring import passport, risk_catalog
 
 SCHEMA_VERSION = "rm-org-1"
+CUSTOMER_SCORE_VERSION = "customer-quality-1"
+
 
 
 def _risk(code: str, description: str, level: float, evidence: List[Dict[str, Any]],
-          verification: List[str], confidence: float = 0.8) -> Dict[str, Any]:
-    """Риск аналитики во внешнем формате (``source = aggregate``)."""
+          verification: List[str], confidence: float = 0.8, source: Optional[str] = None) -> Dict[str, Any]:
+    """Риск аналитики во внешнем формате (``source``: ``aggregate``, для REG-* — ``registry``)."""
     return {"rule_id": code, "title": risk_catalog.title(code), "description": description, "level": level,
             "confidence": confidence, "law": None, "evidence": evidence, "verification_needed": verification,
-            "source": "aggregate"}
+            "source": source or ("registry" if code.startswith("REG-") else "aggregate")}
 
 
 def _share(part: int, total: int) -> Optional[float]:
@@ -188,11 +190,22 @@ def customer_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
                            0.8, [{"src": f"contract:{c['id']}", "black_list_id": b.get("id"), "supplier_inn": c.get("supplier_inn")}
                                  for c, b in black_contracts[:5]],
                            ["Проверить даты заключения контрактов и действие записи реестра"], confidence=1.0))
-    return _finish(m, risks, previous_score, settings, top_suppliers=top)
+    sec = _finish(m, risks, previous_score, settings, top_suppliers=top)
+    if getattr(settings, "CUSTOMER_SCORE_MODEL", "aggregate") == "quality":
+        model = customer_quality(contracts, sec["score"], settings)
+        sec["behaviour_score"] = sec["score"]
+        sec["score_model"] = {"version": CUSTOMER_SCORE_VERSION, **model}
+        if model["quality_index"] is not None:
+            sec["quality_index"] = model["quality_index"]
+            sec["score"] = model["score"]
+            sec["zone"] = model["zone"]
+            sec["delta"] = round(model["score"] - previous_score, 1) if previous_score is not None else None
+    return sec
 
 
 def supplier_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[str, Any]], inn: str, settings: Any,
-                     previous_score: Optional[float] = None, today: Optional[date] = None) -> Dict[str, Any]:
+                     previous_score: Optional[float] = None, today: Optional[date] = None,
+                     rnp: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
     """Секция ``supplier``: метрики, риски, балл поставщика.
 
     Args:
@@ -202,6 +215,7 @@ def supplier_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
         settings: Пороги.
         previous_score: Прошлый балл.
         today: Дата проверки реестра (по умолчанию — сегодня).
+        rnp: Записи РНП по ИНН поставщика → REG-002 (действующие на сегодня).
 
     Returns:
         Dict[str, Any]: Как у :func:`customer_section`, с ``top_customers`` и ``registry``.
@@ -221,6 +235,14 @@ def supplier_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
                            [{"src": f"black_list:{b.get('id')}", "deal_number": b.get("deal_number"),
                              "date_begin": str(b.get("date_begin"))[:10]} for b in active],
                            ["Проверить, не заключались ли контракты в период действия записи"], confidence=1.0))
+    rnp_active = cp.rnp_matches(rnp, {"inn": inn}, today)
+    if rnp_active:
+        e = rnp_active[0]
+        risks.append(_risk("REG-002", f"Поставщик в реестре недобросовестных поставщиков (запись {e.get('reg_number')}, "
+                                      f"с {str(e.get('first_published_at') or e.get('published_at') or '')[:10]})", 0.8,
+                           [{"src": f"rnp:{x.get('id')}", "reg_number": x.get("reg_number"), "fz": x.get("fz")}
+                            for x in rnp_active],
+                           ["Проверить контракты, заключённые в период включения в РНП"], confidence=1.0))
     enough = m["contracts"] >= settings.ORG_MIN_CONTRACTS
     # «Любимый поставщик» (BEH-006) — поведение заказчика, считается в его секции; здесь только метрика
     # top_customer_share (в БД — закупки заказчиков на мониторинге, поэтому у поставщика она завышена)
@@ -234,7 +256,122 @@ def supplier_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
                            ["Проверить исполнение демпинговых контрактов и антидемпинговые меры"]))
     return _finish(m, risks, previous_score, settings, top_customers=top,
                    registry=[{"black_list_id": b.get("id"), "deal_number": b.get("deal_number"),
-                              "date_begin": str(b.get("date_begin"))[:10]} for b in active])
+                              "date_begin": str(b.get("date_begin"))[:10]} for b in active],
+                   rnp=[{"rnp_entry_id": e.get("id"), "reg_number": e.get("reg_number"), "fz": e.get("fz"),
+                         "published_at": str(e.get("published_at") or "")[:10]} for e in rnp_active])
+
+
+def contract_risks(c: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Риски закупки из строки ``customer_contracts.sql``: параллельные массивы ``risk_codes``, ``risk_levels``,
+    ``risk_confidences``, ``risk_sources`` (``ai_analysis.risks[*]``)."""
+    codes = cp.as_json(c.get("risk_codes")) or []
+    levels = cp.as_json(c.get("risk_levels")) or []
+    confs = cp.as_json(c.get("risk_confidences")) or []
+    sources = cp.as_json(c.get("risk_sources")) or []
+    out = []
+    for i, code in enumerate(codes):
+        if not code:
+            continue
+        out.append({"rule_id": code, "level": levels[i] if i < len(levels) else None,
+                    "confidence": confs[i] if i < len(confs) and confs[i] is not None else 1.0,
+                    "sources": sources[i] if i < len(sources) else None})
+    return out
+
+
+def _stage_weight(r: Dict[str, Any], settings: Any) -> float:
+    """Вес риска закупки в блоке стадии: ``level × confidence``; нарушение × ``CUSTOMER_VIOLATION_WEIGHT``;
+    найденный только моделью × ``AI_UNCONFIRMED_WEIGHT``; не больше 1."""
+    w = (passport.clamp01(r.get("level")) or 0.0) * (passport.clamp01(r.get("confidence")) or 0.0)
+    if risk_catalog.kind(r["rule_id"]) == "violation":
+        w *= settings.CUSTOMER_VIOLATION_WEIGHT
+    elif r.get("sources") and set(r["sources"]) <= cp.AI_SOURCES:
+        w *= settings.AI_UNCONFIRMED_WEIGHT
+    return min(1.0, w)
+
+
+def _has_contract(c: Dict[str, Any]) -> bool:
+    """Контракт по закупке заключён (номер контракта или цена контракта в данных ЕИС)."""
+    return bool(c.get("contract_number")) or cp.num(c.get("contract_price")) is not None
+
+
+def quality_zone(q: Optional[float], zones: Sequence[float]) -> Optional[str]:
+    """Зона сводного показателя (чем выше, тем лучше): ``red`` < zones[0] ≤ ``yellow`` < zones[1] ≤ ``green``."""
+    if q is None:
+        return None
+    return "red" if q < zones[0] else "yellow" if q < zones[1] else "green"
+
+
+def previous_customer_score(prev_ai: Dict[str, Any]) -> Optional[float]:
+    """Прошлый балл заказчика для изменения (``delta``) — только если он посчитан той же моделью: балл прежней
+    модели (поведенческие признаки) с новым не сравним (02.07.2026: «−23,5» у РАНХиГС из-за смены модели)."""
+    prev = (prev_ai or {}).get("customer") or {}
+    current = CUSTOMER_SCORE_VERSION if _model_on() else None
+    return prev.get("score") if (prev.get("score_model") or {}).get("version") == current else None
+
+
+def _model_on() -> bool:
+    """Включена ли модель сводной аналитики (``CUSTOMER_SCORE_MODEL = "quality"``)."""
+    from configs import settings
+
+    return getattr(settings, "CUSTOMER_SCORE_MODEL", "aggregate") == "quality"
+
+
+def customer_quality(contracts: Sequence[Dict[str, Any]], behaviour_score: float, settings: Any) -> Dict[str, Any]:
+    """Сводный показатель заказчика по «Модели сводной аналитики» (РАО, 2025).
+
+    ``Псвод = Σ Пблок``, ``Пблок = (Σ k_i × П_i) × 100 × Кблок``. Показатель организации ``П_i`` — среднее по её
+    проанализированным закупкам; показатель закупки — ``1 − интенсивность`` рисков каталога, отнесённых к показателю
+    (``CUSTOMER_QUALITY_BLOCKS``), «шумовым ИЛИ» с затуханием, как балл закупки; нарушения весят
+    ``CUSTOMER_VIOLATION_WEIGHT``. Нет рисков — 1. Блоки реализации и приёмки — только по закупкам с заключённым
+    контрактом; блок без таких закупок не оценивается, и веса оценённых блоков пересчитываются на 100.
+
+    Args:
+        contracts: Закупки заказчика за период (строки ``customer_contracts.sql``).
+        behaviour_score: Балл поведенческих признаков заказчика (0–100), учитывается с ``CUSTOMER_BEHAVIOUR_WEIGHT``.
+        settings: Модель и веса.
+
+    Returns:
+        Dict[str, Any]: ``quality_index`` (Псвод), ``score`` (100 − Псвод), ``zone``, ``blocks`` (по блоку:
+        ``value`` — Пблок, ``quality`` — Σ k·П × 100, ``weight``, ``contracts``, ``indicators``), ``analyzed``.
+    """
+    analyzed = [c for c in contracts if cp.num(c.get("score")) is not None]
+    risks = {id(c): contract_risks(c) for c in analyzed}
+    blocks: Dict[str, Any] = {}
+    for b in settings.CUSTOMER_QUALITY_BLOCKS:
+        pool = analyzed if b["applies"] == "all" else [c for c in analyzed if _has_contract(c)]
+        inds = []
+        for code, title, k, codes in b["indicators"]:
+            values, failed, found = [], 0, Counter()
+            for c in pool:
+                rs = [r for r in risks[id(c)] if r["rule_id"] in codes]
+                x = cp.decayed_or([_stage_weight(r, settings) for r in rs], settings.SCORE_DECAY)
+                values.append(1 - x)
+                if rs:
+                    failed += 1
+                    found.update({r["rule_id"] for r in rs})
+            inds.append({"code": code, "title": title, "weight": k,
+                         "value": round(sum(values) / len(values), 3) if values else None,
+                         "contracts_with_risks": failed, "assessed": bool(codes),
+                         "top": [{"rule_id": r, "title": risk_catalog.title(r), "contracts": n}
+                                 for r, n in found.most_common(3)]})
+        # показатели, которым в риск-мониторинге не сопоставлен ни один риск (П32, П33), не оцениваются: их вес
+        # делится между оценёнными, иначе блок получал бы «соответствует» за отсутствие данных
+        rated_inds = [i for i in inds if i["assessed"]]
+        kw = sum(i["weight"] for i in rated_inds) or 1.0
+        quality = round(100 * sum(i["weight"] * i["value"] for i in rated_inds) / kw, 1) if pool and rated_inds else None
+        blocks[b["name"]] = {"title": b["title"], "weight": b["weight"], "contracts": len(pool), "quality": quality,
+                             "value": round(quality * b["weight"], 1) if quality is not None else None,
+                             "indicators": inds}
+    rated = [v for v in blocks.values() if v["quality"] is not None]
+    q = None
+    if rated:
+        q = sum(v["quality"] * v["weight"] for v in rated) / (sum(v["weight"] for v in rated) or 1.0)
+        q *= 1 - settings.CUSTOMER_BEHAVIOUR_WEIGHT * (behaviour_score or 0) / 100
+        q = round(q, 1)
+    return {"quality_index": q, "score": round(100 - q, 1) if q is not None else None,
+            "zone": quality_zone(q, settings.CUSTOMER_QUALITY_ZONES), "blocks": blocks, "analyzed": len(analyzed),
+            "behaviour": {"score": behaviour_score, "weight": settings.CUSTOMER_BEHAVIOUR_WEIGHT},
+            "rated_blocks": [k for k, v in blocks.items() if v["quality"] is not None]}
 
 
 def _finish(metrics: Dict[str, Any], risks: List[Dict[str, Any]], previous_score: Optional[float], settings: Any,
@@ -246,6 +383,11 @@ def _finish(metrics: Dict[str, Any], risks: List[Dict[str, Any]], previous_score
     return {"metrics": metrics, **extra, "risks": merged, "score": prof["score"], "zone": prof["zone"],
             "delta": prof["delta"], "previous_score": previous_score, "components": prof["components"],
             "top_factors": prof["top_factors"]}
+
+
+def _num(v: Any) -> str:
+    """Число для текста по-русски: 43.2 → «43,2»."""
+    return str(v).replace(".", ",")
 
 
 def _pct(share: Optional[float]) -> str:
@@ -304,12 +446,28 @@ def resume_facts(role: str, section: Dict[str, Any], settings: Any) -> List[str]
     if m.get("analyzed"):
         facts.append(f"Проанализировано закупок: {m['analyzed']}, средний балл {m['avg_score']}, в красной зоне {m['red_zone']}.")
     if section["risks"]:
-        facts.append("Признаки риска: " + "; ".join(f"{r['rule_id']} — {r['description'] or r['title']}"
+        facts.append("Признаки риска: " + "; ".join(f"{r['title']}: {r['description']}" if r.get("description") else str(r["title"])
                                                    for r in section["risks"][:4]) + ".")
     else:
         facts.append("Признаков риска по правилам не выявлено.")
     zones = {"green": "зелёная зона", "yellow": "жёлтая зона", "red": "красная зона"}
-    facts.append(f"Балл риска {section['score']} ({zones.get(section['zone'], section['zone'])}).")
+    model = section.get("score_model")
+    if model and model.get("quality_index") is not None:
+        parts = []
+        for b in model["blocks"].values():
+            if b["quality"] is None:
+                parts.append(f"{b['title']} — не оценивалось (нет закупок с заключённым контрактом)")
+                continue
+            weak = [i for i in b["indicators"] if i["contracts_with_risks"]]
+            parts.append(f"{b['title']} — {_num(b['quality'])} из 100" + (
+                " (замечания: " + ", ".join(f"{i['title']} — в {i['contracts_with_risks']} из {b['contracts']} закупок"
+                                            for i in weak[:3]) + ")" if weak else ", замечаний нет"))
+        facts.append("Сводный показатель качества закупочной деятельности по модели сводной аналитики: "
+                     f"{_num(model['quality_index'])} из 100 ({zones.get(model['zone'], model['zone'])}). По блокам: "
+                     + "; ".join(parts) + ".")
+        if section.get("behaviour_score"):
+            facts.append(f"Поведенческие признаки по совокупности закупок оценены отдельно: {_num(section['behaviour_score'])}.")
+    facts.append(f"Балл риска {_num(section['score'])} ({zones.get(section['zone'], section['zone'])}).")
     return facts
 
 

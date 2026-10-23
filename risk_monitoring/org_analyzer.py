@@ -4,9 +4,10 @@
 (``org_profile``). Данные — закупки за ``settings.ORG_PERIOD_MONTHS`` месяцев (``dataset`` и уже рассчитанный
 профиль закупок ``contracts.ai_analysis.profile``), реестр 19.28. Модель пишет только короткое резюме секции.
 
-Куда пишется результат: каноническая строка группы (``xml_events.canonical_org``). Внешняя система пока не
-принимает ``ai_analysis`` организаций, поэтому по умолчанию (``settings.ORG_PUSH_ENABLED = False``) результат
-хранится у нас (``ai_rm_results``, ``kind = organisation``) и возвращается в задаче.
+Куда пишется результат: каноническая строка группы (``xml_events.canonical_org``). Раньше внешняя система не
+принимала ``ai_analysis`` организаций; по ТЗ 09.10.2026 колонка ``risk_monitoring_organisations.ai_analysis`` есть,
+запись включена (``settings.ORG_PUSH_ENABLED``). Результат всегда сохраняется и у нас (``ai_rm_results``,
+``kind = organisation``) и возвращается в задаче.
 """
 import asyncio
 import json
@@ -23,7 +24,7 @@ from risk_monitoring.xml_events import canonical_org
 logger = get_logger(__name__)
 
 EXTERNAL_TABLE = "risk_monitoring_organisations"
-PROMPT_VERSION = "org-resume-2"
+PROMPT_VERSION = "org-resume-4"
 ROLES = ("customer", "supplier")
 
 RESUME_SYSTEM = (
@@ -31,7 +32,7 @@ RESUME_SYSTEM = (
     "Перескажи их связным резюме: 3–5 предложений, по-русски, без вступлений — объём закупок, признаки риска "
     "(если есть), что проверить. Используй только эти факты: не добавляй цифр, сравнений и выводов, которых в них "
     "нет, не пересчитывай доли. Если признаков риска нет или данных мало — так и напиши, не ищи риски сам. "
-    "Ответ — обычный текст, без JSON и разметки.")
+    "Не используй коды рисков и правил (вида DOC-002, FIN-004, BEH-005, pz_p1) — называй риски словами, понятными заказчику. Ответ — обычный текст, без JSON и разметки.")
 ROLE_NAMES = {"customer": "заказчика", "supplier": "поставщика"}
 
 
@@ -134,6 +135,7 @@ class OrgAnalyzer:
                 if "supplier" in self.roles and sup_inns else []
             black_inns = sorted({str(c.get("supplier_inn")).strip() for c in customer_contracts if c.get("supplier_inn")} | set(sup_inns))
             black = await self._safe_query("black_list.sql", inns=black_inns) if black_inns else []
+            rnp = await self._safe_query("rnp_entries.sql", inns=sorted(sup_inns)) if sup_inns and "supplier" in self.roles else []
             stored = await self._internal(list(targets))
             st["detail"] = f"как заказчик {len(customer_contracts)}, как поставщик {len(supplier_contracts)}, реестр {len(black)}"
 
@@ -144,7 +146,7 @@ class OrgAnalyzer:
             """Одна организация с обработкой ошибок."""
             async with sem:
                 try:
-                    done[cid] = await self._analyze(cid, t, customer_contracts, supplier_contracts, black,
+                    done[cid] = await self._analyze(cid, t, customer_contracts, supplier_contracts, black, rnp,
                                                     stored.get(cid), since)
                 except Exception as e:  # noqa: BLE001
                     logger.error(f"Ошибка аналитики организации {cid}: {e}", exc_info=True)
@@ -164,7 +166,7 @@ class OrgAnalyzer:
         return out
 
     async def _analyze(self, cid: int, t: Dict[str, Any], customer_contracts: List[Dict[str, Any]],
-                       supplier_contracts: List[Dict[str, Any]], black: List[Dict[str, Any]],
+                       supplier_contracts: List[Dict[str, Any]], black: List[Dict[str, Any]], rnp: List[Dict[str, Any]],
                        stored: Optional[Dict[str, Any]], since: str) -> Dict[str, Any]:
         """Секции одной организации, резюме, сохранение и запись."""
         prev = (stored or {}).get("ai_analysis") or {}
@@ -178,7 +180,7 @@ class OrgAnalyzer:
             ids = {int(g["id"]) for g in t["customer_rows"]}
             mine = [c for c in customer_contracts if c.get("organisation_id") is not None and int(c["organisation_id"]) in ids]
             if mine:
-                sec = org_profile.customer_section(mine, black, settings, (prev.get("customer") or {}).get("score"))
+                sec = org_profile.customer_section(mine, black, settings, org_profile.previous_customer_score(prev))
                 progress.note(f"заказчик: закупок {len(mine)}, рисков {len(sec['risks'])}, балл {sec['score']}")
                 async with progress.step("резюме заказчика"):
                     sec["resume"] = await self._resume("customer", name, sec)
@@ -187,9 +189,10 @@ class OrgAnalyzer:
         if "supplier" in self.roles:
             mine = [c for c in supplier_contracts if str(c.get("supplier_inn") or "").strip() == t["inn"]]
             sup_black = [b for b in black if str(b.get("inn") or "").strip() == t["inn"]]
-            if mine or sup_black:
+            sup_rnp = [e for e in rnp if str(e.get("inn") or "").strip() == t["inn"]]
+            if mine or sup_black or sup_rnp:
                 sec = org_profile.supplier_section(mine, sup_black, t["inn"], settings,
-                                                   (prev.get("supplier") or {}).get("score"))
+                                                   (prev.get("supplier") or {}).get("score"), rnp=sup_rnp)
                 progress.note(f"поставщик: контрактов {len(mine)}, рисков {len(sec['risks'])}, балл {sec['score']}")
                 async with progress.step("резюме поставщика"):
                     sec["resume"] = await self._resume("supplier", name, sec)

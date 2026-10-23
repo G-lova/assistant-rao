@@ -33,7 +33,9 @@ import hashlib
 import json
 import os
 import re
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
+import shutil
+import tempfile
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
 from configs.config import Config
 from configs.logger import get_logger
@@ -581,10 +583,28 @@ class AIFileAnalyzer:
         purchase = purchase_context(row)
         prev_id = int(previous["id"]) if previous else None
 
-        async with progress.step("скачивание файла и чтение текста") as st:
-            document_id, text, sha, size = await self._load_document(file_id, row["url"], file_name,
-                                                                     card_id=row.get("risk_monitoring_contract_id"))
-            st["detail"] = f"документ {document_id}, {len(text or '')} символов" if text else "текст не извлечён"
+        from risk_monitoring import archive_volumes
+
+        volume = archive_volumes.volume_info(file_name)
+        local_path, volumes_dir = None, None
+        if volume:
+            vols = await self._volumes(row, volume)
+            if volume[1] > 1:
+                progress.note(f"том {volume[1]} многотомного архива — содержимое анализируется в первом томе")
+                return await self._finalize(file_id, None, self._volume_analysis(row, previous, attempt, vols))
+            async with progress.step(f"скачивание томов архива ({len(vols)})") as st:
+                local_path, volumes_dir = await self._download_volumes(row, vols)
+                st["detail"] = "все тома" if archive_volumes.complete(vols) else "не все тома — читается то, что есть"
+
+        try:
+            async with progress.step("скачивание файла и чтение текста") as st:
+                document_id, text, sha, size = await self._load_document(
+                    file_id, row["url"], file_name, card_id=row.get("risk_monitoring_contract_id"),
+                    **({"local_path": local_path} if local_path else {}))
+                st["detail"] = f"документ {document_id}, {len(text or '')} символов" if text else "текст не извлечён"
+        finally:
+            if volumes_dir:
+                shutil.rmtree(volumes_dir, ignore_errors=True)
         if text is None:
             pipeline = passport.pipeline_block(STAGE, "completed", self.model, self.versions, prev_id,
                                                self.force, attempt, result="no_text")
@@ -703,9 +723,16 @@ class AIFileAnalyzer:
             # правила отбора уточняются, а результат риск-анализа может быть из кэша — применяем их повторно
             from risk_monitoring.document_risk_analyzer import absence_contradicted, rejected_by_rules
 
+            from risk_monitoring.risk_catalog import RISKS as CATALOG
+
+            # коды, которые внешняя система считает правилом по данным ЕИС (FIN-004…008 ↔ pz_p1…p4, CTR-002 ↔ pz_p7):
+            # правило точнее модели, риск модели по ним в паспорте файла не ставится (прогон 21.10.2026: FIN-005
+            # «в соответствии с приложенным файлом», CTR-002 «30 дней с заключения»)
+            covered = {c for c, rec in CATALOG.items() if rec.get("indicator")} if settings.FILE_DROP_RULE_COVERED else set()
             before = len(risk["risks"])
             risk = {**risk, "risks": [r for r in risk["risks"]
-                                      if not rejected_by_rules(r) and not absence_contradicted(r, text)]}
+                                      if not rejected_by_rules(r) and not absence_contradicted(r, text)
+                                      and r.get("code") not in covered]}
             if len(risk["risks"]) < before:
                 progress.note(f"правила отбора сняли рисков: {before - len(risk['risks'])}")
         async with progress.step("фильтр типовых формулировок") as st:
@@ -877,7 +904,19 @@ class AIFileAnalyzer:
                     return res["text"]
             except Exception as e:  # noqa: BLE001 — переходим на общий FileReader
                 logger.warning(f"pdf_text: {file_name}: {type(e).__name__}: {e}; читаю через FileReader")
-        return await self.file_reader.read_file(path, file_name)
+        try:
+            return await self.file_reader.read_file(path, file_name)
+        except Exception as e:  # noqa: BLE001
+            if ext != ".xlsx":
+                raise
+            # книга без обычных листов («Sheet name is an empty list»): текст прямо из XML листов; пусто — файл
+            # получит результат «нет текста», а не ошибку при каждом запуске
+            from risk_monitoring.xlsx_raw import xlsx_raw_text
+
+            text = await asyncio.to_thread(xlsx_raw_text, path)
+            logger.warning(f"{file_name}: Excel не прочитан ({type(e).__name__}: {str(e)[:200]}); "
+                           f"текст из XML листов — {len(text)} символов")
+            return text
 
     def _bad_text_analysis(self, row: Dict[str, Any], quality: Dict[str, Any], print_kind: Optional[Dict[str, Any]],
                            prev_id: Optional[int], attempt: int, sha: str) -> Dict[str, Any]:
@@ -934,7 +973,55 @@ class AIFileAnalyzer:
             ai["raw_data_issues"] = [f"Снят реквизит, которого нет в тексте: {x}" for x in removed_ids]
         ai["risk_scope"] = {"allowed_codes": allowed, "rejected_inconsistent": rejected or 0}
 
-    async def _load_document(self, file_id: int, url: str, file_name: str, card_id: Optional[int] = None):
+    async def _volumes(self, row: Dict[str, Any], volume: Tuple[str, int, str]) -> List[Dict[str, Any]]:
+        """Тома того же многотомного архива закупки (с адресами из ``files_meta.sql``)."""
+        from risk_monitoring import archive_volumes
+
+        card = row.get("risk_monitoring_contract_id")
+        if card is None:
+            return [row]
+        found = await self._query("files_volumes.sql", head=[int(card), volume[2]])
+        vols = archive_volumes.siblings(found, volume[0])
+        meta = {int(r["id"]): r for r in await self.fetch_files_meta([int(v["id"]) for v in vols])} if vols else {}
+        return [meta.get(int(v["id"]), v) for v in vols] or [row]
+
+    async def _download_volumes(self, row: Dict[str, Any], vols: List[Dict[str, Any]]) -> Tuple[Optional[str], str]:
+        """Скачивает все тома в одну папку под их именами (так архиватор находит следующий том).
+
+        Returns:
+            Tuple[Optional[str], str]: Путь к первому тому и папка (удаляется после чтения).
+        """
+        folder = tempfile.mkdtemp(prefix="rm_volumes_")
+        first = None
+        for v in vols:
+            name = os.path.basename(v.get("file_name") or f"volume_{v['id']}")
+            res = await self.parser._download_http_file(url=v.get("url") or v.get("source_url"), procurement_id=None,
+                                                         source="risk_monitoring", original_filename=name)
+            if not res or res.get("status") != "success":
+                logger.warning(f"Том {name} (файл {v['id']}) не скачан: {(res or {}).get('error')}")
+                continue
+            dest = os.path.join(folder, name)
+            shutil.move(res["file_path"], dest)
+            if int(v["id"]) == int(row["id"]):
+                first = dest
+        return first, folder
+
+    def _volume_analysis(self, row: Dict[str, Any], previous: Optional[Dict[str, Any]], attempt: int,
+                         vols: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Паспорт тома 2+ многотомного архива: без анализа, со ссылкой на первый том."""
+        first = vols[0] if vols else {}
+        reason = (f"Том многотомного архива: содержимое анализируется вместе с остальными томами в первом томе — "
+                  f"файл {first.get('id')} («{first.get('file_name')}»).")
+        pipeline = passport.pipeline_block(STAGE, "completed", None, self.versions,
+                                           int(previous["id"]) if previous else None, self.force, attempt,
+                                           result="archive_volume")
+        ai = passport.no_text_analysis(row, reason, pipeline, None, None)
+        ai["archive_volume"] = {"first_file_id": first.get("id"), "first_file_name": first.get("file_name"),
+                                "volumes": [{"file_id": v.get("id"), "file_name": v.get("file_name")} for v in vols]}
+        return ai
+
+    async def _load_document(self, file_id: int, url: str, file_name: str, card_id: Optional[int] = None,
+                             local_path: Optional[str] = None):
         """Скачивает файл, находит или создаёт документ по хэшу содержимого и связывает его с файлом.
 
         Args:
@@ -942,6 +1029,8 @@ class AIFileAnalyzer:
             url: Ссылка на файл (хранилище внешней системы или ЕИС).
             file_name: Имя файла.
             card_id: ``risk_monitoring_contracts.id`` — карточка закупки (срок хранения ссылки).
+            local_path: Уже скачанный файл (первый том многотомного архива рядом с остальными томами) — без
+                скачивания; файл не удаляется (его папку удаляет вызывающий).
 
         Текст с признаками сбоя OCR (циклы повторов) сохраняется со статусом ``suspect``: при обычном
         прогоне он берётся из кэша, при отладочном (``force``) файл читается заново.
@@ -952,8 +1041,11 @@ class AIFileAnalyzer:
         Raises:
             FileUnavailable: Файл не скачался.
         """
-        res = await self.parser._download_http_file(url=url, procurement_id=None, source="risk_monitoring",
-                                                     original_filename=file_name)
+        if local_path:
+            res = {"status": "success", "file_path": local_path, "keep": True}
+        else:
+            res = await self.parser._download_http_file(url=url, procurement_id=None, source="risk_monitoring",
+                                                         original_filename=file_name)
         if not res or res.get("status") != "success":
             raise FileUnavailable((res or {}).get("error", "неизвестная ошибка скачивания"))
         tmp_path = res["file_path"]

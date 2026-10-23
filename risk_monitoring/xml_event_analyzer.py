@@ -23,8 +23,9 @@ import asyncio
 import datetime
 import os
 import zipfile
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from configs import settings
 from configs.config import Config
 from configs.logger import get_logger
 from risk_monitoring import progress
@@ -93,6 +94,9 @@ class ArchiveCache:
         self.parser = parser
         self.paths: Dict[str, str] = {}
         self.locks: Dict[str, asyncio.Lock] = {}
+        # открытый ZIP и указатель «имя → запись» на архив: в выгрузке за день — до десятков тысяч XML в одном
+        # архиве, и открывать его заново (с разбором оглавления) на каждый XML — квадратичная работа
+        self.zips: Dict[str, Tuple[zipfile.ZipFile, Dict[str, str], Any]] = {}
 
     async def read(self, url: str, entry_name: str) -> bytes:
         """Байты XML из архива.
@@ -116,7 +120,28 @@ class ArchiveCache:
                     raise FileNotFoundError(f"архив не скачан: {(res or {}).get('error')}")
                 self.paths[url] = res["file_path"]
         path = self.paths[url]
-        return await asyncio.to_thread(self._read_entry, path, entry_name)
+        return await asyncio.to_thread(self._read_cached, path, entry_name)
+
+    def _read_cached(self, path: str, entry_name: str) -> bytes:
+        """Читает XML из уже открытого архива (открывается один раз; чтение под блокировкой архива)."""
+        import threading
+
+        if path not in self.zips:
+            zf = zipfile.ZipFile(path)
+            index: Dict[str, str] = {}
+            for n in zf.namelist():
+                index.setdefault(n, n)
+                index.setdefault(n.rsplit("/", 1)[-1], n)
+            self.zips[path] = (zf, index, threading.Lock())
+        zf, index, lock = self.zips[path]
+        name = index.get(entry_name) or index.get(entry_name.rsplit("/", 1)[-1])
+        if name is None:
+            raise FileNotFoundError(f"в архиве нет {entry_name}")
+        with lock:
+            info = zf.getinfo(name)
+            if info.file_size > xml_events.MAX_XML_BYTES:
+                raise ValueError(f"{entry_name}: XML больше {xml_events.MAX_XML_BYTES} байт")
+            return zf.read(name)
 
     @staticmethod
     def _read_entry(path: str, entry_name: str) -> bytes:
@@ -133,7 +158,13 @@ class ArchiveCache:
             return zf.read(name)
 
     def close(self) -> None:
-        """Удаляет скачанные архивы."""
+        """Закрывает открытые архивы и удаляет скачанные."""
+        for zf, _, _ in self.zips.values():
+            try:
+                zf.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self.zips.clear()
         for p in self.paths.values():
             try:
                 os.unlink(p)
@@ -196,6 +227,8 @@ class XmlEventAnalyzer:
         self.push_results = push_results
         self.force = force
         self.semaphore = asyncio.Semaphore(concurrency)
+        # кому из событий нужна модель (ежедневный прогон: закупки системы); None — всем
+        self.llm_filter: Optional[Callable[[Dict[str, Any]], bool]] = None
         self.versions = {"event_analyzer": self.event_analyzer.prompt_version if self.event_analyzer else None,
                          "catalog": risk_catalog.CATALOG_VERSION}
 
@@ -234,6 +267,7 @@ class XmlEventAnalyzer:
             # 1) разбор XML, diff, правила — без модели
             prepared = await asyncio.gather(*(self._guarded(found[i], previous.get(i)) for i in ids if i in found))
             ctxs = [p for p in prepared if p.get("status") == "prepared"]
+            self._defer_llm(ctxs)
             # 2) модель — одним запросом на закупку (контракт) для событий, где она нужна
             llm = await self._llm_by_purchase([c for c in ctxs if c["needs_llm"]])
             # 3) сборка ai_analysis и запись
@@ -284,7 +318,7 @@ class XmlEventAnalyzer:
 
     def _will_prepare(self, row: Dict[str, Any]) -> bool:
         """XML будет разбираться в этом запуске (не пропущен как проанализированный или исчерпавший попытки)."""
-        if self.force:
+        if self.force or self._deferred_now_needed(row):
             return True
         if row.get("rm_status") == "completed":
             return False
@@ -351,10 +385,13 @@ class XmlEventAnalyzer:
 
         prevs = [previous[int(r["id"])] for r in rows if previous.get(int(r["id"]))]
         await asyncio.gather(*(parse(x) for x in list(rows) + prevs))
+        covered = self._cache().covered_cards
         ids = [int(r["id"]) for r in rows] + [int(p["id"]) for p in prevs]
         urls = set()
         for r in rows:
-            urls |= self._urls(int(r["id"]), print_forms=True)
+            # файлы закупки уже загружены целиком (ежедневный прогон: daily_files.sql) — ссылки не запрашиваются
+            if _int(r.get("risk_monitoring_contract_id")) not in covered:
+                urls |= self._urls(int(r["id"]), print_forms=True)
         try:
             await self._load_files(ids, sorted(urls))
             await self._load_file_internal()
@@ -407,7 +444,7 @@ class XmlEventAnalyzer:
         """Предыдущая версия каждого XML (максимальная версия меньше текущей) — один запрос на все XML прогона."""
         try:
             grouped = await self._cache().keyed(self._query, "xml_previous.sql", ids, "current_id",
-                                                head=[self.storage_path])
+                                                head=[self.storage_path], size=settings.RM_PREVIOUS_CHUNK)
         except Exception as e:  # noqa: BLE001 — без предыдущей версии событие всё равно анализируется
             logger.warning(f"Предыдущие версии XML не получены: {e}")
             return {}
@@ -423,7 +460,7 @@ class XmlEventAnalyzer:
         xml_id = int(row["id"])
         attempt = (_int(row.get("rm_attempt")) or 0) + 1
         progress.subject(f"XML {xml_id} «{row.get('entry_name') or ''}»")
-        if not self.force:
+        if not self.force and not self._deferred_now_needed(row):
             if row.get("rm_status") == "completed":
                 progress.note("уже проанализирован во внешней БД — пропуск")
                 return {"xml_id": xml_id, "status": "skipped", "reason": "already_analyzed"}
@@ -491,6 +528,27 @@ class XmlEventAnalyzer:
             except Exception as pe:  # noqa: BLE001
                 logger.error(f"Не удалось записать статус ошибки XML {xml_id}: {pe}")
         return result
+
+    def _defer_llm(self, ctxs: List[Dict[str, Any]]) -> None:
+        """Откладывает модель для событий, не прошедших ``llm_filter``: событие описывается правилами и шаблоном,
+        ``pipeline.llm.deferred`` — причина, по которой модель была бы нужна (для повторного разбора, когда
+        закупка появится в системе)."""
+        if getattr(self, "llm_filter", None) is None:
+            return
+        n = 0
+        for c in ctxs:
+            if c.get("needs_llm") and not self.llm_filter(c):
+                c.update(needs_llm=False, llm_deferred=c["llm_reason"], llm_reason="not_own")
+                n += 1
+        if n:
+            logger.info(f"События XML: модель отложена для {n} (XML не относится к закупкам системы)")
+
+    def _deferred_now_needed(self, row: Dict[str, Any]) -> bool:
+        """Разбор XML без модели был отложен, а теперь XML привязан к закупке системы."""
+        deferred = row.get("rm_llm_deferred")
+        if getattr(self, "llm_filter", None) is None or deferred in (None, "", "null", "None") or deferred != deferred:
+            return False
+        return bool(self.llm_filter({"row": row, "link": None}))
 
     async def _finish_guarded(self, ctx: Dict[str, Any], llm: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """Сборка и запись события с обработкой ошибок."""
@@ -628,6 +686,8 @@ class XmlEventAnalyzer:
                                            _int(previous["id"]) if previous else None, self.force, ctx["attempt"],
                                            export_date=str(row.get("exact_date"))[:10] if row.get("exact_date") else None)
         pipeline["llm"] = {"used": llm is not None, "reason": ctx["llm_reason"]}
+        if ctx.get("llm_deferred"):
+            pipeline["llm"]["deferred"] = ctx["llm_deferred"]
         ai = xml_events.build_xml_analysis(event=ctx["event"], facts=ctx["facts"], changes=ctx["changes"],
                                            doc_changes=ctx["doc_changes"], files=ctx["files"], link=ctx["link"],
                                            rule_risk_list=ctx["rules"], llm=llm,
@@ -686,13 +746,16 @@ class XmlEventAnalyzer:
         """
         ids = [xml_id] + ([int(previous["id"])] if previous else [])
         urls = [a["url"] for a in atts][:200]
+        c = self._cache()
         try:
-            await self._load_files(ids, urls)
+            # XML привязанной закупки, файлы которой загружены целиком запросом прогона, — без запроса по ссылкам
+            # (прогон 21.10.2026: 81 запрос xml_files.sql на 111 XML)
+            covered = xml_id in c.covered_xml and (not previous or int(previous["id"]) in c.covered_xml)
+            await self._load_files([] if covered else ids, [] if covered else urls)
             await self._load_file_internal()
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Файлы XML {xml_id} не получены: {e}")
             return []
-        c = self._cache()
         id_set, url_set = set(ids), set(urls)
         rows = [r for _, r in sorted(c.file_rows.items())
                 if _int(r.get("xml_source_id")) in id_set or r.get("source_url") in url_set]

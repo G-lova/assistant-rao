@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+from evaluate_documents.evidence_check import drop_nulls, verify_extraction
 from json_repair import repair_json
 from string import Template
 from typing import Any, Dict, List
@@ -103,9 +104,9 @@ class DataExtractor:
                 logger.error(f"Ошибка при анализе блока {i+1}: {result}")
                 continue
             if isinstance(result, list):   # блок не поместился в контекст и разобран по частям
-                successful_results.extend(r for r in result if r)
+                successful_results.extend(drop_nulls(r) for r in result if r)   # null из схемы → «поля нет»
             elif result != None:
-                successful_results.append(result)
+                successful_results.append(drop_nulls(result))
 
         if not successful_results:
             fallback = {
@@ -119,6 +120,8 @@ class DataExtractor:
             logger.info(f"Объединение извлеченных данных по чанкам для '{filename}'")
             final_result = await self.merge_chunk_results(successful_results, filename)
             logger.info(f"Объединение извлеченных данных по чанкам для '{filename}' прошло успешно: {final_result}")
+            # Значения, которых нет в тексте документа, отбрасываются (суммы, даты, номер, ИНН/КПП/ОГРН, метод НМЦК)
+            final_result = verify_extraction(final_result, "\n".join(chunks), filename)
 
             # logger.info(f"Оптимизация объединенных данных для {document_name}")
             # detected_type = final_result.get("type_compliance", {}).get("detected_type", doc_type)
@@ -189,7 +192,7 @@ class DataExtractor:
                     extra_body={
                         "guided_json": json.loads(schema)},
                     max_tokens=3000,
-                    temperature=0.1
+                    temperature=0
                 )
                 if penalize:  # повтор после зацикливания: штраф за повторяющиеся токены
                     request = penalized(request)
@@ -625,7 +628,7 @@ class DataExtractor:
                         {"role": "user", "content": f"Вот summary каждого чанка:\n\n{summary_string}"}
                     ],
                     max_tokens=3000,
-                    temperature=0.1
+                    temperature=0
                 )
 
                 raw_response = response.choices[0].message.content.strip()

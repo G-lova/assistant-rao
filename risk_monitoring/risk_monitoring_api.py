@@ -16,10 +16,17 @@ ALLOWED_TABLES = {
     "risk_monitoring_contracts",
     "risk_monitoring_eis_xml_sources",
     "risk_monitoring_files",
+    # ТЗ 09.10.2026, п. 3: профиль организации (секции customer / supplier) и сводка ежедневного прогона
+    "risk_monitoring_organisations",
+    "risk_monitoring_daily_runs",
 }
 
 
 LIMITER_WAIT = 120   # наибольшее ожидание своей очереди к API, с
+# 422 на ссылку на предыдущую версию документа (pipeline.previous_scope_id)
+import re as _re
+
+PREVIOUS_REJECTED_RE = _re.compile(r"предыдущ\w*\s+верси|previous_scope", _re.IGNORECASE)
 
 
 class RiskAPIError(Exception):
@@ -49,6 +56,7 @@ class RiskMonitoringAPI:
 
     GET   /api/risk-monitoring/ai-analysis?table=...&id=...
     PATCH /api/risk-monitoring/ai-analysis  {table, id, ai_analysis}
+    POST  /api/risk-monitoring/daily-runs   {export_date, status, stages, started_at, finished_at, ai_analysis} → id
     """
 
     def __init__(self, http_manager: HTTPClientManager, environment: str = None, rate: float = 0.9):
@@ -72,7 +80,7 @@ class RiskMonitoringAPI:
             raise ValueError(f"Недопустимая таблица: {table}")
 
     @async_retry(RISK_API_RETRY_CONFIG)
-    async def _request(self, method: str, **kwargs) -> Dict[str, Any]:
+    async def _request(self, method: str, url: str = None, **kwargs) -> Dict[str, Any]:
         """Запрос к API с лимитом частоты и повторами на 429/503/5xx (с учётом ``Retry-After``).
 
         Ожидание лимита частоты ограничено ``LIMITER_WAIT`` секундами: зависнуть на нём задача не может.
@@ -81,7 +89,7 @@ class RiskMonitoringAPI:
         session = self.http_manager.get_session()
 
         async with session.request(
-            method, self.url, headers=self.headers,
+            method, url or self.url, headers=self.headers,
             timeout=aiohttp.ClientTimeout(total=30), **kwargs
         ) as resp:
             if resp.status in (429, 503) or resp.status >= 500:
@@ -92,8 +100,17 @@ class RiskMonitoringAPI:
                 raise RiskAPIRetryable(f"HTTP {resp.status}", resp.status)
 
             if resp.status != 200:
-                body = (await resp.text())[:300]
-                raise RiskAPIError(f"HTTP {resp.status}: {body}", resp.status)
+                raw = await resp.text()
+                try:   # сообщение API — JSON с \uXXXX: в журнал — читаемым текстом
+                    import json as _json
+
+                    parsed = _json.loads(raw)
+                    body = parsed.get("message") or raw
+                    if parsed.get("errors"):
+                        body = f"{body} {parsed['errors']}"
+                except Exception:  # noqa: BLE001
+                    body = raw
+                raise RiskAPIError(f"HTTP {resp.status}: {str(body)[:2000]}", resp.status)
 
             data = await resp.json(content_type=None)
             if data.get("status") != "ok":
@@ -107,12 +124,111 @@ class RiskMonitoringAPI:
         return data["data"]
 
     async def patch_ai_analysis(self, table: str, record_id: int, ai_analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """Меняет только ai_analysis. Значение — непустой JSON-объект или непустая строка."""
+        """Меняет только ai_analysis. Значение — непустой JSON-объект или непустая строка.
+
+        API проверяет ``pipeline.previous_scope_id``: предыдущей версией может быть только более ранний документ
+        (422 «Предыдущая версия допустима только для более раннего …», файл 5367, 21.10.2026). Тогда результат
+        записывается без ссылки на предыдущую версию: кандидат и ответ API сохраняются в
+        ``pipeline.previous_scope_rejected`` — анализ не теряется из-за спорной связи версий.
+        """
         self._check_table(table)
         if not ai_analysis:
             raise ValueError("ai_analysis не может быть пустым")
-        data = await self._request(
-            "PATCH",
-            json={"table": table, "id": int(record_id), "ai_analysis": ai_analysis},
-        )
+        if table == "risk_monitoring_eis_xml_sources" and isinstance(ai_analysis, dict) \
+                and isinstance(ai_analysis.get("event"), dict):
+            # результаты, сохранённые до 23.10.2026, — без event_type; API его теперь требует
+            from risk_monitoring.xml_events import with_event_type
+            with_event_type(ai_analysis["event"])
+        if table == "risk_monitoring_contracts" and isinstance(ai_analysis, dict):
+            # результаты до 23.10.2026: registry — объект; API ждёт список совпадений
+            from risk_monitoring.contract_package import normalize_registry
+            normalize_registry(ai_analysis)
+        try:
+            data = await self._request(
+                "PATCH",
+                json={"table": table, "id": int(record_id), "ai_analysis": ai_analysis},
+            )
+        except RiskAPIError as e:
+            pipe = (ai_analysis or {}).get("pipeline") if isinstance(ai_analysis, dict) else None
+            if e.status != 422 or not isinstance(pipe, dict) or pipe.get("previous_scope_id") is None \
+                    or not PREVIOUS_REJECTED_RE.search(str(e)):
+                raise
+            logger.warning(f"{table} {record_id}: API отклонил previous_scope_id={pipe['previous_scope_id']} ({e}) — "
+                           f"запись без ссылки на предыдущую версию")
+            pipe.update(previous_scope_rejected={"id": pipe["previous_scope_id"], "reason": str(e)[:300]},
+                        previous_scope_id=None)
+            data = await self._request(
+                "PATCH",
+                json={"table": table, "id": int(record_id), "ai_analysis": ai_analysis},
+            )
         return data["data"]
+
+    def _sibling(self, path: str) -> str:
+        """Адрес метода API рядом с ``/ai-analysis`` (``/daily-runs``, ``/organisations``)."""
+        base = self.url.rsplit("/ai-analysis", 1)[0] if "/ai-analysis" in self.url else self.url.rstrip("/")
+        return f"{base}/{path}"
+
+    @property
+    def daily_runs_url(self) -> str:
+        """Адрес ``POST /api/risk-monitoring/daily-runs``."""
+        return self._sibling("daily-runs")
+
+    async def upsert_daily_run(self, export_date: str, status: str = None, stages: Dict[str, Any] = None,
+                               started_at: str = None, finished_at: str = None) -> Dict[str, Any]:
+        """Создаёт строку ``risk_monitoring_daily_runs`` или обновляет её состояние (upsert по дате выгрузки).
+
+        Передаются только заданные поля: у существующей записи обновляются только они; ``stages`` заменяется
+        целиком. ``ai_analysis`` этим запросом не пишется — только :meth:`patch_ai_analysis` по полученному ``id``
+        (API daily-runs, 21.10.2026).
+
+        Args:
+            export_date: Дата выгрузки ``ГГГГ-ММ-ДД``.
+            status: Код статуса (строчные латинские буквы, цифры, ``_``): ``running`` / ``completed`` / ``failed``.
+            stages: Полный набор состояний этапов.
+            started_at: Начало прогона, ISO 8601 с часовым поясом.
+            finished_at: Окончание прогона (не раньше начала).
+
+        Returns:
+            Dict[str, Any]: ``data`` ответа (``id``, ``export_date``, ``status``).
+        """
+        body: Dict[str, Any] = {"export_date": export_date}
+        for k, v in (("status", status), ("stages", stages), ("started_at", started_at), ("finished_at", finished_at)):
+            if v is not None:
+                body[k] = v
+        if status == "running":
+            # повторный запуск за дату: окончание прежнего запуска раньше нового начала — сбрасываем
+            # (иначе 422 «Завершение прогона не может предшествовать началу», 23.10.2026)
+            body["finished_at"] = None
+        data = await self._request("POST", url=self.daily_runs_url, json=body)
+        return data.get("data") or {}
+
+    async def upsert_organisation(self, inn: str, kpp: str, name: str, year: int = None, short_name: str = None,
+                                  full_name: str = None, ogrn: str = None) -> Dict[str, Any]:
+        """Организация-поставщик: существующая по ``year + inn + kpp`` или новая (``is_external = 1``,
+        ``monitoring = 0``) — ``POST /api/risk-monitoring/organisations`` (API, 21.10.2026).
+
+        Только юридические лица: ИНН — 10 цифр, КПП — 9 цифр. Реквизиты существующей записи не меняются.
+
+        Args:
+            inn: ИНН.
+            kpp: КПП.
+            name: Наименование (обязательно и при повторном запросе).
+            year: Год справочника (по умолчанию текущий на стороне API).
+            short_name: Краткое наименование.
+            full_name: Полное наименование.
+            ogrn: ОГРН (13 цифр).
+
+        Returns:
+            Dict[str, Any]: ``data`` ответа (``id``, ``year``, ``inn``, ``kpp``, ``is_external``, ``monitoring``).
+
+        Raises:
+            ValueError: ИНН/КПП не юридического лица.
+        """
+        if not (str(inn).isdigit() and len(str(inn)) == 10 and str(kpp).isdigit() and len(str(kpp)) == 9):
+            raise ValueError("API принимает только юридические лица: ИНН — 10 цифр, КПП — 9 цифр")
+        body: Dict[str, Any] = {"inn": str(inn), "kpp": str(kpp), "name": str(name)[:1000]}
+        for k, v in (("year", year), ("short_name", short_name), ("full_name", full_name), ("ogrn", ogrn)):
+            if v is not None:
+                body[k] = v
+        data = await self._request("POST", url=self._sibling("organisations"), json=body)
+        return data.get("data") or {}

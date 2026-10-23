@@ -84,7 +84,7 @@ class ContractPackageTest(unittest.TestCase):
                                          statuses={}, previous_score=20.0, settings=settings)
         codes = {r["rule_id"] for r in out["risks"]}
         self.assertEqual(codes, {"PROC-001", "FIN-003", "REG-001"})
-        self.assertEqual(out["registry"]["matches"][0]["black_list_id"], 3)
+        self.assertEqual(out["registry"][0]["black_list_id"], 3)
         self.assertEqual(out["profile"]["zone"], "red")
         self.assertGreater(out["profile"]["delta"], 0)
         self.assertEqual(out["passport"]["stage"], "contract")
@@ -368,3 +368,64 @@ class RuleCoveredTest(unittest.TestCase):
         self.assertEqual([r["rule_id"] for r in out], ["DOC-003"])
         self.assertEqual(len(cp.drop_rule_covered(risks, {"pz_p2": 0}, confirmed={"FIN-005"})), 3)
         self.assertEqual(len(cp.drop_rule_covered(risks, None)), 3)
+
+
+class CustomerQualityTest(unittest.TestCase):
+    """Сводный показатель заказчика по «Модели сводной аналитики»: Псвод = Σ (Σ k·П) × 100 × Кблок."""
+
+    def _c(self, i, codes=(), levels=(), score=10, **kw):
+        """Закупка с рисками ``codes`` уровней ``levels``."""
+        return _contract(i, score=score, risk_codes=json.dumps(list(codes)), risk_levels=json.dumps(list(levels)),
+                         risk_confidences=json.dumps([1.0] * len(codes)),
+                         risk_sources=json.dumps([["rule"]] * len(codes)), **kw)
+
+    def test_clean_customer_is_green(self):
+        """Нет рисков — 100, зелёная зона, балл риска 0."""
+        sec = org_profile.customer_section([self._c(i) for i in range(3)], [], settings)
+        self.assertEqual(sec["quality_index"], 100.0)
+        self.assertEqual((sec["score"], sec["zone"]), (0.0, "green"))
+
+    def test_red_contract_lowers_index(self):
+        """Закупка в красной зоне (прогон 02.07.2026, филиал СПбГЭУ) снижает показатель; расчёт по блокам виден."""
+        cs = [self._c(1, ("DOC-002", "CTR-005", "CTR-014"), (0.8, 0.7, 0.7), score=71.2)]
+        sec = org_profile.customer_section(cs, [], settings)
+        b = sec["score_model"]["blocks"]
+        self.assertLess(sec["quality_index"], 85)
+        self.assertLess(b["conclusion"]["quality"], 100)
+        self.assertLess(b["execution"]["quality"], 100)
+        self.assertEqual(b["acceptance"]["quality"], 100)
+        p22 = next(x for x in b["execution"]["indicators"] if x["code"] == "P22")
+        self.assertAlmostEqual(p22["value"], 0.3, places=3)
+        # Псвод = 0,2·Пзак + 0,5·Пис + 0,3·Пприем
+        expect = round(0.2 * b["conclusion"]["quality"] + 0.5 * b["execution"]["quality"] + 0.3 * 100, 1)
+        self.assertAlmostEqual(sec["quality_index"], expect, delta=0.11)
+
+    def test_no_contract_blocks_not_rated(self):
+        """Без заключённых контрактов реализация и приёмка не оцениваются — показатель по заключению."""
+        cs = [self._c(1, ("DOC-002",), (0.5,), contract_number=None, contract_price=None)]
+        m = org_profile.customer_section(cs, [], settings)["score_model"]
+        self.assertEqual(m["rated_blocks"], ["conclusion"])
+        self.assertEqual(m["quality_index"], m["blocks"]["conclusion"]["quality"])
+
+    def test_violation_weighs_more(self):
+        """Нарушение весит больше риска того же уровня."""
+        from risk_monitoring import risk_catalog
+        code = next(k for k, v in risk_catalog.RISKS.items() if v.get("kind") == "violation")
+        risk = org_profile._stage_weight({"rule_id": "CTR-005", "level": 0.5, "confidence": 1.0}, settings)
+        self.assertGreater(org_profile._stage_weight({"rule_id": code, "level": 0.5, "confidence": 1.0}, settings), risk)
+
+    def test_mapping_valid(self):
+        """Коды показателей есть в каталоге, не повторяются; веса показателей блока в сумме 1, блоков — 1."""
+        from risk_monitoring import risk_catalog
+        codes = [c for b in settings.CUSTOMER_QUALITY_BLOCKS for *_, cs in b["indicators"] for c in cs]
+        self.assertEqual(len(codes), len(set(codes)))
+        self.assertTrue(all(c in risk_catalog.RISKS for c in codes))
+        for b in settings.CUSTOMER_QUALITY_BLOCKS:
+            self.assertAlmostEqual(sum(k for _, _, k, _ in b["indicators"]), 1.0)
+        self.assertAlmostEqual(sum(b["weight"] for b in settings.CUSTOMER_QUALITY_BLOCKS), 1.0)
+
+    def test_no_analyzed(self):
+        """Нет проанализированных закупок — показатель не считается, балл прежний (поведенческий)."""
+        sec = org_profile.customer_section([_contract(i) for i in range(3)], [], settings)
+        self.assertIsNone(sec["score_model"]["quality_index"])
+        self.assertNotIn("quality_index", sec)
