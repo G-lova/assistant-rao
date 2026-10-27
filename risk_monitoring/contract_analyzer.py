@@ -17,19 +17,20 @@ from configs.config import Config
 from configs.logger import get_logger
 from risk_monitoring import contract_package as cp
 from configs import settings
-from risk_monitoring import passport, progress, rm_sql
+from risk_monitoring import passport, progress, risk_catalog, rm_sql
 
 logger = get_logger(__name__)
 
 EXTERNAL_TABLE = "risk_monitoring_contracts"
 STAGE = "S2"
-PROMPT_VERSION = "contract-resume-2"
+PROMPT_VERSION = "contract-resume-3"
 
 RESUME_SYSTEM = (
     "Ты — аналитик риск-мониторинга госзакупок (44-ФЗ, 223-ФЗ). По паспорту закупки, её рискам и событиям напиши "
     "резюме для аналитика: 4–7 предложений, по-русски, без вступлений. Что закупают и на какой стадии, главные риски "
     "со ссылкой на источник (документ, событие ЕИС, правило, реестр), что проверить в первую очередь. Не придумывай "
-    "фактов, которых нет во входных данных; не делай вывод о нарушении — только о признаках риска. Не используй коды рисков и правил (вида DOC-002, FIN-004, BEH-005, pz_p1) — называй риски словами, понятными заказчику. Ответ — "
+    "фактов, которых нет во входных данных; не делай вывод о нарушении — только о признаках риска. Не используй коды рисков и правил (вида DOC-002, FIN-004, BEH-005, pz_p1) — называй риски словами, понятными заказчику. Если у риска указано possible_exclusion — скажи, что по "
+    "документам возможно законное исключение и его стоит проверить. Ответ — "
     "обычный текст, без JSON, списков и разметки.")
 RESUME_SCHEMA = {"type": "object", "properties": {"resume": {"type": "string"}}, "required": ["resume"]}
 
@@ -329,6 +330,7 @@ class ContractAnalyzer:
         progress.subject(f"Закупка {cid} ({card.get('number') or ''})")
         dataset = cp.as_json(card.get("dataset")) or {}
         inn = str((dataset.get("supplier") or {}).get("post_inn") or "").strip()
+        texts: Optional[Dict[int, str]] = None
         if cp.absence_claims(item["files"]):
             async with progress.step("проверка «отсутствует …» по текстам документов закупки") as st:
                 texts = await self._texts(item["files"])
@@ -344,10 +346,16 @@ class ContractAnalyzer:
         if not self.force and card.get("rm_status") == "completed" and card.get("prev_hash") == h:
             progress.note("входные данные не изменились — пересчёт не нужен")
             return {"card_id": cid, "status": "unchanged", "pushed": False}
+        checks = await self._rule_checks(built, item, texts)
         async with progress.step("резюме закупки" + (" (модель)" if self.llm else " (шаблон)")):
             resume, used_llm = await self._resume(built)
-        pipeline = passport.pipeline_block(STAGE, "completed", self.model if used_llm else None,
-                                           {"contract_resume": PROMPT_VERSION} if used_llm else {}, debug=self.force)
+        versions = {"contract_resume": PROMPT_VERSION} if used_llm else {}
+        if checks:
+            from risk_monitoring.rule_exclusions import load_config
+
+            versions["rule_exclusions"] = load_config().get("version")
+        pipeline = passport.pipeline_block(STAGE, "completed", self.model if (used_llm or checks) else None,
+                                           versions, debug=self.force)
         pipeline.update(schema_version=cp.SCHEMA_VERSION, input_hash=h,
                         inputs={"files": len(item["files"]), "xml": len(item["xmls"]),
                                 "rules": bool(item["values"]), "black_list": len(black_by_inn.get(inn, []))})
@@ -366,6 +374,42 @@ class ContractAnalyzer:
             await self._save_internal(cid, ai, result["pushed"], result.get("push_error"))
         return result
 
+    async def _rule_checks(self, built: Dict[str, Any], item: Dict[str, Any],
+                           texts: Optional[Dict[int, str]]) -> Dict[str, Dict[str, Any]]:
+        """Перепроверка сработавших показателей внешней системы по документам закупки (``rule_exclusions``).
+
+        Найденное исключение понижает уровень и уверенность риска (риск не снимается); балл и зона пересчитываются.
+        Сбой модели не мешает анализу закупки.
+
+        Returns:
+            Dict[str, Dict[str, Any]]: ``показатель → rule_check`` (пусто — не проверялось).
+        """
+        from risk_monitoring import rule_exclusions as rx
+
+        if not settings.RULE_EXCLUSION_CHECK_ENABLED or self.llm is None or not rx.fired_with_exclusions(
+                item.get("values"), suspect=settings.RULE_SUSPECT_INDICATORS):
+            return {}
+        try:
+            async with progress.step("перепроверка сработавших правил по документам (исключения)") as st:
+                if texts is None:
+                    texts = await self._texts(item["files"])
+                names = {int(f["id"]): f.get("file_name") for f in item["files"] if f.get("id") is not None}
+                titles = {k: risk_catalog.title(c) for k, c in cp.INDICATOR_TO_CODE.items()}
+                checks = await rx.check_rules(self.llm, item.get("values"), texts, names, settings, titles)
+                lowered = rx.apply_checks(built["risks"], checks, settings)
+                st["detail"] = f"показателей {len(checks)}, исключений {lowered}"
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Перепроверка правил не выполнена: {type(e).__name__}: {e}")
+            return {}
+        if checks:
+            built["rule_checks"] = checks
+            built["risks"].sort(key=lambda r: (r.get("level") or 0) * (r.get("confidence") or 0), reverse=True)
+            built["profile"] = cp.profile(built["risks"], built["profile"].get("previous_score"),
+                                          built.get("confirmed_codes") or (), settings.CONFIRMED_WEIGHT,
+                                          tuple(settings.SCORE_ZONES), settings.SCORE_DECAY, settings.AI_UNCONFIRMED_WEIGHT)
+            built["total_risk"] = passport.total_risk(built["risks"])
+        return checks
+
     async def _resume(self, built: Dict[str, Any]) -> Tuple[str, bool]:
         """Резюме закупки: модель (короткий запрос) или шаблон при её недоступности."""
         fallback = cp.default_resume(built["passport"], built["profile"], built["risks"], built["events"])
@@ -378,7 +422,10 @@ class ContractAnalyzer:
                                                "customer", "supplier", "modification", "termination")},
             "profile": {k: built["profile"].get(k) for k in ("score", "zone", "delta", "components")},
             "risks": [{"title": r.get("title"), "description": (r.get("description") or "")[:300],
-                       "level": r.get("level"), "sources": r.get("sources")} for r in built["risks"][:10]],
+                       "level": r.get("level"), "sources": r.get("sources"),
+                       **({"possible_exclusion": r["rule_check"].get("exclusion")}
+                          if (r.get("rule_check") or {}).get("status") == "excluded" else {})}
+                      for r in built["risks"][:10]],
             "events": [{k: e.get(k) for k in ("title", "importance", "event_at")} for e in built["events"][:8]],
             "completeness": built["package"]["completeness"], "consistency": built["package"]["consistency"][:3],
             "registry": built["registry"],
