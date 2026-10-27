@@ -14,6 +14,8 @@ from configs.llm_resilience import ContextOverflow, split_halves
 from configs.utils import extract_json_objects
 
 
+from evaluate_documents.merge_utils import as_evidence, as_text
+
 logger = get_logger(__name__)
 
 DOCUMENT_TYPE_MAPPING = {
@@ -379,6 +381,7 @@ class TypeDataExtractor:
         Вспомогательный метод для объединения evidence.
         Выбирает evidence с наибольшим confidence.
         """
+        current_evidence, new_evidence = as_evidence(current_evidence), as_evidence(new_evidence)
         if not new_evidence:
             return current_evidence
         if not current_evidence:
@@ -506,7 +509,7 @@ class TypeDataExtractor:
             # summary
             logger.info(f"Объединение summary")
             if raw_data.get("summary", ""):
-                summary.append(raw_data.get("summary", ""))
+                summary.append(as_text(raw_data.get("summary", "")))
 
 
             # document_name, contract number, nmck_method": если найден в chunk — сохраняем первый
@@ -828,10 +831,10 @@ class TypeDataExtractor:
         Определяет тип документа по его названию.
         Возвращает код из DOCUMENT_TYPE_MAPPING.
         """
-        if not document_name:
+        if not document_name or not isinstance(document_name, (str, int, float)):
             return "unknown"
 
-        name = document_name.lower()
+        name = str(document_name).lower()
         name = re.sub(r"\s+", " ", name)
 
         # сначала ищем более длинные совпадения

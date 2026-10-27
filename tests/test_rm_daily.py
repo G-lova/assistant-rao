@@ -642,3 +642,17 @@ class BatchHardStopTest(unittest.TestCase):
         self.assertEqual(run.stages["files"]["status"], "partial")
         self.assertTrue(run.stages["files"]["interrupted"])
         self.assertEqual(run.stages["xml"]["status"], "partial")
+
+
+class MergeUtilsTest(unittest.TestCase):
+    """Поля ответа модели приводятся к ожидаемым типам при объединении блоков (data_extractor, 26.10.2026)."""
+
+    def test_as_evidence_and_text(self):
+        """Строка и список вместо объекта evidence; список вместо строки summary."""
+        from evaluate_documents.merge_utils import as_evidence, as_obj, as_text
+        self.assertEqual(as_evidence("п. 3.1"), {"fragment": "п. 3.1"})
+        self.assertEqual(as_evidence([{"fragment": "a"}]), {"fragment": "a"})
+        self.assertEqual(as_evidence(["a", "b"]), {"fragment": "a; b"})
+        self.assertIsNone(as_evidence(None))
+        self.assertEqual(as_obj("Контракт", "value"), {"value": "Контракт"})
+        self.assertEqual(as_text(["a", "b"]), "a b")
