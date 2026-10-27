@@ -12,7 +12,7 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
 from configs.config import Config
-from configs.file_reader import FileReader
+from risk_monitoring.rm_file_reader import RMFileReader as FileReader
 from configs.http_client_manager import HTTPClientManager
 from configs.llm_client import get_llm
 from configs.logger import get_logger
