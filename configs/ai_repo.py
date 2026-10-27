@@ -327,6 +327,27 @@ class AIRepo:
             env, kind, int(external_id),
         )
 
+    async def list_rm_unfinished(self, env: str, kind: str, hours: int) -> List[Dict[str, Any]]:
+        """Незавершённые результаты (``partial`` / ``failed`` / ``running``), обновлённые за последние ``hours`` часов —
+        для дозапуска ежедневных прогонов.
+
+        Args:
+            env: Окружение.
+            kind: Вид результата (``daily``).
+            hours: Окно по времени последнего обновления.
+
+        Returns:
+            List[Dict[str, Any]]: ``external_id``, ``status``, ``ai_analysis``, ``analyzed_at``.
+        """
+        rows = await self.pool.fetch(
+            "SELECT external_id, status, ai_analysis, analyzed_at FROM ai_rm_results "
+            "WHERE env = $1 AND kind = $2 AND status IN ('partial', 'failed', 'running') "
+            "AND analyzed_at >= NOW() - make_interval(hours => $3) ORDER BY external_id",
+            env, kind, int(hours),
+        )
+        return [{"external_id": int(r["external_id"]), "status": r["status"], "ai_analysis": _load(r["ai_analysis"]),
+                 "analyzed_at": r["analyzed_at"]} for r in rows]
+
     async def get_rm_results(self, env: str, kind: str, external_ids: Sequence[int]) -> Dict[int, Dict[str, Any]]:
         """Сохранённые результаты анализа по id.
 

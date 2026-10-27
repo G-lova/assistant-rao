@@ -415,6 +415,10 @@ def extract_facts(tag: str, body: Dict[str, Any]) -> Dict[str, Any]:
     f["placing_way_code"] = _first(body, ["code"], path_re=r"placingWay")
     f["subject"] = _first(body, ["purchaseObjectInfo", "contractSubject", "subject"])
     f["published_at"] = _first(body, ["publishDTInEIS", "docPublishDTInEIS", "publishDate", "docPublishDate"])
+    # протоколы и уведомления без даты публикации (fcsPlacementResult, fcsProposalsResult,
+    # contractAvailableForElAct — 87 XML за 03.07 и 06.07 без event_at, 422 API 26.10.2026)
+    f["doc_date"] = _first(body, ["createDate", "createDT", "docDate", "protocolDate", "versionDate", "changeDate",
+                                  "modificationDate"])
     f["sign_date"] = _first(body, ["signDate", "conclusionDate"])
     f["applications_end"] = _first(body, ["endDT"], path_re=r"collecting|procedure")
     f["execution_end"] = _first(body, ["endDate"], path_re=r"execution|period")
@@ -895,6 +899,30 @@ def to_external_event_risks(llm_risks: Sequence[Dict[str, Any]], event: Optional
     return out
 
 
+def with_required_event(ai: Dict[str, Any]) -> Dict[str, Any]:
+    """Обязательные для API поля блока ``event`` сохранённого результата: ``event_type`` (:func:`with_event_type`) и
+    ``event_at`` — при отсутствии дата выгрузки (``pipeline.export_date``) или время анализа (422 «event at
+    обязательно», 26.10.2026: протоколы fcsPlacementResult / fcsProposalsResult без даты публикации).
+
+    Args:
+        ai: ``ai_analysis`` XML (меняется на месте).
+
+    Returns:
+        Dict[str, Any]: Тот же ``ai_analysis``.
+    """
+    ev = ai.get("event") if isinstance(ai, dict) else None
+    if not isinstance(ev, dict):
+        return ai
+    with_event_type(ev)
+    if not ev.get("event_at"):
+        pipe = ai.get("pipeline") or {}
+        if pipe.get("export_date"):
+            ev["event_at"], ev["event_at_source"] = f"{pipe['export_date']}T00:00:00", "export_date"
+        elif pipe.get("analyzed_at"):
+            ev["event_at"], ev["event_at_source"] = str(pipe["analyzed_at"]), "analyzed_at"
+    return ai
+
+
 def with_event_type(event: Dict[str, Any]) -> Dict[str, Any]:
     """Дополняет блок события обязательным для API полем ``event_type`` (код события из «Верхних тегов»).
 
@@ -941,7 +969,10 @@ def build_xml_analysis(*, event: Dict[str, Any], facts: Dict[str, Any], changes:
     lookup = list(all_files) if all_files is not None else list(files)
     risks = merge_risks(list(rule_risk_list or []), to_external_event_risks(llm.get("risks") or [], event), fz=fz)
     event_out = with_event_type(dict(event))
-    event_out["event_at"] = facts.get("published_at") or facts.get("sign_date")
+    event_out["event_at"] = facts.get("published_at") or facts.get("sign_date") or facts.get("doc_date")
+    if not event_out["event_at"]:
+        # даты в документе нет — дата выгрузки ЕИС или время анализа (API требует event_at)
+        with_required_event({"event": event_out, "pipeline": pipeline})
     event_out["previous_xml_id"] = int(previous["id"]) if previous else None
     event_out["previous_eis_version"] = previous.get("eis_version") if previous else None
     if llm.get("significance") is not None:

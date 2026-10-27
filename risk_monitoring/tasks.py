@@ -367,9 +367,57 @@ async def _daily_run(environment: str, export_date: str, force: bool, push: bool
         return {"status": "done", "date": d, "summary": summary}
 
 
+def continuation_delay(status: str, chain: int, cfg: Any = None) -> Any:
+    """Через сколько секунд продолжить прогон за ту же дату (или ``None`` — не продолжать).
+
+    Args:
+        status: Итог запуска: ``partial`` (не хватило времени), ``failed`` (упал), иначе — готово.
+        chain: Сколько продолжений уже было подряд.
+        cfg: Настройки (по умолчанию ``configs.settings``).
+
+    Returns:
+        Optional[int]: Задержка, с.
+    """
+    if cfg is None:
+        from configs import settings as cfg
+    if not cfg.DAILY_CONTINUE_ENABLED or chain >= cfg.DAILY_CONTINUE_MAX_ATTEMPTS:
+        return None
+    if status == "partial":
+        return cfg.DAILY_CONTINUE_DELAY_SEC
+    if status == "failed":
+        return cfg.DAILY_RETRY_FAILED_DELAY_SEC
+    return None
+
+
+def _continue(environment: str, export_date: str, status: str, chain: int, push: Any, use_llm: bool,
+              stages: Any) -> None:
+    """Ставит продолжение прогона за ту же дату, если он не завершён (``partial`` / ``failed``): ежедневная сводка
+    должна быть готова в тот же день, без ручного запуска."""
+    delay = continuation_delay(status, chain)
+    if delay is None:
+        if status in ("partial", "failed"):
+            logger.warning(f"Ежедневный прогон {export_date}: {status}, продолжений подряд {chain} — "
+                           f"автоматически больше не продолжается, нужен ручной запуск")
+        return
+    rm_daily_task.apply_async(
+        kwargs={"environment": environment, "export_date": export_date, "push": push, "use_llm": use_llm,
+                "stages": stages, "chain": chain + 1},
+        countdown=delay, queue="risk_monitoring")
+    logger.info(f"Ежедневный прогон {export_date}: {status} — продолжение №{chain + 1} через {delay} с")
+
+
+def _outcome(out: Any) -> str:
+    """Итог прогона по результату ``_daily_run``: ``completed`` / ``partial`` / ``failed`` / ``skip``."""
+    if not isinstance(out, dict):
+        return "skip"
+    if out.get("status") == "done":
+        return ((out.get("summary") or {}).get("pipeline") or {}).get("status") or "completed"
+    return "skip"   # already_done / already_running
+
+
 @celery_app.task(bind=True, name="rm_daily_task", soft_time_limit=13500, time_limit=14100)
 def rm_daily_task(self, environment: str, export_date: str, force: bool = False, push: bool = None,
-                  use_llm: bool = True, stages: List[str] = None) -> Dict[str, Any]:
+                  use_llm: bool = True, stages: List[str] = None, chain: int = 0) -> Dict[str, Any]:
     """Ежедневный прогон за дату выгрузки (S0–S4) и сводка (``risk_monitoring.daily``).
 
     Args:
@@ -379,6 +427,7 @@ def rm_daily_task(self, environment: str, export_date: str, force: bool = False,
         push: Записывать результаты этапов во внешнюю БД (по умолчанию ``settings.DAILY_PUSH``).
         use_llm: Резюме пишет модель.
         stages: Этапы (по умолчанию все).
+        chain: Номер автоматического продолжения (``partial`` / ``failed`` доделываются сами, см. :func:`_continue`).
 
     Returns:
         Dict[str, Any]: ``status`` (``done`` / ``already_done`` / ``already_running``), ``date``, ``summary``.
@@ -395,8 +444,16 @@ def rm_daily_task(self, environment: str, export_date: str, force: bool = False,
         # запросу — готовую с тех пор сводку не пересобираем (21.10.2026: лишние прогоны за 2026-07-03)
         logger.info(f"rm_daily_task[{self.request.id}]: повторная доставка — force не применяется")
         force = False
-    return asyncio.run(_pulsed(_daily_run(environment, export_date, force, push, use_llm, stages),
-                               self.name, self.request.id))
+    try:
+        out = asyncio.run(_pulsed(_daily_run(environment, export_date, force, push, use_llm, stages),
+                                  self.name, self.request.id))
+    except BaseException as e:
+        # прогон упал или снят по лимиту времени (failed уже сохранён в DailyRun.run) — повтор позже
+        if isinstance(e, Exception) or type(e).__name__ == "SoftTimeLimitExceeded":
+            _continue(environment, export_date, "failed", chain, push, use_llm, stages)
+        raise
+    _continue(environment, export_date, _outcome(out), chain, push, use_llm, stages)
+    return out
 
 
 @celery_app.task(bind=True, name="rm_daily_watchdog_task", soft_time_limit=13500, time_limit=14100)
@@ -432,7 +489,66 @@ def rm_daily_watchdog_task(self) -> Dict[str, Any]:
         if not last:
             return {"skipped": "нет выгрузок ЕИС"}
         logger.info(f"Страховка ежедневного прогона: последняя выгрузка {str(last)[:10]} ({settings.DAILY_ENVIRONMENT})")
-        return await _daily_run(settings.DAILY_ENVIRONMENT, str(last)[:10], False, settings.DAILY_PUSH, True)
+        res = await _daily_run(settings.DAILY_ENVIRONMENT, str(last)[:10], False, settings.DAILY_PUSH, True)
+        res["_date"] = str(last)[:10]
+        return res
 
+    # сбой до или во время прогона: дата и отметка failed сохранены — продолжение поставит rm_daily_resume_task
     out = asyncio.run(_pulsed(run(), self.name, self.request.id))
+    if isinstance(out, dict) and out.get("_date"):
+        _continue(settings.DAILY_ENVIRONMENT, out.pop("_date"), _outcome(out), 0, settings.DAILY_PUSH, True, None)
     return {k: v for k, v in out.items() if k != "summary"} if isinstance(out, dict) else out
+
+
+@celery_app.task(bind=True, name="rm_daily_resume_task", soft_time_limit=300, time_limit=360)
+def rm_daily_resume_task(self) -> Dict[str, Any]:
+    """Страховка по расписанию (каждые ``DAILY_RESUME_EVERY_MIN`` минут): незавершённые ежедневные прогоны
+    (``partial``, ``failed``, оборванный ``running``) за последние ``DAILY_RESUME_LOOKBACK_HOURS`` часов ставятся
+    на продолжение — если продолжение после самого прогона не поставилось (перезапуск контейнера, потерянное
+    сообщение).
+
+    Не трогает: идущий прогон (свежий пульс), только что обновлённый (продолжение уже стоит в очереди), прогон,
+    исчерпавший ``DAILY_CONTINUE_MAX_ATTEMPTS`` запусков.
+
+    Returns:
+        Dict[str, Any]: ``queued`` — даты, поставленные на продолжение; ``skipped`` — пропущенные с причиной.
+    """
+    from configs import settings
+
+    if not settings.DAILY_CONTINUE_ENABLED:
+        return {"skipped": "DAILY_CONTINUE_ENABLED = False"}
+
+    async def run() -> Dict[str, Any]:
+        """Незавершённые прогоны и решение по каждому."""
+        from datetime import datetime, timezone
+
+        from configs.ai_repo import AIRepo
+        from risk_monitoring import daily
+
+        env = settings.DAILY_ENVIRONMENT.lower()
+        async with AIRepo() as repo:
+            rows = await repo.list_rm_unfinished(env, daily.KIND, settings.DAILY_RESUME_LOOKBACK_HOURS)
+        queued, skipped = [], []
+        now = datetime.now(timezone.utc)
+        for r in rows:
+            ai = r["ai_analysis"] or {}
+            d = ai.get("date") or daily.key_date(r["external_id"])
+            pipe = ai.get("pipeline") or {}
+            if r["status"] == "running" and daily.running_fresh({"ai_analysis": ai}):
+                skipped.append({"date": d, "reason": "идёт"})
+                continue
+            age = (now - r["analyzed_at"]).total_seconds() if r.get("analyzed_at") else None
+            if r["status"] != "running" and age is not None and age < settings.DAILY_RETRY_FAILED_DELAY_SEC + 300:
+                skipped.append({"date": d, "reason": "продолжение уже запланировано"})
+                continue
+            if int(pipe.get("attempt") or 0) >= settings.DAILY_CONTINUE_MAX_ATTEMPTS:
+                skipped.append({"date": d, "reason": f"запусков {pipe.get('attempt')} — нужен ручной запуск"})
+                continue
+            rm_daily_task.apply_async(kwargs={"environment": settings.DAILY_ENVIRONMENT, "export_date": d,
+                                              "push": settings.DAILY_PUSH}, queue="risk_monitoring")
+            queued.append(d)
+        if queued:
+            logger.info(f"Незавершённые ежедневные прогоны поставлены на продолжение: {queued}")
+        return {"queued": queued, "skipped": skipped}
+
+    return asyncio.run(run())

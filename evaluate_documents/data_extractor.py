@@ -14,6 +14,8 @@ from configs.llm_resilience import ContextOverflow, split_halves
 from configs.utils import extract_json_objects
 
 
+from evaluate_documents.merge_utils import as_evidence, as_obj, as_text
+
 logger = get_logger(__name__)
 
 
@@ -280,6 +282,7 @@ class DataExtractor:
         Вспомогательный метод для объединения evidence.
         Выбирает evidence с наибольшим confidence.
         """
+        current_evidence, new_evidence = as_evidence(current_evidence), as_evidence(new_evidence)
         if not new_evidence:
             return current_evidence
         if not current_evidence:
@@ -347,9 +350,11 @@ class DataExtractor:
 
         # ---- МЕРДЖ ЧАНКОВ ----
         for chunk in chunk_results:
+            if not isinstance(chunk, dict):
+                continue
 
             # --- RADABILITY ---
-            readability = chunk.get("readability", {})
+            readability = as_obj(chunk.get("readability"), "status")
 
             if not merged["readability"]["image_description"]:
                 img = readability.get("image_description")
@@ -378,29 +383,31 @@ class DataExtractor:
 
             # --- RAW DATA ---
             raw_data = chunk.get("raw_data", {})
+            if not isinstance(raw_data, dict):
+                raw_data = {}
 
 
             # summary
             logger.info(f"Объединение summary")
             if raw_data.get("summary", ""):
-                summary.append(raw_data.get("summary", ""))
+                summary.append(as_text(raw_data.get("summary", "")))
 
 
             # document_name, contract number, nmck_method": если найден в chunk — сохраняем первый
             logger.info(f"Объединение document_name")
-            dn = raw_data.get("document_name", {})
+            dn = as_obj(raw_data.get("document_name"), "value")
             if dn.get("value", "") and not merged["raw_data"]["document_name"]["value"]:
                 merged["raw_data"]["document_name"]["value"] = dn["value"]
                 merged["raw_data"]["document_name"]["confidence"] = dn.get("confidence", None)
                     
             logger.info(f"Объединение contract_number")
-            cn = raw_data.get("contract_number", {})
+            cn = as_obj(raw_data.get("contract_number"), "value")
             if cn.get("value", "") and not merged["raw_data"]["contract_number"]["value"]:
                 merged["raw_data"]["contract_number"]["value"] = cn["value"]
                 merged["raw_data"]["contract_number"]["evidence"] = cn.get("evidence", None)
 
             logger.info(f"Объединение nmck")
-            nmck = raw_data.get("nmck_method", {})
+            nmck = as_obj(raw_data.get("nmck_method"), "method")
             if nmck and nmck.get("method", ""):
                 if not merged["raw_data"]["nmck_method"]["method"]:
                     merged["raw_data"]["nmck_method"]["method"] = nmck.get("method", "")
@@ -524,7 +531,7 @@ class DataExtractor:
             # предмет закупки
             logger.info(f"Объединение procurement_subject")
             ps = raw_data.get("procurement_subject", {})
-            if isinstance(ps, dict) and ps.get("description", "") and ps.get("evidence", "") and merged["raw_data"]["procurement_subject"]["description"]:
+            if isinstance(ps, dict) and ps.get("description", "") and ps.get("evidence", "") and not merged["raw_data"]["procurement_subject"]["description"]:
                     merged["raw_data"]["procurement_subject"]["description"] = ps["description"]
                     merged["raw_data"]["procurement_subject"]["evidence"] = ps.get("evidence")
 
@@ -563,7 +570,7 @@ class DataExtractor:
 
             # execution_location
             logger.info(f"Объединение execution_location")
-            el = raw_data.get("execution_location", {})
+            el = as_obj(raw_data.get("execution_location"), "address")
             if el:
                 for k in ["address", "special_conditions"]:
                     if el.get(k) and not merged["raw_data"]["execution_location"].get(k):

@@ -61,6 +61,12 @@ RESUME_SYSTEM = (
     "напиши «Ничего не требует внимания.» Пиши грамотно, без двойного отрицания. Не используй коды рисков и правил (вида DOC-002, FIN-004, BEH-005, pz_p1) — называй риски словами, понятными заказчику. Ответ — обычный текст, без JSON и разметки.")
 
 
+def key_date(key: int) -> str:
+    """Дата выгрузки по id сводки: ``ГГГГММДД`` → ``ГГГГ-ММ-ДД``."""
+    k = str(int(key))
+    return f"{k[:4]}-{k[4:6]}-{k[6:8]}"
+
+
 def run_key(d: str) -> int:
     """id сводки в ``ai_rm_results``: дата ``ГГГГ-ММ-ДД`` → ``ГГГГММДД``."""
     return int(parse_date(d).strftime("%Y%m%d"))
@@ -770,7 +776,29 @@ class DailyRun:
         fa = None
         parts = chunks(xml_ids, max(1, int(settings.DAILY_XML_BATCH)))
         deadline = time.monotonic() + settings.DAILY_DOCUMENTS_BUDGET_SEC
+        # жёсткий предел: пачка, начатая до исчерпания бюджета, прерывается, если не уложилась и в запас — иначе
+        # задачу снимает лимит Celery и закупки со сводкой не собираются (прогон 06.07, 26.10.2026: пачка 1 —
+        # 8555 с, пачка 2 — SoftTimeLimitExceeded на 13 500 с)
+        stop_at = deadline + settings.DAILY_BATCH_OVERRUN_SEC
+
+        async def bounded(coro: Any) -> Any:
+            """Этап пачки не дольше оставшегося до жёсткого предела времени."""
+            left_sec = stop_at - time.monotonic()
+            if left_sec <= 0:
+                coro.close()
+                raise asyncio.TimeoutError()
+            return await asyncio.wait_for(coro, timeout=left_sec)
+
+        def cut(n: int, st: Dict[str, Any]) -> None:
+            """Пачка прервана по времени: этап partial, остаток — следующим запуском за ту же дату."""
+            st.update(status="partial", batches_left=len(parts) - n + 1, xml_left=sum(len(p) for p in parts[n - 1:]),
+                      interrupted=True)
+            logger.warning(f"Ежедневный прогон: пачка {n} прервана — время на документы исчерпано; "
+                           f"повторите прогон за эту дату")
+
         for n, part in enumerate(parts, 1):
+            if st_files.get("interrupted") or st_xml.get("interrupted"):
+                break
             if time.monotonic() > deadline:
                 # бюджет времени на документы исчерпан: остальное — следующим запуском за ту же дату (уже
                 # проанализированное пропускается), а этот прогон успевает собрать закупки и сводку до предела задачи
@@ -793,21 +821,27 @@ class DailyRun:
 
                             fa = AIFileAnalyzer(self.http_manager, self.environment, self.repo,
                                                 push_results=self.push, run_cache=cache)
-                        res = await fa.analyze_ids(ids)
+                        res = await bounded(fa.analyze_ids(ids))
                         _add_counts(st_files, self._counts(res))
                         file_results.update({int(r["file_id"]): slim_file(r["ai_analysis"]) for r in res
                                              if r.get("ai_analysis") and r.get("file_id") is not None})
+                except asyncio.TimeoutError:
+                    cut(n, st_files)
+                    if st_xml.get("status") == "completed":
+                        cut(n, st_xml)
                 except Exception as e:  # noqa: BLE001 — сбой пачки не останавливает прогон
                     logger.error(f"Ежедневный прогон, файлы пачки {n}: {type(e).__name__}: {e}", exc_info=True)
                     st_files.update(status="failed", error=f"{type(e).__name__}: {e}"[:500])
                 st_files["seconds"] += round(time.monotonic() - t)
-            if st_xml.get("status") != "skipped":
+            if st_xml.get("status") != "skipped" and not st_xml.get("interrupted"):
                 t = time.monotonic()
                 try:
                     xa.file_results = file_results
-                    res = await xa.analyze_ids(part)
+                    res = await bounded(xa.analyze_ids(part))
                     _add_counts(st_xml, self._counts(res))
                     events.update({int(r["xml_id"]): slim_event(r["ai_analysis"]) for r in res if r.get("ai_analysis")})
+                except asyncio.TimeoutError:
+                    cut(n, st_xml)
                 except Exception as e:  # noqa: BLE001
                     logger.error(f"Ежедневный прогон, события пачки {n}: {type(e).__name__}: {e}", exc_info=True)
                     st_xml.update(status="failed", error=f"{type(e).__name__}: {e}"[:500])

@@ -175,7 +175,7 @@ class AIFileAnalyzer:
         """
         from configs.data_fetcher import DataFetcher
         from configs.embedding_client import EmbeddingClient
-        from configs.file_reader import FileReader
+        from risk_monitoring.rm_file_reader import RMFileReader as FileReader
         from configs.llm_client import get_llm
         from configs.parsing import CloudStorageParser
         from evaluate_documents.data_extractor import DataExtractor

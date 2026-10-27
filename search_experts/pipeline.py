@@ -117,8 +117,9 @@ class ScoringPipeline:
         Применяет нечёткое сравнение (fuzzy matching) между текстом экспертизы и описанием эксперта,
         а также сравнивает фамилию заказчика экспертизы с фамилиями экспертов в группе.
 
-        Исключает записи, где степень совпадения fuzzy matching превышает порог (85%) или выявлены потенциальные семейные связи,
-        что указывает на возможный конфликт.
+        Исключает записи, где степень совпадения fuzzy matching превышает порог (85%), выявлены потенциальные семейные связи
+        или организация эксперта совпадает с заказчиком/исполнителем после снятия ОПФ
+        (`ConflictDetector.find_organization_conflicts`), что указывает на возможный конфликт.
 
         Args:
             df (pandas.DataFrame): Датафрейм с текстами и сходством.
@@ -135,6 +136,12 @@ class ScoringPipeline:
         exclude_ids = self.conflict_detector.find_family_conflicts(df)
         if exclude_ids:
             conflict_ids |= exclude_ids
+
+        # место работы эксперта = заказчик или исполнитель (без учёта записи ОПФ: «ФГБОУ ВО» vs полная форма)
+        org_ids = self.conflict_detector.find_organization_conflicts(df)
+        if org_ids:
+            logger.info(f"Эксперты работают в организации заказчика/исполнителя: {org_ids}")
+            conflict_ids |= org_ids
 
         if conflict_ids:
             logger.info(f"Обнаружен конфликт интересов у экспертов: {conflict_ids}")

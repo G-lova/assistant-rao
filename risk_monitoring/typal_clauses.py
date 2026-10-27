@@ -257,6 +257,33 @@ LIMIT 1
 """
 
 
+def pg_date(v: Any) -> Any:
+    """Дата для параметра ``::date`` asyncpg: строка ``ГГГГ-ММ-ДД…`` → ``date`` (asyncpg не принимает строки —
+    «'str' object has no attribute 'toordinal'», загрузка 24.10.2026); пусто или не дата — ``None``."""
+    import datetime as _dt
+
+    if v is None or isinstance(v, _dt.date):
+        return v
+    try:
+        return _dt.date.fromisoformat(str(v).strip()[:10])
+    except ValueError:
+        return None
+
+
+def pg_timestamp(v: Any) -> Any:
+    """Момент для параметра ``::timestamptz`` asyncpg: ISO-строка (в т. ч. с ``Z``) → ``datetime``; иначе ``None``."""
+    import datetime as _dt
+
+    if v is None or isinstance(v, _dt.datetime):
+        return v
+    text = str(v).strip().replace("Z", "+00:00")
+    try:
+        return _dt.datetime.fromisoformat(text)
+    except ValueError:
+        d = pg_date(text)
+        return _dt.datetime(d.year, d.month, d.day, tzinfo=_dt.timezone.utc) if d else None
+
+
 class TypalRepo:
     """Хранение типовых положений в Postgres сервиса (пул ``AIRepo.pool``)."""
 
@@ -279,8 +306,9 @@ class TypalRepo:
             async with conn.transaction():
                 cid = await conn.fetchval(
                     SQL_UPSERT_CLAUSE, clause["registration_number"], clause["version"], clause.get("guid"),
-                    clause.get("name"), clause.get("url_eis"), clause.get("approve_date"), clause.get("use_for_base_date"),
-                    clause.get("place_date"), clause.get("modification_reason"), clause["creator"].get("inn"),
+                    clause.get("name"), clause.get("url_eis"), pg_date(clause.get("approve_date")),
+                    pg_date(clause.get("use_for_base_date")),
+                    pg_timestamp(clause.get("place_date")), clause.get("modification_reason"), clause["creator"].get("inn"),
                     clause["creator"].get("name"), clause.get("region"),
                     json.dumps(clause.get("purchase_methods") or [], ensure_ascii=False),
                     json.dumps(clause.get("data") or {}, ensure_ascii=False), clause.get("xml_sha256"))
@@ -353,7 +381,7 @@ class TypalRepo:
         """
         on = on or date.today().isoformat()
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(SQL_CUSTOMER_CLAUSE, str(inn).strip(), (kpp or None), on)
+            row = await conn.fetchrow(SQL_CUSTOMER_CLAUSE, str(inn).strip(), (kpp or None), pg_date(on))
             if not row:
                 return None
             files = [dict(f) for f in await conn.fetch(

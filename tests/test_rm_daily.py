@@ -562,3 +562,129 @@ class SummaryScopeFixTest(unittest.TestCase):
             self.assertIsNone(org_profile.previous_customer_score({"customer": {"score": 32}}))
             same = {"customer": {"score": 12, "score_model": {"version": org_profile.CUSTOMER_SCORE_VERSION}}}
             self.assertEqual(org_profile.previous_customer_score(same), 12)
+
+
+class Fixes1026Test(unittest.TestCase):
+    """Прогоны 26.10.2026: event_at протоколов, даты типовых положений, PDF Word по текстовому слою."""
+
+    def test_event_at_fallback(self):
+        """Нет даты в документе — дата выгрузки; сохранённый результат дополняется при записи."""
+        from risk_monitoring import xml_events
+        ai = {"event": {"code": "PUR-010"}, "pipeline": {"export_date": "2026-07-06"}}
+        xml_events.with_required_event(ai)
+        self.assertEqual(ai["event"]["event_at"], "2026-07-06T00:00:00")
+        self.assertEqual(ai["event"]["event_at_source"], "export_date")
+        self.assertEqual(ai["event"]["event_type"], "PUR-010")
+        keep = {"event": {"code": "X", "event_at": "2026-07-01T10:00:00"}, "pipeline": {"export_date": "2026-07-06"}}
+        self.assertEqual(xml_events.with_required_event(keep)["event"]["event_at"], "2026-07-01T10:00:00")
+
+    def test_pg_dates(self):
+        """Строки дат превращаются в date / datetime для asyncpg."""
+        import datetime as dt
+        from tests.stubs import stubbed_import
+        with stubbed_import("risk_monitoring.typal_clauses") as m:
+            self.assertEqual(m.pg_date("2026-10-19"), dt.date(2026, 10, 19))
+            self.assertIsNone(m.pg_date("не дата"))
+            self.assertEqual(m.pg_timestamp("2026-10-19T10:00:00Z").tzinfo, dt.timezone.utc)
+            self.assertEqual(m.pg_timestamp("2026-10-19").date(), dt.date(2026, 10, 19))
+
+    def test_rm_reader_uses_text_layer(self):
+        """Чтение PDF (и Word через конвертацию) — по слою; общий OCR всех страниц только при сбое."""
+        from tests.stubs import stubbed_import
+        with stubbed_import("risk_monitoring.rm_file_reader") as m:
+            r = m.RMFileReader.__new__(m.RMFileReader)
+            r.ocr_processor = None
+
+            async def layer(path, name, proc):
+                """Текст слоя."""
+                return {"text": "Страница 1:\nтекст"}
+
+            with mock.patch.object(m.pdf_text, "read_pdf", layer):
+                self.assertEqual(asyncio.run(r.read_pdf_file("x.pdf", "Карта.docx")), "Страница 1:\nтекст")
+
+
+class BatchHardStopTest(unittest.TestCase):
+    """Пачка, не уложившаяся в бюджет и запас, прерывается — прогон доходит до закупок и сводки."""
+
+    def test_cut(self):
+        """Файлы пачки дольше предела → partial, interrupted; события этой пачки не начинаются."""
+        import sys
+        import types
+        from risk_monitoring.run_cache import RunCache
+
+        class SlowFiles:
+            """Анализ файлов, который не успевает."""
+
+            def __init__(self, *a, **kw):
+                """Без зависимостей."""
+
+            async def analyze_ids(self, ids):
+                """Дольше предела."""
+                await asyncio.sleep(5)
+                return []
+
+        xa = mock.Mock()
+
+        async def pending(part):
+            """Файлы пачки."""
+            return [1, 2]
+
+        xa.pending_files = pending
+        run = daily.DailyRun.__new__(daily.DailyRun)
+        run.stages_on, run.stages, run.push, run.http_manager, run.environment, run.repo = (
+            daily.STAGES, {}, False, None, "stage", None)
+        fake = types.ModuleType("risk_monitoring.ai_file_analyzer")
+        fake.AIFileAnalyzer = SlowFiles
+        with mock.patch.dict(sys.modules, {"risk_monitoring.ai_file_analyzer": fake}), \
+                mock.patch.object(settings, "DAILY_DOCUMENTS_BUDGET_SEC", 0.05), \
+                mock.patch.object(settings, "DAILY_BATCH_OVERRUN_SEC", 0.2):
+            asyncio.run(run._documents([1, 2, 3], xa, RunCache(), {"files": 0}, {}, {}))
+        self.assertEqual(run.stages["files"]["status"], "partial")
+        self.assertTrue(run.stages["files"]["interrupted"])
+        self.assertEqual(run.stages["xml"]["status"], "partial")
+
+
+class MergeUtilsTest(unittest.TestCase):
+    """Поля ответа модели приводятся к ожидаемым типам при объединении блоков (data_extractor, 26.10.2026)."""
+
+    def test_as_evidence_and_text(self):
+        """Строка и список вместо объекта evidence; список вместо строки summary."""
+        from evaluate_documents.merge_utils import as_evidence, as_obj, as_text
+        self.assertEqual(as_evidence("п. 3.1"), {"fragment": "п. 3.1"})
+        self.assertEqual(as_evidence([{"fragment": "a"}]), {"fragment": "a"})
+        self.assertEqual(as_evidence(["a", "b"]), {"fragment": "a; b"})
+        self.assertIsNone(as_evidence(None))
+        self.assertEqual(as_obj("Контракт", "value"), {"value": "Контракт"})
+        self.assertEqual(as_text(["a", "b"]), "a b")
+
+
+class ContinuationTest(unittest.TestCase):
+    """partial и failed доделываются в тот же день: продолжение после запуска и страховка по расписанию."""
+
+    def _cfg(self, **kw):
+        """Настройки продолжения."""
+        import types
+        base = dict(DAILY_CONTINUE_ENABLED=True, DAILY_CONTINUE_DELAY_SEC=60, DAILY_RETRY_FAILED_DELAY_SEC=900,
+                    DAILY_CONTINUE_MAX_ATTEMPTS=3)
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    def test_delay(self):
+        """partial — через минуту, failed — через 15 минут, готово — нет; после предела — только вручную."""
+        from tests.stubs import stubbed_import
+        with stubbed_import("risk_monitoring.tasks") as t:
+            cfg = self._cfg()
+            self.assertEqual(t.continuation_delay("partial", 0, cfg), 60)
+            self.assertEqual(t.continuation_delay("failed", 1, cfg), 900)
+            self.assertIsNone(t.continuation_delay("completed", 0, cfg))
+            self.assertIsNone(t.continuation_delay("skip", 0, cfg))
+            self.assertIsNone(t.continuation_delay("partial", 3, cfg))
+            self.assertIsNone(t.continuation_delay("partial", 0, self._cfg(DAILY_CONTINUE_ENABLED=False)))
+
+    def test_outcome_and_key(self):
+        """Итог берётся из pipeline.status сводки; already_done / already_running не продолжаются."""
+        from tests.stubs import stubbed_import
+        with stubbed_import("risk_monitoring.tasks") as t:
+            self.assertEqual(t._outcome({"status": "done", "summary": {"pipeline": {"status": "partial"}}}), "partial")
+            self.assertEqual(t._outcome({"status": "already_running"}), "skip")
+        self.assertEqual(daily.key_date(20260702), "2026-07-02")

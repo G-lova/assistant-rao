@@ -137,8 +137,8 @@ class RiskMonitoringAPI:
         if table == "risk_monitoring_eis_xml_sources" and isinstance(ai_analysis, dict) \
                 and isinstance(ai_analysis.get("event"), dict):
             # результаты, сохранённые до 23.10.2026, — без event_type; API его теперь требует
-            from risk_monitoring.xml_events import with_event_type
-            with_event_type(ai_analysis["event"])
+            from risk_monitoring.xml_events import with_required_event
+            with_required_event(ai_analysis)
         if table == "risk_monitoring_contracts" and isinstance(ai_analysis, dict):
             # результаты до 23.10.2026: registry — объект; API ждёт список совпадений
             from risk_monitoring.contract_package import normalize_registry
