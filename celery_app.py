@@ -145,6 +145,12 @@ celery_app.conf.update(
             'schedule': crontab(hour=settings.DAILY_WATCHDOG_HOUR, minute=0),
             'options': {'queue': 'risk_monitoring'},
         },
+        # Незавершённые ежедневные прогоны (partial / failed / оборванные) доделываются в тот же день
+        'rm-daily-resume': {
+            'task': 'rm_daily_resume_task',
+            'schedule': crontab(minute=f"*/{settings.DAILY_RESUME_EVERY_MIN}"),
+            'options': {'queue': 'risk_monitoring'},
+        },
         'typal-clauses-daily': {
             'task': 'rm_typal_clauses_task',
             'schedule': crontab(hour=5, minute=40),

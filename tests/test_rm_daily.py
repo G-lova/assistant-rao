@@ -656,3 +656,35 @@ class MergeUtilsTest(unittest.TestCase):
         self.assertIsNone(as_evidence(None))
         self.assertEqual(as_obj("Контракт", "value"), {"value": "Контракт"})
         self.assertEqual(as_text(["a", "b"]), "a b")
+
+
+class ContinuationTest(unittest.TestCase):
+    """partial и failed доделываются в тот же день: продолжение после запуска и страховка по расписанию."""
+
+    def _cfg(self, **kw):
+        """Настройки продолжения."""
+        import types
+        base = dict(DAILY_CONTINUE_ENABLED=True, DAILY_CONTINUE_DELAY_SEC=60, DAILY_RETRY_FAILED_DELAY_SEC=900,
+                    DAILY_CONTINUE_MAX_ATTEMPTS=3)
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    def test_delay(self):
+        """partial — через минуту, failed — через 15 минут, готово — нет; после предела — только вручную."""
+        from tests.stubs import stubbed_import
+        with stubbed_import("risk_monitoring.tasks") as t:
+            cfg = self._cfg()
+            self.assertEqual(t.continuation_delay("partial", 0, cfg), 60)
+            self.assertEqual(t.continuation_delay("failed", 1, cfg), 900)
+            self.assertIsNone(t.continuation_delay("completed", 0, cfg))
+            self.assertIsNone(t.continuation_delay("skip", 0, cfg))
+            self.assertIsNone(t.continuation_delay("partial", 3, cfg))
+            self.assertIsNone(t.continuation_delay("partial", 0, self._cfg(DAILY_CONTINUE_ENABLED=False)))
+
+    def test_outcome_and_key(self):
+        """Итог берётся из pipeline.status сводки; already_done / already_running не продолжаются."""
+        from tests.stubs import stubbed_import
+        with stubbed_import("risk_monitoring.tasks") as t:
+            self.assertEqual(t._outcome({"status": "done", "summary": {"pipeline": {"status": "partial"}}}), "partial")
+            self.assertEqual(t._outcome({"status": "already_running"}), "skip")
+        self.assertEqual(daily.key_date(20260702), "2026-07-02")
