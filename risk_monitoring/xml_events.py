@@ -1073,10 +1073,19 @@ def with_required_event(ai: Dict[str, Any]) -> Dict[str, Any]:
     with_event_type(ev)
     if not ev.get("event_at"):
         pipe = ai.get("pipeline") or {}
+        # с явным поясом: PHP хранит rm_event_at в UTC, а время без пояса считает московским (+03:00, 28.10.2026).
+        # Дата выгрузки — московская календарная дата; время анализа — локальное время сервиса (TZ контейнера
+        # может быть не московским), поэтому пояс берётся из системы
         if pipe.get("export_date"):
-            ev["event_at"], ev["event_at_source"] = f"{pipe['export_date']}T00:00:00", "export_date"
+            ev["event_at"], ev["event_at_source"] = f"{str(pipe['export_date'])[:10]}T00:00:00+03:00", "export_date"
         elif pipe.get("analyzed_at"):
-            ev["event_at"], ev["event_at_source"] = str(pipe["analyzed_at"]), "analyzed_at"
+            from risk_monitoring.passport import iso_tz
+
+            try:
+                ev["event_at"] = iso_tz(str(pipe["analyzed_at"]))
+            except ValueError:
+                ev["event_at"] = str(pipe["analyzed_at"])
+            ev["event_at_source"] = "analyzed_at"
     return ai
 
 
