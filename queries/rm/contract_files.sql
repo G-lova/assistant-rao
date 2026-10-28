@@ -10,6 +10,7 @@ SELECT
     f.download_status,
     JSON_UNQUOTE(JSON_EXTRACT(f.ai_analysis, '$.pipeline.status')) AS rm_status,
     JSON_UNQUOTE(JSON_EXTRACT(f.ai_analysis, '$.pipeline.result')) AS rm_result,
+    JSON_UNQUOTE(JSON_EXTRACT(f.ai_analysis, '$.readability.text_quality.status')) AS text_quality,
     JSON_UNQUOTE(JSON_EXTRACT(f.ai_analysis, '$.doc_type.detected_type')) AS detected_type,
     JSON_UNQUOTE(JSON_EXTRACT(f.ai_analysis, '$.resume')) AS resume,
     JSON_EXTRACT(f.ai_analysis, '$.total_doc_risk') AS total_doc_risk,

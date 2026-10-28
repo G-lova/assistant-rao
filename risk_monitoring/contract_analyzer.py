@@ -60,6 +60,16 @@ def _counts(results: List[Dict[str, Any]]) -> Dict[str, int]:
     return out
 
 
+def rescore(built: Dict[str, Any], cfg: Any = settings) -> None:
+    """Пересчёт порядка рисков, балла, зоны и интегрального риска после изменения уровней (исключения по
+    документам, затухание). Прошлый балл для изменения — прежний ``profile.previous_score``."""
+    built["risks"].sort(key=lambda r: (r.get("level") or 0) * (r.get("confidence") or 0), reverse=True)
+    built["profile"] = cp.profile(built["risks"], built["profile"].get("previous_score"),
+                                  built.get("confirmed_codes") or (), cfg.CONFIRMED_WEIGHT, tuple(cfg.SCORE_ZONES),
+                                  cfg.SCORE_DECAY, cfg.AI_UNCONFIRMED_WEIGHT)
+    built["total_risk"] = passport.total_risk(built["risks"])
+
+
 class ContractAnalyzer:
     """Анализ закупок/контрактов по id карточек.
 
@@ -294,6 +304,8 @@ class ContractAnalyzer:
             async with progress.step("повторное чтение данных закупок после анализа документов"):
                 data = await self._load(ids)   # результаты документов — во внешней БД или у нас
         by = self._group(data)
+        # прошлые результаты закупок — для событий риска и даты первого выявления (затухание)
+        self.previous = await self._internal("contract", ids)
         statuses: Dict[Tuple[int, str], int] = {}
         for s in data["statuses"]:
             try:
@@ -346,7 +358,9 @@ class ContractAnalyzer:
         if not self.force and card.get("rm_status") == "completed" and card.get("prev_hash") == h:
             progress.note("входные данные не изменились — пересчёт не нужен")
             return {"card_id": cid, "status": "unchanged", "pushed": False}
+        prev_ai = ((getattr(self, "previous", {}) or {}).get(cid) or {}).get("ai_analysis") or {}
         checks = await self._rule_checks(built, item, texts)
+        self._dynamics(built, item, prev_ai)
         async with progress.step("резюме закупки" + (" (модель)" if self.llm else " (шаблон)")):
             resume, used_llm = await self._resume(built)
         versions = {"contract_resume": PROMPT_VERSION} if used_llm else {}
@@ -403,12 +417,37 @@ class ContractAnalyzer:
             return {}
         if checks:
             built["rule_checks"] = checks
-            built["risks"].sort(key=lambda r: (r.get("level") or 0) * (r.get("confidence") or 0), reverse=True)
-            built["profile"] = cp.profile(built["risks"], built["profile"].get("previous_score"),
-                                          built.get("confirmed_codes") or (), settings.CONFIRMED_WEIGHT,
-                                          tuple(settings.SCORE_ZONES), settings.SCORE_DECAY, settings.AI_UNCONFIRMED_WEIGHT)
-            built["total_risk"] = passport.total_risk(built["risks"])
         return checks
+
+    def _dynamics(self, built: Dict[str, Any], item: Dict[str, Any], prev_ai: Dict[str, Any]) -> None:
+        """Динамика риска (концепция 10.10, 10.14, 10.15, 11.7): затухание, пересчёт балла, события риска,
+        индекс доверия и приоритет проверки — в ``built``.
+
+        Args:
+            built: Результат ``build_contract_analysis`` (меняется на месте).
+            item: Входные данные закупки (``files``, ``values``).
+            prev_ai: Прошлый ``ai_analysis`` закупки из нашего хранилища (пусто — первая оценка).
+        """
+        from risk_monitoring import risk_dynamics as rd
+
+        prev = prev_ai.get("risks") or []
+        confirmed = set(built.get("confirmed_codes") or [])
+        for r in built["risks"]:
+            if r.get("rule_id") in confirmed:
+                r["analyst_confirmed"] = True
+        rd.apply_decay(built["risks"], prev, settings.RISK_HALF_LIFE_DAYS)
+        rescore(built, settings)
+        built["risk_changes"] = rd.risk_changes(
+            prev, built["risks"], prev_ai.get("confirmed_codes") or (), confirmed,
+            prev_ai.get("rejected_codes") or (), built.get("rejected_codes") or (), settings.RISK_CHANGE_THRESHOLD)
+        built["confidence"] = rd.confidence_index(built["passport"], built["package"], built["risks"], item["files"],
+                                                  bool(item.get("values")))
+        built["priority"] = rd.priority(built["profile"].get("score"), built["profile"].get("delta"),
+                                        built["passport"].get("nmck"), built["risk_changes"],
+                                        built["confidence"]["score"], settings.PRIORITY_WEIGHTS)
+        if built["risk_changes"]:
+            progress.note("события риска: " + ", ".join(f"{c['title'].lower()} {c['rule_id']}"
+                                                         for c in built["risk_changes"][:6]))
 
     async def _resume(self, built: Dict[str, Any]) -> Tuple[str, bool]:
         """Резюме закупки: модель (короткий запрос) или шаблон при её недоступности."""

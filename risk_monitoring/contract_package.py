@@ -94,6 +94,7 @@ TERMINATION_LEVEL = 0.5
 
 IGNORED_RISK_STATUSES = {2, 4}     # отклонён, устранён
 CONFIRMED_STATUS = 1
+REJECTED_STATUS = 2
 
 
 # ------------------------------------------------------------------ значения dataset
@@ -672,12 +673,15 @@ AI_SOURCES = {"ai_file", "ai_event", "version_diff"}
 
 def _weight(r: Dict[str, Any], confirmed: Iterable[str], confirmed_weight: float, ai_weight: float = 1.0) -> float:
     """Вес риска в балле: ``level × confidence``; подтверждённый аналитиком × ``confirmed_weight``; найденный
-    только моделью и не подтверждённый × ``ai_weight`` (его ещё нужно проверить); не больше 1."""
+    только моделью и не подтверждённый × ``ai_weight`` (его ещё нужно проверить); × ``decay_factor`` (затухание);
+    не больше 1."""
     w = (passport.clamp01(r.get("level")) or 0.0) * (passport.clamp01(r.get("confidence")) or 0.0)
     if r.get("rule_id") in set(confirmed):
         w *= confirmed_weight
     elif r.get("sources") and set(r["sources"]) <= AI_SOURCES:
         w *= ai_weight
+    # затухание во времени (концепция 10.10; risk_dynamics.apply_decay)
+    w *= float(r.get("decay_factor") if r.get("decay_factor") is not None else 1.0)
     return min(1.0, w)
 
 
@@ -865,6 +869,8 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
     matches = registry_matches(black, p["supplier"], as_date(p["dates"]["contract"]))
     rnp_found = rnp_matches(rnp, p["supplier"], as_date(p["dates"]["contract"]))
     f_risks, confirmed = file_risks(files, statuses)
+    file_ids = {int(f["id"]) for f in files if f.get("id") is not None}
+    rejected = {code for (fid, code), st in statuses.items() if st == REJECTED_STATUS and fid in file_ids}
     f_risks = drop_rule_covered(f_risks, values, confirmed, fz, getattr(settings, "RULE_SUSPECT_INDICATORS", ()))
     fav = favourite_supplier(p, supplier_counts, settings)
     risks = passport.merge_risks(
@@ -897,6 +903,7 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
         "total_risk": passport.total_risk(risks),
         "profile": prof,
         "confirmed_codes": sorted(confirmed),
+        "rejected_codes": sorted(rejected),
         "input_hash": input_hash(p, [(r["rule_id"], r.get("level"), r.get("confidence")) for r in risks],
                                  [e.get("xml_id") for e in events], sorted(confirmed)),
     }
