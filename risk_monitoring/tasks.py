@@ -405,6 +405,52 @@ def rm_decay_task(self, environment: str = None, push: bool = None) -> Dict[str,
     return out
 
 
+@celery_app.task(bind=True, name="rm_period_task", soft_time_limit=900, time_limit=960)
+def rm_period_task(self, environment: str = None, kinds: List[str] = None, period: str = None,
+                   use_llm: bool = True, force: bool = False) -> Dict[str, Any]:
+    """Сводки за неделю и месяц из ежедневных сводок (``risk_monitoring.period_summary``).
+
+    По расписанию (ежедневно в ``PERIOD_SUMMARY_HOUR``) — последняя завершившаяся неделя и последний месяц:
+    сводка с теми же входными данными не пересобирается, неполная (дни догоняли прогон) — пересобирается.
+
+    Args:
+        environment: Окружение (по умолчанию ``DAILY_ENVIRONMENT``).
+        kinds: ``week`` / ``month`` (по умолчанию оба).
+        period: Обозначение периода; пусто — последний завершившийся.
+        use_llm: Текст пишет модель.
+        force: Пересобрать в любом случае.
+
+    Returns:
+        Dict[str, Any]: По виду периода — ``period``, ``status``, ``unchanged``, ``days``.
+    """
+    from configs import settings
+
+    if not settings.PERIOD_SUMMARY_ENABLED and period is None:
+        return {"skipped": "PERIOD_SUMMARY_ENABLED = False"}
+    environment = environment or settings.DAILY_ENVIRONMENT
+
+    async def run() -> Dict[str, Any]:
+        """Сводки по видам периода."""
+        from datetime import date
+
+        from configs.ai_repo import AIRepo
+        from risk_monitoring import period_summary as ps
+
+        out: Dict[str, Any] = {}
+        async with AIRepo() as repo:
+            for kind in kinds or ("week", "month"):
+                p = period or ps.last_closed(kind, date.today())
+                s = await ps.run_period(repo, environment, kind, p, use_llm=use_llm, force=force)
+                out[kind] = {"period": p, "status": (s.get("pipeline") or {}).get("status"),
+                             "unchanged": bool(s.get("unchanged")),
+                             "days": len((s.get("days") or {}).get("completed") or [])}
+        return out
+
+    out = asyncio.run(_pulsed(run(), self.name, self.request.id))
+    logger.info(f"Сводки периода: {out}")
+    return out
+
+
 async def _daily_run(environment: str, export_date: str, force: bool, push: bool, use_llm: bool,
                      stages: List[str] = None) -> Dict[str, Any]:
     """Прогон за дату с защитой от повтора: готовая сводка возвращается без пересчёта (кроме ``force``),

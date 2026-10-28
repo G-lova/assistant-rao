@@ -438,7 +438,48 @@ def extract_facts(tag: str, body: Dict[str, Any]) -> Dict[str, Any]:
         f["termination_reason"] = _first(term[0], ["name", "reason"])
         f["termination_date"] = _first(term[0], ["terminationDate", "date", "paid"])
     f["final_stage"] = str(_first(body, ["finalStageExecution", "isFinalStage", "finalStage"]) or "").lower() == "true" or None
+    if "omplaint" in tag or "Complaint" in tag:
+        f.update(complaint_facts(tag, body))
     return {k: v for k, v in f.items() if v not in (None, "", [])}
+
+
+# Итог рассмотрения жалобы: коды ЕИС (complResult / checkResult …) и формулировки решений
+COMPLAINT_RESULTS = (
+    ("unfounded", re.compile(r"NO_VIOLATION|NOT_VALID|UNFOUNDED|необоснован", re.I)),
+    ("partly", re.compile(r"PARTLY|частично", re.I)),
+    ("justified", re.compile(r"VIOLATION|VALID|JUSTIFIED|обоснован", re.I)),
+    ("returned", re.compile(r"RETURN|возвра", re.I)),
+)
+
+
+def complaint_facts(tag: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Сведения жалобы: заявитель (раскрывается только в жалобе — участники процедур скрыты), номер, итог.
+
+    Args:
+        tag: Тег документа (``complaint``, ``complaintDecision``, ``complaintWithdraw`` …).
+        body: Нормализованное тело.
+
+    Returns:
+        Dict[str, Any]: ``complainant_inn``, ``complainant_kpp``, ``complainant_name``, ``complaint_number``,
+        ``complaint_result`` (``justified`` / ``partly`` / ``unfounded`` / ``returned`` / ``withdrawn``),
+        ``complaint_result_text``.
+    """
+    who = r"applicant|complainant|declarant|zayavitel"
+    f: Dict[str, Any] = {
+        "complainant_inn": _first(body, ["INN", "inn"], path_re=who, pred=lambda v: re.fullmatch(r"\d{10}|\d{12}", v)),
+        "complainant_kpp": _first(body, ["KPP", "kpp"], path_re=who),
+        "complainant_name": _first(body, ["fullName", "shortName", "organizationName", "name", "lastName"], path_re=who),
+        "complaint_number": _first(body, ["complaintNumber", "regNumber"], path_re=r"complaint|commonInfo"),
+    }
+    if "ithdraw" in tag:
+        f["complaint_result"] = "withdrawn"
+        return f
+    raw = _first(body, ["complResult", "complaintResult", "checkResult", "decisionType", "result", "decision"],
+                 pred=lambda v: len(v) < 400)
+    if raw is not None:
+        f["complaint_result_text"] = str(raw)[:200]
+        f["complaint_result"] = next((k for k, rx in COMPLAINT_RESULTS if rx.search(str(raw))), None)
+    return f
 
 
 def attachments(body: Dict[str, Any]) -> List[Dict[str, Any]]:

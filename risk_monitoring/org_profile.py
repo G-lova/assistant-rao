@@ -134,8 +134,95 @@ def _black_on(contract: Dict[str, Any], black: Sequence[Dict[str, Any]]) -> List
                                cp.as_date(contract.get("contract_date")) or cp.as_date(contract.get("date_public")))
 
 
+# ------------------------------------------------------------------ жалобы
+# Итог рассмотрения: решение важнее уведомления о приёме (по жалобе приходит несколько XML)
+COMPLAINT_RANK = {"justified": 5, "partly": 4, "unfounded": 3, "returned": 2, "withdrawn": 2, None: 0}
+
+
+def complaints(rows: Sequence[Dict[str, Any]], inn: str, role: str) -> List[Dict[str, Any]]:
+    """Жалобы организации — одна запись на жалобу (документы одной жалобы сводятся, итог — по решению).
+
+    Args:
+        rows: Строки ``complaints_by_inn.sql``.
+        inn: ИНН организации.
+        role: ``customer`` — жалобы на её закупки, ``supplier`` — поданные ею.
+
+    Returns:
+        List[Dict[str, Any]]: ``key``, ``purchase_number``, ``complainant_inn``, ``complainant_name``,
+        ``customer_inn``, ``result``, ``date``, ``xml_ids``.
+    """
+    field = "customer_inn" if role == "customer" else "complainant_inn"
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows or []:
+        if str(r.get(field) or "").strip() != inn:
+            continue
+        key = str(r.get("complaint_number") or f"{r.get('purchase_number')}|{r.get('complainant_inn')}")
+        c = out.setdefault(key, {"key": key, "purchase_number": r.get("purchase_number"),
+                                 "complainant_inn": r.get("complainant_inn"), "complainant_name": r.get("complainant_name"),
+                                 "customer_inn": r.get("customer_inn"), "result": None, "date": None, "xml_ids": []})
+        c["xml_ids"].append(r.get("id"))
+        c["complainant_name"] = c["complainant_name"] or r.get("complainant_name")
+        res = r.get("complaint_result") or None
+        if COMPLAINT_RANK.get(res, 0) > COMPLAINT_RANK.get(c["result"], 0):
+            c["result"] = res
+        d = str(r.get("event_at") or "")[:10] or None
+        c["date"] = min(x for x in (c["date"], d) if x) if (c["date"] or d) else None
+    return sorted(out.values(), key=lambda c: c["date"] or "")
+
+
+def complaint_metrics(items: Sequence[Dict[str, Any]], contracts: Sequence[Dict[str, Any]] = (),
+                      role: str = "customer") -> Dict[str, Any]:
+    """Метрики жалоб.
+
+    Args:
+        items: :func:`complaints`.
+        contracts: Закупки организации за период (заказчик — доля закупок с жалобами; поставщик — победы после
+            собственной жалобы).
+        role: ``customer`` / ``supplier``.
+
+    Returns:
+        Dict[str, Any]: ``total``, ``purchases``, ``justified`` (в т. ч. частично), ``unfounded``, ``withdrawn``
+        (отозваны или возвращены), ``pending``, ``justified_share`` (от рассмотренных), ``purchases_share`` или
+        ``customers``, ``won_after_complaint``.
+    """
+    n = len(items)
+    just = sum(1 for c in items if c["result"] in ("justified", "partly"))
+    unf = sum(1 for c in items if c["result"] == "unfounded")
+    wd = sum(1 for c in items if c["result"] in ("withdrawn", "returned"))
+    decided = just + unf
+    purchases = {c["purchase_number"] for c in items if c.get("purchase_number")}
+    m = {"total": n, "purchases": len(purchases), "justified": just, "unfounded": unf, "withdrawn": wd,
+         "pending": n - just - unf - wd, "justified_share": _share(just, decided)}
+    if role == "customer":
+        m["purchases_share"] = _share(len(purchases), len(contracts)) if contracts else None
+    else:
+        m["customers"] = len({c["customer_inn"] for c in items if c.get("customer_inn")})
+        won = {str(c.get("number") or "") for c in contracts}
+        m["won_after_complaint"] = len({p for p in purchases if p in won})
+    return m
+
+
+def _complaint_risks(m: Dict[str, Any], role: str, settings: Any) -> List[Dict[str, Any]]:
+    """Риски по жалобам: заказчик — обоснованные жалобы (BEH-001), поставщик — массовые необоснованные жалобы
+    (BEH-002: возможное давление на заказчиков и затягивание закупок)."""
+    if role == "customer" and m["justified"] >= settings.CUSTOMER_COMPLAINTS_JUSTIFIED_MIN:
+        return [_risk("BEH-001", f"Жалобы на закупки заказчика признаны обоснованными (полностью или частично): "
+                                 f"{m['justified']} из {m['justified'] + m['unfounded']} рассмотренных, закупок с "
+                                 f"жалобами {m['purchases']}", 0.5,
+                      [{"src": "aggregate", "complaints": m["total"], "justified": m["justified"]}],
+                      ["Изучить решения контрольного органа и устранение нарушений в документации"])]
+    if role == "supplier" and m["total"] >= settings.SUPPLIER_COMPLAINTS_MIN \
+            and (m["justified_share"] is not None and 1 - m["justified_share"] >= settings.SUPPLIER_UNFOUNDED_SHARE):
+        return [_risk("BEH-002", f"Поставщик часто подаёт жалобы, которые признаются необоснованными: "
+                                 f"{m['unfounded']} из {m['total']} жалоб (заказчиков: {m['customers']})", 0.3,
+                      [{"src": "aggregate", "complaints": m["total"], "unfounded": m["unfounded"]}],
+                      ["Проверить, не используются ли жалобы для затягивания закупок или давления на заказчиков"])]
+    return []
+
+
 def customer_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[str, Any]], settings: Any,
-                     previous_score: Optional[float] = None) -> Dict[str, Any]:
+                     previous_score: Optional[float] = None,
+                     complaint_items: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
     """Секция ``customer``: метрики, риски, балл заказчика.
 
     Args:
@@ -143,6 +230,7 @@ def customer_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
         black: Записи реестра 19.28 по ИНН его поставщиков.
         settings: Пороги (``configs.settings``).
         previous_score: Прошлый балл.
+        complaint_items: Жалобы на закупки заказчика (:func:`complaints`) → ``metrics.complaints``, BEH-001.
 
     Returns:
         Dict[str, Any]: ``metrics``, ``top_suppliers``, ``risks``, ``score``, ``zone``, ``delta``, ``top_factors``.
@@ -190,6 +278,9 @@ def customer_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
                            0.8, [{"src": f"contract:{c['id']}", "black_list_id": b.get("id"), "supplier_inn": c.get("supplier_inn")}
                                  for c, b in black_contracts[:5]],
                            ["Проверить даты заключения контрактов и действие записи реестра"], confidence=1.0))
+    if complaint_items:
+        m["complaints"] = complaint_metrics(complaint_items, contracts, "customer")
+        risks += _complaint_risks(m["complaints"], "customer", settings)
     sec = _finish(m, risks, previous_score, settings, top_suppliers=top)
     if getattr(settings, "CUSTOMER_SCORE_MODEL", "aggregate") == "quality":
         model = customer_quality(contracts, sec["score"], settings)
@@ -205,8 +296,12 @@ def customer_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
 
 def supplier_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[str, Any]], inn: str, settings: Any,
                      previous_score: Optional[float] = None, today: Optional[date] = None,
-                     rnp: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
+                     rnp: Sequence[Dict[str, Any]] = (),
+                     complaint_items: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
     """Секция ``supplier``: метрики, риски, балл поставщика.
+
+    Участники процедур в ЕИС скрыты: о поставщике известны только его контракты (победы) и поданные им жалобы
+    (заявитель раскрывается в жалобе) — ``metrics.complaints``, ``metrics.known_participations``.
 
     Args:
         contracts: Контракты поставщика за период.
@@ -216,6 +311,7 @@ def supplier_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
         previous_score: Прошлый балл.
         today: Дата проверки реестра (по умолчанию — сегодня).
         rnp: Записи РНП по ИНН поставщика → REG-002 (действующие на сегодня).
+        complaint_items: Жалобы, поданные поставщиком (:func:`complaints`).
 
     Returns:
         Dict[str, Any]: Как у :func:`customer_section`, с ``top_customers`` и ``registry``.
@@ -254,6 +350,12 @@ def supplier_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
         risks.append(_risk("BEH-002", f"Систематический демпинг: снижение ≥ {settings.DEMPING_PCT} % в {m['demping']} "
                                       f"контрактах", 0.4, [{"src": "aggregate", "demping_share": m["demping_share"]}],
                            ["Проверить исполнение демпинговых контрактов и антидемпинговые меры"]))
+    if complaint_items:
+        m["complaints"] = complaint_metrics(complaint_items, contracts, "supplier")
+        risks += _complaint_risks(m["complaints"], "supplier", settings)
+        # известное участие: закупки, где поставщик победил или подал жалобу
+        m["known_participations"] = len({str(c.get("number")) for c in contracts if c.get("number")}
+                                        | {c["purchase_number"] for c in complaint_items if c.get("purchase_number")})
     return _finish(m, risks, previous_score, settings, top_customers=top,
                    registry=[{"black_list_id": b.get("id"), "deal_number": b.get("deal_number"),
                               "date_begin": str(b.get("date_begin"))[:10]} for b in active],
@@ -431,6 +533,20 @@ def resume_facts(role: str, section: Dict[str, Any], settings: Any) -> List[str]
         facts.append(f"Контрактов изменено: {m['modified']}, расторгнуто: {m['terminated']}.")
     if m["penalties"]:
         facts.append(f"Контрактов с начисленными неустойками: {m['penalties']}.")
+    cm = m.get("complaints")
+    if cm and cm["total"]:
+        if role == "customer":
+            facts.append(f"Жалоб на закупки заказчика: {cm['total']} (закупок с жалобами {cm['purchases']}); признаны "
+                         f"обоснованными полностью или частично — {cm['justified']}, необоснованными — {cm['unfounded']}, "
+                         f"отозваны или возвращены — {cm['withdrawn']}, без решения в данных — {cm['pending']}.")
+        else:
+            facts.append(f"Жалоб, поданных поставщиком: {cm['total']} (заказчиков: {cm['customers']}); "
+                         f"обоснованных — {cm['justified']}, необоснованных — {cm['unfounded']}"
+                         + (f"; закупок, где после своей жалобы он заключил контракт: {cm['won_after_complaint']}"
+                            if cm.get("won_after_complaint") else "") + ".")
+    if role == "supplier" and m.get("known_participations"):
+        facts.append(f"Известное участие в закупках (победы и собственные жалобы — остальные участники в ЕИС скрыты): "
+                     f"{m['known_participations']}.")
     top = section.get("top_suppliers") if role == "customer" else section.get("top_customers")
     linked = m.get("with_supplier") if role == "customer" else m.get("with_customer")
     other = "поставщик" if role == "customer" else "заказчик"
