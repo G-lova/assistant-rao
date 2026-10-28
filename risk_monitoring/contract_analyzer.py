@@ -23,14 +23,15 @@ logger = get_logger(__name__)
 
 EXTERNAL_TABLE = "risk_monitoring_contracts"
 STAGE = "S2"
-PROMPT_VERSION = "contract-resume-3"
+PROMPT_VERSION = "contract-resume-4"
 
 RESUME_SYSTEM = (
     "Ты — аналитик риск-мониторинга госзакупок (44-ФЗ, 223-ФЗ). По паспорту закупки, её рискам и событиям напиши "
     "резюме для аналитика: 4–7 предложений, по-русски, без вступлений. Что закупают и на какой стадии, главные риски "
     "со ссылкой на источник (документ, событие ЕИС, правило, реестр), что проверить в первую очередь. Не придумывай "
     "фактов, которых нет во входных данных; не делай вывод о нарушении — только о признаках риска. Не используй коды рисков и правил (вида DOC-002, FIN-004, BEH-005, pz_p1) — называй риски словами, понятными заказчику. Если у риска указано possible_exclusion — скажи, что по "
-    "документам возможно законное исключение и его стоит проверить. Ответ — "
+    "документам возможно законное исключение и его стоит проверить. Если есть composite_risks — назови это "
+    "сочетание признаков (оно опаснее каждого признака по отдельности) и из каких признаков оно сложилось. Ответ — "
     "обычный текст, без JSON, списков и разметки.")
 RESUME_SCHEMA = {"type": "object", "properties": {"resume": {"type": "string"}}, "required": ["resume"]}
 
@@ -64,10 +65,12 @@ def rescore(built: Dict[str, Any], cfg: Any = settings) -> None:
     """Пересчёт порядка рисков, балла, зоны и интегрального риска после изменения уровней (исключения по
     документам, затухание). Прошлый балл для изменения — прежний ``profile.previous_score``."""
     built["risks"].sort(key=lambda r: (r.get("level") or 0) * (r.get("confidence") or 0), reverse=True)
-    built["profile"] = cp.profile(built["risks"], built["profile"].get("previous_score"),
+    # составные риски (CR-*) — ещё один фактор балла, хранятся отдельно от risks
+    scored = list(built["risks"]) + list(built.get("composite_risks") or [])
+    built["profile"] = cp.profile(scored, built["profile"].get("previous_score"),
                                   built.get("confirmed_codes") or (), cfg.CONFIRMED_WEIGHT, tuple(cfg.SCORE_ZONES),
                                   cfg.SCORE_DECAY, cfg.AI_UNCONFIRMED_WEIGHT)
-    built["total_risk"] = passport.total_risk(built["risks"])
+    built["total_risk"] = passport.total_risk(scored)
 
 
 class ContractAnalyzer:
@@ -364,6 +367,10 @@ class ContractAnalyzer:
         async with progress.step("резюме закупки" + (" (модель)" if self.llm else " (шаблон)")):
             resume, used_llm = await self._resume(built)
         versions = {"contract_resume": PROMPT_VERSION} if used_llm else {}
+        if built.get("composite_risks"):
+            from risk_monitoring import composite_risks as cr
+
+            versions["composite_risks"] = cr.load_config().get("version")
         if checks:
             from risk_monitoring.rule_exclusions import load_config
 
@@ -436,9 +443,18 @@ class ContractAnalyzer:
             if r.get("rule_id") in confirmed:
                 r["analyst_confirmed"] = True
         rd.apply_decay(built["risks"], prev, settings.RISK_HALF_LIFE_DAYS)
+        if settings.COMPOSITE_RISKS_ENABLED:
+            from risk_monitoring import composite_risks as cr
+
+            built["composite_risks"] = cr.detect(built["risks"], built.get("rejected_codes") or (),
+                                                 prev=prev_ai.get("composite_risks") or ())
+            if built["composite_risks"]:
+                progress.note("составные риски: " + ", ".join(c["title"] for c in built["composite_risks"]))
         rescore(built, settings)
         built["risk_changes"] = rd.risk_changes(
-            prev, built["risks"], prev_ai.get("confirmed_codes") or (), confirmed,
+            list(prev) + list(prev_ai.get("composite_risks") or []),
+            list(built["risks"]) + list(built.get("composite_risks") or []),
+            prev_ai.get("confirmed_codes") or (), confirmed,
             prev_ai.get("rejected_codes") or (), built.get("rejected_codes") or (), settings.RISK_CHANGE_THRESHOLD)
         built["confidence"] = rd.confidence_index(built["passport"], built["package"], built["risks"], item["files"],
                                                   bool(item.get("values")))
@@ -465,6 +481,9 @@ class ContractAnalyzer:
                        **({"possible_exclusion": r["rule_check"].get("exclusion")}
                           if (r.get("rule_check") or {}).get("status") == "excluded" else {})}
                       for r in built["risks"][:10]],
+            "composite_risks": [{"title": c["title"], "description": c.get("description"),
+                                 "components": [x.get("title") for x in c.get("components") or []]}
+                                for c in built.get("composite_risks") or []],
             "events": [{k: e.get(k) for k in ("title", "importance", "event_at")} for e in built["events"][:8]],
             "completeness": built["package"]["completeness"], "consistency": built["package"]["consistency"][:3],
             "registry": built["registry"],

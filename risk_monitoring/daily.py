@@ -110,11 +110,12 @@ PLAIN_NAMES = {
 def risk_names(codes: Sequence[str]) -> str:
     """Названия рисков по каталогу вместо кодов: сводку читает заказчик («BEH-005» → «Аномальное распределение
     результатов»)."""
-    from risk_monitoring import risk_catalog
+    from risk_monitoring import composite_risks, risk_catalog
 
+    composite = composite_risks.titles()
     names = []
     for c in codes or []:
-        t = PLAIN_NAMES.get(c) or risk_catalog.title(c) or "признак риска"
+        t = PLAIN_NAMES.get(c) or composite.get(c) or risk_catalog.title(c) or "признак риска"
         if t not in names:
             names.append(t[:1].lower() + t[1:] if t[:2] != t[:2].upper() else t)
     return ", ".join(names)
@@ -154,6 +155,7 @@ def contract_item(card: Dict[str, Any], ai: Dict[str, Any], changed: bool) -> Di
         "priority": _num((ai.get("priority") or {}).get("score")),
         "priority_reasons": (ai.get("priority") or {}).get("reasons") or [],
         "confidence": _num((ai.get("confidence") or {}).get("score")),
+        "composite": [c.get("rule_id") for c in ai.get("composite_risks") or [] if c.get("rule_id")],
         # события риска (концепция 11.7) — только если закупка пересчитана в этом прогоне
         "risk_changes": [{k: c.get(k) for k in ("code", "rule_id", "risk_title")}
                          for c in (ai.get("risk_changes") or [])] if changed else [],
@@ -360,6 +362,10 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
             rsk[c["code"]] = rsk.get(c["code"], 0) + 1
     new_risks = [(i, c) for i in items for c in i["risk_changes"] if c["code"] == "RSK-001"]
     closed_risks = [(i, c) for i in items for c in i["risk_changes"] if c["code"] == "RSK-004"]
+    comp: Dict[str, int] = {}
+    for i in items:
+        for c in i["composite"]:
+            comp[c] = comp.get(c, 0) + 1
     priorities = sorted((i for i in items if i.get("priority") is not None), key=lambda i: -(i["priority"] or 0))
     return {
         "date": export_date,
@@ -385,6 +391,8 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
                          "closed": [{"card_id": i["card_id"], "purchase_number": i["purchase_number"],
                                      "customer": i["customer"], "rule_id": c["rule_id"], "title": c["risk_title"]}
                                     for i, c in closed_risks[:top]]},
+        # составные риски (CR-*): сколько закупок с каждым сочетанием признаков
+        "composite_risks": dict(sorted(comp.items(), key=lambda kv: -kv[1])),
         "priorities": [{k: i.get(k) for k in ("card_id", "purchase_number", "customer", "score", "zone", "priority",
                                               "priority_reasons", "confidence", "monitoring")} for i in priorities[:top]],
     }
@@ -442,6 +450,10 @@ def summary_facts(s: Dict[str, Any]) -> List[str]:
         if rc.get("closed"):
             facts.append("Сняты риски: " + "; ".join(
                 f"{risk_names([x['rule_id']])} — закупка {x['purchase_number']}" for x in rc["closed"][:5]) + ".")
+    comp = s.get("composite_risks") or {}
+    if comp:
+        facts.append("Сочетания признаков риска (опаснее, чем каждый признак по отдельности): " + "; ".join(
+            f"{risk_names([k])} — закупок {v}" for k, v in list(comp.items())[:5]) + ".")
     pr = [x for x in s.get("priorities") or [] if x.get("priority")]
     if pr:
         facts.append("Проверить в первую очередь (приоритет проверки учитывает балл, его рост, сумму, новизну "

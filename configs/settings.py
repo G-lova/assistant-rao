@@ -363,3 +363,6 @@ def warn_env_leftovers(logger) -> None:
     for env_name, env_value, code_value in env_leftovers():
         logger.warning(f"В .env задано {env_name}={env_value}, но значение теперь задаётся в коде ({code_value}): "
                        f"переменная игнорируется — перенесите значение в settings.py или удалите строку из .env")
+
+# ── Составные риски закупки (CR-*): сочетания факторов, шаблоны — risk_monitoring/config/composite_risks.json
+COMPOSITE_RISKS_ENABLED = True

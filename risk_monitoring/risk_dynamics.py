@@ -264,11 +264,18 @@ def recalc_decay(ai: Dict[str, Any], cfg: Any, now: Optional[datetime] = None) -
     # прошлое — сами же риски: даты первого выявления сохраняются, «усиления» нет
     apply_decay(new["risks"], ai["risks"], cfg.RISK_HALF_LIFE_DAYS, now)
     new["risks"].sort(key=lambda r: (r.get("level") or 0) * (r.get("confidence") or 0), reverse=True)
-    new["profile"] = cp.profile(new["risks"], prof.get("previous_score"), new.get("confirmed_codes") or (),
+    if getattr(cfg, "COMPOSITE_RISKS_ENABLED", False):
+        from risk_monitoring import composite_risks as cr
+
+        # затухание составного — по его факторам; сочетание могло и распасться (фактор ослаб ниже порога)
+        new["composite_risks"] = cr.detect(new["risks"], new.get("rejected_codes") or (),
+                                           prev=ai.get("composite_risks") or ())
+    scored = list(new["risks"]) + list(new.get("composite_risks") or [])
+    new["profile"] = cp.profile(scored, prof.get("previous_score"), new.get("confirmed_codes") or (),
                                 cfg.CONFIRMED_WEIGHT, tuple(cfg.SCORE_ZONES), cfg.SCORE_DECAY, cfg.AI_UNCONFIRMED_WEIGHT)
     if abs(float(new["profile"].get("score") or 0) - float(prof.get("score") or 0)) < cfg.RISK_DECAY_MIN_CHANGE:
         return None
-    new["total_risk"] = passport.total_risk(new["risks"])
+    new["total_risk"] = passport.total_risk(scored)
     conf = (new.get("confidence") or {}).get("score")
     new["priority"] = priority(new["profile"].get("score"), new["profile"].get("delta"),
                                (new.get("passport") or {}).get("nmck"), (), conf, cfg.PRIORITY_WEIGHTS)
