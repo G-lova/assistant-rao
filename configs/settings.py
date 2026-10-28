@@ -389,3 +389,10 @@ PERIOD_SUMMARY_MINUTE = 23
 CUSTOMER_COMPLAINTS_JUSTIFIED_MIN = 2   # обоснованных жалоб на закупки заказчика за период → BEH-001
 SUPPLIER_COMPLAINTS_MIN = 5             # жалоб поставщика за период, с которых оценивается их обоснованность
 SUPPLIER_UNFOUNDED_SHARE = 0.7          # доля необоснованных среди рассмотренных → BEH-002
+
+# ── Внеплановые проверки контрольных органов (risk_monitoring/control_checks.py)
+CHECK_LOOKBACK_DAYS = 365           # проверки за этот период учитываются в оценке закупок
+# уровень PROC-008 закупки из проверки с нарушениями: проверяли самого заказчика / организацию, проводившую закупку
+CHECK_RISK_LEVELS = {"customer": 0.7, "other": 0.3}
+CHECK_PRESCRIPTION_BONUS = 0.1      # выдано предписание
+CUSTOMER_CHECK_VIOLATIONS_MIN = 1   # проверок заказчика с нарушениями → BEH-001

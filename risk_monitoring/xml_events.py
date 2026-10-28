@@ -439,6 +439,8 @@ def extract_facts(tag: str, body: Dict[str, Any]) -> Dict[str, Any]:
         f["termination_date"] = _first(term[0], ["terminationDate", "date", "paid"])
     f["final_stage"] = str(_first(body, ["finalStageExecution", "isFinalStage", "finalStage"]) or "").lower() == "true" or None
     # checkResult — и решение по жалобе (есть блок complaint), и результат внеплановой проверки (base/unplannedCheck)
+    if tag == "checkResult" and not isinstance(body.get("complaint"), dict):
+        f.update(check_facts(body))
     if "omplaint" in tag or tag == "tenderSuspension" or (tag == "checkResult" and isinstance(body.get("complaint"), dict)):
         f.update(complaint_facts(tag, body))
         # заказчик в жалобе не указан (в indicted — оператор площадки, комиссия или заказчик): берём из ИКЗ
@@ -458,6 +460,51 @@ COMPLAINT_RESULTS = (
 # номер жалобы: 44-ФЗ — 18 цифр (202600100161005752), 223-ФЗ — «дата.номер» (19.10.2026.307017)
 COMPLAINANT_IN_FILE_RE = re.compile(r"по\s+(?:жалобе|делу)\s+(.+?)\s+от\s+\d", re.I)
 COMPLAINT_NUMBER_RE = re.compile(r"\d{18}|\d{2}\.\d{2}\.\d{4}\.\d+")
+
+
+CHECK_RESULTS = (("no_violations", re.compile(r"NO_VIOLATION|NOT_VIOLATION|WITHOUT", re.I)),
+                 ("violations", re.compile(r"VIOLATION", re.I)))
+
+
+def check_facts(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Результат внеплановой проверки контрольного органа (``checkResult`` без блока ``complaint``, схема 16.3).
+
+    Одна проверка охватывает много закупок (``base/unplannedCheck/orders[]``), поэтому список закупок и заказчиков
+    (из ИКЗ) сохраняется целиком — по нему проверка связывается со всеми закупками, а не только с той, к которой
+    привязан XML (проверено на результате ФАС России от 27.10.2026: 13+ закупок, VIOLATIONS, предписание).
+
+    Args:
+        body: Нормализованное тело.
+
+    Returns:
+        Dict[str, Any]: ``check_number``, ``check_result`` (``violations`` / ``no_violations``), ``check_result_code``,
+        ``check_prescription``, ``check_decision_date``, ``check_inspection_type``, ``check_subjects``
+        (``role``, ``inn``, ``kpp``, ``name``), ``check_purchases`` (номера), ``check_customer_inns`` (ИНН заказчиков
+        из ИКЗ).
+    """
+    uc = next((v for p, k, v in walk(body) if k == "unplannedCheck" and isinstance(v, dict)), None) or body
+    code = _first(uc, ["checkResult"])
+    subjects = []
+    for p, k, v in walk(uc.get("checkSubjects") or {}):
+        if isinstance(v, dict) and (v.get("INN") or v.get("inn")):
+            subjects.append({"role": re.sub(r"New$", "", k), "inn": str(v.get("INN") or v.get("inn")),
+                             "kpp": v.get("KPP") or v.get("kpp"), "name": v.get("shortName") or v.get("fullName")})
+    purchases, inns = [], []
+    for p, k, v in walk(uc):
+        if k == "purchaseNumber" and re.fullmatch(r"\d{11,19}", str(v or "")) and str(v) not in purchases:
+            purchases.append(str(v))
+        if k == "purchaseCode":
+            parts = parse_ikz(v)
+            if parts and parts["customer_inn"] not in inns:
+                inns.append(parts["customer_inn"])
+    f = {"check_number": _first(uc, ["regNumber"], pred=lambda v: COMPLAINT_NUMBER_RE.fullmatch(v)),
+         "check_result_code": code,
+         "check_result": next((k for k, rx in CHECK_RESULTS if rx.search(str(code or ""))), None),
+         "check_prescription": bool(next((v for p, k, v in walk(uc) if k == "decisionPrescription" and v), None)),
+         "check_decision_date": _first(uc, ["decisionDate"], path_re=r"decision"),
+         "check_inspection_type": _first(uc, ["inspectionType"]),
+         "check_subjects": subjects, "check_purchases": purchases, "check_customer_inns": inns}
+    return {k: v for k, v in f.items() if v not in (None, "", [])}
 
 
 def complaint_facts(tag: str, body: Dict[str, Any]) -> Dict[str, Any]:

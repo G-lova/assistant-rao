@@ -985,6 +985,19 @@ class DailyRun:
                 card = ((events.get(int(r["id"])) or {}).get("link") or {}).get("risk_monitoring_contract_id")
             xml_cards[int(r["id"])] = int(card) if card is not None else None
         card_ids = sorted({c for c in xml_cards.values() if c is not None})
+        # внеплановая проверка охватывает много закупок, а XML привязан к одной: пересчитываются все закупки
+        # системы из списка проверки (ai_analysis.facts.check_purchases)
+        day_checks = [{"id": xid, **(ai.get("facts") or {})} for xid, ai in events.items()
+                      if (ai.get("facts") or {}).get("check_number")]
+        if day_checks:
+            from risk_monitoring import control_checks
+
+            nums = control_checks.purchases_of(control_checks.normalize(day_checks))
+            linked = []
+            for i in range(0, len(nums), 500):
+                linked += [int(r["id"]) for r in await self._query("link_by_number.sql", nums=nums[i:i + 500])]
+            scope["check_contracts"] = len(set(linked) - set(card_ids))
+            card_ids = sorted(set(card_ids) | set(linked))
         scope["contracts"] = len(card_ids)
         scope["xml_unlinked"] = sum(1 for c in xml_cards.values() if c is None)
         cards = {int(r["id"]): r for r in await self._query("daily_cards.sql", ids=card_ids)} if card_ids else {}
@@ -998,6 +1011,7 @@ class DailyRun:
 
             ca = ContractAnalyzer(self.http_manager, self.environment, self.repo, push_results=self.push,
                                   use_llm=self.use_llm, analyze_documents=False)
+            ca.extra_checks = day_checks
             res = await ca.analyze_ids(card_ids)
             changed.extend(int(r["card_id"]) for r in res if r.get("status") == "done")
             return None, self._counts(res)

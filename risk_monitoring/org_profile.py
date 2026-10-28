@@ -236,7 +236,8 @@ def _complaint_risks(m: Dict[str, Any], role: str, settings: Any) -> List[Dict[s
 
 def customer_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[str, Any]], settings: Any,
                      previous_score: Optional[float] = None,
-                     complaint_items: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
+                     complaint_items: Sequence[Dict[str, Any]] = (),
+                     check_metrics: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Секция ``customer``: метрики, риски, балл заказчика.
 
     Args:
@@ -245,6 +246,8 @@ def customer_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
         settings: Пороги (``configs.settings``).
         previous_score: Прошлый балл.
         complaint_items: Жалобы на закупки заказчика (:func:`complaints`) → ``metrics.complaints``, BEH-001.
+        check_metrics: Внеплановые проверки (``control_checks.customer_metrics``) → ``metrics.control_checks``,
+            BEH-001 при нарушениях у самого заказчика.
 
     Returns:
         Dict[str, Any]: ``metrics``, ``top_suppliers``, ``risks``, ``score``, ``zone``, ``delta``, ``top_factors``.
@@ -295,6 +298,11 @@ def customer_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
     if complaint_items:
         m["complaints"] = complaint_metrics(complaint_items, contracts, "customer")
         risks += _complaint_risks(m["complaints"], "customer", settings)
+    if check_metrics:
+        from risk_monitoring import control_checks
+
+        m["control_checks"] = check_metrics
+        risks += control_checks.customer_risks(check_metrics, settings)
     sec = _finish(m, risks, previous_score, settings, top_suppliers=top)
     if getattr(settings, "CUSTOMER_SCORE_MODEL", "aggregate") == "quality":
         model = customer_quality(contracts, sec["score"], settings)
@@ -560,6 +568,15 @@ def resume_facts(role: str, section: Dict[str, Any], settings: Any) -> List[str]
                          f"обоснованных — {cm['justified']}, необоснованных — {cm['unfounded']}"
                          + (f"; закупок, где после своей жалобы он заключил контракт: {cm['won_after_complaint']}"
                             if cm.get("won_after_complaint") else "") + ".")
+    ck = m.get("control_checks")
+    if ck:
+        if ck["as_subject"]:
+            facts.append(f"Внеплановых проверок контрольных органов, где заказчик — субъект проверки: {ck['as_subject']}, "
+                         f"нарушения выявлены в {ck['as_subject_violations']}, предписаний — {ck['prescriptions']}.")
+        if ck["via_purchases"]:
+            facts.append(f"Проверок организаций, проводивших закупки заказчика (уполномоченный орган, специализированная "
+                         f"организация): {ck['via_purchases']}, с нарушениями — {ck['via_purchases_violations']}; "
+                         f"закупок заказчика в этих проверках — {ck['purchases_checked']}.")
     if role == "supplier" and m.get("known_participations"):
         facts.append(f"Известное участие в закупках (победы и собственные жалобы — остальные участники в ЕИС скрыты): "
                      f"{m['known_participations']}.")

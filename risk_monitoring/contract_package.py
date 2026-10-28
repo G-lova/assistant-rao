@@ -840,7 +840,8 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
                             values: Optional[Dict[str, Any]], black: Sequence[Dict[str, Any]],
                             statuses: Dict[Tuple[int, str], int], previous_score: Optional[float] = None,
                             settings: Any = None, supplier_counts: Optional[Dict[str, int]] = None,
-                            rnp: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
+                            rnp: Sequence[Dict[str, Any]] = (),
+                            checks: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
     """Собирает ``ai_analysis`` закупки/контракта без модели (резюме добавляет анализатор).
 
     Args:
@@ -852,6 +853,8 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
         statuses: Статусы рисков файлов у аналитика.
         supplier_counts: Контракты заказчика за период по ИНН поставщиков (для BEH-006); ``None`` — не проверять.
         rnp: Записи РНП по ИНН поставщика (``risk_monitoring_rnp_entries``) → REG-002.
+        checks: Внеплановые проверки контрольных органов (``control_checks.normalize``) → PROC-008, если закупка в
+            списке проверки с нарушениями.
         previous_score: Прошлый балл.
         settings: Модуль ``configs.settings`` (пороги).
 
@@ -873,12 +876,13 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
     rejected = {code for (fid, code), st in statuses.items() if st == REJECTED_STATUS and fid in file_ids}
     f_risks = drop_rule_covered(f_risks, values, confirmed, fz, getattr(settings, "RULE_SUSPECT_INDICATORS", ()))
     fav = favourite_supplier(p, supplier_counts, settings)
-    from risk_monitoring import purchase_profiles
+    from risk_monitoring import control_checks, purchase_profiles
 
     execution = purchase_profiles.execution_profile(dataset)
     risks = passport.merge_risks(
         rule_values_risks(values), f_risks, event_risks(xmls), registry_risks(matches), rnp_risks(rnp_found), dataset_risks(p),
         favourite_risks(p, fav), purchase_profiles.execution_risks(execution, settings),
+        control_checks.check_risks(checks, p.get("purchase_number"), (p.get("customer") or {}).get("inn"), settings),
         consistency_risks(cons), completeness_risks(comp, settings.COMPLETENESS_RISK), fz=fz)
     risks = drop_same_quote(risks, confirmed)
     prof = profile(risks, previous_score, confirmed, settings.CONFIRMED_WEIGHT, tuple(settings.SCORE_ZONES),
@@ -903,6 +907,10 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
         "customer_supplier": fav,
         # профиль исполнения контракта (purchase_profiles.execution_profile)
         "execution": execution,
+        # внеплановые проверки, в список закупок которых входит закупка
+        "control_checks": [{"number": c["number"], "date": c["date"], "result": c["result"],
+                            "prescription": c["prescription"], "subjects": [x.get("name") for x in c["subjects"][:2]]}
+                           for c in checks if p.get("purchase_number") and str(p["purchase_number"]) in c["purchases"]],
         "events": events,
         "risks": risks,
         "total_risk": passport.total_risk(risks),

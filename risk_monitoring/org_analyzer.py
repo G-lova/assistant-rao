@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from configs.config import Config
 from configs.logger import get_logger
 from configs import settings
-from risk_monitoring import org_profile, passport, progress, rm_sql
+from risk_monitoring import control_checks, org_profile, passport, progress, rm_sql
 from risk_monitoring.contract_analyzer import _none
 from risk_monitoring.xml_events import canonical_org
 
@@ -145,6 +145,9 @@ class OrgAnalyzer:
             numbers = sorted({str(r["complaint_number"]) for r in rows_c if r.get("complaint_number")})
             more = await self._safe_query("complaints_by_number.sql", nums=numbers) if numbers else []
             self.complaint_rows = rows_c + more
+            check_since = (date.today() - timedelta(days=settings.CHECK_LOOKBACK_DAYS)).isoformat()
+            self.checks = control_checks.normalize(await self._safe_query("checks_recent.sql", [check_since])) \
+                if "customer" in self.roles else []
             stored = await self._internal(list(targets))
             st["detail"] = f"как заказчик {len(customer_contracts)}, как поставщик {len(supplier_contracts)}, реестр {len(black)}"
 
@@ -192,6 +195,9 @@ class OrgAnalyzer:
                 sec = org_profile.customer_section(mine, black, settings, org_profile.previous_customer_score(prev),
                                                    complaint_items=org_profile.complaints(
                                                        getattr(self, "complaint_rows", []), t["inn"], "customer",
+                                                       [c.get("number") for c in mine]),
+                                                   check_metrics=control_checks.customer_metrics(
+                                                       getattr(self, "checks", []), t["inn"],
                                                        [c.get("number") for c in mine]))
                 progress.note(f"заказчик: закупок {len(mine)}, рисков {len(sec['risks'])}, балл {sec['score']}")
                 async with progress.step("резюме заказчика"):

@@ -312,6 +312,7 @@ class ContractAnalyzer:
         # прошлые результаты закупок — для событий риска и даты первого выявления (затухание)
         self.previous = await self._internal("contract", ids)
         await self._load_peers()
+        await self._load_checks()
         statuses: Dict[Tuple[int, str], int] = {}
         for s in data["statuses"]:
             try:
@@ -358,7 +359,8 @@ class ContractAnalyzer:
                                            black=black_by_inn.get(inn, []), statuses=statuses,
                                            previous_score=cp.num(card.get("prev_score")),
                                            supplier_counts=supplier_counts,
-                                           rnp=getattr(self, "rnp_by_inn", {}).get(inn, []))
+                                           rnp=getattr(self, "rnp_by_inn", {}).get(inn, []),
+                                           checks=getattr(self, "checks", []))
         h = built.pop("input_hash")
         progress.note(f"сборка: рисков {len(built['risks'])}, балл {built['profile']['score']} ({built['profile']['zone']})")
         if not self.force and card.get("rm_status") == "completed" and card.get("prev_hash") == h:
@@ -398,6 +400,23 @@ class ContractAnalyzer:
         async with progress.step("сохранение результата во внутренней БД"):
             await self._save_internal(cid, ai, result["pushed"], result.get("push_error"))
         return result
+
+    async def _load_checks(self) -> None:
+        """Внеплановые проверки контрольных органов за ``CHECK_LOOKBACK_DAYS`` (``checks_recent.sql``) и проверки
+        текущего прогона (``extra_checks`` — ещё не записанные во внешнюю БД). Один запрос на запуск анализатора;
+        сбой не мешает анализу."""
+        from datetime import date, timedelta
+
+        from risk_monitoring import control_checks
+
+        if getattr(self, "checks", None) is not None and getattr(self, "_checks_loaded", False):
+            return
+        since = (date.today() - timedelta(days=settings.CHECK_LOOKBACK_DAYS)).isoformat()
+        rows = await self._safe_query("checks_recent.sql", [since])
+        self.checks = control_checks.normalize(list(rows) + list(getattr(self, "extra_checks", None) or []))
+        self._checks_loaded = True
+        if self.checks:
+            progress.note(f"внеплановых проверок за {settings.CHECK_LOOKBACK_DAYS} дн.: {len(self.checks)}")
 
     async def _load_peers(self) -> None:
         """Похожие закупки системы для сравнения (один запрос на запуск анализатора, ``benchmark_peers.sql``).
