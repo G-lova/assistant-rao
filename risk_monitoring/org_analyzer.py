@@ -138,8 +138,13 @@ class OrgAnalyzer:
             rnp = await self._safe_query("rnp_entries.sql", inns=sorted(sup_inns)) if sup_inns and "supplier" in self.roles else []
             # жалобы: заявитель раскрывается только в жалобе — по ИНН заказчиков и поставщиков
             org_inns = sorted({t["inn"] for t in targets.values()})
-            self.complaint_rows = await self._safe_query("complaints_by_inn.sql", head=[since], inns=org_inns,
-                                                         inns2=org_inns) if org_inns else []
+            nums = sorted({str(c["number"]) for c in customer_contracts if c.get("number")})
+            rows_c = await self._safe_query("complaints_by_inn.sql", head=[since], inns=org_inns, inns2=org_inns,
+                                            nums=nums) if org_inns else []
+            # отзыв, решение и приостановка той же жалобы — без ИНН заявителя, по номеру жалобы
+            numbers = sorted({str(r["complaint_number"]) for r in rows_c if r.get("complaint_number")})
+            more = await self._safe_query("complaints_by_number.sql", nums=numbers) if numbers else []
+            self.complaint_rows = rows_c + more
             stored = await self._internal(list(targets))
             st["detail"] = f"как заказчик {len(customer_contracts)}, как поставщик {len(supplier_contracts)}, реестр {len(black)}"
 
@@ -186,7 +191,8 @@ class OrgAnalyzer:
             if mine:
                 sec = org_profile.customer_section(mine, black, settings, org_profile.previous_customer_score(prev),
                                                    complaint_items=org_profile.complaints(
-                                                       getattr(self, "complaint_rows", []), t["inn"], "customer"))
+                                                       getattr(self, "complaint_rows", []), t["inn"], "customer",
+                                                       [c.get("number") for c in mine]))
                 progress.note(f"заказчик: закупок {len(mine)}, рисков {len(sec['risks'])}, балл {sec['score']}")
                 async with progress.step("резюме заказчика"):
                     sec["resume"] = await self._resume("customer", name, sec)

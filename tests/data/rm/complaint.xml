@@ -1,0 +1,82 @@
+<ns3:export xmlns="http://zakupki.gov.ru/oos/types/1" xmlns:ns2="http://zakupki.gov.ru/oos/base/1" xmlns:ns4="http://zakupki.gov.ru/oos/common/1" xmlns:ns3="http://zakupki.gov.ru/oos/export/1" xmlns:ns6="http://zakupki.gov.ru/oos/TPtypes/1" xmlns:ns5="http://zakupki.gov.ru/oos/EPtypes/1" xmlns:ns8="http://zakupki.gov.ru/oos/CPtypes/1" xmlns:ns7="http://zakupki.gov.ru/oos/KOTypes/1" xmlns:ns13="http://zakupki.gov.ru/oos/EATypes/1" xmlns:ns9="http://zakupki.gov.ru/oos/pprf615types/1" xmlns:ns12="http://zakupki.gov.ru/oos/URTypes/1" xmlns:ns11="http://zakupki.gov.ru/oos/SMTypes/1" xmlns:ns10="http://zakupki.gov.ru/oos/CETypes/1" xmlns:ns14="http://zakupki.gov.ru/oos/printform/1">
+    <ns3:complaint schemeVersion="16.1">
+        <commonInfo>
+            <regNumber>202600100161005752</regNumber>
+            <docNumber>2026001001610057520001</docNumber>
+            <versionNumber>1</versionNumber>
+            <registrationKO xsi:type="zfcs_organizationInfoType" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+                <regNum>01731000120</regNum>
+                <fullName>ФЕДЕРАЛЬНАЯ АНТИМОНОПОЛЬНАЯ СЛУЖБА</fullName>
+                <INN>7703516539</INN>
+                <KPP>770301001</KPP>
+            </registrationKO>
+            <regType>P</regType>
+            <regDate>2026-05-12T10:47:51.951+03:00</regDate>
+            <printFormInfo>
+                <editDate>2026-05-12T10:47:52.961+03:00</editDate>
+                <publishDate>2026-05-12T10:47:51.951+03:00</publishDate>
+            </printFormInfo>
+        </commonInfo>
+        <KOInfo>
+            <regNum>01731000120</regNum>
+            <fullName>ФЕДЕРАЛЬНАЯ АНТИМОНОПОЛЬНАЯ СЛУЖБА</fullName>
+            <INN>7703516539</INN>
+            <KPP>770301001</KPP>
+            <address>Российская Федерация, 125993, Москва, Садовая Кудринская, 11, -</address>
+        </KOInfo>
+        <indicted>
+            <EP>
+                <regNum>08007000014</regNum>
+                <fullName>АКЦИОНЕРНОЕ ОБЩЕСТВО "ЕДИНАЯ ЭЛЕКТРОННАЯ ТОРГОВАЯ ПЛОЩАДКА"</fullName>
+                <INN>7707704692</INN>
+                <KPP>772501001</KPP>
+                <address>115114, МОСКВА ГОРОД, КОЖЕВНИЧЕСКАЯ УЛИЦА, ДОМ 14, СТРОЕНИЕ 5</address>
+            </EP>
+        </indicted>
+        <applicantNew>
+            <legalEntity>
+                <fullName>ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ "ИНЖЕНЕРНАЯ КОМПАНИЯ АЛЬФА"</fullName>
+                <INN>7801731943</INN>
+                <KPP>771601001</KPP>
+                <registrationDate>2025-08-21</registrationDate>
+                <address>129128, Г.МОСКВА, вн.тер.г. МУНИЦИПАЛЬНЫЙ ОКРУГ РОСТОКИНО, УЛ БАЖОВА, Д. 8, ПОМЕЩ. 70/1</address>
+                <contactPhone/>
+                <contactEMail/>
+            </legalEntity>
+        </applicantNew>
+        <object>
+            <purchase>
+                <purchaseNumber>0373200632426000004</purchaseNumber>
+                <purchaseCodes>
+                    <purchaseCode>264770729099577070100100180010000244</purchaseCode>
+                </purchaseCodes>
+                <purchaseName>Оказание услуг по обследованию зданий на соответствие требований безопасности (испытание электросетей) в 2026 -2027 гг</purchaseName>
+                <purchasePlacingDate>2026-04-27T10:31:22.984</purchasePlacingDate>
+            </purchase>
+        </object>
+        <text> Некорректная работа площадки при проведении аукциона</text>
+        <appealActionInfo>
+            <ns2:code>BIDS</ns2:code>
+            <ns2:shortName>Жалоба на ЭТП при подаче предложений о цене контракта</ns2:shortName>
+            <ns2:fullName>Жалоба на действия (бездействие) оператора электронной площадки, совершенные при проведении предусмотренной Законом о контрактной системе процедуры подачи предложений о цене контракта либо о сумме цен единиц товара, работы, услуги</ns2:fullName>
+        </appealActionInfo>
+        <printForm>
+            <url>https://zakupki.gov.ru/controls/printForm?type=COMPLAINT&amp;id=26135036&amp;reestrNumber=202600100161005752&amp;versionNumber=1</url>
+            <signatureInfo>
+                <dsUid>019E1B2817557D918A441F3FCCBDF408</dsUid>
+            </signatureInfo>
+        </printForm>
+        <attachments>
+            <attachment>
+                <publishedContentId>30DD2CAE14604D0D80BA7714D2A22D01</publishedContentId>
+                <fileName>0. Жалоба в ФАС 12.05.26.pdf</fileName>
+                <docDescription>0. Жалоба в ФАС 12.05.26.pdf</docDescription>
+                <docNumber>2026001001610057520002</docNumber>
+                <url>https://zakupki.gov.ru/controls/documentComplaintDownload?documentId=46084042</url>
+                <cryptoSigns>
+                    <signature/>
+                </cryptoSigns>
+            </attachment>
+        </attachments>
+    </ns3:complaint>
+</ns3:export>

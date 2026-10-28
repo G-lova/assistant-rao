@@ -91,40 +91,63 @@ class PeriodTest(unittest.TestCase):
 class ComplaintsTest(unittest.TestCase):
     """Жалобы: заявитель из XML, сводка документов одной жалобы, метрики и риски организаций."""
 
-    def test_facts(self):
-        """Заявитель и итог из XML жалобы и решения."""
-        f = complaint_facts("complaint", {"complaint": {"commonInfo": {"complaintNumber": "202600001"},
-                                                        "applicantNew": {"legalEntity": {"INN": "7701234567",
-                                                                                         "fullName": "ООО «А»"}}}})
-        self.assertEqual((f["complainant_inn"], f["complaint_number"]), ("7701234567", "202600001"))
+    def facts(self, name):
+        """Сведения XML ЕИС из ``tests/data/rm`` (реальные документы 05.2026, без подписи и контактов)."""
+        from pathlib import Path
+
+        from risk_monitoring import xml_events as xe
+
+        tag, _, body = xe.parse_xml((Path(__file__).parent / "data" / "rm" / name).read_bytes())
+        return xe.extract_facts(tag, body)
+
+    def test_real_xml(self):
+        """Жалоба: заявитель, номер, на оператора площадки, заказчик из ИКЗ; отзыв — только наименование и
+        номер; приостановка — номер жалобы и закупки."""
+        f = self.facts("complaint.xml")
+        self.assertEqual((f["complainant_inn"], f["complaint_number"], f["complaint_target"]),
+                         ("7801731943", "202600100161005752", "EP"))
+        self.assertEqual(f["customer_inn"], "7707290995")
+        self.assertIn("ЭТП", f["complaint_subject"])
+        c = self.facts("complaintCancel.xml")
+        self.assertEqual((c["complaint_number"], c["complaint_result"]), ("202600132489008095", "withdrawn"))
+        self.assertIn("ВЫСОТА", c["complainant_name"])
+        self.assertNotIn("complainant_inn", c)
+        t = self.facts("tenderSuspension.xml")
+        self.assertEqual((t["complaint_number"], t["purchase_number"]), ("202600100161003481", "0373200563926000023"))
+
+    def test_decision_code(self):
+        """Итог по коду решения."""
         d = complaint_facts("complaintDecision", {"checkResult": {"complResult": "COMPLAINT_PARTLY_VALID"}})
         self.assertEqual(d["complaint_result"], "partly")
-        self.assertEqual(complaint_facts("complaintWithdraw", {})["complaint_result"], "withdrawn")
 
     def rows(self):
-        """Две жалобы поставщика 77… на заказчика 24…: одна с решением «обоснована», вторая — необоснована."""
+        """Жалобы поставщика 77… на закупки заказчика 24…: №1 — обоснована (решение без ИНН), №2 — отозвана
+        (отзыв без ИНН), №3 — на оператора площадки, обоснована; №4 — другого заявителя по номеру закупки."""
         base = {"complainant_inn": "7701234567", "customer_inn": "2457007351"}
         return [{"id": 1, "complaint_number": "1", "purchase_number": "P1", "tag": "complaint", **base},
-                {"id": 2, "complaint_number": "1", "purchase_number": "P1", "tag": "complaintDecision",
+                {"id": 2, "complaint_number": "1", "tag": "complaintDecision", "complaint_result": "justified"},
+                {"id": 3, "complaint_number": "2", "purchase_number": "P2", **base},
+                {"id": 4, "complaint_number": "2", "tag": "complaintCancel", "complaint_result": "withdrawn"},
+                {"id": 5, "complaint_number": "3", "purchase_number": "P3", "complaint_target": "EP",
                  "complaint_result": "justified", **base},
-                {"id": 3, "complaint_number": "2", "purchase_number": "P2", "complaint_result": "unfounded", **base},
-                {"id": 4, "complaint_number": "3", "purchase_number": "P3", "complaint_result": "justified",
-                 "complainant_inn": "5000000000", "customer_inn": "2457007351"}]
+                {"id": 6, "complaint_number": "4", "purchase_number": "P4", "complaint_result": "justified",
+                 "complainant_inn": "5000000000"}]
 
     def test_customer(self):
-        """Жалобы на заказчика: документы одной жалобы — одна запись; обоснованные → BEH-001."""
-        items = org_profile.complaints(self.rows(), "2457007351", "customer")
-        self.assertEqual(len(items), 3)
-        m = org_profile.complaint_metrics(items, [{"number": "P1"}, {"number": "P9"}], "customer")
-        self.assertEqual((m["justified"], m["unfounded"], m["purchases"]), (2, 1, 3))
-        risks = org_profile._complaint_risks(m, "customer", settings)
-        self.assertEqual([r["rule_id"] for r in risks], ["BEH-001"])
+        """Документы одной жалобы сводятся по номеру; жалоба на оператора не считается обоснованной против
+        заказчика; закупка заказчика находится и без ИНН (по номеру)."""
+        items = org_profile.complaints(self.rows(), "2457007351", "customer", ["P4"])
+        self.assertEqual([c["key"] for c in items], ["1", "2", "3", "4"])
+        m = org_profile.complaint_metrics(items, [{"number": "P1"}], "customer")
+        self.assertEqual((m["justified"], m["withdrawn"], m["against_operator"]), (2, 1, 1))
+        self.assertEqual([r["rule_id"] for r in org_profile._complaint_risks(m, "customer", settings)], ["BEH-001"])
 
     def test_supplier(self):
-        """Жалобы поставщика: победа после жалобы; мало жалоб — без риска."""
+        """Жалобы поставщика: победа после жалобы; мало жалоб — без риска; много необоснованных — BEH-002."""
         items = org_profile.complaints(self.rows(), "7701234567", "supplier")
+        self.assertEqual(len(items), 3)
         m = org_profile.complaint_metrics(items, [{"number": "P2"}], "supplier")
-        self.assertEqual((m["total"], m["customers"], m["won_after_complaint"]), (2, 1, 1))
+        self.assertEqual((m["customers"], m["won_after_complaint"]), (1, 1))
         self.assertEqual(org_profile._complaint_risks(m, "supplier", settings), [])
         many = [{"key": str(i), "purchase_number": f"P{i}", "customer_inn": "1", "result": "unfounded"} for i in range(6)]
         mm = org_profile.complaint_metrics(many, [], "supplier")

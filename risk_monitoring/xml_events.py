@@ -438,8 +438,12 @@ def extract_facts(tag: str, body: Dict[str, Any]) -> Dict[str, Any]:
         f["termination_reason"] = _first(term[0], ["name", "reason"])
         f["termination_date"] = _first(term[0], ["terminationDate", "date", "paid"])
     f["final_stage"] = str(_first(body, ["finalStageExecution", "isFinalStage", "finalStage"]) or "").lower() == "true" or None
-    if "omplaint" in tag or "Complaint" in tag:
+    if "omplaint" in tag or tag == "tenderSuspension":
         f.update(complaint_facts(tag, body))
+        # заказчик в жалобе не указан (в indicted — оператор площадки, комиссия или заказчик): берём из ИКЗ
+        if not f.get("customer_inn") and (f.get("ikz_parts") or {}).get("customer_inn"):
+            f["customer_inn"] = f["ikz_parts"]["customer_inn"]
+            f["customer_kpp"] = f["ikz_parts"].get("customer_kpp")
     return {k: v for k, v in f.items() if v not in (None, "", [])}
 
 
@@ -453,25 +457,40 @@ COMPLAINT_RESULTS = (
 
 
 def complaint_facts(tag: str, body: Dict[str, Any]) -> Dict[str, Any]:
-    """Сведения жалобы: заявитель (раскрывается только в жалобе — участники процедур скрыты), номер, итог.
+    """Сведения жалобы: заявитель (раскрывается только в жалобе — участники процедур скрыты), номер, на кого
+    подана, предмет, итог.
+
+    Разбор проверен на XML ЕИС ``complaint``, ``complaintCancel``, ``tenderSuspension`` (схема 16.1, 28.10.2026):
+
+    - заявитель — ``applicantNew/legalEntity`` (``INN``, ``KPP``, ``fullName``) или ``individualPerson`` /
+      ``individualBusinessman``; в ``complaintCancel`` — только наименование (``name`` верхнего уровня);
+    - номер жалобы — 18 цифр: ``commonInfo/regNumber``, ``regNumber``, ``complaintNumber`` (у документов одной
+      жалобы он общий — по нему отзыв и решение сводятся с жалобой);
+    - на кого подана — первый элемент ``indicted`` (``EP`` — оператор площадки, ``customer``, ``commission`` …);
+    - отзыв — тег ``complaintCancel`` / ``complaintWithdraw``.
 
     Args:
-        tag: Тег документа (``complaint``, ``complaintDecision``, ``complaintWithdraw`` …).
+        tag: Тег документа.
         body: Нормализованное тело.
 
     Returns:
         Dict[str, Any]: ``complainant_inn``, ``complainant_kpp``, ``complainant_name``, ``complaint_number``,
-        ``complaint_result`` (``justified`` / ``partly`` / ``unfounded`` / ``returned`` / ``withdrawn``),
-        ``complaint_result_text``.
+        ``complaint_target``, ``complaint_subject``, ``complaint_result`` (``justified`` / ``partly`` / ``unfounded``
+        / ``returned`` / ``withdrawn``), ``complaint_result_text``.
     """
-    who = r"applicant|complainant|declarant|zayavitel"
+    who = r"applicant|complainant|declarant"
+    indicted = next((v for p, k, v in walk(body) if k == "indicted" and isinstance(v, dict)), None)
     f: Dict[str, Any] = {
         "complainant_inn": _first(body, ["INN", "inn"], path_re=who, pred=lambda v: re.fullmatch(r"\d{10}|\d{12}", v)),
         "complainant_kpp": _first(body, ["KPP", "kpp"], path_re=who),
-        "complainant_name": _first(body, ["fullName", "shortName", "organizationName", "name", "lastName"], path_re=who),
-        "complaint_number": _first(body, ["complaintNumber", "regNumber"], path_re=r"complaint|commonInfo"),
+        "complainant_name": _first(body, ["fullName", "shortName", "organizationName", "lastName"], path_re=who),
+        "complaint_number": _first(body, ["complaintNumber", "regNumber"], pred=lambda v: re.fullmatch(r"\d{18}", v)),
+        "complaint_target": next(iter(indicted), None) if indicted else None,
+        "complaint_subject": _first(body, ["shortName"], path_re=r"appealActionInfo"),
     }
-    if "ithdraw" in tag:
+    if not f["complainant_name"] and "Cancel" in tag and isinstance(body.get("name"), str):
+        f["complainant_name"] = body["name"]
+    if "ithdraw" in tag or "Cancel" in tag:
         f["complaint_result"] = "withdrawn"
         return f
     raw = _first(body, ["complResult", "complaintResult", "checkResult", "decisionType", "result", "decision"],

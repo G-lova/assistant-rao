@@ -21,7 +21,7 @@
 """
 from collections import Counter, defaultdict
 from datetime import date
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from risk_monitoring import contract_package as cp
 from risk_monitoring import passport, risk_catalog
@@ -139,35 +139,46 @@ def _black_on(contract: Dict[str, Any], black: Sequence[Dict[str, Any]]) -> List
 COMPLAINT_RANK = {"justified": 5, "partly": 4, "unfounded": 3, "returned": 2, "withdrawn": 2, None: 0}
 
 
-def complaints(rows: Sequence[Dict[str, Any]], inn: str, role: str) -> List[Dict[str, Any]]:
-    """Жалобы организации — одна запись на жалобу (документы одной жалобы сводятся, итог — по решению).
+def complaints(rows: Sequence[Dict[str, Any]], inn: str, role: str,
+               purchases: Iterable[str] = ()) -> List[Dict[str, Any]]:
+    """Жалобы организации — одна запись на жалобу: документы одной жалобы (жалоба, отзыв, решение,
+    приостановка) сводятся по номеру жалобы, итог — по самому весомому документу (решение важнее приёма).
 
     Args:
-        rows: Строки ``complaints_by_inn.sql``.
+        rows: Строки ``complaints_by_inn.sql`` и ``complaints_by_number.sql``.
         inn: ИНН организации.
-        role: ``customer`` — жалобы на её закупки, ``supplier`` — поданные ею.
+        role: ``customer`` — жалобы на её закупки (ИНН заказчика из ИКЗ или номер её закупки), ``supplier`` —
+            поданные ею.
+        purchases: Номера закупок заказчика (для ``customer``).
 
     Returns:
         List[Dict[str, Any]]: ``key``, ``purchase_number``, ``complainant_inn``, ``complainant_name``,
-        ``customer_inn``, ``result``, ``date``, ``xml_ids``.
+        ``customer_inn``, ``target``, ``subject``, ``result``, ``date``, ``xml_ids``.
     """
-    field = "customer_inn" if role == "customer" else "complainant_inn"
-    out: Dict[str, Dict[str, Any]] = {}
+    purchases = {str(p) for p in purchases if p}
+    groups: Dict[str, Dict[str, Any]] = {}
     for r in rows or []:
-        if str(r.get(field) or "").strip() != inn:
-            continue
         key = str(r.get("complaint_number") or f"{r.get('purchase_number')}|{r.get('complainant_inn')}")
-        c = out.setdefault(key, {"key": key, "purchase_number": r.get("purchase_number"),
-                                 "complainant_inn": r.get("complainant_inn"), "complainant_name": r.get("complainant_name"),
-                                 "customer_inn": r.get("customer_inn"), "result": None, "date": None, "xml_ids": []})
+        c = groups.setdefault(key, {"key": key, "purchase_number": None, "complainant_inn": None,
+                                    "complainant_name": None, "customer_inn": None, "target": None, "subject": None,
+                                    "result": None, "date": None, "xml_ids": []})
+        if r.get("id") in c["xml_ids"]:
+            continue
         c["xml_ids"].append(r.get("id"))
-        c["complainant_name"] = c["complainant_name"] or r.get("complainant_name")
+        for k, src in (("purchase_number", "purchase_number"), ("complainant_inn", "complainant_inn"),
+                       ("complainant_name", "complainant_name"), ("customer_inn", "customer_inn"),
+                       ("target", "complaint_target"), ("subject", "complaint_subject")):
+            c[k] = c[k] or (str(r[src]).strip() if r.get(src) else None)
         res = r.get("complaint_result") or None
         if COMPLAINT_RANK.get(res, 0) > COMPLAINT_RANK.get(c["result"], 0):
             c["result"] = res
         d = str(r.get("event_at") or "")[:10] or None
         c["date"] = min(x for x in (c["date"], d) if x) if (c["date"] or d) else None
-    return sorted(out.values(), key=lambda c: c["date"] or "")
+    if role == "customer":
+        mine = [c for c in groups.values() if c["customer_inn"] == inn or (c["purchase_number"] in purchases)]
+    else:
+        mine = [c for c in groups.values() if c["complainant_inn"] == inn]
+    return sorted(mine, key=lambda c: c["date"] or "")
 
 
 def complaint_metrics(items: Sequence[Dict[str, Any]], contracts: Sequence[Dict[str, Any]] = (),
@@ -186,13 +197,16 @@ def complaint_metrics(items: Sequence[Dict[str, Any]], contracts: Sequence[Dict[
         ``customers``, ``won_after_complaint``.
     """
     n = len(items)
-    just = sum(1 for c in items if c["result"] in ("justified", "partly"))
+    # жалоба на оператора площадки (indicted = EP) — не о действиях заказчика: в обоснованные заказчика не входит
+    operator = sum(1 for c in items if c.get("target") == "EP")
+    just = sum(1 for c in items if c["result"] in ("justified", "partly")
+               and not (role == "customer" and c.get("target") == "EP"))
     unf = sum(1 for c in items if c["result"] == "unfounded")
     wd = sum(1 for c in items if c["result"] in ("withdrawn", "returned"))
     decided = just + unf
     purchases = {c["purchase_number"] for c in items if c.get("purchase_number")}
     m = {"total": n, "purchases": len(purchases), "justified": just, "unfounded": unf, "withdrawn": wd,
-         "pending": n - just - unf - wd, "justified_share": _share(just, decided)}
+         "pending": max(0, n - just - unf - wd), "justified_share": _share(just, decided), "against_operator": operator}
     if role == "customer":
         m["purchases_share"] = _share(len(purchases), len(contracts)) if contracts else None
     else:
@@ -538,7 +552,9 @@ def resume_facts(role: str, section: Dict[str, Any], settings: Any) -> List[str]
         if role == "customer":
             facts.append(f"Жалоб на закупки заказчика: {cm['total']} (закупок с жалобами {cm['purchases']}); признаны "
                          f"обоснованными полностью или частично — {cm['justified']}, необоснованными — {cm['unfounded']}, "
-                         f"отозваны или возвращены — {cm['withdrawn']}, без решения в данных — {cm['pending']}.")
+                         f"отозваны или возвращены — {cm['withdrawn']}, без решения в данных — {cm['pending']}"
+                         + (f"; на оператора электронной площадки (не о действиях заказчика) — {cm['against_operator']}"
+                            if cm.get("against_operator") else "") + ".")
         else:
             facts.append(f"Жалоб, поданных поставщиком: {cm['total']} (заказчиков: {cm['customers']}); "
                          f"обоснованных — {cm['justified']}, необоснованных — {cm['unfounded']}"
