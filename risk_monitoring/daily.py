@@ -156,6 +156,7 @@ def contract_item(card: Dict[str, Any], ai: Dict[str, Any], changed: bool) -> Di
         "priority_reasons": (ai.get("priority") or {}).get("reasons") or [],
         "confidence": _num((ai.get("confidence") or {}).get("score")),
         "composite": [c.get("rule_id") for c in ai.get("composite_risks") or [] if c.get("rule_id")],
+        "plan_passed_open": bool((ai.get("execution") or {}).get("plan_passed_open")),
         # события риска (концепция 11.7) — только если закупка пересчитана в этом прогоне
         "risk_changes": [{k: c.get(k) for k in ("code", "rule_id", "risk_title")}
                          for c in (ai.get("risk_changes") or [])] if changed else [],
@@ -391,6 +392,8 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
                          "closed": [{"card_id": i["card_id"], "purchase_number": i["purchase_number"],
                                      "customer": i["customer"], "rule_id": c["rule_id"], "title": c["risk_title"]}
                                     for i, c in closed_risks[:top]]},
+        # контракты, у которых плановый срок прошёл, а сведений о завершении в ЕИС нет (профиль исполнения)
+        "execution_open_past_plan": sum(1 for i in items if i["plan_passed_open"]),
         # составные риски (CR-*): сколько закупок с каждым сочетанием признаков
         "composite_risks": dict(sorted(comp.items(), key=lambda kv: -kv[1])),
         "priorities": [{k: i.get(k) for k in ("card_id", "purchase_number", "customer", "score", "zone", "priority",
@@ -450,6 +453,9 @@ def summary_facts(s: Dict[str, Any]) -> List[str]:
         if rc.get("closed"):
             facts.append("Сняты риски: " + "; ".join(
                 f"{risk_names([x['rule_id']])} — закупка {x['purchase_number']}" for x in rc["closed"][:5]) + ".")
+    if s.get("execution_open_past_plan"):
+        facts.append(f"Плановый срок исполнения прошёл, а сведений о завершении в ЕИС нет — контрактов "
+                     f"{s['execution_open_past_plan']}: проверить исполнение и полноту сведений в реестре контрактов.")
     comp = s.get("composite_risks") or {}
     if comp:
         facts.append("Сочетания признаков риска (опаснее, чем каждый признак по отдельности): " + "; ".join(

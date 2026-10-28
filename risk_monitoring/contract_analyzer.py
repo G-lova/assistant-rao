@@ -23,7 +23,7 @@ logger = get_logger(__name__)
 
 EXTERNAL_TABLE = "risk_monitoring_contracts"
 STAGE = "S2"
-PROMPT_VERSION = "contract-resume-4"
+PROMPT_VERSION = "contract-resume-5"
 
 RESUME_SYSTEM = (
     "Ты — аналитик риск-мониторинга госзакупок (44-ФЗ, 223-ФЗ). По паспорту закупки, её рискам и событиям напиши "
@@ -31,7 +31,9 @@ RESUME_SYSTEM = (
     "со ссылкой на источник (документ, событие ЕИС, правило, реестр), что проверить в первую очередь. Не придумывай "
     "фактов, которых нет во входных данных; не делай вывод о нарушении — только о признаках риска. Не используй коды рисков и правил (вида DOC-002, FIN-004, BEH-005, pz_p1) — называй риски словами, понятными заказчику. Если у риска указано possible_exclusion — скажи, что по "
     "документам возможно законное исключение и его стоит проверить. Если есть composite_risks — назови это "
-    "сочетание признаков (оно опаснее каждого признака по отдельности) и из каких признаков оно сложилось. Ответ — "
+    "сочетание признаков (оно опаснее каждого признака по отдельности) и из каких признаков оно сложилось. "
+    "execution — исполнение контракта (просрочка, доли исполнения и оплаты), benchmark — сравнение снижения цены и "
+    "числа заявок с похожими закупками системы: упомяни, если есть заметное отличие. Ответ — "
     "обычный текст, без JSON, списков и разметки.")
 RESUME_SCHEMA = {"type": "object", "properties": {"resume": {"type": "string"}}, "required": ["resume"]}
 
@@ -309,6 +311,7 @@ class ContractAnalyzer:
         by = self._group(data)
         # прошлые результаты закупок — для событий риска и даты первого выявления (затухание)
         self.previous = await self._internal("contract", ids)
+        await self._load_peers()
         statuses: Dict[Tuple[int, str], int] = {}
         for s in data["statuses"]:
             try:
@@ -362,6 +365,7 @@ class ContractAnalyzer:
             progress.note("входные данные не изменились — пересчёт не нужен")
             return {"card_id": cid, "status": "unchanged", "pushed": False}
         prev_ai = ((getattr(self, "previous", {}) or {}).get(cid) or {}).get("ai_analysis") or {}
+        self._benchmark(built)
         checks = await self._rule_checks(built, item, texts)
         self._dynamics(built, item, prev_ai)
         async with progress.step("резюме закупки" + (" (модель)" if self.llm else " (шаблон)")):
@@ -394,6 +398,34 @@ class ContractAnalyzer:
         async with progress.step("сохранение результата во внутренней БД"):
             await self._save_internal(cid, ai, result["pushed"], result.get("push_error"))
         return result
+
+    async def _load_peers(self) -> None:
+        """Похожие закупки системы для сравнения (один запрос на запуск анализатора, ``benchmark_peers.sql``).
+
+        Сбой запроса не мешает анализу — сравнение просто не выполняется.
+        """
+        from datetime import date, timedelta
+
+        self.peers: List[Dict[str, Any]] = []
+        if not settings.BENCHMARK_ENABLED:
+            return
+        since = (date.today() - timedelta(days=settings.BENCHMARK_LOOKBACK_DAYS)).isoformat()
+        async with progress.step("похожие закупки для сравнения") as st:
+            self.peers = await self._safe_query("benchmark_peers.sql", [since])
+            st["detail"] = f"закупок {len(self.peers)}"
+
+    def _benchmark(self, built: Dict[str, Any]) -> None:
+        """Сравнение закупки с похожими (``ai_analysis.benchmark``) и риск «аномальная цена» (FIN-001) при
+        аномально малом снижении цены. Балл пересчитывается позже (``_dynamics``)."""
+        from risk_monitoring import purchase_profiles as pp
+
+        peers = getattr(self, "peers", None) or []
+        b = pp.benchmark(built["passport"], peers, settings) if peers else None
+        built["benchmark"] = b
+        extra = pp.benchmark_risks(b, built["passport"], settings)
+        if extra:
+            built["risks"] = passport.merge_risks(built["risks"], extra, fz=built["passport"].get("fz"))
+            progress.note(extra[0]["description"])
 
     async def _rule_checks(self, built: Dict[str, Any], item: Dict[str, Any],
                            texts: Optional[Dict[int, str]]) -> Dict[str, Dict[str, Any]]:
@@ -484,6 +516,10 @@ class ContractAnalyzer:
             "composite_risks": [{"title": c["title"], "description": c.get("description"),
                                  "components": [x.get("title") for x in c.get("components") or []]}
                                 for c in built.get("composite_risks") or []],
+            "execution": {k: (built.get("execution") or {}).get(k)
+                          for k in ("status", "delay_days", "executed_share", "paid_share", "notes")}
+            if built.get("execution") else None,
+            "benchmark": built.get("benchmark"),
             "events": [{k: e.get(k) for k in ("title", "importance", "event_at")} for e in built["events"][:8]],
             "completeness": built["package"]["completeness"], "consistency": built["package"]["consistency"][:3],
             "registry": built["registry"],

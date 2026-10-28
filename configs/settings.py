@@ -366,3 +366,15 @@ def warn_env_leftovers(logger) -> None:
 
 # ── Составные риски закупки (CR-*): сочетания факторов, шаблоны — risk_monitoring/config/composite_risks.json
 COMPOSITE_RISKS_ENABLED = True
+
+# ── Профили закупки (risk_monitoring/purchase_profiles.py)
+# Исполнение контракта: уровень риска просрочки (CTR-017) по числу дней — (до N дней включительно, уровень)
+EXECUTION_DELAY_LEVELS = ((7, 0.3), (30, 0.45), (10**6, 0.6))
+EXECUTION_UNDERDONE_SHARE = 0.9      # завершён, а исполнено меньше этой доли цены → CTR-018
+# Сравнение с похожими закупками системы (класс ОКПД2 + закон + конкурентный способ)
+BENCHMARK_ENABLED = True
+BENCHMARK_LOOKBACK_DAYS = 730        # период похожих закупок
+BENCHMARK_MIN_PEERS = 10             # меньше — раздел ОКПД2, ещё меньше — не сравнивать
+BENCHMARK_MIN_MEDIAN = 8.0           # медиана снижения у похожих, %, ниже которой малое снижение не аномально
+BENCHMARK_LOW_DISCOUNT_GAP = 5.0     # насколько п. п. снижение должно быть меньше медианы
+BENCHMARK_RISK_LEVEL = 0.4           # уровень FIN-001 (для раздела ОКПД2 — × 0,75)

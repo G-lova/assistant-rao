@@ -873,9 +873,12 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
     rejected = {code for (fid, code), st in statuses.items() if st == REJECTED_STATUS and fid in file_ids}
     f_risks = drop_rule_covered(f_risks, values, confirmed, fz, getattr(settings, "RULE_SUSPECT_INDICATORS", ()))
     fav = favourite_supplier(p, supplier_counts, settings)
+    from risk_monitoring import purchase_profiles
+
+    execution = purchase_profiles.execution_profile(dataset)
     risks = passport.merge_risks(
         rule_values_risks(values), f_risks, event_risks(xmls), registry_risks(matches), rnp_risks(rnp_found), dataset_risks(p),
-        favourite_risks(p, fav),
+        favourite_risks(p, fav), purchase_profiles.execution_risks(execution, settings),
         consistency_risks(cons), completeness_risks(comp, settings.COMPLETENESS_RISK), fz=fz)
     risks = drop_same_quote(risks, confirmed)
     prof = profile(risks, previous_score, confirmed, settings.CONFIRMED_WEIGHT, tuple(settings.SCORE_ZONES),
@@ -898,6 +901,8 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
                  "planned_exclusion_date": str(m.get("planned_exclusion_date") or "")[:10] or None}
                 for m in rnp_found],
         "customer_supplier": fav,
+        # профиль исполнения контракта (purchase_profiles.execution_profile)
+        "execution": execution,
         "events": events,
         "risks": risks,
         "total_risk": passport.total_risk(risks),
