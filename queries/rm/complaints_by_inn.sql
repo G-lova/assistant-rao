@@ -16,7 +16,7 @@ SELECT
     JSON_UNQUOTE(JSON_EXTRACT(x.ai_analysis, '$.facts.complaint_target')) AS complaint_target,
     JSON_UNQUOTE(JSON_EXTRACT(x.ai_analysis, '$.facts.complaint_subject')) AS complaint_subject
 FROM risk_monitoring_eis_xml_sources x
-WHERE (x.entry_name LIKE '%omplaint%' OR x.entry_name LIKE 'tenderSuspension%')
+WHERE (x.entry_name LIKE '%omplaint%' OR x.entry_name LIKE 'tenderSuspension%' OR x.entry_name LIKE 'checkResult%')
   AND JSON_UNQUOTE(JSON_EXTRACT(x.ai_analysis, '$.event.code')) = 'CMP-001'
   AND COALESCE(x.created_at, x.updated_at) >= ?
   AND (JSON_UNQUOTE(JSON_EXTRACT(x.ai_analysis, '$.facts.complainant_inn')) IN ({inns})

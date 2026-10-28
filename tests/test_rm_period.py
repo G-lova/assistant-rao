@@ -131,6 +131,37 @@ class ComplaintsTest(unittest.TestCase):
         self.assertEqual(complaint_facts("complaintDecision", {"complaintDecisionViolation": "N"})
                          ["complaint_result"], "unfounded")
 
+    def test_real_decision_44(self):
+        """Решение по жалобе 44-ФЗ (checkResult с блоком complaint): номер жалобы — из complaint, а не номер
+        решения; итог, заказчик, заявитель из имени файла; событие — жалоба, уровень риска по итогу."""
+        from pathlib import Path
+
+        from risk_monitoring import xml_events as xe
+
+        f = self.facts("checkResult_complaint_unfounded.xml")
+        self.assertEqual((f["complaint_number"], f["complaint_result"], f["complaint_target"]),
+                         ("202600132489019607", "unfounded", "customer"))
+        self.assertEqual((f["customer_inn"], f["purchase_number"]), ("7725060786", "0373200026426000249"))
+        self.assertEqual(f["complainant_name"], "ООО «Рэлкон Строй»")
+        j = self.facts("checkResult_complaint_justified.xml")
+        self.assertEqual(j["complaint_result"], "justified")
+        tag, ver, body = xe.parse_xml((Path(__file__).parent / "data" / "rm" / "checkResult_complaint_justified.xml").read_bytes())
+        ev = xe.classify(tag, ver, False, [], j)
+        self.assertEqual(ev["code"], "CMP-001")
+        self.assertEqual([(r["rule_id"], r["level"]) for r in xe.rule_risks(ev, [], j)], [("PROC-008", 0.8)])
+        self.assertEqual(xe.rule_risks(ev, [], f)[0]["level"], 0.2)
+
+    def test_unplanned_check_not_complaint(self):
+        """checkResult без блока complaint — результат внеплановой проверки, не жалоба."""
+        from pathlib import Path
+
+        from risk_monitoring import xml_events as xe
+
+        f = self.facts("checkResult_unplanned.xml")
+        self.assertNotIn("complaint_number", f)
+        tag, ver, _ = xe.parse_xml((Path(__file__).parent / "data" / "rm" / "checkResult_unplanned.xml").read_bytes())
+        self.assertEqual(xe.classify(tag, ver, False, [], f)["code"], "CTL-001")
+
     def test_decision_code(self):
         """Итог по коду решения."""
         d = complaint_facts("complaintDecision", {"checkResult": {"complResult": "COMPLAINT_PARTLY_VALID"}})
