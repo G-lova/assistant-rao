@@ -32,6 +32,34 @@ SCHEMA_VERSION = "rm-contract-1"
 INDICATOR_TO_CODE: Dict[str, str] = {
     rec["indicator"]: code for code, rec in risk_catalog.RISKS.items() if rec.get("indicator")
 }
+CODE_TO_INDICATOR: Dict[str, str] = {code: key for key, code in INDICATOR_TO_CODE.items()}
+RULES_FZ = 44   # показатели внешней системы написаны для 44-ФЗ («Описание формул РИСК-МОНИТОРИНГА (44-ФЗ)»)
+
+
+def rule_decision(code: str, values: Optional[Dict[str, Any]], fz: Any = None,
+                  suspect: Iterable[str] = ()) -> Optional[str]:
+    """Что говорит показатель внешней системы о риске каталога ``code``.
+
+    Args:
+        code: Код риска каталога.
+        values: Значения показателей закупки (``risk_monitoring_evaluation_results.values``).
+        fz: Закон закупки.
+        suspect: Показатели с известными ошибками в формуле (``RULE_SUSPECT_INDICATORS``).
+
+    Returns:
+        Optional[str]: ``fired`` — сработал; ``not_fired`` — посчитан и не сработал; ``None`` — правило не решает:
+        у кода нет показателя, расчёта нет, закупка не по 44-ФЗ (формулы написаны для 44-ФЗ) или формула ошибочна.
+    """
+    key = CODE_TO_INDICATOR.get(code)
+    if not key or not values or key not in values or key in set(suspect or ()):
+        return None
+    law = risk_catalog.normalize_fz(fz)
+    if law is not None and law != RULES_FZ:
+        return None
+    v = values.get(key)
+    fired = v is True or (num(v) or 0) > 0
+    return "fired" if fired else "not_fired"
+
 
 # Ожидаемые документы конкурентной закупки: группа → допустимые типы (detected_type)
 EXPECTED_DOCS = {
@@ -66,6 +94,7 @@ TERMINATION_LEVEL = 0.5
 
 IGNORED_RISK_STATUSES = {2, 4}     # отклонён, устранён
 CONFIRMED_STATUS = 1
+REJECTED_STATUS = 2
 
 
 # ------------------------------------------------------------------ значения dataset
@@ -365,27 +394,40 @@ def events_feed(xmls: Sequence[Dict[str, Any]], limit: int = 50) -> List[Dict[st
 
 
 def drop_rule_covered(risks: Sequence[Dict[str, Any]], values: Optional[Dict[str, Any]],
-                      confirmed: Iterable[str] = ()) -> List[Dict[str, Any]]:
-    """Убирает риски модели по кодам, которые внешняя система считает правилом по данным ЕИС.
+                      confirmed: Iterable[str] = (), fz: Any = None, suspect: Iterable[str] = ()) -> List[Dict[str, Any]]:
+    """Риски модели по кодам, которые проверяет показатель внешней системы (FIN-004 ↔ pz_p1, FIN-005 ↔ pz_p2 …).
 
-    Для таких кодов (FIN-004 ↔ pz_p1, FIN-005 ↔ pz_p2, FIN-006 ↔ pz_p3, FIN-008 ↔ pz_p4 …) правило точнее модели:
-    сработало — риск уже есть с ``source = rule``; не сработало — данные ЕИС утверждению модели противоречат
-    (закупка 1399, 20.10.2026: «нет обеспечения исполнения» с цитатой об авансе при pz_p2 = 0). Подтверждённые
-    аналитиком риски не трогаются.
+    По концепции ИИ работает поверх правил и не заменяет их (2.8, 2.9):
+
+    * показатель посчитан и не сработал (44-ФЗ) — данные ЕИС утверждению модели противоречат, риск модели снимается
+      (закупка 1399, 20.10.2026: «нет обеспечения исполнения» при pz_p2 = 0);
+    * показатель сработал — находка модели остаётся подтверждением: её цитаты добавляются к риску правила, уровень —
+      уровень правила (у подтверждения уровень 0, описание пустое), источник риска — «правило»;
+    * правило не решает (223-ФЗ, нет расчёта, формула на проверке) — риск модели остаётся как есть («ИИ»).
+
+    Подтверждённые аналитиком риски не трогаются.
 
     Args:
         risks: Риски файлов.
-        values: Значения правил закупки (``None`` — расчёта нет, ничего не убирается).
+        values: Значения правил закупки.
         confirmed: Коды, подтверждённые аналитиком.
+        fz: Закон закупки.
+        suspect: Показатели с известными ошибками (``RULE_SUSPECT_INDICATORS``).
 
     Returns:
-        List[Dict[str, Any]]: Риски без перекрытых правилами.
+        List[Dict[str, Any]]: Риски модели без опровергнутых правилами; подтверждающие правило — как доказательства.
     """
-    if not values:
-        return list(risks)
-    covered = {code for key, code in INDICATOR_TO_CODE.items() if key in values}
     keep = set(confirmed)
-    return [r for r in risks if r.get("rule_id") not in covered or r.get("rule_id") in keep]
+    out = []
+    for r in risks:
+        code = r.get("rule_id")
+        decision = None if code in keep else rule_decision(code, values, fz, suspect)
+        if decision == "not_fired":
+            continue
+        if decision == "fired":
+            r = {**r, "level": 0.0, "description": "", "law": None, "corroborates_rule": CODE_TO_INDICATOR[code]}
+        out.append(r)
+    return out
 
 
 def rule_level(kind: Optional[str]) -> float:
@@ -631,12 +673,15 @@ AI_SOURCES = {"ai_file", "ai_event", "version_diff"}
 
 def _weight(r: Dict[str, Any], confirmed: Iterable[str], confirmed_weight: float, ai_weight: float = 1.0) -> float:
     """Вес риска в балле: ``level × confidence``; подтверждённый аналитиком × ``confirmed_weight``; найденный
-    только моделью и не подтверждённый × ``ai_weight`` (его ещё нужно проверить); не больше 1."""
+    только моделью и не подтверждённый × ``ai_weight`` (его ещё нужно проверить); × ``decay_factor`` (затухание);
+    не больше 1."""
     w = (passport.clamp01(r.get("level")) or 0.0) * (passport.clamp01(r.get("confidence")) or 0.0)
     if r.get("rule_id") in set(confirmed):
         w *= confirmed_weight
     elif r.get("sources") and set(r["sources"]) <= AI_SOURCES:
         w *= ai_weight
+    # затухание во времени (концепция 10.10; risk_dynamics.apply_decay)
+    w *= float(r.get("decay_factor") if r.get("decay_factor") is not None else 1.0)
     return min(1.0, w)
 
 
@@ -696,6 +741,7 @@ def profile(risks: Sequence[Dict[str, Any]], previous_score: Optional[float] = N
         "top_factors": [{"rule_id": r["rule_id"], "title": r.get("title"), "level": r.get("level"),
                          "confidence": r.get("confidence"), "confirmed": r["rule_id"] in confirmed,
                          "sources": r.get("sources"),
+                         **({"rule_check": r["rule_check"].get("status")} if r.get("rule_check") else {}),
                          "refs": list(dict.fromkeys(e.get("src") for e in r.get("evidence") or [] if e.get("src")))[:5]}
                         for r in top],
     }
@@ -794,7 +840,8 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
                             values: Optional[Dict[str, Any]], black: Sequence[Dict[str, Any]],
                             statuses: Dict[Tuple[int, str], int], previous_score: Optional[float] = None,
                             settings: Any = None, supplier_counts: Optional[Dict[str, int]] = None,
-                            rnp: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
+                            rnp: Sequence[Dict[str, Any]] = (),
+                            checks: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
     """Собирает ``ai_analysis`` закупки/контракта без модели (резюме добавляет анализатор).
 
     Args:
@@ -806,6 +853,8 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
         statuses: Статусы рисков файлов у аналитика.
         supplier_counts: Контракты заказчика за период по ИНН поставщиков (для BEH-006); ``None`` — не проверять.
         rnp: Записи РНП по ИНН поставщика (``risk_monitoring_rnp_entries``) → REG-002.
+        checks: Внеплановые проверки контрольных органов (``control_checks.normalize``) → PROC-008, если закупка в
+            списке проверки с нарушениями.
         previous_score: Прошлый балл.
         settings: Модуль ``configs.settings`` (пороги).
 
@@ -823,11 +872,17 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
     matches = registry_matches(black, p["supplier"], as_date(p["dates"]["contract"]))
     rnp_found = rnp_matches(rnp, p["supplier"], as_date(p["dates"]["contract"]))
     f_risks, confirmed = file_risks(files, statuses)
-    f_risks = drop_rule_covered(f_risks, values, confirmed)
+    file_ids = {int(f["id"]) for f in files if f.get("id") is not None}
+    rejected = {code for (fid, code), st in statuses.items() if st == REJECTED_STATUS and fid in file_ids}
+    f_risks = drop_rule_covered(f_risks, values, confirmed, fz, getattr(settings, "RULE_SUSPECT_INDICATORS", ()))
     fav = favourite_supplier(p, supplier_counts, settings)
+    from risk_monitoring import control_checks, purchase_profiles
+
+    execution = purchase_profiles.execution_profile(dataset)
     risks = passport.merge_risks(
-        f_risks, event_risks(xmls), rule_values_risks(values), registry_risks(matches), rnp_risks(rnp_found), dataset_risks(p),
-        favourite_risks(p, fav),
+        rule_values_risks(values), f_risks, event_risks(xmls), registry_risks(matches), rnp_risks(rnp_found), dataset_risks(p),
+        favourite_risks(p, fav), purchase_profiles.execution_risks(execution, settings),
+        control_checks.check_risks(checks, p.get("purchase_number"), (p.get("customer") or {}).get("inn"), settings),
         consistency_risks(cons), completeness_risks(comp, settings.COMPLETENESS_RISK), fz=fz)
     risks = drop_same_quote(risks, confirmed)
     prof = profile(risks, previous_score, confirmed, settings.CONFIRMED_WEIGHT, tuple(settings.SCORE_ZONES),
@@ -850,11 +905,18 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
                  "planned_exclusion_date": str(m.get("planned_exclusion_date") or "")[:10] or None}
                 for m in rnp_found],
         "customer_supplier": fav,
+        # профиль исполнения контракта (purchase_profiles.execution_profile)
+        "execution": execution,
+        # внеплановые проверки, в список закупок которых входит закупка
+        "control_checks": [{"number": c["number"], "date": c["date"], "result": c["result"],
+                            "prescription": c["prescription"], "subjects": [x.get("name") for x in c["subjects"][:2]]}
+                           for c in checks if p.get("purchase_number") and str(p["purchase_number"]) in c["purchases"]],
         "events": events,
         "risks": risks,
         "total_risk": passport.total_risk(risks),
         "profile": prof,
         "confirmed_codes": sorted(confirmed),
+        "rejected_codes": sorted(rejected),
         "input_hash": input_hash(p, [(r["rule_id"], r.get("level"), r.get("confidence")) for r in risks],
                                  [e.get("xml_id") for e in events], sorted(confirmed)),
     }

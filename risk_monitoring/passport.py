@@ -190,10 +190,12 @@ def apply_catalog(risk: Dict[str, Any], fz: Any = None) -> Dict[str, Any]:
 # Источник риска для ``risk_monitoring_document_risks.source`` (ТЗ 09.10.2026): один на риск, по надёжности
 SOURCE_PRIORITY = ("registry", "rule", "package", "aggregate", "ai_event", "ai_file")
 SOURCE_ALIASES = {"print_form": "rule", "version_diff": "ai_file", "eis": "rule"}
+AI_ONLY_SOURCES = {"ai_file", "ai_event", "ai"}
 
 
 def primary_source(sources: Iterable[str]) -> Optional[str]:
-    """Главный источник риска из ``sources``: реестр → правило → комплект → аналитика → событие → файл.
+    """Источник риска для колонки ``source``: при ``RISK_SOURCE_LABELS = "simple"`` — ``rule`` / ``ai``, иначе главный
+    из ``sources``: реестр → правило → комплект → аналитика → событие → файл.
 
     Args:
         sources: Источники риска (``ai_file``, ``rule``, ``print_form`` …).
@@ -202,6 +204,13 @@ def primary_source(sources: Iterable[str]) -> Optional[str]:
         Optional[str]: Значение из ``SOURCE_PRIORITY`` или ``None``, если источников нет.
     """
     norm = {SOURCE_ALIASES.get(s, s) for s in sources or [] if s}
+    if not norm:
+        return None
+    from configs import settings
+
+    if getattr(settings, "RISK_SOURCE_LABELS", "detailed") == "simple":
+        # «правило» — нашло правило (в т. ч. вместе с моделью), «ai» — только модель (решение 27.10.2026)
+        return "ai" if norm <= AI_ONLY_SOURCES else "rule"
     return next((s for s in SOURCE_PRIORITY if s in norm), next(iter(sorted(norm)), None))
 
 
@@ -238,6 +247,9 @@ def merge_risks(*lists: Iterable[Dict[str, Any]], fz: Any = None) -> List[Dict[s
                 cur["title"] = r.get("title") or risk_catalog.title(code)
                 merged[code] = cur
                 continue
+            if r.get("corroborates_rule"):
+                # находка модели подтверждает сработавший показатель внешней системы (contract_package.drop_rule_covered)
+                cur["corroborated_by_ai"] = True
             cur["level"] = max(cur.get("level") or 0, r.get("level") or 0)
             cur["confidence"] = max(cur.get("confidence") or 0, r.get("confidence") or 0)
             if not cur.get("description") and r.get("description"):

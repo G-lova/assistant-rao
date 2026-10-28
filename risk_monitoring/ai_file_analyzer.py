@@ -406,6 +406,24 @@ class AIFileAnalyzer:
                 x["newer"] = file_versions.newer_versions(x, cands)
         return out
 
+    async def _rule_values(self, card: Any) -> Optional[Dict[str, Any]]:
+        """Значения показателей внешней системы по закупке файла (последний расчёт; один запрос на закупку за прогон).
+
+        Returns:
+            Optional[Dict[str, Any]]: ``{показатель: значение}`` или ``None`` (нет закупки, расчёта или сбой запроса).
+        """
+        c = _card(card)
+        if c is None:
+            return None
+        try:
+            rows = (await self._run_cache().keyed(self._query, "contract_rules.sql", [c], "card_id")).get(c) or []
+        except Exception as e:  # noqa: BLE001 — без значений правило ничего не снимает
+            logger.warning(f"Показатели правил закупки {c} не получены: {type(e).__name__}: {e}")
+            return None
+        from risk_monitoring.contract_package import as_json
+
+        return as_json(rows[0].get("rule_values")) if rows else None
+
     def _run_cache(self) -> Any:
         """Кэш прогона (создаётся при первом обращении — и у объектов, собранных без ``__init__``)."""
         c = self.__dict__.get("cache")
@@ -728,7 +746,16 @@ class AIFileAnalyzer:
             # коды, которые внешняя система считает правилом по данным ЕИС (FIN-004…008 ↔ pz_p1…p4, CTR-002 ↔ pz_p7):
             # правило точнее модели, риск модели по ним в паспорте файла не ставится (прогон 21.10.2026: FIN-005
             # «в соответствии с приложенным файлом», CTR-002 «30 дней с заключения»)
-            covered = {c for c, rec in CATALOG.items() if rec.get("indicator")} if settings.FILE_DROP_RULE_COVERED else set()
+            # снимается, только если показатель посчитан для закупки по 44-ФЗ и не сработал (rule_decision): при 223-ФЗ,
+            # без расчёта или при сработавшем показателе находка модели остаётся (концепция 2.9: ИИ поверх правил)
+            covered = set()
+            if settings.FILE_DROP_RULE_COVERED and any(CATALOG.get(r.get("code"), {}).get("indicator")
+                                                       for r in risk["risks"]):
+                from risk_monitoring.contract_package import rule_decision
+
+                values = await self._rule_values(row.get("risk_monitoring_contract_id"))
+                covered = {r.get("code") for r in risk["risks"]
+                           if rule_decision(r.get("code"), values, fz, settings.RULE_SUSPECT_INDICATORS) == "not_fired"}
             before = len(risk["risks"])
             risk = {**risk, "risks": [r for r in risk["risks"]
                                       if not rejected_by_rules(r) and not absence_contradicted(r, text)

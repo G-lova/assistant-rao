@@ -2,6 +2,7 @@
 import asyncio
 import json
 import unittest
+from unittest import mock
 from datetime import date
 
 from risk_monitoring import contract_package as cp
@@ -362,12 +363,39 @@ class RuleCoveredTest(unittest.TestCase):
     """Риски модели по кодам с правилом внешней системы уступают правилу (закупка 1399, 20.10.2026)."""
 
     def test_drop_rule_covered(self):
-        """FIN-005 модели при pz_p2 = 0 и FIN-006 при pz_p3 = 1 убираются; DOC-003 остаётся; подтверждённый — тоже."""
-        risks = [{"rule_id": "FIN-005"}, {"rule_id": "FIN-006"}, {"rule_id": "DOC-003"}]
+        """pz_p2 = 0 → FIN-005 модели снят; pz_p3 = 1 → FIN-006 модели остаётся подтверждением (уровень правила);
+        DOC-003 и подтверждённый аналитиком — как есть."""
+        risks = [{"rule_id": "FIN-005", "level": 0.7}, {"rule_id": "FIN-006", "level": 0.7, "description": "нет"},
+                 {"rule_id": "DOC-003", "level": 0.5}]
         out = cp.drop_rule_covered(risks, {"pz_p2": 0, "pz_p3": 1})
-        self.assertEqual([r["rule_id"] for r in out], ["DOC-003"])
+        self.assertEqual([r["rule_id"] for r in out], ["FIN-006", "DOC-003"])
+        self.assertEqual((out[0]["level"], out[0]["corroborates_rule"]), (0.0, "pz_p3"))
         self.assertEqual(len(cp.drop_rule_covered(risks, {"pz_p2": 0}, confirmed={"FIN-005"})), 3)
         self.assertEqual(len(cp.drop_rule_covered(risks, None)), 3)
+
+    def test_rule_decision_by_law(self):
+        """Правила написаны для 44-ФЗ: при 223-ФЗ и для показателя «на проверке» правило не решает — находка ИИ стоит."""
+        self.assertEqual(cp.rule_decision("FIN-005", {"pz_p2": 0}, 44), "not_fired")
+        self.assertEqual(cp.rule_decision("FIN-005", {"pz_p2": "1"}, "44"), "fired")
+        self.assertIsNone(cp.rule_decision("FIN-005", {"pz_p2": 0}, 223))
+        self.assertIsNone(cp.rule_decision("FIN-005", {"pz_p2": 0}, 44, suspect=("pz_p2",)))
+        self.assertIsNone(cp.rule_decision("DOC-003", {"pz_p2": 0}, 44))
+        kept = cp.drop_rule_covered([{"rule_id": "FIN-005", "level": 0.7}], {"pz_p2": 0}, fz=223)
+        self.assertEqual(kept[0]["level"], 0.7)
+
+    def test_merge_corroboration(self):
+        """Правило + модель: один риск, уровень правила, цитата модели в доказательствах, источник «rule»."""
+        from risk_monitoring import passport
+        rule = {"rule_id": "FIN-006", "level": 0.2, "confidence": 1.0, "source": "rule", "description": "Сработал pz_p3",
+                "evidence": [{"src": "rule:pz_p3", "value": 1}]}
+        ai = cp.drop_rule_covered([{"rule_id": "FIN-006", "level": 0.8, "confidence": 0.9, "source": "ai_file",
+                                    "evidence": [{"src": "file:7", "fragment": "обеспечение не устанавливается"}]}],
+                                  {"pz_p3": 1}, fz=44)
+        with mock.patch.object(settings, "RISK_SOURCE_LABELS", "simple"):
+            (m,) = passport.merge_risks([rule], ai)
+        self.assertEqual((m["level"], m["source"], m["description"]), (0.2, "rule", "Сработал pz_p3"))
+        self.assertTrue(m["corroborated_by_ai"])
+        self.assertEqual(len(m["evidence"]), 2)
 
 
 class CustomerQualityTest(unittest.TestCase):
@@ -429,3 +457,58 @@ class CustomerQualityTest(unittest.TestCase):
         sec = org_profile.customer_section([_contract(i) for i in range(3)], [], settings)
         self.assertIsNone(sec["score_model"]["quality_index"])
         self.assertNotIn("quality_index", sec)
+
+
+class RuleExclusionsTest(unittest.TestCase):
+    """Перепроверка сработавших показателей по документам: исключение понижает риск, но не снимает его."""
+
+    def setUp(self):
+        """Справочник и тексты закупки."""
+        from risk_monitoring import rule_exclusions as rx
+        self.rx = rx
+        self.texts = {7: "5. Порядок оплаты.\nАвансовые платежи подлежат казначейскому сопровождению в соответствии "
+                         "со ст. 242.23 БК РФ.\n\n6. Гарантии. Гарантийный срок 12 месяцев."}
+
+    def test_fired_and_fragments(self):
+        """Берутся только сработавшие показатели из справочника; фрагменты — абзацы с ключевыми словами."""
+        self.assertEqual(self.rx.fired_with_exclusions({"pz_p4": 1, "pz_p5": 0, "pz_p6": 1}), ["pz_p4"])
+        self.assertEqual(self.rx.fired_with_exclusions({"pz_p4": 1}, suspect=("pz_p4",)), [])
+        frags = self.rx.fragments(self.texts, {7: "Проект контракта.docx"}, ["казначейск"], 5000)
+        self.assertEqual(len(frags), 1)
+        self.assertIn("казначейскому сопровождению", frags[0]["text"])
+
+    def test_verify_and_apply(self):
+        """Исключение с цитатой из текста — уровень × 0,3; выдуманная цитата — unclear, риск как есть."""
+        cfg = self.rx.load_config()
+        checks = self.rx.verify([{"indicator": "pz_p4", "status": "excluded", "exclusion_id": "treasury",
+                                  "reason": "казначейское сопровождение", "file_id": 7,
+                                  "quote": "Авансовые платежи подлежат казначейскому сопровождению"},
+                                 {"indicator": "pz_p5", "status": "excluded", "reason": "x", "quote": "нет такого"}],
+                                ["pz_p4", "pz_p5"], self.texts, cfg)
+        self.assertEqual(checks["pz_p4"]["status"], "excluded")
+        self.assertEqual(checks["pz_p4"]["evidence"]["file_id"], 7)
+        self.assertEqual(checks["pz_p5"]["status"], "unclear")
+        risks = [{"rule_id": "FIN-008", "level": 0.2, "confidence": 1.0, "evidence": [{"src": "rule:pz_p4"}]},
+                 {"rule_id": "FIN-003", "level": 0.2, "confidence": 1.0, "evidence": [{"src": "rule:pz_p5"}]}]
+        self.assertEqual(self.rx.apply_checks(risks, checks, settings), 1)
+        self.assertAlmostEqual(risks[0]["level"], 0.06)
+        self.assertEqual(risks[0]["confidence"], settings.RULE_EXCLUDED_CONFIDENCE)
+        self.assertEqual(risks[0]["rule_check"]["status"], "excluded")
+        self.assertEqual((risks[1]["level"], risks[1]["rule_check"]["status"]), (0.2, "unclear"))
+
+    def test_check_rules_one_request(self):
+        """Один запрос к модели на закупку по всем сработавшим показателям с исключениями."""
+        calls = []
+
+        class FakeLLM:
+            """Модель с фиксированным ответом."""
+
+            async def ask(self, system, user, schema=None, max_tokens=0):
+                """Ответ по pz_p4."""
+                calls.append(user)
+                return {"checks": [{"indicator": "pz_p4", "status": "confirmed", "reason": "сопровождения нет"}]}
+
+        out = asyncio.run(self.rx.check_rules(FakeLLM(), {"pz_p4": 1, "pz_p3": 1}, self.texts, {7: "Контракт"}, settings))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(out["pz_p4"]["status"], "confirmed")
+        self.assertEqual(out["pz_p3"]["status"], "unclear")

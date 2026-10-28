@@ -342,6 +342,115 @@ def rm_typal_clauses_task(self, environment: str = None, regions: List[str] = No
     return out
 
 
+@celery_app.task(bind=True, name="rm_decay_task", soft_time_limit=3500, time_limit=3600)
+def rm_decay_task(self, environment: str = None, push: bool = None) -> Dict[str, Any]:
+    """Еженедельный пересчёт затухания рисков закупок (концепция 10.10).
+
+    Закупки без новых данных ежедневный прогон не пересчитывает, поэтому давно выявленные риски ослабевают
+    только здесь: для каждой сохранённой закупки пересчитывается ``decay_factor``, балл, зона и приоритет; если
+    балл изменился не меньше чем на ``RISK_DECAY_MIN_CHANGE``, результат сохраняется и записывается во внешнюю БД.
+
+    Args:
+        environment: Окружение (по умолчанию ``DAILY_ENVIRONMENT``).
+        push: Записывать во внешнюю БД (по умолчанию ``DAILY_PUSH``).
+
+    Returns:
+        Dict[str, Any]: ``checked``, ``updated``, ``pushed``, ``errors``.
+    """
+    from configs import settings
+
+    if not settings.RISK_DECAY_RECALC_ENABLED:
+        return {"skipped": "RISK_DECAY_RECALC_ENABLED = False"}
+    environment = environment or settings.DAILY_ENVIRONMENT
+    push = settings.DAILY_PUSH if push is None else push
+
+    async def run() -> Dict[str, Any]:
+        """Постраничный обход сохранённых закупок."""
+        from configs.ai_repo import AIRepo
+        from configs.http_client_manager import HTTPClientManager
+        from risk_monitoring import risk_dynamics as rd
+        from risk_monitoring.contract_analyzer import EXTERNAL_TABLE
+        from risk_monitoring.risk_monitoring_api import RiskMonitoringAPI
+
+        env = environment.lower()
+        out = {"checked": 0, "updated": 0, "pushed": 0, "errors": 0}
+        async with HTTPClientManager(timeout=60.0) as mgr, AIRepo() as repo:
+            api = RiskMonitoringAPI(mgr, environment)
+            after = 0
+            while True:
+                rows = await repo.list_rm_page(env, "contract", after, 500)
+                if not rows:
+                    break
+                after = rows[-1]["external_id"]
+                for r in rows:
+                    out["checked"] += 1
+                    new = rd.recalc_decay(r["ai_analysis"] or {}, settings)
+                    if new is None:
+                        continue
+                    out["updated"] += 1
+                    pushed, err = False, None
+                    if push:
+                        try:
+                            await api.patch_ai_analysis(EXTERNAL_TABLE, r["external_id"], new)
+                            pushed = True
+                            out["pushed"] += 1
+                        except Exception as e:  # noqa: BLE001 — сохраним у себя, дозапишется позже
+                            err = str(e)
+                            out["errors"] += 1
+                    await repo.save_rm_result(env, "contract", r["external_id"], new, pushed, err)
+        return out
+
+    out = asyncio.run(_pulsed(run(), self.name, self.request.id))
+    logger.info(f"Пересчёт затухания рисков: {out}")
+    return out
+
+
+@celery_app.task(bind=True, name="rm_period_task", soft_time_limit=900, time_limit=960)
+def rm_period_task(self, environment: str = None, kinds: List[str] = None, period: str = None,
+                   use_llm: bool = True, force: bool = False) -> Dict[str, Any]:
+    """Сводки за неделю и месяц из ежедневных сводок (``risk_monitoring.period_summary``).
+
+    По расписанию (ежедневно в ``PERIOD_SUMMARY_HOUR``) — последняя завершившаяся неделя и последний месяц:
+    сводка с теми же входными данными не пересобирается, неполная (дни догоняли прогон) — пересобирается.
+
+    Args:
+        environment: Окружение (по умолчанию ``DAILY_ENVIRONMENT``).
+        kinds: ``week`` / ``month`` (по умолчанию оба).
+        period: Обозначение периода; пусто — последний завершившийся.
+        use_llm: Текст пишет модель.
+        force: Пересобрать в любом случае.
+
+    Returns:
+        Dict[str, Any]: По виду периода — ``period``, ``status``, ``unchanged``, ``days``.
+    """
+    from configs import settings
+
+    if not settings.PERIOD_SUMMARY_ENABLED and period is None:
+        return {"skipped": "PERIOD_SUMMARY_ENABLED = False"}
+    environment = environment or settings.DAILY_ENVIRONMENT
+
+    async def run() -> Dict[str, Any]:
+        """Сводки по видам периода."""
+        from datetime import date
+
+        from configs.ai_repo import AIRepo
+        from risk_monitoring import period_summary as ps
+
+        out: Dict[str, Any] = {}
+        async with AIRepo() as repo:
+            for kind in kinds or ("week", "month"):
+                p = period or ps.last_closed(kind, date.today())
+                s = await ps.run_period(repo, environment, kind, p, use_llm=use_llm, force=force)
+                out[kind] = {"period": p, "status": (s.get("pipeline") or {}).get("status"),
+                             "unchanged": bool(s.get("unchanged")),
+                             "days": len((s.get("days") or {}).get("completed") or [])}
+        return out
+
+    out = asyncio.run(_pulsed(run(), self.name, self.request.id))
+    logger.info(f"Сводки периода: {out}")
+    return out
+
+
 async def _daily_run(environment: str, export_date: str, force: bool, push: bool, use_llm: bool,
                      stages: List[str] = None) -> Dict[str, Any]:
     """Прогон за дату с защитой от повтора: готовая сводка возвращается без пересчёта (кроме ``force``),

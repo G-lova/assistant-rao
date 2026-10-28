@@ -1,0 +1,867 @@
+<ns3:export xmlns="http://zakupki.gov.ru/oos/types/1" xmlns:ns2="http://zakupki.gov.ru/oos/base/1" xmlns:ns4="http://zakupki.gov.ru/oos/common/1" xmlns:ns3="http://zakupki.gov.ru/oos/export/1" xmlns:ns6="http://zakupki.gov.ru/oos/TPtypes/1" xmlns:ns5="http://zakupki.gov.ru/oos/EPtypes/1" xmlns:ns8="http://zakupki.gov.ru/oos/CPtypes/1" xmlns:ns7="http://zakupki.gov.ru/oos/KOTypes/1" xmlns:ns13="http://zakupki.gov.ru/oos/EATypes/1" xmlns:ns9="http://zakupki.gov.ru/oos/pprf615types/1" xmlns:ns12="http://zakupki.gov.ru/oos/URTypes/1" xmlns:ns11="http://zakupki.gov.ru/oos/SMTypes/1" xmlns:ns10="http://zakupki.gov.ru/oos/CETypes/1" xmlns:ns14="http://zakupki.gov.ru/oos/printform/1">
+    <ns3:checkResult schemeVersion="16.3">
+        <commonInfo>
+            <checkResultNumber> </checkResultNumber>
+            <regNumber>202600100161018148</regNumber>
+            <docNumber>2026001001610181480001</docNumber>
+            <versionNumber>1</versionNumber>
+            <createDate>2026-10-28T12:05:00.000+03:00</createDate>
+            <publishDate>2026-10-28T12:09:34.046+03:00</publishDate>
+            <owner xsi:type="zfcs_organizationInfoType" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+                <regNum>01731000120</regNum>
+                <fullName>ФЕДЕРАЛЬНАЯ АНТИМОНОПОЛЬНАЯ СЛУЖБА</fullName>
+                <INN>7703516539</INN>
+                <KPP>770301001</KPP>
+            </owner>
+            <printFormInfo>
+                <createOrganization>
+                    <regNum>01731000120</regNum>
+                    <fullName>ФЕДЕРАЛЬНАЯ АНТИМОНОПОЛЬНАЯ СЛУЖБА</fullName>
+                    <INN>7703516539</INN>
+                    <KPP>770301001</KPP>
+                </createOrganization>
+                <createUser/>
+                <editDate>2026-10-28T12:09:34.046+03:00</editDate>
+                <editOrganization>
+                    <regNum>01731000120</regNum>
+                    <fullName>ФЕДЕРАЛЬНАЯ АНТИМОНОПОЛЬНАЯ СЛУЖБА</fullName>
+                    <INN>7703516539</INN>
+                    <KPP>770301001</KPP>
+                </editOrganization>
+                <editUser/>
+                <publishOrganization>
+                    <regNum>01731000120</regNum>
+                    <fullName>ФЕДЕРАЛЬНАЯ АНТИМОНОПОЛЬНАЯ СЛУЖБА</fullName>
+                    <INN>7703516539</INN>
+                    <KPP>770301001</KPP>
+                </publishOrganization>
+                <publishUser/>
+            </printFormInfo>
+        </commonInfo>
+        <base>
+            <unplannedCheck>
+                <regNumber>202600100161017921</regNumber>
+                <inspectionType>K</inspectionType>
+                <checkSubjects>
+                    <specializedNew>
+                        <fullName>АКЦИОНЕРНОЕ ОБЩЕСТВО "АГЕНТСТВО ПО ГОСУДАРСТВЕННОМУ ЗАКАЗУ РЕСПУБЛИКИ ТАТАРСТАН"</fullName>
+                        <shortName>АО "АГЗРТ"</shortName>
+                        <legalForm>
+                            <code>12267</code>
+                            <singularName>Непубличные акционерные общества</singularName>
+                        </legalForm>
+                        <INN>1655391893</INN>
+                        <KPP>165501001</KPP>
+                        <registrationDate>2017-09-14</registrationDate>
+                        <OKPO>19532567</OKPO>
+                        <address>420021, РЕСПУБЛИКА ТАТАРСТАН (ТАТАРСТАН), КАЗАНЬ Г., 16, МОСКОВСКАЯ УЛ., Д. 55, ПОМЕЩ. 510</address>
+                        <contactPhone/>
+                    </specializedNew>
+                </checkSubjects>
+                <info>Иное. Сбой на сайте ОЭП АО "РАД" (закл 601-650)</info>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0711200012826000689</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262165501824016600100107480013250244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка расходных материалов (стекло предметное) для клинико-диагностической лаборатории ГАУЗ "Республиканский клинический противотуберкулезный диспансер" в 2026 году</purchaseName>
+                        <purchasePlacingDate>2026-10-05T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0311300104526000040</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262165105787316510100100530012120244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка реактивов к анализатору BS</purchaseName>
+                        <purchasePlacingDate>2026-10-06T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0711200011026000761</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262165901366016590100107970013250244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка расходных материалов для оказания высокотехнологичной медицинской помощи</purchaseName>
+                        <purchasePlacingDate>2026-10-02T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0711200009326000032</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262165002897516500100100050142120244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка реагентов</purchaseName>
+                        <purchasePlacingDate>2026-10-01T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0813500000126018492</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>263183303979818400100100340018129244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>зз-0016-38246 - 2026 Выполнение работ по содержанию скейт-парка в Индустриальном районе города Ижевска</purchaseName>
+                        <purchasePlacingDate>2026-10-05T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0111300013226000053</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>263161100555816110100100070013240244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Приобретение бильярдных столов в комплекте</purchaseName>
+                        <purchasePlacingDate>2026-10-02T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0811300008326000656</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>263165515110816550100100380016209244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Оказание услуг по информационно-техническому сопровождению программного обеспечения «Административная комиссия»</purchaseName>
+                        <purchasePlacingDate>2026-10-05T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0353100003626000097</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>261561005488856100100101070012630242</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка коммутаторов</purchaseName>
+                        <purchasePlacingDate>2026-10-02T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0711200011926000005</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262164900470816490100100130013250244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка медицинского изделия (шприцы) для ГАУСО «Лениногорский дом-интернат для престарелых и инвалидов» в  2026 г.  					</purchaseName>
+                        <purchasePlacingDate>2026-10-06T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0340200003326011718</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262434519083243450100100970030240244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Выполнение работ по отводу и таксации лесосек под рубки ухода за лесом (проходные рубки)</purchaseName>
+                        <purchasePlacingDate>2026-09-29T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0809500000326003807</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262132619313413260100100610011920244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>закупка горюче-смазочных материалов</purchaseName>
+                        <purchasePlacingDate>2026-10-07T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0311300226426000137</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>263162400913316240100100050126831244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Приобретение жилого помещения в маневренный фонд Лаишевского муниципального района</purchaseName>
+                        <purchasePlacingDate>2026-10-06T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0375200040226000542</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262911008712091100100100010520000244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка лекарственных препаратов</purchaseName>
+                        <purchasePlacingDate>2026-10-01T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0711200005826000197</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262166001341716600100100640062120244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка реагентов для определения наркотиков в моче человека для ГАУЗ «РКНД МЗ РТ» и филиалов в 2026г.</purchaseName>
+                        <purchasePlacingDate>2026-10-05T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0711200012426000083</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262165005330816500100100800013250244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка изделий медицинского назначения</purchaseName>
+                        <purchasePlacingDate>2026-10-06T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0711200005826000193</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262166001341716600100100910031107244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка воды питьевой упакованной</purchaseName>
+                        <purchasePlacingDate>2026-10-05T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0111300092226000035</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>263163600557416360100100630014399244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Создание и содержание мест (площадок) накопления твердых коммунальных отходов (в т.ч. их раздельного накопления) на территории МО п.г.т. Джалиль Сармановского МР РТ</purchaseName>
+                        <purchasePlacingDate>2026-10-07T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0111100005926000055</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>261166007506816600100102140011920221</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Обеспечение топливом и горюче-смазочными материалами в рамках государственного оборонного заказа. Поставка бензина для транспортных средств</purchaseName>
+                        <purchasePlacingDate>2026-10-07T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0311200045726000099</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262165900665516550100103070013220244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка и установка систем климат-контроля для роялей</purchaseName>
+                        <purchasePlacingDate>2026-10-08T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0311300226426000135</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>263162400913316240100100050106831244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Приобретение жилого помещения в маневренный фонд Лаишевского муниципального района</purchaseName>
+                        <purchasePlacingDate>2026-10-06T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0372200203826000008</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262782543991678420100100160010000244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка компьютерного оборудования</purchaseName>
+                        <purchasePlacingDate>2026-10-02T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0111200002426000604</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262540700408654060100100640022670244</purchaseCode>
+                            <purchaseCode>262183503379118410100100910012670244</purchaseCode>
+                            <purchaseCode>262110148715011010100104630012670244</purchaseCode>
+                            <purchaseCode>261781308525078130100102300012670244</purchaseCode>
+                            <purchaseCode>262212801599921300100104570012670244</purchaseCode>
+                            <purchaseCode>262450101937745010100104450012670244</purchaseCode>
+                            <purchaseCode>262631819736763180100101460010000244</purchaseCode>
+                            <purchaseCode>262165401717016550100100210030000244</purchaseCode>
+                            <purchaseCode>262732601212473260100101370012670244</purchaseCode>
+                            <purchaseCode>262745313582774530100100920012670244</purchaseCode>
+                            <purchaseCode>262054101736105730100100620012670244</purchaseCode>
+                            <purchaseCode>262710700631171070100100960012670244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка, ввод в эксплуатацию медицинских изделий, обучение правилам эксплуатации специалистов, эксплуатирующих медицинские изделия, и специалистов, осуществляющих техническое обслуживание медицинских изделий (Цифровой сканер микропрепаратов ИВД)</purchaseName>
+                        <purchasePlacingDate>2026-10-05T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0711200023126000031</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262164600629516460100100460012893244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>поставка кухонного оборудования</purchaseName>
+                        <purchasePlacingDate>2026-10-07T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0371200015826000315</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262760206382976020100104960013812244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Оказание услуг по вывозу и обезвреживанию медицинских отходов класса Б</purchaseName>
+                        <purchasePlacingDate>2026-10-07T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0711200005826000198</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262166001341716600100100650370000244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка  запасных частей  для хроматографа газового с масс-селективным детектором для нужд клинико-диагностической лаборатории ГАУЗ "РКНД МЗ РТ" на 2026 г.</purchaseName>
+                        <purchasePlacingDate>2026-10-05T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0375200040226000553</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262911008712091100100100420540000244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Закупка кресел, стульев</purchaseName>
+                        <purchasePlacingDate>2026-10-07T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0311200039726000018</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262165901814616550100100240011920244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка моторных масел для нужд ГКУЗ РМЦ МР "Резерв" МЗ РТ.</purchaseName>
+                        <purchasePlacingDate>2026-10-02T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0111300052326000119</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>263164300891416430100100050014211244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Выполнение работ по профилированию дорог с щебеночным покрытием в Верхнестярлинском сельском поселении</purchaseName>
+                        <purchasePlacingDate>2026-10-07T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0711200004026000235</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262164100264216520100100040660000244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка расходного материала и реагентов для нужд "ГАУЗ Чистопольская ЦРБ" на 2026 год (городская больница №2)</purchaseName>
+                        <purchasePlacingDate>2026-10-02T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0813500000126018570</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262183502772718400100107200013250244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>зз-0014-41409 - 2026 Материал для реконструкции мочевыводящих путей, коллагеновый</purchaseName>
+                        <purchasePlacingDate>2026-10-06T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0813500000126018624</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262183104497918410100100450792120323</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>зз-0019-40257 - 2026 Поставка лекарственного (-ых) препарата(-ов) для медицинского применения ИМАТИНИБ для обеспечения больных онкологическими заболеваниями</purchaseName>
+                        <purchasePlacingDate>2026-10-06T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0371500001026000731</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262761013065276100100100302100000244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка изделий медицинского назначения (металлоконструкции  для проведения травматологических операций</purchaseName>
+                        <purchasePlacingDate>2026-10-07T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0311300225226000047</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262163600151616360100100640013312244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Техническое обслуживание двух лифтов на (ноябрь-декабрь) 2026 год ГАУЗ Сармановская ЦРБ</purchaseName>
+                        <purchasePlacingDate>2026-10-07T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0311500000926000101</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262165539597916550100101490014120243</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Выполнение строительно-монтажных и прочих работ по капитальному ремонту, в том числе установка и монтаж оборудования</purchaseName>
+                        <purchasePlacingDate>2026-10-05T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0340200003326011858</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262434701047543450100100570200000323</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка лекарственных препаратов (Моксонидин)</purchaseName>
+                        <purchasePlacingDate>2026-10-05T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0813500000126018657</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262183300285418400100114480012120244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>зз-0019-39878 - 2026 Лекарственный препарат МИДОСТАУРИН</purchaseName>
+                        <purchasePlacingDate>2026-10-07T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0311200027426000067</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262160300228916030100100850012211244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка зимних автомобильных шин для нужд ГАУСО "Федоровский дом-интернат для престарелых и инвалидов" МТЗ и СЗ РТ</purchaseName>
+                        <purchasePlacingDate>2026-10-02T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0711200011026000759</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262165901366016590100107990013250244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка расходных материалов для оказания высокотехнологичной медицинской помощи</purchaseName>
+                        <purchasePlacingDate>2026-10-01T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0371200015826000306</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262760206382976020100104790010000244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка реагентов для определения групп крови человека</purchaseName>
+                        <purchasePlacingDate>2026-09-28T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0311200027426000065</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262160300228916030100100830010000244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка мягкого инвентаря (панталоны женские, трусы мужские) </purchaseName>
+                        <purchasePlacingDate>2026-10-02T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0340200003326011866</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262434701047543450100100173230000323</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка лекарственных препаратов (Глибенкламид)</purchaseName>
+                        <purchasePlacingDate>2026-10-06T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0813500000126018669</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262183300285418400100115560013250244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>зз-0014-41137 - 2026 Шкаф для подогрева медицинских изделий универсальный, стационарный</purchaseName>
+                        <purchasePlacingDate>2026-10-07T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0311200003026000208</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262165504338116550100102190012211244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка автошин зимних 275/40 R21, 315/35 R21</purchaseName>
+                        <purchasePlacingDate>2026-10-07T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0809500000326003862</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262131402923513140100100030011920244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>закупка неэтилированного бензина марки АИ-92 для автомобильного транспорта</purchaseName>
+                        <purchasePlacingDate>2026-10-06T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0813500000126018560</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262183300285418400100112750012660244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>зз-0014-37662 - 2026 Бронхоскоп гибкий</purchaseName>
+                        <purchasePlacingDate>2026-10-06T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0111300003026000063</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>263160500475716050100100210018129244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Выполнение работ по содержанию объектов улично-дорожной сети в пгт. Алексеевское, Алексеевский район, Республика Татарстан в зимний период с ноября 2026 года по декабрь 2027 года. </purchaseName>
+                        <purchasePlacingDate>2026-10-02T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0371200010926000016</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262760600356376060100100340012120244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Поставка лекарственного препарата для медицинского применения (этанол)</purchaseName>
+                        <purchasePlacingDate>2026-10-05T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0813500000126018668</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262183300285418400100112620012660244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>зз-0014-41112 - 2026 Аппараты слуховые заушные</purchaseName>
+                        <purchasePlacingDate>2026-10-07T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0811400000126000236</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>261770989550916554300100090280000242</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Оказание услуг по техническому обслуживанию и регламентно-профилактическому ремонту оргтехники для нужд Межрегионального филиала Федерального казенного учреждения «Центр по обеспечению деятельности казначейства России» в г. Казани</purchaseName>
+                        <purchasePlacingDate>2026-10-05T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0813500000126018658</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262183103791818310100100020980000244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>зз-0018-42504 - 2026 Продукты питания</purchaseName>
+                        <purchasePlacingDate>2026-10-07T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <decision>
+                    <decisionNumber>179</decisionNumber>
+                    <decisionDate>2026-10-27</decisionDate>
+                    <decisionText>см. вложение</decisionText>
+                    <attachments>
+                        <attachment>
+                            <publishedContentId>01A181C279AB709A8CC0F98CE530AA76</publishedContentId>
+                            <fileName>Решение 26 44 99 179 ЕИС.docx</fileName>
+                            <docDescription>Решение 26 44 99 179 ЕИС</docDescription>
+                            <docNumber>2026001001610181480005</docNumber>
+                            <url>https://zakupki.gov.ru/controls/documentIcrDownload?documentId=3974251</url>
+                            <cryptoSigns>
+                                <signature/>
+                            </cryptoSigns>
+                        </attachment>
+                    </attachments>
+                </decision>
+                <decisionPrescription>
+                    <prescriptionNumber>179</prescriptionNumber>
+                    <prescriptionDate>2026-10-27</prescriptionDate>
+                    <prescriptionText>см. вложение</prescriptionText>
+                    <attachments>
+                        <attachment>
+                            <publishedContentId>01A181C2D86A793C8BBF693D409A7DB7</publishedContentId>
+                            <fileName>Предписание 26 44 99 179 ЕИС.docx</fileName>
+                            <docDescription>Предписание 26 44 99 179 ЕИС</docDescription>
+                            <docNumber>2026001001610181480006</docNumber>
+                            <url>https://zakupki.gov.ru/controls/documentIcrDownload?documentId=3974252</url>
+                            <cryptoSigns>
+                                <signature/>
+                            </cryptoSigns>
+                        </attachment>
+                    </attachments>
+                </decisionPrescription>
+                <checkResult>VIOLATIONS</checkResult>
+            </unplannedCheck>
+        </base>
+        <startDate>2026-10-27</startDate>
+        <endDate>2026-10-27</endDate>
+        <printForm>
+            <url>https://zakupki.gov.ru/controls/printForm?type=ICR&amp;id=2664437</url>
+            <signature/>
+        </printForm>
+    </ns3:checkResult>
+</ns3:export>

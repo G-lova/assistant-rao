@@ -572,7 +572,7 @@ class Fixes1026Test(unittest.TestCase):
         from risk_monitoring import xml_events
         ai = {"event": {"code": "PUR-010"}, "pipeline": {"export_date": "2026-07-06"}}
         xml_events.with_required_event(ai)
-        self.assertEqual(ai["event"]["event_at"], "2026-07-06T00:00:00")
+        self.assertEqual(ai["event"]["event_at"], "2026-07-06T00:00:00+03:00")
         self.assertEqual(ai["event"]["event_at_source"], "export_date")
         self.assertEqual(ai["event"]["event_type"], "PUR-010")
         keep = {"event": {"code": "X", "event_at": "2026-07-01T10:00:00"}, "pipeline": {"export_date": "2026-07-06"}}

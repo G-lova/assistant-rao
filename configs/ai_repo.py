@@ -348,6 +348,27 @@ class AIRepo:
         return [{"external_id": int(r["external_id"]), "status": r["status"], "ai_analysis": _load(r["ai_analysis"]),
                  "analyzed_at": r["analyzed_at"]} for r in rows]
 
+    async def list_rm_page(self, env: str, kind: str, after_id: int, limit: int) -> List[Dict[str, Any]]:
+        """Страница сохранённых результатов по возрастанию id — для пересчётов по всем закупкам
+        (затухание рисков).
+
+        Args:
+            env: Окружение.
+            kind: Вид результата (``contract``).
+            after_id: Вернуть id больше этого.
+            limit: Размер страницы.
+
+        Returns:
+            List[Dict[str, Any]]: ``external_id``, ``ai_analysis``, ``pushed``.
+        """
+        rows = await self.pool.fetch(
+            "SELECT external_id, ai_analysis, pushed FROM ai_rm_results "
+            "WHERE env = $1 AND kind = $2 AND external_id > $3 ORDER BY external_id LIMIT $4",
+            env, kind, int(after_id), int(limit),
+        )
+        return [{"external_id": int(r["external_id"]), "ai_analysis": _load(r["ai_analysis"]), "pushed": r["pushed"]}
+                for r in rows]
+
     async def get_rm_results(self, env: str, kind: str, external_ids: Sequence[int]) -> Dict[int, Dict[str, Any]]:
         """Сохранённые результаты анализа по id.
 

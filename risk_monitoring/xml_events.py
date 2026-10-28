@@ -438,7 +438,154 @@ def extract_facts(tag: str, body: Dict[str, Any]) -> Dict[str, Any]:
         f["termination_reason"] = _first(term[0], ["name", "reason"])
         f["termination_date"] = _first(term[0], ["terminationDate", "date", "paid"])
     f["final_stage"] = str(_first(body, ["finalStageExecution", "isFinalStage", "finalStage"]) or "").lower() == "true" or None
+    # checkResult — и решение по жалобе (есть блок complaint), и результат внеплановой проверки (base/unplannedCheck)
+    if tag == "checkResult" and not isinstance(body.get("complaint"), dict):
+        f.update(check_facts(body))
+    if "omplaint" in tag or tag == "tenderSuspension" or (tag == "checkResult" and isinstance(body.get("complaint"), dict)):
+        f.update(complaint_facts(tag, body))
+        # заказчик в жалобе не указан (в indicted — оператор площадки, комиссия или заказчик): берём из ИКЗ
+        if not f.get("customer_inn") and (f.get("ikz_parts") or {}).get("customer_inn"):
+            f["customer_inn"] = f["ikz_parts"]["customer_inn"]
+            f["customer_kpp"] = f["ikz_parts"].get("customer_kpp")
     return {k: v for k, v in f.items() if v not in (None, "", [])}
+
+
+# Итог рассмотрения жалобы: коды ЕИС (complResult / checkResult …) и формулировки решений
+COMPLAINT_RESULTS = (
+    ("unfounded", re.compile(r"NOT_CONFIRMED|NO_VIOLATION|NOT_VALID|UNFOUNDED|REJECT|необоснован", re.I)),
+    ("partly", re.compile(r"PARTIAL|PARTLY|частично", re.I)),
+    ("returned", re.compile(r"RETURN|NOT_CONSIDER|возвра|без рассмотрения", re.I)),
+    ("justified", re.compile(r"CONFIRMED|VIOLATION|VALID|JUSTIFIED|обоснован", re.I)),
+)
+# номер жалобы: 44-ФЗ — 18 цифр (202600100161005752), 223-ФЗ — «дата.номер» (19.10.2026.307017)
+COMPLAINANT_IN_FILE_RE = re.compile(r"по\s+(?:жалобе|делу)\s+(.+?)\s+от\s+\d", re.I)
+COMPLAINT_NUMBER_RE = re.compile(r"\d{18}|\d{2}\.\d{2}\.\d{4}\.\d+")
+
+
+CHECK_RESULTS = (("no_violations", re.compile(r"NO_VIOLATION|NOT_VIOLATION|WITHOUT", re.I)),
+                 ("violations", re.compile(r"VIOLATION", re.I)))
+
+
+def check_facts(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Результат внеплановой проверки контрольного органа (``checkResult`` без блока ``complaint``, схема 16.3).
+
+    Одна проверка охватывает много закупок (``base/unplannedCheck/orders[]``), поэтому список закупок и заказчиков
+    (из ИКЗ) сохраняется целиком — по нему проверка связывается со всеми закупками, а не только с той, к которой
+    привязан XML (проверено на результате ФАС России от 27.10.2026: 13+ закупок, VIOLATIONS, предписание).
+
+    Args:
+        body: Нормализованное тело.
+
+    Returns:
+        Dict[str, Any]: ``check_number``, ``check_result`` (``violations`` / ``no_violations``), ``check_result_code``,
+        ``check_prescription``, ``check_decision_date``, ``check_inspection_type``, ``check_subjects``
+        (``role``, ``inn``, ``kpp``, ``name``), ``check_purchases`` (номера), ``check_customer_inns`` (ИНН заказчиков
+        из ИКЗ).
+    """
+    uc = next((v for p, k, v in walk(body) if k == "unplannedCheck" and isinstance(v, dict)), None) or body
+    code = _first(uc, ["checkResult"])
+    subjects = []
+    for p, k, v in walk(uc.get("checkSubjects") or {}):
+        if isinstance(v, dict) and (v.get("INN") or v.get("inn")):
+            subjects.append({"role": re.sub(r"New$", "", k), "inn": str(v.get("INN") or v.get("inn")),
+                             "kpp": v.get("KPP") or v.get("kpp"), "name": v.get("shortName") or v.get("fullName")})
+    purchases, inns = [], []
+    for p, k, v in walk(uc):
+        if k == "purchaseNumber" and re.fullmatch(r"\d{11,19}", str(v or "")) and str(v) not in purchases:
+            purchases.append(str(v))
+        if k == "purchaseCode":
+            parts = parse_ikz(v)
+            if parts and parts["customer_inn"] not in inns:
+                inns.append(parts["customer_inn"])
+    f = {"check_number": _first(uc, ["regNumber"], pred=lambda v: COMPLAINT_NUMBER_RE.fullmatch(v)),
+         "check_result_code": code,
+         "check_result": next((k for k, rx in CHECK_RESULTS if rx.search(str(code or ""))), None),
+         "check_prescription": bool(next((v for p, k, v in walk(uc) if k == "decisionPrescription" and v), None)),
+         "check_decision_date": _first(uc, ["decisionDate"], path_re=r"decision"),
+         "check_inspection_type": _first(uc, ["inspectionType"]),
+         "check_subjects": subjects, "check_purchases": purchases, "check_customer_inns": inns}
+    return {k: v for k, v in f.items() if v not in (None, "", [])}
+
+
+def complaint_facts(tag: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Сведения жалобы: заявитель (раскрывается только в жалобе — участники процедур скрыты), номер, на кого
+    подана, предмет, итог.
+
+    Разбор проверен на XML ЕИС ``complaint``, ``complaintCancel``, ``tenderSuspension`` (схема 16.1, 28.10.2026):
+
+    - заявитель — ``applicantNew/legalEntity`` (``INN``, ``KPP``, ``fullName``) или ``individualPerson`` /
+      ``individualBusinessman``; в ``complaintCancel`` — только наименование (``name`` верхнего уровня);
+    - номер жалобы — 18 цифр: ``commonInfo/regNumber``, ``regNumber``, ``complaintNumber`` (у документов одной
+      жалобы он общий — по нему отзыв и решение сводятся с жалобой);
+    - на кого подана — первый элемент ``indicted`` (``EP`` — оператор площадки, ``customer``, ``commission`` …);
+    - отзыв — тег ``complaintCancel`` / ``complaintWithdraw``;
+    - решение 223-ФЗ (``complaintDecision``, TFF-16.2) — ``complaintDecisionData``: ``registrationNumber``
+      (номер жалобы «19.10.2026.307017»), ``complaintDecisionSolution`` (``CONFIRMED`` — обоснована …),
+      ``complaintDecisionViolation`` (``Y`` / ``N`` — выявлены ли нарушения); заявителя и закупки в решении нет —
+      оно сводится с жалобой по номеру;
+    - решение по жалобе 44-ФЗ — ``checkResult`` с блоком ``complaint`` (16.3, решения УФАС по г. Москве 23–26.10.2026):
+      ``complaint/regNumber`` — номер жалобы (``commonInfo/regNumber`` — номер самого решения), ``complaintResult``
+      (``COMPLAINT_VIOLATIONS`` / ``COMPLAINT_NO_VIOLATIONS``), ``complaintResultInfo`` («Жалоба признана
+      обоснованной»), заказчик — ``checkSubjects/subjectComplaint/customerNew``, закупка — ``checkedObject``;
+      заявитель — только в имени файла решения. ``checkResult`` без ``complaint`` (``base/unplannedCheck``) —
+      результат внеплановой проверки, не жалоба.
+
+    Args:
+        tag: Тег документа.
+        body: Нормализованное тело.
+
+    Returns:
+        Dict[str, Any]: ``complainant_inn``, ``complainant_kpp``, ``complainant_name``, ``complaint_number``,
+        ``complaint_target``, ``complaint_subject``, ``complaint_result`` (``justified`` / ``partly`` / ``unfounded``
+        / ``returned`` / ``withdrawn``), ``complaint_result_text``.
+    """
+    who = r"applicant|complainant|declarant"
+    indicted = next((v for p, k, v in walk(body) if k == "indicted" and isinstance(v, dict)), None)
+    f: Dict[str, Any] = {
+        "complainant_inn": _first(body, ["INN", "inn"], path_re=who, pred=lambda v: re.fullmatch(r"\d{10}|\d{12}", v)),
+        "complainant_kpp": _first(body, ["KPP", "kpp"], path_re=who),
+        "complainant_name": _first(body, ["fullName", "shortName", "organizationName", "lastName"], path_re=who),
+        # checkResult: commonInfo/regNumber — номер самого решения, номер жалобы — complaint/regNumber
+        "complaint_number": _first(body, ["complaintNumber"], pred=lambda v: COMPLAINT_NUMBER_RE.fullmatch(v))
+        or _first(body, ["regNumber"], path_re=r"(^|\.)complaint\.regNumber$", pred=lambda v: COMPLAINT_NUMBER_RE.fullmatch(v))
+        or _first(body, ["regNumber"], pred=lambda v: COMPLAINT_NUMBER_RE.fullmatch(v))
+        or _first(body, ["registrationNumber"], path_re=r"complaint", pred=lambda v: COMPLAINT_NUMBER_RE.fullmatch(v)),
+        "complaint_target": next(iter(indicted), None) if indicted else None,
+        "complaint_subject": _first(body, ["shortName"], path_re=r"appealActionInfo"),
+    }
+    if not f["complaint_target"]:
+        subj = next((v for p, k, v in walk(body) if k == "subjectComplaint" and isinstance(v, dict)), None)
+        if subj:
+            f["complaint_target"] = re.sub(r"New$", "", next(iter(subj), "")) or None
+    if not f["complainant_name"] and "Cancel" in tag and isinstance(body.get("name"), str):
+        f["complainant_name"] = body["name"]
+    if not f["complainant_name"] and tag == "checkResult":
+        # в решении заявитель — только в имени файла: «Решение по жалобе ООО «Медея» от 23.10.2026.pdf»
+        m = next((COMPLAINANT_IN_FILE_RE.search(str(v)) for _, v in find_values(body, ["fileName", "docDescription"])
+                  if COMPLAINANT_IN_FILE_RE.search(str(v))), None)
+        if m:
+            f["complainant_name"] = m.group(1).strip()
+    if "ithdraw" in tag or "Cancel" in tag:
+        f["complaint_result"] = "withdrawn"
+        return f
+    # 223-ФЗ: complaintDecisionSolution (CONFIRMED …) и complaintDecisionViolation (Y / N) — решение УФАС
+    # 19.10.2026.307017 от 27.10.2026; 44-ФЗ — complResult / checkResult
+    # по приоритету имён, а не по порядку в документе: в checkResult есть и complaintResult, и checkResult
+    raw = next((v for v in (_first(body, [n], pred=lambda v: len(v) < 400) for n in (
+        "complaintDecisionSolution", "complaintResult", "complResult", "checkResult", "decisionType", "result"))
+        if v is not None), None)
+    info = _first(body, ["complaintResultInfo"])
+    if info:
+        f["complaint_result_info"] = str(info)[:200]
+    if raw is not None:
+        f["complaint_result_text"] = str(raw)[:200]
+        f["complaint_result"] = next((k for k, rx in COMPLAINT_RESULTS if rx.search(str(raw))), None)
+    violation = str(_first(body, ["complaintDecisionViolation"]) or "").upper()
+    if violation:
+        f["complaint_violation"] = violation == "Y"
+        if not f.get("complaint_result") and violation in ("Y", "N"):
+            f["complaint_result"] = "justified" if violation == "Y" else "unfounded"
+    return f
 
 
 def attachments(body: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -635,6 +782,8 @@ def classify(tag: str, version: Optional[int], has_previous: bool, changes: Sequ
         base = "CON-001" if first else "CON-008"
     else:
         base = risk_catalog.TAG_EVENTS.get(tag, "OTH-000")
+    if tag == "checkResult" and facts.get("complaint_number"):
+        base = "CMP-001"      # решение по жалобе, а не результат проверки
     if tag in ("contractProcedure", "pprf615ContractProcedure", "performanceContract"):
         if facts.get("termination_reason_code") or facts.get("termination_reason") or facts.get("termination_date"):
             base = "CON-007"
@@ -758,7 +907,15 @@ def rule_risks(event: Dict[str, Any], changes: Sequence[Dict[str, Any]], facts: 
         risks.append(_risk("PROC-002", event["title"], 0.5, tag_ev,
                            ["Проверить причины отмены и наличие повторной закупки"]))
     if event["code"] == "CMP-001":
-        risks.append(_risk("PROC-008", event["title"], 0.6, tag_ev,
+        # уровень — по итогу: обоснованная жалоба сильнее поданной, необоснованная или отозванная — слабый признак
+        res = facts.get("complaint_result")
+        level = {"justified": 0.8, "partly": 0.7, "unfounded": 0.2, "withdrawn": 0.2, "returned": 0.2}.get(res, 0.6)
+        words = {"justified": "жалоба признана обоснованной", "partly": "жалоба признана частично обоснованной",
+                 "unfounded": "жалоба признана необоснованной", "withdrawn": "жалоба отозвана",
+                 "returned": "жалоба возвращена"}
+        risks.append(_risk("PROC-008", event["title"] + (f": {words[res]}" if res in words else ""), level,
+                           tag_ev + ([{"complaint_number": facts.get("complaint_number"), "complaint_result": res}]
+                                     if facts.get("complaint_number") else []),
                            ["Изучить доводы жалобы и решение контрольного органа"]))
     return risks
 
@@ -916,10 +1073,19 @@ def with_required_event(ai: Dict[str, Any]) -> Dict[str, Any]:
     with_event_type(ev)
     if not ev.get("event_at"):
         pipe = ai.get("pipeline") or {}
+        # с явным поясом: PHP хранит rm_event_at в UTC, а время без пояса считает московским (+03:00, 28.10.2026).
+        # Дата выгрузки — московская календарная дата; время анализа — локальное время сервиса (TZ контейнера
+        # может быть не московским), поэтому пояс берётся из системы
         if pipe.get("export_date"):
-            ev["event_at"], ev["event_at_source"] = f"{pipe['export_date']}T00:00:00", "export_date"
+            ev["event_at"], ev["event_at_source"] = f"{str(pipe['export_date'])[:10]}T00:00:00+03:00", "export_date"
         elif pipe.get("analyzed_at"):
-            ev["event_at"], ev["event_at_source"] = str(pipe["analyzed_at"]), "analyzed_at"
+            from risk_monitoring.passport import iso_tz
+
+            try:
+                ev["event_at"] = iso_tz(str(pipe["analyzed_at"]))
+            except ValueError:
+                ev["event_at"] = str(pipe["analyzed_at"])
+            ev["event_at_source"] = "analyzed_at"
     return ai
 
 

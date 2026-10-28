@@ -1,0 +1,35 @@
+<ns3:export xmlns="http://zakupki.gov.ru/oos/types/1" xmlns:ns2="http://zakupki.gov.ru/oos/base/1" xmlns:ns4="http://zakupki.gov.ru/oos/common/1" xmlns:ns3="http://zakupki.gov.ru/oos/export/1" xmlns:ns6="http://zakupki.gov.ru/oos/TPtypes/1" xmlns:ns5="http://zakupki.gov.ru/oos/EPtypes/1" xmlns:ns8="http://zakupki.gov.ru/oos/CPtypes/1" xmlns:ns7="http://zakupki.gov.ru/oos/KOTypes/1" xmlns:ns13="http://zakupki.gov.ru/oos/EATypes/1" xmlns:ns9="http://zakupki.gov.ru/oos/pprf615types/1" xmlns:ns12="http://zakupki.gov.ru/oos/URTypes/1" xmlns:ns11="http://zakupki.gov.ru/oos/SMTypes/1" xmlns:ns10="http://zakupki.gov.ru/oos/CETypes/1" xmlns:ns14="http://zakupki.gov.ru/oos/printform/1">
+    <ns3:complaintCancel schemeVersion="16.1">
+        <regNumber>202600132489008095</regNumber>
+        <isGroupItem>false</isGroupItem>
+        <regDate>2026-05-12T11:18:23.943</regDate>
+        <infoReceivingDate>2026-05-12</infoReceivingDate>
+        <registrationKO xsi:type="zfcs_organizationInfoType" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <regNum>01731000090</regNum>
+            <fullName>УПРАВЛЕНИЕ ФЕДЕРАЛЬНОЙ АНТИМОНОПОЛЬНОЙ СЛУЖБЫ ПО Г. МОСКВЕ</fullName>
+            <INN>7706096339</INN>
+            <KPP>770101001</KPP>
+        </registrationKO>
+        <name>ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ "ВЫСОТА"</name>
+        <regType>P</regType>
+        <text>Осуществлен отзыв жалобы Поставщиком</text>
+        <printForm>
+            <url>https://zakupki.gov.ru/controls/printForm?type=COMPLAINT&amp;id=26140036&amp;reestrNumber=202600132489008095&amp;versionNumber=2</url>
+            <signatureInfo>
+                <dsUid>019E1B4409A47E958A9369ED08C49747</dsUid>
+            </signatureInfo>
+        </printForm>
+        <attachments>
+            <attachment>
+                <publishedContentId>DC3081290803453691014589CEC04B21</publishedContentId>
+                <fileName>жалоба 0373200022226001000 .docx</fileName>
+                <docDescription>жалоба 0373200022226001000 .docx</docDescription>
+                <docNumber>2026001324890080950006</docNumber>
+                <url>https://zakupki.gov.ru/controls/documentComplaintDownload?documentId=46092042</url>
+                <cryptoSigns>
+                    <signature/>
+                </cryptoSigns>
+            </attachment>
+        </attachments>
+    </ns3:complaintCancel>
+</ns3:export>

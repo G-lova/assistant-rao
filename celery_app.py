@@ -151,6 +151,19 @@ celery_app.conf.update(
             'schedule': crontab(minute=f"*/{settings.DAILY_RESUME_EVERY_MIN}"),
             'options': {'queue': 'risk_monitoring'},
         },
+        # Сводки за прошлую неделю и прошлый месяц из ежедневных (неполная пересобирается, когда дни догонятся)
+        'rm-period-summary': {
+            'task': 'rm_period_task',
+            'schedule': crontab(hour=settings.PERIOD_SUMMARY_HOUR, minute=settings.PERIOD_SUMMARY_MINUTE),
+            'options': {'queue': 'risk_monitoring'},
+        },
+        # Еженедельный пересчёт затухания рисков закупок без новых данных (концепция 10.10)
+        'rm-decay-weekly': {
+            'task': 'rm_decay_task',
+            'schedule': crontab(day_of_week=settings.RISK_DECAY_RECALC_WEEKDAY, hour=settings.RISK_DECAY_RECALC_HOUR,
+                                minute=17),
+            'options': {'queue': 'risk_monitoring'},
+        },
         'typal-clauses-daily': {
             'task': 'rm_typal_clauses_task',
             'schedule': crontab(hour=5, minute=40),

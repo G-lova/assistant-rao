@@ -40,8 +40,9 @@ logger = get_logger(__name__)
 # повторно без force (документы повторно не анализируются — только недостающее, отложенное и сводка).
 # rm-daily-2 (23.10.2026): охват — все закупки системы, а не только monitoring = 1
 # rm-daily-3 (23.10.2026): события XML без привязки к закупкам системы не входят в сводку; красная зона — в фактах
-SCHEMA_VERSION = "rm-daily-3"
-PROMPT_VERSION = "daily-resume-4"
+# rm-daily-4 (28.10.2026): события риска, приоритет проверки, индекс доверия
+SCHEMA_VERSION = "rm-daily-4"
+PROMPT_VERSION = "daily-resume-5"
 KIND = "daily"
 STAGES = ("files", "xml", "contracts", "customers", "suppliers", "summary")
 RED = "red"
@@ -51,6 +52,7 @@ RED = "red"
 # дату не блокируется (раньше отметка без пульса блокировала повтор на 4 часа, 21.10.2026)
 HEARTBEAT_SECONDS = 120
 RUNNING_STALE_SECONDS = 10 * 60
+DAILY_LOW_CONFIDENCE_TOP = 10      # среди скольких первых по приоритету отмечать низкое доверие
 
 RESUME_SYSTEM = (
     "Ты — аналитик риск-мониторинга госзакупок организаций, подведомственных Минобрнауки России. Тебе дан список "
@@ -108,11 +110,12 @@ PLAIN_NAMES = {
 def risk_names(codes: Sequence[str]) -> str:
     """Названия рисков по каталогу вместо кодов: сводку читает заказчик («BEH-005» → «Аномальное распределение
     результатов»)."""
-    from risk_monitoring import risk_catalog
+    from risk_monitoring import composite_risks, risk_catalog
 
+    composite = composite_risks.titles()
     names = []
     for c in codes or []:
-        t = PLAIN_NAMES.get(c) or risk_catalog.title(c) or "признак риска"
+        t = PLAIN_NAMES.get(c) or composite.get(c) or risk_catalog.title(c) or "признак риска"
         if t not in names:
             names.append(t[:1].lower() + t[1:] if t[:2] != t[:2].upper() else t)
     return ", ".join(names)
@@ -149,6 +152,14 @@ def contract_item(card: Dict[str, Any], ai: Dict[str, Any], changed: bool) -> Di
         "changed": changed,
         "top": [{"rule_id": f.get("rule_id"), "title": f.get("title")} for f in (prof.get("top_factors") or [])[:3]],
         "registry_1928": bool(stored_registry(ai)),
+        "priority": _num((ai.get("priority") or {}).get("score")),
+        "priority_reasons": (ai.get("priority") or {}).get("reasons") or [],
+        "confidence": _num((ai.get("confidence") or {}).get("score")),
+        "composite": [c.get("rule_id") for c in ai.get("composite_risks") or [] if c.get("rule_id")],
+        "plan_passed_open": bool((ai.get("execution") or {}).get("plan_passed_open")),
+        # события риска (концепция 11.7) — только если закупка пересчитана в этом прогоне
+        "risk_changes": [{k: c.get(k) for k in ("code", "rule_id", "risk_title")}
+                         for c in (ai.get("risk_changes") or [])] if changed else [],
     }
 
 
@@ -346,6 +357,17 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
                     risk_names([x for x in sups[-1]["risks"] if x.startswith("REG-")]))
     sups.sort(key=lambda c: -(c.get("score") or 0))
     top = cfg.DAILY_TOP
+    rsk: Dict[str, int] = {}
+    for i in items:
+        for c in i["risk_changes"]:
+            rsk[c["code"]] = rsk.get(c["code"], 0) + 1
+    new_risks = [(i, c) for i in items for c in i["risk_changes"] if c["code"] == "RSK-001"]
+    closed_risks = [(i, c) for i in items for c in i["risk_changes"] if c["code"] == "RSK-004"]
+    comp: Dict[str, int] = {}
+    for i in items:
+        for c in i["composite"]:
+            comp[c] = comp.get(c, 0) + 1
+    priorities = sorted((i for i in items if i.get("priority") is not None), key=lambda i: -(i["priority"] or 0))
     return {
         "date": export_date,
         "environment": environment,
@@ -362,6 +384,20 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
         "customers": cust,
         "suppliers": sups,
         "attention": attention,
+        # события риска за прогон (11.7) и приоритет проверки (10.14)
+        "risk_changes": {"by_type": rsk,
+                         "new": [{"card_id": i["card_id"], "purchase_number": i["purchase_number"],
+                                  "customer": i["customer"], "rule_id": c["rule_id"], "title": c["risk_title"]}
+                                 for i, c in new_risks[:top]],
+                         "closed": [{"card_id": i["card_id"], "purchase_number": i["purchase_number"],
+                                     "customer": i["customer"], "rule_id": c["rule_id"], "title": c["risk_title"]}
+                                    for i, c in closed_risks[:top]]},
+        # контракты, у которых плановый срок прошёл, а сведений о завершении в ЕИС нет (профиль исполнения)
+        "execution_open_past_plan": sum(1 for i in items if i["plan_passed_open"]),
+        # составные риски (CR-*): сколько закупок с каждым сочетанием признаков
+        "composite_risks": dict(sorted(comp.items(), key=lambda kv: -kv[1])),
+        "priorities": [{k: i.get(k) for k in ("card_id", "purchase_number", "customer", "score", "zone", "priority",
+                                              "priority_reasons", "confidence", "monitoring")} for i in priorities[:top]],
     }
 
 
@@ -404,6 +440,37 @@ def summary_facts(s: Dict[str, Any]) -> List[str]:
             f"закупка {i['purchase_number']}, {i['customer']} — балл {_sc(i['score'])}"
             + (" (заказчик с текущими задачами мониторинга)" if i.get("monitoring") else "")
             for i in c["red"][:5]) + ".")
+    rc = s.get("risk_changes") or {}
+    by = rc.get("by_type") or {}
+    if by:
+        names = {"RSK-001": "новых", "RSK-002": "усилилось", "RSK-003": "ослабло", "RSK-004": "снято",
+                 "RSK-005": "подтверждено аналитиком", "RSK-006": "отклонено аналитиком"}
+        facts.append("Изменения рисков в пересчитанных закупках: " + ", ".join(
+            f"{names[k]} — {v}" for k, v in sorted(by.items()) if k in names) + ".")
+        if rc.get("new"):
+            facts.append("Новые риски: " + "; ".join(
+                f"{risk_names([x['rule_id']])} — закупка {x['purchase_number']}" for x in rc["new"][:5]) + ".")
+        if rc.get("closed"):
+            facts.append("Сняты риски: " + "; ".join(
+                f"{risk_names([x['rule_id']])} — закупка {x['purchase_number']}" for x in rc["closed"][:5]) + ".")
+    if s.get("execution_open_past_plan"):
+        facts.append(f"Плановый срок исполнения прошёл, а сведений о завершении в ЕИС нет — контрактов "
+                     f"{s['execution_open_past_plan']}: проверить исполнение и полноту сведений в реестре контрактов.")
+    comp = s.get("composite_risks") or {}
+    if comp:
+        facts.append("Сочетания признаков риска (опаснее, чем каждый признак по отдельности): " + "; ".join(
+            f"{risk_names([k])} — закупок {v}" for k, v in list(comp.items())[:5]) + ".")
+    pr = [x for x in s.get("priorities") or [] if x.get("priority")]
+    if pr:
+        facts.append("Проверить в первую очередь (приоритет проверки учитывает балл, его рост, сумму, новизну "
+                     "событий и доверие к оценке): " + "; ".join(
+                         f"закупка {x['purchase_number']}, {x['customer']} — приоритет {_sc(x['priority'])}"
+                         + (f" ({', '.join(x['priority_reasons'])})" if x.get("priority_reasons") else "")
+                         for x in pr[:5]) + ".")
+    low = [x for x in pr[:DAILY_LOW_CONFIDENCE_TOP] if x.get("confidence") is not None and x["confidence"] < 60]
+    if low:
+        facts.append("Низкое доверие к оценке (нужна дополнительная проверка, а не категоричный вывод): "
+                     + ", ".join(f"закупка {x['purchase_number']} — {_sc(x['confidence'])} %" for x in low) + ".")
     kinds = {}
     for a in s["attention"]:
         kinds[a["kind"]] = kinds.get(a["kind"], 0) + 1
@@ -918,6 +985,19 @@ class DailyRun:
                 card = ((events.get(int(r["id"])) or {}).get("link") or {}).get("risk_monitoring_contract_id")
             xml_cards[int(r["id"])] = int(card) if card is not None else None
         card_ids = sorted({c for c in xml_cards.values() if c is not None})
+        # внеплановая проверка охватывает много закупок, а XML привязан к одной: пересчитываются все закупки
+        # системы из списка проверки (ai_analysis.facts.check_purchases)
+        day_checks = [{"id": xid, **(ai.get("facts") or {})} for xid, ai in events.items()
+                      if (ai.get("facts") or {}).get("check_number")]
+        if day_checks:
+            from risk_monitoring import control_checks
+
+            nums = control_checks.purchases_of(control_checks.normalize(day_checks))
+            linked = []
+            for i in range(0, len(nums), 500):
+                linked += [int(r["id"]) for r in await self._query("link_by_number.sql", nums=nums[i:i + 500])]
+            scope["check_contracts"] = len(set(linked) - set(card_ids))
+            card_ids = sorted(set(card_ids) | set(linked))
         scope["contracts"] = len(card_ids)
         scope["xml_unlinked"] = sum(1 for c in xml_cards.values() if c is None)
         cards = {int(r["id"]): r for r in await self._query("daily_cards.sql", ids=card_ids)} if card_ids else {}
@@ -931,6 +1011,7 @@ class DailyRun:
 
             ca = ContractAnalyzer(self.http_manager, self.environment, self.repo, push_results=self.push,
                                   use_llm=self.use_llm, analyze_documents=False)
+            ca.extra_checks = day_checks
             res = await ca.analyze_ids(card_ids)
             changed.extend(int(r["card_id"]) for r in res if r.get("status") == "done")
             return None, self._counts(res)

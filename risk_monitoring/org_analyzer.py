@@ -17,14 +17,14 @@ from typing import Any, Dict, List, Optional, Tuple
 from configs.config import Config
 from configs.logger import get_logger
 from configs import settings
-from risk_monitoring import org_profile, passport, progress, rm_sql
+from risk_monitoring import control_checks, org_profile, passport, progress, rm_sql
 from risk_monitoring.contract_analyzer import _none
 from risk_monitoring.xml_events import canonical_org
 
 logger = get_logger(__name__)
 
 EXTERNAL_TABLE = "risk_monitoring_organisations"
-PROMPT_VERSION = "org-resume-4"
+PROMPT_VERSION = "org-resume-5"
 ROLES = ("customer", "supplier")
 
 RESUME_SYSTEM = (
@@ -136,6 +136,18 @@ class OrgAnalyzer:
             black_inns = sorted({str(c.get("supplier_inn")).strip() for c in customer_contracts if c.get("supplier_inn")} | set(sup_inns))
             black = await self._safe_query("black_list.sql", inns=black_inns) if black_inns else []
             rnp = await self._safe_query("rnp_entries.sql", inns=sorted(sup_inns)) if sup_inns and "supplier" in self.roles else []
+            # жалобы: заявитель раскрывается только в жалобе — по ИНН заказчиков и поставщиков
+            org_inns = sorted({t["inn"] for t in targets.values()})
+            nums = sorted({str(c["number"]) for c in customer_contracts if c.get("number")})
+            rows_c = await self._safe_query("complaints_by_inn.sql", head=[since], inns=org_inns, inns2=org_inns,
+                                            nums=nums) if org_inns else []
+            # отзыв, решение и приостановка той же жалобы — без ИНН заявителя, по номеру жалобы
+            numbers = sorted({str(r["complaint_number"]) for r in rows_c if r.get("complaint_number")})
+            more = await self._safe_query("complaints_by_number.sql", nums=numbers) if numbers else []
+            self.complaint_rows = rows_c + more
+            check_since = (date.today() - timedelta(days=settings.CHECK_LOOKBACK_DAYS)).isoformat()
+            self.checks = control_checks.normalize(await self._safe_query("checks_recent.sql", [check_since])) \
+                if "customer" in self.roles else []
             stored = await self._internal(list(targets))
             st["detail"] = f"как заказчик {len(customer_contracts)}, как поставщик {len(supplier_contracts)}, реестр {len(black)}"
 
@@ -180,7 +192,13 @@ class OrgAnalyzer:
             ids = {int(g["id"]) for g in t["customer_rows"]}
             mine = [c for c in customer_contracts if c.get("organisation_id") is not None and int(c["organisation_id"]) in ids]
             if mine:
-                sec = org_profile.customer_section(mine, black, settings, org_profile.previous_customer_score(prev))
+                sec = org_profile.customer_section(mine, black, settings, org_profile.previous_customer_score(prev),
+                                                   complaint_items=org_profile.complaints(
+                                                       getattr(self, "complaint_rows", []), t["inn"], "customer",
+                                                       [c.get("number") for c in mine]),
+                                                   check_metrics=control_checks.customer_metrics(
+                                                       getattr(self, "checks", []), t["inn"],
+                                                       [c.get("number") for c in mine]))
                 progress.note(f"заказчик: закупок {len(mine)}, рисков {len(sec['risks'])}, балл {sec['score']}")
                 async with progress.step("резюме заказчика"):
                     sec["resume"] = await self._resume("customer", name, sec)
@@ -190,9 +208,11 @@ class OrgAnalyzer:
             mine = [c for c in supplier_contracts if str(c.get("supplier_inn") or "").strip() == t["inn"]]
             sup_black = [b for b in black if str(b.get("inn") or "").strip() == t["inn"]]
             sup_rnp = [e for e in rnp if str(e.get("inn") or "").strip() == t["inn"]]
-            if mine or sup_black or sup_rnp:
+            filed = org_profile.complaints(getattr(self, "complaint_rows", []), t["inn"], "supplier")
+            if mine or sup_black or sup_rnp or filed:
                 sec = org_profile.supplier_section(mine, sup_black, t["inn"], settings,
-                                                   (prev.get("supplier") or {}).get("score"), rnp=sup_rnp)
+                                                   (prev.get("supplier") or {}).get("score"), rnp=sup_rnp,
+                                                   complaint_items=filed)
                 progress.note(f"поставщик: контрактов {len(mine)}, рисков {len(sec['risks'])}, балл {sec['score']}")
                 async with progress.step("резюме поставщика"):
                     sec["resume"] = await self._resume("supplier", name, sec)

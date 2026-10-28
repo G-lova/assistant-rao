@@ -9,6 +9,8 @@
 * ``GET /risk-monitoring/typal-clauses/customer/{inn}`` — типовое положение заказчика;
 * ``POST /risk-monitoring/daily`` — ежедневный прогон за дату выгрузки и сводка; ``GET /risk-monitoring/daily/{date}`` —
   готовая сводка;
+* ``POST /risk-monitoring/summary/{week|month}`` — сводка за неделю / месяц из ежедневных сводок;
+  ``GET /risk-monitoring/summary/{week|month}/{period}`` — готовая сводка (``2026-W43`` / ``2026-10``);
 * статус задачи — существующий ``GET /task/{task_id}``.
 
 Окружение внешней системы — заголовок ``X-API-Database`` (как в остальных эндпоинтах).
@@ -386,4 +388,83 @@ async def get_daily(export_date: str, x_api_database: str = Header(default="dev"
         stored = (await repo.get_rm_results(x_api_database.lower(), daily.KIND, [key])).get(key)
     if not stored:
         raise HTTPException(status_code=404, detail="Прогона за эту дату не было")
+    return stored["ai_analysis"]
+
+
+class PeriodRequest(BaseModel):
+    """Сводка за неделю или месяц.
+
+    Attributes:
+        period: ``2026-W43`` (неделя) / ``2026-10`` (месяц); пусто — последний завершившийся период.
+        force: Пересобрать готовую сводку с теми же данными (только в режиме отладки).
+        use_llm: Текст пишет модель.
+    """
+
+    period: Optional[str] = None
+    force: bool = False
+    use_llm: bool = True
+
+
+def _check_period(kind: str, period: Optional[str]) -> None:
+    """Вид и обозначение периода (400 при ошибке)."""
+    from risk_monitoring import period_summary
+
+    if kind not in period_summary.KINDS:
+        raise HTTPException(status_code=400, detail="Вид периода — week или month")
+    if period:
+        try:
+            period_summary.period_bounds(kind, period)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="Период — ГГГГ-Wнн (неделя) или ГГГГ-ММ (месяц)")
+
+
+@router.post("/summary/{kind}", status_code=status.HTTP_202_ACCEPTED)
+async def run_period_summary(kind: str, req: PeriodRequest,
+                             x_api_database: str = Header(default="dev", alias="X-API-Database")):
+    """Ставит в очередь сводку за неделю или месяц (``risk_monitoring.period_summary``).
+
+    Args:
+        kind: ``week`` / ``month``.
+        req: Период и режимы.
+        x_api_database: Окружение внешней системы.
+
+    Returns:
+        dict: ``task_id``, ``kind``, ``period``.
+    """
+    _check_period(kind, req.period)
+    if req.force and not Config.risk_monitoring_debug():
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Пересборка готовой сводки (force) доступна только в режиме отладки (RISK_MONITORING_DEBUG)")
+    from risk_monitoring.tasks import rm_period_task
+
+    task = rm_period_task.apply_async(kwargs={"environment": x_api_database, "kinds": [kind], "period": req.period,
+                                              "use_llm": req.use_llm, "force": req.force}, queue="risk_monitoring")
+    return {"task_id": task.id, "kind": kind, "period": req.period, "status": "queued"}
+
+
+@router.get("/summary/{kind}/{period}")
+async def get_period_summary(kind: str, period: str,
+                             x_api_database: str = Header(default="dev", alias="X-API-Database")):
+    """Готовая сводка за неделю или месяц.
+
+    Args:
+        kind: ``week`` / ``month``.
+        period: ``2026-W43`` / ``2026-10``.
+        x_api_database: Окружение внешней системы.
+
+    Returns:
+        dict: Сводка (``period``, ``days``, ``events``, ``contracts``, ``risk_changes``, ``priorities``, ``resume``).
+
+    Raises:
+        HTTPException: 400 — неверный период; 404 — сводки нет.
+    """
+    _check_period(kind, period)
+    from configs.ai_repo import AIRepo
+    from risk_monitoring import period_summary
+
+    key = period_summary.period_key(kind, period)
+    async with AIRepo() as repo:
+        stored = (await repo.get_rm_results(x_api_database.lower(), period_summary.KINDS[kind], [key])).get(key)
+    if not stored:
+        raise HTTPException(status_code=404, detail="Сводки за этот период нет")
     return stored["ai_analysis"]

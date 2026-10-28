@@ -12,6 +12,16 @@ from risk_monitoring import org_profile, passport
 class SourceTest(unittest.TestCase):
     """Колонка ``source`` в ``risk_monitoring_document_risks``: один главный источник на риск."""
 
+    def test_primary_source_simple(self):
+        """Две метки: «rule» — нашло правило (в т. ч. вместе с моделью), «ai» — только модель (27.10.2026)."""
+        with mock.patch.object(settings, "RISK_SOURCE_LABELS", "simple"):
+            self.assertEqual(passport.primary_source(["ai_file", "rule"]), "rule")
+            self.assertEqual(passport.primary_source(["registry"]), "rule")
+            self.assertEqual(passport.primary_source(["package", "ai_event"]), "rule")
+            self.assertEqual(passport.primary_source(["ai_file", "version_diff", "ai_event"]), "ai")
+            self.assertIsNone(passport.primary_source([]))
+
+    @mock.patch.object(settings, "RISK_SOURCE_LABELS", "detailed")
     def test_primary_source(self):
         """Реестр важнее правила, правило — модели; print_form → rule, version_diff → ai_file."""
         self.assertEqual(passport.primary_source(["ai_file", "rule"]), "rule")
@@ -54,7 +64,8 @@ class RnpTest(unittest.TestCase):
         """Секция поставщика: действующая запись РНП → REG-002 и блок ``rnp``."""
         sec = org_profile.supplier_section([], [], "1660331280", settings, None, today=date(2026, 6, 1), rnp=[self.entry])
         self.assertEqual([x["rule_id"] for x in sec["risks"]], ["REG-002"])
-        self.assertEqual(sec["risks"][0]["source"], "registry")
+        self.assertEqual(sec["risks"][0]["source"], "rule")
+        self.assertEqual(sec["risks"][0]["sources"], ["registry"])
         self.assertEqual(sec["rnp"][0]["reg_number"], "РНП.123")
 
 
