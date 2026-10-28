@@ -115,6 +115,22 @@ class ComplaintsTest(unittest.TestCase):
         t = self.facts("tenderSuspension.xml")
         self.assertEqual((t["complaint_number"], t["purchase_number"]), ("202600100161003481", "0373200563926000023"))
 
+    def test_real_decision_223(self):
+        """Решение УФАС по жалобе 223-ФЗ: номер «дата.номер», CONFIRMED + нарушения выявлены → обоснована."""
+        f = self.facts("complaintDecision223.xml")
+        self.assertEqual((f["complaint_number"], f["complaint_result"], f["complaint_violation"]),
+                         ("19.10.2026.307017", "justified", True))
+        self.assertNotIn("complainant_inn", f)
+
+    def test_result_codes(self):
+        """«Не подтверждена» не путается с «подтверждена»; без решения — по признаку нарушения."""
+        self.assertEqual(complaint_facts("complaintDecision", {"complaintDecisionSolution": "NOT_CONFIRMED"})
+                         ["complaint_result"], "unfounded")
+        self.assertEqual(complaint_facts("complaintDecision", {"complaintDecisionSolution": "PARTIALLY_CONFIRMED"})
+                         ["complaint_result"], "partly")
+        self.assertEqual(complaint_facts("complaintDecision", {"complaintDecisionViolation": "N"})
+                         ["complaint_result"], "unfounded")
+
     def test_decision_code(self):
         """Итог по коду решения."""
         d = complaint_facts("complaintDecision", {"checkResult": {"complResult": "COMPLAINT_PARTLY_VALID"}})

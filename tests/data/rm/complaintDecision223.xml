@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<ns2:complaintDecision xsi:schemaLocation="https://zakupki.gov.ru/223/integration/schema/TFF-16.2 https://zakupki.gov.ru/223/integration/schema/TFF-16.2/complaint.xsd" xmlns="http://zakupki.gov.ru/223fz/types/1" xmlns:ns2="http://zakupki.gov.ru/223fz/complaint/1" xmlns:ns4="http://zakupki.gov.ru/223fz/agencyRelation/1" xmlns:ns3="http://zakupki.gov.ru/223fz/dishonestSupplier/1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:ns6="http://zakupki.gov.ru/223fz/customerAccredited/1" xmlns:ns5="http://zakupki.gov.ru/223fz/contract/1" xmlns:ns30="http://zakupki.gov.ru/223fz/ecp-packet/1" xmlns:ns8="http://zakupki.gov.ru/223fz/decisionSuspension/1" xmlns:ns7="http://zakupki.gov.ru/223fz/customerRegistry/1" xmlns:ns13="http://zakupki.gov.ru/223fz/machineryListInfo/1" xmlns:ns9="http://zakupki.gov.ru/223fz/detachedRights/1" xmlns:ns12="http://zakupki.gov.ru/223fz/exclusion/1" xmlns:ns11="http://zakupki.gov.ru/223fz/purchase/1" xmlns:ns10="http://zakupki.gov.ru/223fz/disagreementProtocol/1" xmlns:ns17="http://zakupki.gov.ru/223fz/purchasePlan/1" xmlns:ns16="http://zakupki.gov.ru/223fz/orderClauseList/1" xmlns:ns15="http://zakupki.gov.ru/223fz/notificationIssue/1" xmlns:ns14="http://zakupki.gov.ru/223fz/missedNotice/1" xmlns:ns19="http://zakupki.gov.ru/223fz/purchasePlanAdditionalPosition/1" xmlns:ns18="http://zakupki.gov.ru/223fz/purchasePlanUpdatePositionDataType/1" xmlns:ns20="http://zakupki.gov.ru/223fz/purchasePlanProject/1" xmlns:ns24="http://zakupki.gov.ru/223fz/stopCommodity/1" xmlns:ns23="http://zakupki.gov.ru/223fz/revenue/1" xmlns:ns22="http://zakupki.gov.ru/223fz/reference/1" xmlns:ns21="http://zakupki.gov.ru/223fz/purchasePlanProjectAdditionalPosition/1" xmlns:ns28="http://zakupki.gov.ru/223fz/integration/1" xmlns:ns27="http://zakupki.gov.ru/223fz/guarantee/1" xmlns:ns26="http://zakupki.gov.ru/223fz/webRequest/1" xmlns:ns25="http://zakupki.gov.ru/223fz/typalOrderClauseList/1" xmlns:ns29="http://zakupki.gov.ru/223fz/ecp-packetSpec/1">
+    <header>
+        <guid>5563aa3b-176a-4f0e-872a-57063850108b</guid>
+        <createDateTime>2026-10-27T08:55:17</createDateTime>
+    </header>
+    <ns2:extendedType>
+        <contentUid>01A17BEC1D4871EB86E8D7AAF08A5C2B</contentUid>
+        <cryptoSigns>
+            <signature>
+                <userSignature/>
+                <trustedSignature/>
+                <userSignatureUid>01A17BED610274D2B3592FF324580A8C</userSignatureUid>
+                <trustedUserSignatureUid>01A17BED6149783C82EAEBCCAC0430D5</trustedUserSignatureUid>
+            </signature>
+        </cryptoSigns>
+        <xsltFileDsUid>E406AE895072427798129422058409FE</xsltFileDsUid>
+    </ns2:extendedType>
+    <ns2:body>
+        <ns2:item>
+            <guid>8c539876-7422-4d88-b540-019a45049cb7</guid>
+            <ns2:complaintDecisionData>
+                <ns2:guid>f48d4505-cdc9-4fb3-ba2a-ed2b6f46a33b</ns2:guid>
+                <ns2:registrationNumber>19.10.2026.307017</ns2:registrationNumber>
+                <ns2:publishDate>2026-10-27T08:55:16+03:00</ns2:publishDate>
+                <ns2:version>1</ns2:version>
+                <ns2:status>P</ns2:status>
+                <ns2:complaintDate>2026-10-16T00:00:00</ns2:complaintDate>
+                <ns2:placer>
+                    <mainInfo>
+                        <fullName>УПРАВЛЕНИЕ ФЕДЕРАЛЬНОЙ АНТИМОНОПОЛЬНОЙ СЛУЖБЫ ПО РЕСПУБЛИКЕ МАРИЙ ЭЛ</fullName>
+                        <shortName>МАРИЙСКОЕ УФАС РОССИИ</shortName>
+                        <inn>1215026787</inn>
+                        <kpp>121501001</kpp>
+                        <ogrn>1021200772251</ogrn>
+                        <legalAddress>424000, Г.. ЙОШКАР-ОЛА, УЛ. ВОЛКОВА, Д. 164</legalAddress>
+                        <email/>
+                        <okopf>75104</okopf>
+                        <okopfName>Федеральные государственные казенные учреждения</okopfName>
+                        <okfs>12</okfs>
+                        <okfsName>Федеральная собственность</okfsName>
+                        <timeZone>
+                            <offset>0</offset>
+                            <name>МСК (СГВ+4) Москва, Волгоград</name>
+                        </timeZone>
+                        <region>РЕСПУБЛИКА МАРИЙ ЭЛ</region>
+                    </mainInfo>
+                </ns2:placer>
+                <ns2:complaintDecisionSolution>CONFIRMED</ns2:complaintDecisionSolution>
+                <ns2:complaintDecisionViolation>Y</ns2:complaintDecisionViolation>
+                <ns2:prescription>
+                    <ns2:type>S</ns2:type>
+                    <ns2:number></ns2:number>
+                    <ns2:text></ns2:text>
+                </ns2:prescription>
+                <ns2:urlEIS>https://lk.zakupki.gov.ru/223/complaint/private/complaint/consideration-info.html?considerationId=5952</ns2:urlEIS>
+                <ns2:attachments>
+                    <totalDocumentsCount>1</totalDocumentsCount>
+                    <document>
+                        <guid>d49e4002-83c6-431f-93e8-46314669576d</guid>
+                        <createDateTime>2026-10-27T08:52:48</createDateTime>
+                        <fileName>решение по жалобе.pdf</fileName>
+                        <description>решение по жалобе</description>
+                        <url>https://zakupki.gov.ru/223/filestore/public/1.0/download/fz223/file.html?uid=8F9734B192EE4770AB1222864A069D73</url>
+                        <contentUid>8F9734B192EE4770AB1222864A069D73</contentUid>
+                        <cryptoSigns>
+                            <signature>
+                                <userSignature/>
+                                <trustedSignature/>
+                                <userSignatureUid>01A17BED62B371E8A58016F36A5AF9CF</userSignatureUid>
+                                <trustedUserSignatureUid>01A17BED633A7453AA5BF6A209B4EB98</trustedUserSignatureUid>
+                            </signature>
+                        </cryptoSigns>
+                    </document>
+                </ns2:attachments>
+            </ns2:complaintDecisionData>
+        </ns2:item>
+    </ns2:body>
+</ns2:complaintDecision>

@@ -449,11 +449,13 @@ def extract_facts(tag: str, body: Dict[str, Any]) -> Dict[str, Any]:
 
 # Итог рассмотрения жалобы: коды ЕИС (complResult / checkResult …) и формулировки решений
 COMPLAINT_RESULTS = (
-    ("unfounded", re.compile(r"NO_VIOLATION|NOT_VALID|UNFOUNDED|необоснован", re.I)),
-    ("partly", re.compile(r"PARTLY|частично", re.I)),
-    ("justified", re.compile(r"VIOLATION|VALID|JUSTIFIED|обоснован", re.I)),
-    ("returned", re.compile(r"RETURN|возвра", re.I)),
+    ("unfounded", re.compile(r"NOT_CONFIRMED|NO_VIOLATION|NOT_VALID|UNFOUNDED|REJECT|необоснован", re.I)),
+    ("partly", re.compile(r"PARTIAL|PARTLY|частично", re.I)),
+    ("returned", re.compile(r"RETURN|NOT_CONSIDER|возвра|без рассмотрения", re.I)),
+    ("justified", re.compile(r"CONFIRMED|VIOLATION|VALID|JUSTIFIED|обоснован", re.I)),
 )
+# номер жалобы: 44-ФЗ — 18 цифр (202600100161005752), 223-ФЗ — «дата.номер» (19.10.2026.307017)
+COMPLAINT_NUMBER_RE = re.compile(r"\d{18}|\d{2}\.\d{2}\.\d{4}\.\d+")
 
 
 def complaint_facts(tag: str, body: Dict[str, Any]) -> Dict[str, Any]:
@@ -467,7 +469,11 @@ def complaint_facts(tag: str, body: Dict[str, Any]) -> Dict[str, Any]:
     - номер жалобы — 18 цифр: ``commonInfo/regNumber``, ``regNumber``, ``complaintNumber`` (у документов одной
       жалобы он общий — по нему отзыв и решение сводятся с жалобой);
     - на кого подана — первый элемент ``indicted`` (``EP`` — оператор площадки, ``customer``, ``commission`` …);
-    - отзыв — тег ``complaintCancel`` / ``complaintWithdraw``.
+    - отзыв — тег ``complaintCancel`` / ``complaintWithdraw``;
+    - решение 223-ФЗ (``complaintDecision``, TFF-16.2) — ``complaintDecisionData``: ``registrationNumber``
+      (номер жалобы «19.10.2026.307017»), ``complaintDecisionSolution`` (``CONFIRMED`` — обоснована …),
+      ``complaintDecisionViolation`` (``Y`` / ``N`` — выявлены ли нарушения); заявителя и закупки в решении нет —
+      оно сводится с жалобой по номеру.
 
     Args:
         tag: Тег документа.
@@ -484,7 +490,9 @@ def complaint_facts(tag: str, body: Dict[str, Any]) -> Dict[str, Any]:
         "complainant_inn": _first(body, ["INN", "inn"], path_re=who, pred=lambda v: re.fullmatch(r"\d{10}|\d{12}", v)),
         "complainant_kpp": _first(body, ["KPP", "kpp"], path_re=who),
         "complainant_name": _first(body, ["fullName", "shortName", "organizationName", "lastName"], path_re=who),
-        "complaint_number": _first(body, ["complaintNumber", "regNumber"], pred=lambda v: re.fullmatch(r"\d{18}", v)),
+        "complaint_number": _first(body, ["complaintNumber", "regNumber"],
+                                   pred=lambda v: COMPLAINT_NUMBER_RE.fullmatch(v))
+        or _first(body, ["registrationNumber"], path_re=r"complaint", pred=lambda v: COMPLAINT_NUMBER_RE.fullmatch(v)),
         "complaint_target": next(iter(indicted), None) if indicted else None,
         "complaint_subject": _first(body, ["shortName"], path_re=r"appealActionInfo"),
     }
@@ -493,11 +501,18 @@ def complaint_facts(tag: str, body: Dict[str, Any]) -> Dict[str, Any]:
     if "ithdraw" in tag or "Cancel" in tag:
         f["complaint_result"] = "withdrawn"
         return f
-    raw = _first(body, ["complResult", "complaintResult", "checkResult", "decisionType", "result", "decision"],
-                 pred=lambda v: len(v) < 400)
+    # 223-ФЗ: complaintDecisionSolution (CONFIRMED …) и complaintDecisionViolation (Y / N) — решение УФАС
+    # 19.10.2026.307017 от 27.10.2026; 44-ФЗ — complResult / checkResult
+    raw = _first(body, ["complaintDecisionSolution", "complResult", "complaintResult", "checkResult", "decisionType",
+                        "result", "decision"], pred=lambda v: len(v) < 400)
     if raw is not None:
         f["complaint_result_text"] = str(raw)[:200]
         f["complaint_result"] = next((k for k, rx in COMPLAINT_RESULTS if rx.search(str(raw))), None)
+    violation = str(_first(body, ["complaintDecisionViolation"]) or "").upper()
+    if violation:
+        f["complaint_violation"] = violation == "Y"
+        if not f.get("complaint_result") and violation in ("Y", "N"):
+            f["complaint_result"] = "justified" if violation == "Y" else "unfounded"
     return f
 
 
