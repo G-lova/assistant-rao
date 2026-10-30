@@ -203,8 +203,12 @@ class LLMJson:
         last: Optional[BaseException] = None
         for attempt in range(self.retries):
             guided = bool(schema) and self.guided
-            sys_text = system if guided or not schema else (
-                system + "\n\nОтвет — строго один JSON-объект по схеме:\n" + json.dumps(schema, ensure_ascii=False))
+            # повтор после неразобранного ответа: схема и требование «только JSON» — и в промпт, даже при guided_json
+            # (сервер может молча не применять guided_json: модель отвечала markdown, 30.10.2026)
+            strict = bool(schema) and (not guided or isinstance(last, ValueError))
+            sys_text = system if not strict else (
+                system + "\n\nОтвет — строго один JSON-объект по схеме, без markdown и текста вне JSON:\n"
+                + json.dumps(schema, ensure_ascii=False))
             messages: List[Dict[str, str]] = [{"role": "system", "content": sys_text}, {"role": "user", "content": user}]
             content = None
             try:

@@ -55,6 +55,35 @@ class AskListTest(unittest.TestCase):
             self.assertIn("ответ не разобран", " ".join(logs.output))
 
 
+class RetryStrictTest(unittest.TestCase):
+    """Повтор после markdown-ответа: схема и «только JSON» в системном промпте даже при guided_json."""
+
+    def test_retry_adds_schema(self):
+        """Первый ответ — markdown (как qwen3-vl 30.10.2026), второй — JSON; во втором запросе есть схема."""
+        llm = llm_json.LLMJson(object(), "m", retries=2)
+        systems, answers = [], ["**checks:** - **pz_p2**: unclear", '{"checks": []}']
+
+        async def fake(client, **k):
+            """Ответы по очереди, системный промпт — в список."""
+            systems.append(k["messages"][0]["content"])
+            return answers.pop(0)
+
+        async def no_sleep(_):
+            """Без ожидания между попытками."""
+
+        with mock.patch.object(llm_json, "call_llm", fake), mock.patch.object(llm_json.asyncio, "sleep", no_sleep):
+            self.assertEqual(asyncio.run(llm.ask("sys", "u", {"type": "object"})), {"checks": []})
+        self.assertNotIn("строго один JSON", systems[0])
+        self.assertIn("строго один JSON", systems[1])
+
+    def test_prompt_asks_json(self):
+        """Запрос перепроверки прямо требует JSON и перечисляет показатели."""
+        cfg = rx.load_config()
+        p = rx.build_prompt(["pz_p2"], [{"file_id": 1, "file_name": "a", "text": "t"}], cfg, {})
+        self.assertIn('{"checks"', p)
+        self.assertIn("Только JSON", p)
+
+
 class FallbackTest(unittest.TestCase):
     """Перепроверка правил переходит на запасную модель, если основная не дала JSON."""
 
