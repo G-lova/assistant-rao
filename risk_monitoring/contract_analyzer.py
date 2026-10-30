@@ -112,8 +112,11 @@ class ContractAnalyzer:
             from configs.llm_client import get_llm
             from risk_monitoring.llm_json import LLMJson, reasoning_llm
 
-            client, self.model = reasoning_llm(*get_llm())
+            base_client, base_model = get_llm()
+            client, self.model = reasoning_llm(base_client, base_model)
             self.llm = LLMJson(client, self.model, concurrency=2)
+            # запасная модель для JSON-ответов, если отдельная модель «с мышлением» его не дала
+            self.llm.fallback = LLMJson(base_client, base_model, concurrency=2) if self.model != base_model else None
         self.stats: Dict[str, Any] = {"llm_resume": 0}
         self.documents: Dict[str, Any] = {}
 

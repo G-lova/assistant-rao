@@ -199,5 +199,17 @@ async def check_rules(llm: Any, values: Optional[Dict[str, Any]], texts: Dict[in
     if not frags:
         return {k: {"status": "unclear", "reason": "в документах нет фрагментов по теме показателя",
                     "version": cfg.get("version")} for k in keys}
-    data = await llm.ask(SYSTEM, build_prompt(keys, frags, cfg, titles or {}), schema=SCHEMA, max_tokens=2000)
+    prompt = build_prompt(keys, frags, cfg, titles or {})
+    max_tokens = getattr(settings, "RULE_EXCLUSION_MAX_TOKENS", 4000)
+    try:
+        data = await llm.ask(SYSTEM, prompt, schema=SCHEMA, max_tokens=max_tokens, list_key="checks")
+    except ValueError:
+        # модель с «мышлением» не дала JSON (30.10.2026: «В ответе модели нет JSON» у закупок 1542, 1543) —
+        # запасная модель без мышления, если она есть
+        fallback = getattr(llm, "fallback", None)
+        if fallback is None:
+            raise
+        logger.warning(f"Перепроверка правил: модель {getattr(llm, 'model', '')} не дала JSON, "
+                       f"запасная {getattr(fallback, 'model', '')}")
+        data = await fallback.ask(SYSTEM, prompt, schema=SCHEMA, max_tokens=max_tokens, list_key="checks")
     return verify(data.get("checks") or [], keys, texts, cfg)

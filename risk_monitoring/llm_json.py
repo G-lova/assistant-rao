@@ -67,6 +67,11 @@ def parse_json(raw: str) -> Any:
         ValueError: Если JSON извлечь не удалось.
     """
     text = (raw or "").strip()
+    # размышления модели в ответе (модели с «мышлением» без разбора reasoning на сервере): <think>…</think>;
+    # незакрытый <think> — ответ оборван на размышлениях, JSON нет (30.10.2026, перепроверка правил)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S | re.I).strip()
+    if re.match(r"<think>", text, re.I):
+        raise ValueError("Ответ модели оборван на размышлениях (<think> без JSON) — мало max_tokens")
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
     try:
         return json.loads(text)
@@ -177,7 +182,7 @@ class LLMJson:
         return text
 
     async def ask(self, system: str, user: str, schema: Optional[Dict[str, Any]] = None,
-                  max_tokens: int = 3000, temperature: float = 0.1) -> Dict[str, Any]:
+                  max_tokens: int = 3000, temperature: float = 0.1, list_key: Optional[str] = None) -> Dict[str, Any]:
         """Запрос к модели с guided JSON и разбором ответа.
 
         Args:
@@ -186,6 +191,8 @@ class LLMJson:
             schema: JSON-схема ответа (передаётся как ``guided_json``).
             max_tokens: Лимит токенов ответа.
             temperature: Температура.
+            list_key: Модель вернула массив вместо объекта — принять его как ``{list_key: массив}`` (схема с одним
+                полем-массивом, например ``checks``).
 
         Returns:
             Dict[str, Any]: Разобранный ответ.
@@ -199,6 +206,7 @@ class LLMJson:
             sys_text = system if guided or not schema else (
                 system + "\n\nОтвет — строго один JSON-объект по схеме:\n" + json.dumps(schema, ensure_ascii=False))
             messages: List[Dict[str, str]] = [{"role": "system", "content": sys_text}, {"role": "user", "content": user}]
+            content = None
             try:
                 async with self.semaphore:
                     await self.rate_limiter.acquire()
@@ -206,11 +214,17 @@ class LLMJson:
                         self.client, model=self.model, messages=messages, max_tokens=max_tokens,
                         temperature=temperature, extra_body={"guided_json": schema} if guided else {})
                 data = parse_json(content)
+                if isinstance(data, list) and list_key:
+                    data = {list_key: data}
                 if not isinstance(data, dict):
                     raise ValueError("Ответ модели не является объектом")
                 return data
             except Exception as e:  # noqa: BLE001 — битый JSON / постоянная ошибка: повторяем
                 last = e
+                if content is not None and isinstance(e, ValueError):
+                    # что именно ответила модель — без этого «нет JSON» не разобрать (30.10.2026)
+                    head = re.sub(r"\s+", " ", str(content))[:300]
+                    logger.warning(f"LLM {self.model}: ответ не разобран ({len(str(content))} симв., guided={guided}): {head!r}")
                 if guided and _guided_unsupported(e):
                     logger.warning(f"LLM {self.model}: guided_json не поддерживается, перехожу на схему в промпте")
                     self.guided = False
