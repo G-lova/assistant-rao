@@ -131,7 +131,7 @@ class TypeDetector:
 
             raw_response = response.choices[0].message.content.strip()
             logger.info(f"Получен ответ длиной {len(raw_response)} символов для чанка '{filename}'")
-            logger.info(raw_response)
+            logger.debug(raw_response)  # полный ответ — только в отладке: журнал рос до 4,7 МБ за прогон (30.10.2026)
 
             # Парсим JSON
             try:
