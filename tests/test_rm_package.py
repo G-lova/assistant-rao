@@ -503,7 +503,7 @@ class RuleExclusionsTest(unittest.TestCase):
         class FakeLLM:
             """Модель с фиксированным ответом."""
 
-            async def ask(self, system, user, schema=None, max_tokens=0):
+            async def ask(self, system, user, schema=None, max_tokens=0, list_key=None):
                 """Ответ по pz_p4."""
                 calls.append(user)
                 return {"checks": [{"indicator": "pz_p4", "status": "confirmed", "reason": "сопровождения нет"}]}
