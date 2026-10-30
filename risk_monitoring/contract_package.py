@@ -766,11 +766,13 @@ def default_resume(p: Dict[str, Any], prof: Dict[str, Any], risks: Sequence[Dict
                      + (f" (снижение {p['price_reduction_pct']} %)" if p.get("price_reduction_pct") else "") + ".")
     parts.append(f"Балл риска {prof['score']} ({ {'green': 'зелёная', 'yellow': 'жёлтая', 'red': 'красная'}.get(prof['zone'], '') } зона)"
                  + (f", изменение {prof['delta']:+}" if prof.get("delta") else "") + ".")
-    if risks:
-        parts.append("Основные факторы: " + "; ".join(str(r.get('title') or r['rule_id']) for r in risks[:3]) + ".")
-    if events:
-        parts.append(f"Последнее событие: {events[0].get('title')} ({str(events[0].get('event_at') or '')[:10]}).")
-    return " ".join(parts)
+    from risk_monitoring import text_format
+
+    tail = (f"Последнее событие: {events[0].get('title')} ({str(events[0].get('event_at') or '')[:10]})."
+            if events else "")
+    # абзацы и список — в формате заключений ИИ (text_format)
+    return text_format.compose(" ".join(parts), [str(r.get('title') or r['rule_id']) for r in risks[:3]], tail,
+                               intro="Основные факторы:")
 
 
 def favourite_supplier(p: Dict[str, Any], counts: Optional[Dict[str, int]], settings: Any) -> Optional[Dict[str, Any]]:

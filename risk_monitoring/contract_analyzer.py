@@ -17,24 +17,24 @@ from configs.config import Config
 from configs.logger import get_logger
 from risk_monitoring import contract_package as cp
 from configs import settings
-from risk_monitoring import passport, progress, risk_catalog, rm_sql
+from risk_monitoring import passport, progress, risk_catalog, rm_sql, text_format
 
 logger = get_logger(__name__)
 
 EXTERNAL_TABLE = "risk_monitoring_contracts"
 STAGE = "S2"
-PROMPT_VERSION = "contract-resume-5"
+PROMPT_VERSION = "contract-resume-6"
 
 RESUME_SYSTEM = (
     "Ты — аналитик риск-мониторинга госзакупок (44-ФЗ, 223-ФЗ). По паспорту закупки, её рискам и событиям напиши "
-    "резюме для аналитика: 4–7 предложений, по-русски, без вступлений. Что закупают и на какой стадии, главные риски "
+    "резюме для аналитика: до 7 предложений, по-русски, без вступлений. Что закупают и на какой стадии, главные риски "
     "со ссылкой на источник (документ, событие ЕИС, правило, реестр), что проверить в первую очередь. Не придумывай "
     "фактов, которых нет во входных данных; не делай вывод о нарушении — только о признаках риска. Не используй коды рисков и правил (вида DOC-002, FIN-004, BEH-005, pz_p1) — называй риски словами, понятными заказчику. Если у риска указано possible_exclusion — скажи, что по "
     "документам возможно законное исключение и его стоит проверить. Если есть composite_risks — назови это "
     "сочетание признаков (оно опаснее каждого признака по отдельности) и из каких признаков оно сложилось. "
     "execution — исполнение контракта (просрочка, доли исполнения и оплаты), benchmark — сравнение снижения цены и "
-    "числа заявок с похожими закупками системы: упомяни, если есть заметное отличие. Ответ — "
-    "обычный текст, без JSON, списков и разметки.")
+    "числа заявок с похожими закупками системы: упомяни, если есть заметное отличие. "
+    + text_format.instruction())
 RESUME_SCHEMA = {"type": "object", "properties": {"resume": {"type": "string"}}, "required": ["resume"]}
 
 
@@ -375,6 +375,7 @@ class ContractAnalyzer:
         self._dynamics(built, item, prev_ai)
         async with progress.step("резюме закупки" + (" (модель)" if self.llm else " (шаблон)")):
             resume, used_llm = await self._resume(built)
+            resume = text_format.normalize(resume)
         versions = {"contract_resume": PROMPT_VERSION} if used_llm else {}
         if built.get("composite_risks"):
             from risk_monitoring import composite_risks as cr

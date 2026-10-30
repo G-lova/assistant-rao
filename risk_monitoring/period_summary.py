@@ -17,11 +17,12 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from configs import settings
 from configs.logger import get_logger
+from risk_monitoring import text_format
 
 logger = get_logger(__name__)
 
 SCHEMA_VERSION = "rm-period-1"
-PROMPT_VERSION = "period-resume-1"
+PROMPT_VERSION = "period-resume-2"
 KINDS = {"week": "weekly", "month": "monthly"}
 NAMES = {"week": "неделю", "month": "месяц"}
 MONTHS = ("январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь",
@@ -33,7 +34,7 @@ RESUME_SYSTEM = (
     "изменилось за период и по сравнению с прошлым периодом, какие закупки и заказчики требуют внимания в первую "
     "очередь, что проверить. Используй только эти факты: не добавляй цифр и выводов, которых в них нет. Если в "
     "периоде есть дни без сводки — скажи, что сводка неполная. Не используй коды рисков и правил (вида DOC-002, "
-    "CR-001, pz_p1) — называй риски словами. Ответ — обычный текст, без JSON и разметки.")
+    "CR-001, pz_p1) — называй риски словами. ")
 
 
 # ------------------------------------------------------------------ периоды
@@ -270,8 +271,9 @@ def period_facts(s: Dict[str, Any]) -> List[str]:
 
 
 def default_resume(s: Dict[str, Any]) -> str:
-    """Текст сводки периода шаблоном: факты подряд."""
-    return " ".join(period_facts(s))
+    """Текст сводки периода шаблоном: первый факт — вывод, остальные — списком."""
+    facts = period_facts(s)
+    return text_format.compose(facts[0], facts[1:]) if facts else ""
 
 
 # ------------------------------------------------------------------ прогон
@@ -318,12 +320,12 @@ async def run_period(repo: Any, environment: str, kind: str, period: str, use_ll
 
             client, model = reasoning_llm(*get_llm())
             text = await LLMJson(client, model, concurrency=1).ask_text(
-                RESUME_SYSTEM.format(period=s["period"]["title"]),
+                RESUME_SYSTEM.format(period=s["period"]["title"]) + text_format.instruction(),
                 json.dumps({"facts": period_facts(s)}, ensure_ascii=False), max_tokens=1800, temperature=0.2)
             resume, used = (text, True) if text else (resume, False)
         except Exception as e:  # noqa: BLE001 — текст не обязателен
             logger.warning(f"Сводка за {period} шаблоном: {type(e).__name__}: {e}")
-    s["resume"] = resume
+    s["resume"] = text_format.normalize(resume)
     s["facts"] = period_facts(s)
     incomplete = s["days"]["missing"] or s["days"]["partial"] or s["days"]["future"]
     s["pipeline"] = {"schema_version": SCHEMA_VERSION, "stage": "S5", "status": "partial" if incomplete else "completed",

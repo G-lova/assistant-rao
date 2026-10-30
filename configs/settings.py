@@ -397,3 +397,7 @@ CHECK_LOOKBACK_DAYS = 365           # проверки за этот перио�
 CHECK_RISK_LEVELS = {"customer": 0.7, "other": 0.3}
 CHECK_PRESCRIPTION_BONUS = 0.1      # выдано предписание
 CUSTOMER_CHECK_VIOLATIONS_MIN = 1   # проверок заказчика с нарушениями → BEH-001
+
+# ── Оформление заключений ИИ (risk_monitoring/text_format.py): "plain" — абзацы и списки «— » без символов разметки
+# (читается и как простой текст, и как markdown); "markdown" — для интерфейса, который рендерит markdown
+AI_TEXT_FORMAT = "plain"

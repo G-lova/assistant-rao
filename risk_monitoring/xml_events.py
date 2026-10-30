@@ -1174,7 +1174,7 @@ def build_xml_analysis(*, event: Dict[str, Any], facts: Dict[str, Any], changes:
         "documents": docs,
         "files": [{"file_id": f.get("file_id"), "file_name": f.get("file_name"), "detected_type": f.get("detected_type"),
                    "total_doc_risk": f.get("total_doc_risk")} for f in files],
-        "resume": llm.get("event_summary") or default_summary(event, facts, changes),
+        "resume": _fmt(llm.get("event_summary") or default_summary(event, facts, changes)),
         "confidence": llm.get("confidence") if llm.get("confidence") is not None else (1.0 if not llm else 0.0),
         "risks": risks,
         "total_event_risk": total_risk(risks),
@@ -1187,6 +1187,13 @@ def build_xml_analysis(*, event: Dict[str, Any], facts: Dict[str, Any], changes:
     if llm.get("error"):
         result["llm_error"] = llm["error"]
     return result
+
+
+def _fmt(text: str) -> str:
+    """Резюме события в формате заключений ИИ (``text_format``)."""
+    from risk_monitoring import text_format
+
+    return text_format.normalize(text)
 
 
 def default_summary(event: Dict[str, Any], facts: Dict[str, Any], changes: Sequence[Dict[str, Any]]) -> str:

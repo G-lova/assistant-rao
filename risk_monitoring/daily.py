@@ -30,7 +30,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 from configs.config import Config
 from configs.logger import get_logger
 from configs import settings
-from risk_monitoring import passport, progress, rm_sql
+from risk_monitoring import passport, progress, rm_sql, text_format
 from risk_monitoring.contract_analyzer import _none
 from risk_monitoring.contract_package import stored_registry
 
@@ -42,7 +42,7 @@ logger = get_logger(__name__)
 # rm-daily-3 (23.10.2026): события XML без привязки к закупкам системы не входят в сводку; красная зона — в фактах
 # rm-daily-4 (28.10.2026): события риска, приоритет проверки, индекс доверия
 SCHEMA_VERSION = "rm-daily-4"
-PROMPT_VERSION = "daily-resume-5"
+PROMPT_VERSION = "daily-resume-6"
 KIND = "daily"
 STAGES = ("files", "xml", "contracts", "customers", "suppliers", "summary")
 RED = "red"
@@ -57,10 +57,10 @@ DAILY_LOW_CONFIDENCE_TOP = 10      # среди скольких первых п
 RESUME_SYSTEM = (
     "Ты — аналитик риск-мониторинга госзакупок организаций, подведомственных Минобрнауки России. Тебе дан список "
     "фактов ежедневной сводки за дату выгрузки ЕИС. Заказчиков с текущими задачами мониторинга упоминай особо. "
-    "Напиши сводку для руководителя: 4–6 предложений, по-русски, без вступлений — что "
+    "Напиши сводку для руководителя: до 8 предложений, по-русски, без вступлений — что "
     "пришло за сутки, что требует внимания в первую очередь (назови закупки и заказчиков из фактов), что проверить. "
     "Используй только эти факты: не добавляй цифр и выводов, которых в них нет. Если внимания ничего не требует — "
-    "напиши «Ничего не требует внимания.» Пиши грамотно, без двойного отрицания. Не используй коды рисков и правил (вида DOC-002, FIN-004, BEH-005, pz_p1) — называй риски словами, понятными заказчику. Ответ — обычный текст, без JSON и разметки.")
+    "напиши «Ничего не требует внимания.» Пиши грамотно, без двойного отрицания. Не используй коды рисков и правил (вида DOC-002, FIN-004, BEH-005, pz_p1) — называй риски словами, понятными заказчику. " + text_format.instruction())
 
 
 def key_date(key: int) -> str:
@@ -542,8 +542,9 @@ def make_own_filter(orgs: set) -> Any:
 
 
 def default_resume(s: Dict[str, Any]) -> str:
-    """Текст сводки шаблоном (без модели)."""
-    return " ".join(summary_facts(s))
+    """Текст сводки шаблоном (без модели): первый факт — вывод, остальные — списком."""
+    facts = summary_facts(s)
+    return text_format.compose(facts[0], facts[1:]) if facts else ""
 
 
 class DailyRun:
@@ -1062,7 +1063,7 @@ class DailyRun:
             async with progress.step("S4: текст сводки (модель)"):
                 resume, used_llm = await self._resume(summary)
         self.stages["summary"] = {"status": "completed", "llm": used_llm}
-        summary["resume"] = resume
+        summary["resume"] = text_format.normalize(resume)
         summary["facts"] = summary_facts(summary)
         partial = any((v or {}).get("status") == "partial" for v in self.stages.values())
         summary["pipeline"] = {"schema_version": SCHEMA_VERSION, "stage": "S0-S4",
