@@ -171,10 +171,10 @@ celery_app.conf.update(
             'schedule': crontab(hour=5, minute=40),
             'options': {'queue': 'risk_monitoring'},
         },
-        # Публикации экспертов: снимок источников из внешней БД → новые / изменённые / удалённые, затем разбор очереди
+        # Публикации экспертов раз в сутки: снимок источников из внешней БД → новые / изменённые / удалённые, затем разбор очереди
         'expert-publications-sync': {
             'task': 'expert_publications_task',
-            'schedule': settings.EXPERT_PUB_SYNC_EVERY_MIN * 60.0,
+            'schedule': crontab(hour=settings.EXPERT_PUB_SYNC_HOUR, minute=settings.EXPERT_PUB_SYNC_MINUTE),
             'options': {'queue': 'evaluation'},
         },
     },

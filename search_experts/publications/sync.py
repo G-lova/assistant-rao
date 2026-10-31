@@ -15,7 +15,7 @@
 5. **Удалённый эксперт** (``deleted_at``, сменилась роль, нет в выборке при полной синхронизации) — все его
    источники ``removed``.
 
-Синхронизация запускается Celery beat раз в ``settings.EXPERT_PUB_SYNC_EVERY_MIN`` минут и по запросу
+Синхронизация запускается Celery beat раз в сутки (``settings.EXPERT_PUB_SYNC_HOUR``:``EXPERT_PUB_SYNC_MINUTE``) и по запросу
 ``POST /expert-publications/sync`` (например, портал вызывает его после сохранения анкеты — с ``expert_ids``,
 тогда обрабатываются только эти эксперты).
 """

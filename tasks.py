@@ -187,7 +187,7 @@ def expert_publications_task(self, environment: str = None, expert_ids: list = N
                              process: bool = True):
     """Публикации и монографии экспертов: синхронизация с внешней БД и разбор очереди.
 
-    Запускается Celery beat раз в ``settings.EXPERT_PUB_SYNC_EVERY_MIN`` минут (полная синхронизация окружения
+    Запускается Celery beat раз в сутки в ``settings.EXPERT_PUB_SYNC_HOUR``:``EXPERT_PUB_SYNC_MINUTE`` (полная синхронизация окружения
     установки) и ``POST /expert-publications/sync`` (после изменения анкеты — только указанные эксперты).
     Если в очереди остались источники, ставит продолжение (только обработка, без повторной синхронизации).
 
