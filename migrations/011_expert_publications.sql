@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS expert_publications (
     udk             TEXT,
     author_verified BOOLEAN,              -- фамилия эксперта среди авторов; NULL — авторов не определить
     embed_text_sha  CHAR(64),             -- хэш текста эмбеддинга (пересчёт только при изменении)
-    embedding       vector({{EMBEDDING_DIM}}),
+    embedding       vector(1024),         -- как ai_document_chunks (Qwen3-Embedding-0.6B)
     embedding_model TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (source_id, pub_no)
