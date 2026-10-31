@@ -688,3 +688,87 @@ class ContinuationTest(unittest.TestCase):
             self.assertEqual(t._outcome({"status": "done", "summary": {"pipeline": {"status": "partial"}}}), "partial")
             self.assertEqual(t._outcome({"status": "already_running"}), "skip")
         self.assertEqual(daily.key_date(20260702), "2026-07-02")
+
+
+class DailyLockTest(unittest.TestCase):
+    """Два запуска за одну дату одновременно (ручной + продолжение после перезапуска воркера, 31.10.2026):
+    прогон выполняет только один."""
+
+    def test_parallel_runs(self):
+        """Второй запуск при занятой блокировке — already_running, прогон выполняется один раз."""
+        import asyncio
+        from contextlib import asynccontextmanager
+        from unittest import mock
+
+        from tests.stubs import stubbed_import
+
+        held, runs = set(), []
+
+        class Repo:
+            """Внутренняя БД: устаревшая отметка «выполняется» и блокировка по имени."""
+
+            async def __aenter__(self):
+                """Открытие."""
+                return self
+
+            async def __aexit__(self, *a):
+                """Закрытие."""
+
+            async def get_rm_results(self, env, kind, ids):
+                """Отметка с пульсом двухчасовой давности: running_fresh её не защищает."""
+                return {i: {"ai_analysis": {"pipeline": {"status": "running",
+                                                         "heartbeat_at": "2026-10-31T19:01:00+03:00"}}} for i in ids}
+
+            @asynccontextmanager
+            async def advisory_lock(self, name):
+                """Блокировка в памяти — как pg_try_advisory_lock."""
+                got = name not in held
+                held.add(name)
+                try:
+                    yield got
+                finally:
+                    if got:
+                        held.discard(name)
+
+        class Mgr:
+            """HTTP-клиент."""
+
+            def __init__(self, **kw):
+                """Параметры."""
+
+            async def __aenter__(self):
+                """Открытие."""
+                return self
+
+            async def __aexit__(self, *a):
+                """Закрытие."""
+
+        class Run:
+            """Прогон, который идёт заметное время."""
+
+            def __init__(self, *a, **kw):
+                """Параметры."""
+
+            async def run(self, d):
+                """Прогон."""
+                runs.append(d)
+                await asyncio.sleep(0.05)
+                return {"pipeline": {"status": "completed"}}
+
+        import types
+
+        fakes = {"configs.ai_repo": types.SimpleNamespace(AIRepo=Repo),
+                 "configs.http_client_manager": types.SimpleNamespace(HTTPClientManager=Mgr)}
+        with stubbed_import("risk_monitoring.tasks") as t:
+            from risk_monitoring import daily as dm
+
+            with mock.patch.dict("sys.modules", fakes), mock.patch.object(dm, "DailyRun", Run):
+                async def both():
+                    """Два запуска одновременно."""
+                    return await asyncio.gather(*(t._daily_run("stage", "2026-08-03", False, True, True)
+                                                  for _ in range(2)))
+
+                out = asyncio.run(both())
+        self.assertEqual(runs, ["2026-08-03"])
+        self.assertEqual(sorted(o["status"] for o in out), ["already_running", "done"])
+

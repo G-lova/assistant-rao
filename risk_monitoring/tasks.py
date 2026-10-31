@@ -471,9 +471,20 @@ async def _daily_run(environment: str, export_date: str, force: bool, push: bool
         if daily.running_fresh(stored):
             logger.info(f"Ежедневный прогон {d} ({env}) уже идёт — второй не запускается")
             return {"status": "already_running", "date": d}
-        run = daily.DailyRun(mgr, environment, repo, push_results=push, use_llm=use_llm, stages=stages)
-        summary = await run.run(d)
-        return {"status": "done", "date": d, "summary": summary}
+        # отметка «выполняется» с устаревшим пульсом не защищает от гонки: два запуска одновременно видят её
+        # устаревшей и оба стартуют (31.10.2026: ручной запуск и продолжение после перезапуска воркера —
+        # 21:20:21, оба за 2026-08-03). Блокировка в Postgres — атомарная и снимается при падении процесса.
+        async with repo.advisory_lock(f"rm_daily:{env}:{d}") as got:
+            if not got:
+                logger.info(f"Ежедневный прогон {d} ({env}) уже идёт в другом процессе — второй не запускается")
+                return {"status": "already_running", "date": d}
+            stored = (await repo.get_rm_results(env, daily.KIND, [daily.run_key(d)])).get(daily.run_key(d))
+            if not force and daily.completed(stored):
+                # первый запуск закончил прогон, пока второй ждал в очереди
+                return {"status": "already_done", "date": d, "summary": stored["ai_analysis"]}
+            run = daily.DailyRun(mgr, environment, repo, push_results=push, use_llm=use_llm, stages=stages)
+            summary = await run.run(d)
+            return {"status": "done", "date": d, "summary": summary}
 
 
 def continuation_delay(status: str, chain: int, cfg: Any = None) -> Any:
