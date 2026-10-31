@@ -89,6 +89,17 @@ class EvaluateRequest(BaseModel):
 class ExpertsScoringRequest(BaseModel):
     expertise_id: int
     details: bool = False
+
+
+class ExpertPublicationsSyncRequest(BaseModel):
+    """Запрос ``POST /expert-publications/sync``.
+
+    Attributes:
+        expert_ids: Эксперты, анкета которых изменилась (``None`` или пусто — полная синхронизация окружения).
+        process: Сразу разобрать очередь (иначе — только сравнить источники).
+    """
+    expert_ids: Optional[List[int]] = None
+    process: bool = True
     
 
 class RAOConclusionRequest(BaseModel):

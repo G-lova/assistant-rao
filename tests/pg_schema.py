@@ -19,7 +19,7 @@ MIGRATIONS = Path(__file__).resolve().parent.parent / "migrations"
 TEST_ENV = "dev"
 
 DROP = """
-DROP TABLE IF EXISTS raw_document_data, procurement_identity, pe_summary_opinions, pe_facts, pe_chunks, pe_documents, pe_form_fields,
+DROP TABLE IF EXISTS expert_publications, expert_pub_sources, expert_pub_experts, raw_document_data, procurement_identity, pe_summary_opinions, pe_facts, pe_chunks, pe_documents, pe_form_fields,
     pe_procurements, ai_file_links, ai_document_analysis, ai_document_chunks, ai_documents, schema_migrations CASCADE;
 """
 

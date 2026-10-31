@@ -180,3 +180,33 @@ def generate_summary_opinion_task(self, expertise_id: int, environment: str, sen
             return result
 
     return run_async(run())
+
+
+@celery_app.task(bind=True, name="expert_publications_task")
+def expert_publications_task(self, environment: str = None, expert_ids: list = None, sync: bool = True,
+                             process: bool = True):
+    """Публикации и монографии экспертов: синхронизация с внешней БД и разбор очереди.
+
+    Запускается Celery beat раз в ``settings.EXPERT_PUB_SYNC_EVERY_MIN`` минут (полная синхронизация окружения
+    установки) и ``POST /expert-publications/sync`` (после изменения анкеты — только указанные эксперты).
+    Если в очереди остались источники, ставит продолжение (только обработка, без повторной синхронизации).
+
+    Args:
+        environment: Окружение (``X-API-Database``); по умолчанию — окружение установки (``APP_ENV``).
+        expert_ids: Только эти эксперты; ``None`` — все.
+        sync: Сравнить снимок внешней БД с внутренней.
+        process: Разобрать пачку очереди.
+
+    Returns:
+        dict: Счётчики синхронизации и обработки, сводка по окружению (``search_experts.publications.runner.run``).
+    """
+    from configs import settings
+    from search_experts.publications.runner import run
+
+    if not settings.EXPERT_PUB_SYNC_ENABLED:
+        return {"skipped": True}
+    env = environment or settings.ENVIRONMENT
+    result = run_async(run(env, expert_ids=expert_ids, sync=sync, process=process))
+    if process and result.get("more"):
+        expert_publications_task.apply_async(kwargs={"environment": env, "sync": False}, countdown=30)
+    return result

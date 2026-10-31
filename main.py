@@ -21,7 +21,7 @@ from configs.eis_parsing import EISParser
 from configs.http_client_manager import HTTPClientManager
 from configs.llm_client import get_llm
 from configs.logger import setup_logging, get_logger
-from configs.schemas import EISParseRequest, EvaluateRequest, SummaryOpinionRequest, ExpertsScoringRequest, FileEntity, RAOConclusionRequest, ViolationsReportRequest
+from configs.schemas import EISParseRequest, EvaluateRequest, SummaryOpinionRequest, ExpertsScoringRequest, ExpertPublicationsSyncRequest, FileEntity, RAOConclusionRequest, ViolationsReportRequest
 from configs.utils import APIKeyMiddleware, split_large_text
 from configs.working_with_db import get_async_summary_report_from_db, get_contract_info_from_db
 from evaluate_documents.send_subject_service import SendSubjectService
@@ -32,7 +32,7 @@ from src.rating import rating
 from src.scoring import scoring
 from src.subject_detector import SubjectDetector
 from src.violations_reporter import ViolationsReporter
-from tasks import evaluate_documents_task, generate_summary_opinion_task
+from tasks import evaluate_documents_task, expert_publications_task, generate_summary_opinion_task
 from risk_monitoring.router import router as risk_monitoring_router
 
 # Глобальный экземпляр (настраивается под вашу нагрузку)
@@ -294,6 +294,38 @@ async def get_experts_for_expertise(
     except Exception as e:
         logger.error(f"Ошибка при подборе экспертов: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Ошибка при подборе экспертов: {str(e)}")
+
+
+@app.post("/expert-publications/sync")
+async def expert_publications_sync(
+    request: ExpertPublicationsSyncRequest,
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
+):
+    """
+    Ставит в очередь синхронизацию публикаций и монографий экспертов с внешней БД.
+
+    Портал вызывает эндпоинт после сохранения анкеты эксперта (``expert_ids`` — чьи анкеты изменились): новые файлы
+    и ссылки разбираются, удалённые перестают учитываться в подборе, при смене ФИО заново проверяется авторство.
+    Без ``expert_ids`` — полная синхронизация окружения (то же делает расписание раз в
+    ``settings.EXPERT_PUB_SYNC_EVERY_MIN`` минут).
+
+    Args:
+        request: ``expert_ids`` (необязательно), ``process`` — сразу разобрать очередь.
+        x_api_database: Окружение внешней БД.
+
+    Returns:
+        dict: ``task_id`` (результат — ``GET /task/{task_id}``) и ``status``.
+
+    Raises:
+        HTTPException: 400 — недопустимое окружение; 500 — задачу не удалось поставить.
+    """
+    _check_env_header(x_api_database)
+    try:
+        task = expert_publications_task.delay(x_api_database, request.expert_ids or None, True, request.process)
+        return {"task_id": task.id, "status": "processing", "message": "Синхронизация публикаций запущена"}
+    except Exception as e:
+        logger.error(f"Ошибка запуска синхронизации публикаций: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка запуска синхронизации публикаций: {e}")
 
 
 @app.post("/get-experts-rating")

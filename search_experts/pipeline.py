@@ -56,7 +56,9 @@ class ScoringPipeline:
             http_manager=http_manager
         )
         self.conflict_detector = ConflictDetector()
-        
+        self.environment = environment
+        self.embedding_model = embedding_config.model
+
         self.sql_queries_path = paths_config.sql_queries
     
     
@@ -181,7 +183,41 @@ class ScoringPipeline:
         )
         
         df["similarity_embeddings"] = cosine_similarity(exp_emb, expert_embs).flatten()
+        df = await self.apply_publication_similarity(df, exp_emb[0])
         return df.sort_values(by="similarity_embeddings", ascending=False)
+
+    async def apply_publication_similarity(self, df, expertise_embedding):
+        """
+        Добавляет к сходству анкеты сходство публикаций и монографий эксперта (внутренняя БД, миграция 011).
+
+        Итог — ``(1 − w) × сходство анкеты + w × сходство публикаций`` (``settings.EXPERT_PUB_SIMILARITY_WEIGHT``);
+        эксперт без разобранных публикаций сохраняет сходство анкеты. Ошибка внутренней БД подбор не останавливает:
+        сходство остаётся прежним (предупреждение в журнале).
+
+        Args:
+            df (pandas.DataFrame): Кандидаты со столбцом 'similarity_embeddings'.
+            expertise_embedding: Эмбеддинг текста экспертизы.
+
+        Returns:
+            pandas.DataFrame: Датафрейм со столбцами 'similarity_profile', 'similarity_publications',
+            'publications_count', 'publication_top' и обновлённым 'similarity_embeddings'.
+        """
+        from configs import settings
+        from search_experts.publications import similarity
+
+        if not settings.EXPERT_PUB_SIMILARITY_ENABLED:
+            return df
+        try:
+            from knowledge_store.scope import normalize_env
+            env = normalize_env(self.environment or settings.ENVIRONMENT)
+            scores = await similarity.publication_scores(
+                env, df["expert_id"].dropna().astype(int).unique().tolist(), list(expertise_embedding), self.embedding_model)
+        except Exception as e:  # noqa: BLE001 — подбор работает и без публикаций
+            logger.warning(f"Сходство публикаций не учтено: {type(e).__name__}: {e}")
+            return df
+        if scores:
+            logger.info(f"Публикации учтены у {len(scores)} из {df['expert_id'].nunique()} кандидатов")
+        return similarity.blend(df, scores, settings.EXPERT_PUB_SIMILARITY_WEIGHT)
     
 
     def detect_nepotism(self, df):
@@ -399,6 +435,10 @@ class ScoringPipeline:
                         "total_rate": f"{round(row.scoring * 100, 2)}",
                         "predict_rate": None, # добавить предсказание модели, когда будет реализовано
                         "semantic_rate": f"{round(row.similarity_embeddings * 100, 2)}",
+                        # сходство публикаций и самая близкая публикация (None — публикаций нет или учёт выключен)
+                        "publication_rate": None if pd.isna(getattr(row, "similarity_publications", float("nan")))
+                        else f"{round(row.similarity_publications * 100, 2)}",
+                        "publication_top": getattr(row, "publication_top", None),
                         "distance_rate": f"{round(row.distance_rate * 100, 2)}",
                         "criterion_rate": None if pd.isna(row.criterion_rating) else f"{round(row.criterion_rating * 100, 2)}",
                         "div_rate": f"{round(row.avg_rating * 100, 2)}",

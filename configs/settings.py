@@ -95,6 +95,45 @@ MODEL_MAX_TOKENS = 4096
 # Размер пакета запроса эмбеддингов
 EMBEDDING_BATCH_SIZE = 16
 
+# ---------------------------------------------------------------- публикации экспертов (подбор экспертов)
+# Файлы (media: documentPublication / documentMonographs) и ссылки анкеты (linkPublication / linkMonographs)
+# разбираются во внутреннюю БД (миграция 011) и учитываются в similarity при подборе экспертов
+EXPERT_PUB_SYNC_ENABLED = True
+# Синхронизация с внешней БД: снимок источников всех экспертов (≈ 1,5 тыс. файлов и 3 тыс. ссылок — два SQL-запроса)
+# сравнивается с внутренним; новые — в очередь, исчезнувшие — removed. Раз в столько минут (Celery beat)
+EXPERT_PUB_SYNC_EVERY_MIN = 60
+# Источников, обрабатываемых за один запуск задачи (скачивание, чтение/OCR, модель); остальные — в следующий
+EXPERT_PUB_BATCH = 40
+# Время на обработку за запуск, с (меньше task_soft_time_limit = 1500)
+EXPERT_PUB_BUDGET_SEC = 1200
+# Неудавшийся источник повторяется не чаще раза в столько часов и не больше EXPERT_PUB_MAX_ATTEMPTS раз
+EXPERT_PUB_RETRY_HOURS = 12
+EXPERT_PUB_MAX_ATTEMPTS = 3
+# Какие ссылки анкеты обрабатывать. eLibrary (63 % ссылок) не обрабатывается: правила сайта запрещают
+# автоматический сбор, при массовых запросах — капча и блокировка IP. Scopus — только с ключом Elsevier API;
+# ResearchGate / Google Scholar блокируют сбор. Такие ссылки хранятся со статусом unsupported
+EXPERT_PUB_LINK_TYPES = ("doi", "file", "cloud", "journal")
+# Метаданные по DOI (title, abstract, авторы, год, журнал): OpenAlex, при отказе — Crossref
+EXPERT_PUB_OPENALEX_URL = "https://api.openalex.org/works/doi:"
+EXPERT_PUB_CROSSREF_URL = "https://api.crossref.org/works/"
+EXPERT_PUB_HTTP_TIMEOUT = 30
+# Текст файла, передаваемый модели для разбора (символов на запрос) и максимум запросов на файл
+# (список трудов на 300 позиций режется на части)
+EXPERT_PUB_LLM_CHUNK_CHARS = 12000
+EXPERT_PUB_LLM_MAX_CHUNKS = 6
+EXPERT_PUB_MAX_PER_SOURCE = 300
+# Similarity по публикациям: среднее сходство K самых близких публикаций эксперта с текстом экспертизы, вклад
+# публикации убывает вдвое за HALF_LIFE лет, но не ниже FLOOR (старая монография по профилю всё же значима)
+EXPERT_PUB_SIMILARITY_ENABLED = True
+EXPERT_PUB_TOP_K = 3
+EXPERT_PUB_HALF_LIFE_YEARS = 7
+EXPERT_PUB_RECENCY_FLOOR = 0.5
+# Итоговая similarity эксперта с публикациями: (1 − w) × сходство анкеты + w × сходство публикаций. Эксперт без
+# разобранных публикаций сохраняет сходство анкеты (не штрафуется)
+EXPERT_PUB_SIMILARITY_WEIGHT = 0.4
+# Публикации, где фамилии эксперта нет среди авторов (author_verified = false), не учитываются
+EXPERT_PUB_REQUIRE_AUTHOR = True
+
 # Повторы HTTP-запросов (async_retry): попыток, первая задержка (с), множитель задержки
 RETRY_MAX_ATTEMPTS = 3
 RETRY_DELAY = 1.0

@@ -121,6 +121,8 @@ celery_app.conf.update(
         'rm_analyze_contracts_task': {'queue': 'risk_monitoring'},
         'rm_analyze_orgs_task': {'queue': 'risk_monitoring'},
         'rm_typal_clauses_task': {'queue': 'risk_monitoring'},
+        # публикации экспертов: скачивание, OCR и модель — та же очередь, что у документов экспертиз
+        'expert_publications_task': {'queue': 'evaluation'},
         'main.get_experts_task': {
             'queue': 'scoring',
             'retry_policy': {
@@ -168,6 +170,12 @@ celery_app.conf.update(
             'task': 'rm_typal_clauses_task',
             'schedule': crontab(hour=5, minute=40),
             'options': {'queue': 'risk_monitoring'},
+        },
+        # Публикации экспертов: снимок источников из внешней БД → новые / изменённые / удалённые, затем разбор очереди
+        'expert-publications-sync': {
+            'task': 'expert_publications_task',
+            'schedule': settings.EXPERT_PUB_SYNC_EVERY_MIN * 60.0,
+            'options': {'queue': 'evaluation'},
         },
     },
 )
