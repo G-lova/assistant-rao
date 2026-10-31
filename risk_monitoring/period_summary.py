@@ -9,6 +9,11 @@
 Сводка собирается кодом (:func:`build_period_summary`), текст — моделью по фактам (:func:`period_facts`) или
 шаблоном. Дни без готовой ежедневной сводки перечисляются (``days.missing``, ``days.partial``), сводка периода с
 такими днями — ``partial`` и пересобирается задачей ``rm_period_task``, когда дни догонятся.
+
+Внешняя БД (``PERIOD_SUMMARY_PUSH_ENABLED``): строка ``risk_monitoring_daily_runs`` с ``period_type = week / month``,
+``period_key`` и ``export_date`` = последний день периода (``POST /api/risk-monitoring/daily-runs``), затем
+``ai_analysis`` — ``PATCH /api/risk-monitoring/ai-analysis`` по ``id`` строки (:func:`push_period`). Собранная, но не
+записанная сводка дозаписывается при следующем запуске без пересборки.
 """
 import hashlib
 import json
@@ -21,7 +26,7 @@ from risk_monitoring import text_format
 
 logger = get_logger(__name__)
 
-SCHEMA_VERSION = "rm-period-1"
+SCHEMA_VERSION = "rm-period-2"  # 2 — period.type / key, status в корне (31.10.2026)
 PROMPT_VERSION = "period-resume-2"
 KINDS = {"week": "weekly", "month": "monthly"}
 NAMES = {"week": "неделю", "month": "месяц"}
@@ -188,7 +193,7 @@ def build_period_summary(kind: str, period: str, dailies: Dict[str, Dict[str, An
     new_list = [{**i, "date": d} for d, i in sorted(new_r, key=lambda x: x[0])]
     closed_list = [{**i, "date": d} for d, i in sorted(closed_r, key=lambda x: x[0])]
     out = {
-        "period": {"kind": kind, "period": period, "title": period_title(kind, period),
+        "period": {"type": kind, "key": period, "title": period_title(kind, period),
                    "from": all_days[0], "to": all_days[-1]},
         "days": {"total": len(all_days), "completed": done, "partial": partial, "missing": missing, "future": future},
         "events": {"total": ev_total, "by_type": dict(sorted(ev_types.items(), key=lambda kv: -kv[1])),
@@ -206,7 +211,7 @@ def build_period_summary(kind: str, period: str, dailies: Dict[str, Dict[str, An
     }
     if previous:
         pe, pc, pr = previous.get("events") or {}, previous.get("contracts") or {}, previous.get("risk_changes") or {}
-        out["comparison"] = {"period": (previous.get("period") or {}).get("period"),
+        out["comparison"] = {"period": summary_key(previous),
                              "events": ev_total - int(pe.get("total") or 0),
                              "became_red": len(red) - int(pc.get("became_red") or 0),
                              "new_risks": len(new_list) - int(pr.get("new_total") or 0),
@@ -215,6 +220,12 @@ def build_period_summary(kind: str, period: str, dailies: Dict[str, Dict[str, An
         [[d, ((s.get("pipeline") or {}).get("finished_at"))] for d, s in sorted(used.items())]
         + [(previous or {}).get("input_hash")], default=str).encode()).hexdigest()[:16]
     return out
+
+
+def summary_key(s: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Обозначение периода сводки: ``period.key`` (с ``rm-period-2``) или ``period.period`` (прежние сводки)."""
+    p = (s or {}).get("period") or {}
+    return p.get("key") or p.get("period")
 
 
 # ------------------------------------------------------------------ текст
@@ -278,7 +289,7 @@ def default_resume(s: Dict[str, Any]) -> str:
 
 # ------------------------------------------------------------------ прогон
 async def run_period(repo: Any, environment: str, kind: str, period: str, use_llm: bool = True,
-                     force: bool = False, today: Optional[date] = None) -> Dict[str, Any]:
+                     force: bool = False, today: Optional[date] = None, push: bool = True) -> Dict[str, Any]:
     """Собирает и сохраняет сводку периода (``ai_rm_results``, ``kind = weekly / monthly``).
 
     Готовая сводка с теми же входными данными (ежедневные сводки не изменились) не пересобирается — модель второй
@@ -292,6 +303,7 @@ async def run_period(repo: Any, environment: str, kind: str, period: str, use_ll
         use_llm: Текст моделью.
         force: Пересобрать в любом случае.
         today: Сегодня.
+        push: Записать во внешнюю БД (при ``PERIOD_SUMMARY_PUSH_ENABLED``).
 
     Returns:
         Dict[str, Any]: Сводка периода (``status`` в ``pipeline``: ``completed`` / ``partial``; ``unchanged`` —
@@ -311,6 +323,10 @@ async def run_period(repo: Any, environment: str, kind: str, period: str, use_ll
     old = (have.get(pkey) or {}).get("ai_analysis") or {}
     if not force and old.get("input_hash") == s["input_hash"] \
             and (old.get("pipeline") or {}).get("schema_version") == SCHEMA_VERSION:
+        if push and settings.PERIOD_SUMMARY_PUSH_ENABLED and not (have.get(pkey) or {}).get("pushed"):
+            # собрана раньше, во внешнюю БД не дошла (или отправка была выключена) — дозаписываем без пересборки
+            pushed, error = await push_period(env, kind, period, old)
+            await repo.save_rm_result(env, KINDS[kind], pkey, old, pushed, error)
         return {**old, "unchanged": True}
     resume, used = default_resume(s), False
     if use_llm and settings.PACKAGE_LLM_RESUME and dailies:
@@ -331,7 +347,62 @@ async def run_period(repo: Any, environment: str, kind: str, period: str, use_ll
     s["pipeline"] = {"schema_version": SCHEMA_VERSION, "stage": "S5", "status": "partial" if incomplete else "completed",
                      "finished_at": passport.now_iso(),
                      "prompt_versions": {"period_resume": PROMPT_VERSION} if used else {}}
-    await repo.save_rm_result(env, KINDS[kind], pkey, s, False, None)
+    s["status"] = s["pipeline"]["status"]
+    pushed, error = False, None
+    if push and settings.PERIOD_SUMMARY_PUSH_ENABLED:
+        pushed, error = await push_period(env, kind, period, s)
+    await repo.save_rm_result(env, KINDS[kind], pkey, s, pushed, error)
     logger.info(f"Сводка за {s['period']['title']} ({env}): дней {len(s['days']['completed'])}/{s['days']['total']}, "
                 f"статус {s['pipeline']['status']}")
     return s
+
+
+async def push_period(environment: str, kind: str, period: str, s: Dict[str, Any],
+                      api: Any = None) -> Tuple[bool, Optional[str]]:
+    """Записывает сводку периода в ``risk_monitoring_daily_runs`` внешней БД.
+
+    ``POST /api/risk-monitoring/daily-runs`` с ``period_type`` (``week`` / ``month``), ``period_key`` и
+    ``export_date`` = последний день периода (upsert по ``period_type + export_date``), затем
+    ``PATCH /api/risk-monitoring/ai-analysis`` по ``id`` строки. Сбой не поднимается: сводка остаётся у нас, при
+    следующем запуске дозаписывается.
+
+    Args:
+        environment: Окружение.
+        kind: ``week`` / ``month``.
+        period: Обозначение периода.
+        s: Сводка периода (``pipeline.status``, ``pipeline.finished_at``).
+        api: ``RiskMonitoringAPI`` (для тестов); по умолчанию создаётся со своим HTTP-клиентом.
+
+    Returns:
+        Tuple[bool, Optional[str]]: Записана ли сводка; текст ошибки.
+    """
+    from risk_monitoring import passport
+
+    pipe = s.get("pipeline") or {}
+    status = pipe.get("status") or "partial"
+    finished = passport.iso_tz(pipe["finished_at"]) if pipe.get("finished_at") else None
+
+    async def send(a: Any) -> None:
+        """Строка периода и её ``ai_analysis``."""
+        row = await a.upsert_daily_run(period_bounds(kind, period)[1].isoformat(), status,
+                                       started_at=finished, finished_at=finished,
+                                       period_type=kind, period_key=period)
+        if row.get("id") is None:
+            raise RuntimeError(f"API daily-runs не вернул id: {row}")
+        await a.patch_ai_analysis("risk_monitoring_daily_runs", int(row["id"]), s)
+
+    try:
+        if api is not None:
+            await send(api)
+        else:
+            from configs.http_client_manager import HTTPClientManager
+            from risk_monitoring.risk_monitoring_api import RiskMonitoringAPI
+
+            async with HTTPClientManager(timeout=180.0) as mgr:
+                await send(RiskMonitoringAPI(mgr, environment))
+        logger.info(f"Сводка за {period} записана в risk_monitoring_daily_runs ({kind})")
+        return True, None
+    except Exception as e:  # noqa: BLE001 — сводка остаётся у нас
+        error = f"{type(e).__name__}: {e}"[:500]
+        logger.warning(f"Сводка за {period} не записана в risk_monitoring_daily_runs: {error}")
+        return False, error
