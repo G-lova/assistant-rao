@@ -1,5 +1,3 @@
-/* Файлы анкеты эксперта: публикации и монографии (синхронизация публикаций экспертов, search_experts.publications).
-   Фильтр по экспертам подставляет код (search_experts.publications.sync). */
 SELECT
     m.id AS media_id,
     m.model_id AS expert_id,

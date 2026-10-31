@@ -120,11 +120,22 @@ class SnapshotTest(unittest.TestCase):
         snap.sources.append(sync.Source("link", "https://x.ru", "publication", "https://x.ru", None, "journal"))
         self.assertNotEqual(snap.sources_hash(), h)
 
+    def test_query_files_start_with_select(self):
+        """Файлы запросов к порталу начинаются с SELECT (портал отклоняет запросы с комментарием в начале)."""
+        root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "queries")
+        for name in ("expert_pub_users.sql", "expert_pub_media.sql"):
+            with open(os.path.join(root, name), encoding="utf-8") as f:
+                sql, _ = sync._filter_sql(f.read(), "u.id", [1])
+            self.assertTrue(sql.upper().startswith("SELECT"), name)
+
     def test_filter_sql(self):
         """Фильтр по экспертам подставляется плейсхолдерами портала."""
         sql, b = sync._filter_sql("SELECT 1 FROM users u WHERE 1 {{EXPERT_FILTER}}", "u.id", [1, 2])
         self.assertIn("AND u.id IN (?, ?)", sql)
         self.assertEqual(b, [1, 2])
+        sql, _ = sync._filter_sql("/* описание */\nSELECT 1 -- хвост\nFROM u WHERE 1 {{EXPERT_FILTER}}", "u.id", None)
+        self.assertTrue(sql.startswith("SELECT 1"))
+        self.assertNotIn("хвост", sql)
         sql, b = sync._filter_sql("WHERE 1 {{EXPERT_FILTER}}", "u.id", None)
         self.assertEqual((sql.strip(), b), ("WHERE 1", []))
 

@@ -20,6 +20,7 @@
 тогда обрабатываются только эти эксперты).
 """
 import hashlib
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
@@ -165,7 +166,13 @@ def initial_status(source: Source, link_types: Sequence[str]) -> str:
 
 
 def _filter_sql(sql: str, column: str, expert_ids: Optional[Sequence[int]]) -> (str, list):
-    """Подставляет в запрос фильтр по экспертам (``{{EXPERT_FILTER}}``) и возвращает привязки."""
+    """Подставляет в запрос фильтр по экспертам (``{{EXPERT_FILTER}}``) и возвращает привязки.
+
+    Комментарии ``/* … */`` и ``-- …`` убираются: портал (``/api/database/query``) принимает только запросы,
+    начинающиеся с SELECT / SHOW / DESCRIBE / EXPLAIN / WITH (403 на запрос с комментарием в начале, 31.10.2026).
+    """
+    sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.S)
+    sql = re.sub(r"(?m)--[^\n]*$", " ", sql).strip()
     if not expert_ids:
         return sql.replace("{{EXPERT_FILTER}}", ""), []
     ids = [int(i) for i in expert_ids]
