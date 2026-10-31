@@ -432,6 +432,13 @@ PERIOD_SUMMARY_MINUTE = 23
 # (period_type, period_key, UNIQUE (period_type, export_date)) и доработки POST /api/risk-monitoring/daily-runs
 PERIOD_SUMMARY_PUSH_ENABLED = False
 
+# ── Чтение Excel (configs/file_reader.py): потоково и с ограничениями — полная загрузка книги-сметы подвешивала
+# прогон (31.10.2026)
+EXCEL_MAX_ROWS = 500        # непустых строк на лист
+EXCEL_MAX_COLS = 60         # столбцов
+EXCEL_MAX_SHEETS = 20       # листов
+EXCEL_MAX_CHARS = 300_000   # символов всего
+
 # ── Жалобы в профилях организаций (заявитель раскрывается только в жалобе; участники процедур в ЕИС скрыты)
 CUSTOMER_COMPLAINTS_JUSTIFIED_MIN = 2   # обоснованных жалоб на закупки заказчика за период → BEH-001
 SUPPLIER_COMPLAINTS_MIN = 5             # жалоб поставщика за период, с которых оценивается их обоснованность
