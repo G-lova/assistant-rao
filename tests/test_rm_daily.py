@@ -696,6 +696,21 @@ class DailyLockTest(unittest.TestCase):
 
     def test_parallel_runs(self):
         """Второй запуск при занятой блокировке — already_running, прогон выполняется один раз."""
+        runs, out = self._run_twice("2026-10-31T19:01:00+03:00")
+        self.assertEqual(runs, ["2026-08-03"])
+        self.assertEqual(sorted(o["status"] for o in out), ["already_running", "done"])
+
+    def test_fresh_mark_after_restart(self):
+        """Отметка «выполняется» со свежим пульсом, но блокировка свободна (воркер перезапущен, 02.11.2026) —
+        прогон продолжается сразу, а не через 10 минут."""
+        from datetime import datetime, timezone
+
+        runs, out = self._run_twice(datetime.now(timezone.utc).isoformat(), parallel=1)
+        self.assertEqual(runs, ["2026-08-03"])
+        self.assertEqual([o["status"] for o in out], ["done"])
+
+    def _run_twice(self, heartbeat, parallel=2):
+        """Запуски ``_daily_run`` за 2026-08-03 одновременно; возвращает выполненные прогоны и итоги."""
         import asyncio
         from contextlib import asynccontextmanager
         from unittest import mock
@@ -716,8 +731,8 @@ class DailyLockTest(unittest.TestCase):
 
             async def get_rm_results(self, env, kind, ids):
                 """Отметка с пульсом двухчасовой давности: running_fresh её не защищает."""
-                return {i: {"ai_analysis": {"pipeline": {"status": "running",
-                                                         "heartbeat_at": "2026-10-31T19:01:00+03:00"}}} for i in ids}
+                return {i: {"ai_analysis": {"pipeline": {"status": "running", "heartbeat_at": heartbeat}}}
+                        for i in ids}
 
             @asynccontextmanager
             async def advisory_lock(self, name):
@@ -766,9 +781,8 @@ class DailyLockTest(unittest.TestCase):
                 async def both():
                     """Два запуска одновременно."""
                     return await asyncio.gather(*(t._daily_run("stage", "2026-08-03", False, True, True)
-                                                  for _ in range(2)))
+                                                  for _ in range(parallel)))
 
                 out = asyncio.run(both())
-        self.assertEqual(runs, ["2026-08-03"])
-        self.assertEqual(sorted(o["status"] for o in out), ["already_running", "done"])
+        return runs, out
 
