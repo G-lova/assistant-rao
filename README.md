@@ -258,8 +258,10 @@ assistant-rao/
 (`CONFLICT_INN_SAME_KPP_ONLY`). У эксперта без ИНН ИНН восстанавливается по названию из справочника организаций
 (`search_experts/org_directory.py`: официальные названия портала + псевдонимы `org_name_aliases`, миграция 012;
 TF-IDF символьных n-грамм и сравнение по словам в обе стороны). Не нашёлся — сравнение названий без учёта ОПФ.
-Псевдонимы пополняет ежедневная задача `org_aliases_task`. Причины исключения — в журнале
-(`inn_work`, `guess_inn_work`, `name_work`, …).
+Псевдонимы пополняет ежедневная задача `org_aliases_task`. Соавторство по разобранным публикациям за
+`CONFLICT_COAUTHOR_YEARS` лет (`search_experts/coauthors.py`): соавтор — контактное лицо или руководитель заказчика —
+эксперт исключается; кандидаты-соавторы — остаётся более подходящий. Причины исключения — в журнале
+(`inn_work`, `guess_inn_work`, `name_work`, `coauthor_customer`, `coauthor_expert`, …).
 
 #### `POST /expert-publications/sync`
 Синхронизация публикаций и монографий экспертов с внешней БД (Celery, очередь `evaluation`; результат — `GET /task/{task_id}`)

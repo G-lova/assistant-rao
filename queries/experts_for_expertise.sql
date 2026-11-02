@@ -15,6 +15,7 @@ WITH expertise_info AS (
 		    ELSE ''
 		END AS expertise_director,
 		u.organization AS expertise_organization,
+		u.director AS expertise_director_name,
 		u.inn AS expertise_inn,
 		u.kpp AS expertise_kpp,
 		e.priceContract, 

@@ -142,10 +142,35 @@ class ScoringPipeline:
             logger.warning(f"Справочник организаций не применён: {type(e).__name__}: {e}")
             return df
 
+    async def load_coauthors(self, df):
+        """
+        Загружает авторов публикаций кандидатов для проверки соавторства (``search_experts.coauthors``).
+
+        Результат — ``self.coauthor_publications`` (``expert_id`` → публикации с авторами); при выключенной проверке
+        или ошибке внутренней БД — пустой словарь (соавторство не проверяется, подбор продолжается).
+
+        Args:
+            df (pandas.DataFrame): Кандидаты.
+        """
+        from configs import settings
+        from search_experts import coauthors
+
+        self.coauthor_publications = {}
+        if not settings.CONFLICT_COAUTHORS_ENABLED or not self._has_valid_experts(df):
+            return
+        try:
+            from knowledge_store.scope import normalize_env
+            env = normalize_env(self.environment or settings.ENVIRONMENT)
+            self.coauthor_publications = await coauthors.load_coauthors(
+                env, df["expert_id"].dropna().astype(int).unique().tolist(), coauthors.min_year(settings.CONFLICT_COAUTHOR_YEARS))
+        except Exception as e:  # noqa: BLE001 — без публикаций соавторство не проверяется
+            logger.warning(f"Соавторы не загружены: {type(e).__name__}: {e}")
+
     def detect_conflicts(self, df):
         """
         Фильтрует экспертов, имеющих конфликт интересов с текущей экспертизой.
 
+        Соавторство с контактным лицом или руководителем заказчика (``search_experts.coauthors``) — тоже конфликт.
         Организации эксперта (место работы и организация, выдавшая диплом) сравниваются с заказчиком по ИНН/КПП,
         если реквизиты есть у эксперта и заказчика, а без реквизитов — прежним методом по названиям (fuzzy matching
         ≥ 85 % и сравнение без учёта ОПФ). Исполнитель контракта и ФИО сравниваются по названиям
@@ -173,6 +198,13 @@ class ScoringPipeline:
         exclude_ids = self.conflict_detector.find_family_conflicts(df)
         if exclude_ids:
             conflict_ids |= exclude_ids
+
+        # соавтор — контактное лицо или руководитель заказчика
+        from search_experts import coauthors
+        co = coauthors.customer_coauthor_conflicts(df, getattr(self, "coauthor_publications", {}) or {})
+        if co:
+            logger.info(f"Соавторство с заказчиком (coauthor_customer): {co}")
+            conflict_ids |= set(co)
 
         if conflict_ids:
             logger.info(f"Обнаружен конфликт интересов у экспертов: {conflict_ids}")
@@ -261,6 +293,9 @@ class ScoringPipeline:
         с более низким значением метрики `similarity_embeddings`, что предполагает
         его меньшую релевантность или соответствие требованиям экспертизы.
 
+        Так же разрешаются пары кандидатов-соавторов (``search_experts.coauthors.expert_coauthor_pairs``):
+        остаётся эксперт с большим сходством.
+
         После определения идентификаторов экспертов для исключения, соответствующие строки
         удаляются из переданного датафрейма.
 
@@ -284,6 +319,14 @@ class ScoringPipeline:
         if exclude_ids:
             logger.info(f"Обнаружена семейственность у экспертов: {exclude_ids}")
             experts_to_exclude |= exclude_ids
+
+        # кандидаты-соавторы: остаётся более подходящий (coauthor_expert)
+        from search_experts import coauthors
+        pairs = coauthors.expert_coauthor_pairs(df, getattr(self, "coauthor_publications", {}) or {})
+        if pairs:
+            excluded = coauthors.exclude_coauthor_pairs(df, pairs)
+            logger.info(f"Соавторство кандидатов (coauthor_expert): пары {pairs}, исключены {excluded}")
+            experts_to_exclude |= excluded
 
         df = df[~df["expert_id"].isin(experts_to_exclude)]
         return df
@@ -344,6 +387,9 @@ class ScoringPipeline:
             
             # ИНН организаций экспертов без реквизитов — из справочника организаций
             df = await self.attach_org_guesses(df)
+
+            # Соавторы кандидатов (публикации во внутренней БД)
+            await self.load_coauthors(df)
 
             # Обнаружение конфликтов
             df = await asyncio.to_thread(self.detect_conflicts, df)

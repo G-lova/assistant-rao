@@ -117,6 +117,11 @@ CONFLICT_ORG_DIRECTORY_THRESHOLD = 0.8
 CONFLICT_ORG_DIRECTORY_BRANCH_THRESHOLD = 0.7
 CONFLICT_ORG_DIRECTORY_MARGIN = 0.03
 CONFLICT_ORG_DIRECTORY_TTL_SEC = 3600
+# Соавторство (search_experts.coauthors, публикации — миграция 011): соавтор — контактное лицо или руководитель
+# заказчика → эксперт исключается; кандидаты-соавторы → остаётся более подходящий. Учитываются публикации последних
+# CONFLICT_COAUTHOR_YEARS лет (год неизвестен — учитывается; None — все)
+CONFLICT_COAUTHORS_ENABLED = True
+CONFLICT_COAUTHOR_YEARS = 5
 # Пополнение псевдонимов (org_aliases_task), время московское — до синхронизации публикаций (01:20)
 ORG_ALIASES_HOUR = 1
 ORG_ALIASES_MINUTE = 5
