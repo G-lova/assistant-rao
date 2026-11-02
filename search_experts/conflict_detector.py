@@ -37,7 +37,7 @@ _NOISE_TOKENS = {"и", "г", "город"}
 _BRANCH_MARKERS = {"филиал", "при", "подразделение"}
 
 
-def _org_tokens(text):
+def _org_tokens(text, abbr_prefix_only=False):
     """
     Приводит название организации к списку значимых слов («ядру») для сравнения.
 
@@ -46,6 +46,9 @@ def _org_tokens(text):
 
     Args:
         text (str | Any): Название организации в произвольной записи; None/NaN — пустой список.
+        abbr_prefix_only (bool): Снимать сокращённую ОПФ только до первого слова собственного имени:
+            в «ФГБОУ ВО Санкт-Петербургский ГАУ» «ГАУ» — аграрный университет, а не «государственное
+            автономное учреждение» (справочник организаций).
 
     Returns:
         list[str]: Слова ядра названия в исходном порядке.
@@ -55,9 +58,14 @@ def _org_tokens(text):
     t = text.lower().replace("ё", "е")
     t = _OPF_PHRASES_RE.sub(" ", t)
     tokens = []
+    prefix = True   # начало названия или сразу после «филиал» / «при»: здесь сокращения — ОПФ
     for tok in re.split(r"[^\w]+", t):
+        if tok in _OPF_ABBR and abbr_prefix_only and not prefix:
+            tokens.append(tok)
+            continue
         if not tok or tok in _OPF_WORDS or tok in _OPF_ABBR or tok in _NOISE_TOKENS or len(tok) == 1:
             continue
+        prefix = tok in _BRANCH_MARKERS
         tokens.append("им" if tok == "имени" else tok)
     return tokens
 
@@ -277,9 +285,14 @@ class ConflictDetector:
                 ``TextProcessor.normalize_text``) и реквизиты expertise_inn, expertise_kpp, expert_organization_inn,
                 expert_organization_kpp, expert_diplom_inn, expert_diplom_kpp (могут отсутствовать).
 
+        ИНН места работы или диплома, которого нет в анкете, берётся из справочника организаций
+        (``expert_*_inn_guess``, :func:`search_experts.org_directory.resolve_frame`) — причина ``guess_inn_*``;
+        если восстановленный ИНН не совпал с заказчиком, место работы дополнительно сравнивается по названиям.
+
         Returns:
             list[str]: Причины: ``inn_work``, ``inn_work_branch``, ``inn_diplom``, ``inn_diplom_branch``,
-            ``name_work``, ``name_diplom``, ``name_executor``, ``name_person``; пустой список — конфликта нет.
+            ``guess_inn_work``, ``guess_inn_diplom``, ``name_work``, ``name_diplom``, ``name_executor``,
+            ``name_person``; пустой список — конфликта нет.
         """
         get = row.get if hasattr(row, "get") else (lambda k, d=None: getattr(row, k, d))
 
@@ -292,26 +305,35 @@ class ConflictDetector:
 
         reasons = []
         cust_inn, cust_kpp = get("expertise_inn"), get("expertise_kpp")
-
-        # место работы ↔ заказчик
-        work = ConflictDetector.requisites_match(get("expert_organization_inn"), get("expert_organization_kpp"), cust_inn, cust_kpp)
         from configs import settings
         org_fuzzy = getattr(settings, "CONFLICT_ORG_NAME_FUZZY", True)
-        if work is None:
+
+        def requisites(field):
+            """ИНН/КПП поля анкеты или ИНН из справочника (КПП тогда неизвестен) и признак восстановления."""
+            inn, kpp = get(f"expert_{field}_inn"), get(f"expert_{field}_kpp")
+            if not normalize_inn(inn) and normalize_inn(get(f"expert_{field}_inn_guess")):
+                return get(f"expert_{field}_inn_guess"), None, True
+            return inn, kpp, False
+
+        # место работы ↔ заказчик
+        inn, kpp, guessed = requisites("organization")
+        work = ConflictDetector.requisites_match(inn, kpp, cust_inn, cust_kpp)
+        if work is not None and ConflictDetector._requisites_conflict(work):
+            reasons.append(("guess_inn_work" if guessed else "inn_work") + ("" if work == "same" else "_branch"))
+        elif work is None or guessed:
+            # без реквизитов (или ИНН из справочника не совпал) — по названиям
             fuzzy_hit = org_fuzzy and max(ratio("expertise_name", "expert_organization"),
                                           ratio("expert_organization", "expertise_organization")) >= 85
             if fuzzy_hit or ConflictDetector.same_organization(get("expert_organization"), get("expertise_organization")):
                 reasons.append("name_work")
-        elif ConflictDetector._requisites_conflict(work):
-            reasons.append("inn_work" if work == "same" else "inn_work_branch")
 
         # диплом ↔ заказчик
-        diplom = ConflictDetector.requisites_match(get("expert_diplom_inn"), get("expert_diplom_kpp"), cust_inn, cust_kpp)
-        if diplom is None:
-            if ratio("expertise_name", "expert_diplom") >= 85:
-                reasons.append("name_diplom")
-        elif ConflictDetector._requisites_conflict(diplom):
-            reasons.append("inn_diplom" if diplom == "same" else "inn_diplom_branch")
+        inn, kpp, guessed = requisites("diplom")
+        diplom = ConflictDetector.requisites_match(inn, kpp, cust_inn, cust_kpp)
+        if diplom is not None and ConflictDetector._requisites_conflict(diplom):
+            reasons.append(("guess_inn_diplom" if guessed else "inn_diplom") + ("" if diplom == "same" else "_branch"))
+        elif diplom is None and ratio("expertise_name", "expert_diplom") >= 85:
+            reasons.append("name_diplom")
 
         # место работы ↔ исполнитель контракта (реквизитов исполнителя нет)
         if (org_fuzzy and ratio("expert_organization", "exucutorContract") >= 85) \

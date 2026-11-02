@@ -144,12 +144,14 @@ class RequisitesTest(unittest.TestCase):
             self.assertEqual(ConflictDetector.organization_conflict_reasons(r), [])
 
     def test_org_name_fuzzy_setting(self):
-        """Полные названия с общей ОПФ: fuzz.ratio ≥ 85 даёт ложный конфликт; при CONFLICT_ORG_NAME_FUZZY = False — нет."""
+        """Полные названия с общей ОПФ: fuzz.ratio ≥ 85 даёт ложный конфликт (CONFLICT_ORG_NAME_FUZZY = True);
+        по умолчанию (False) — нет, а same_organization продолжает работать."""
         from unittest import mock
         from configs import settings
         r = self.row(expert_organization="федеральное государственное бюджетное образовательное учреждение высшего "
                                          "образования тюменский государственный университет")
-        self.assertEqual(ConflictDetector.organization_conflict_reasons(r), ["name_work"])
+        with mock.patch.object(settings, "CONFLICT_ORG_NAME_FUZZY", True):
+            self.assertEqual(ConflictDetector.organization_conflict_reasons(r), ["name_work"])
         with mock.patch.object(settings, "CONFLICT_ORG_NAME_FUZZY", False):
             self.assertEqual(ConflictDetector.organization_conflict_reasons(r), [])
             r = self.row(expert_organization="фгбоу во тульский государственный университет")

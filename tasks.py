@@ -210,3 +210,24 @@ def expert_publications_task(self, environment: str = None, expert_ids: list = N
     if process and result.get("more"):
         expert_publications_task.apply_async(kwargs={"environment": env, "sync": False}, countdown=30)
     return result
+
+
+@celery_app.task(name="org_aliases_task")
+def org_aliases_task(environment: str = None):
+    """Пополняет псевдонимы организаций для конфликта интересов (``search_experts.org_aliases``).
+
+    Раз в сутки (Celery beat, ``settings.ORG_ALIASES_HOUR``:``ORG_ALIASES_MINUTE``): написание места работы или
+    диплома эксперта, у которого появился ИНН, становится псевдонимом этого ИНН в ``org_name_aliases``.
+
+    Args:
+        environment: Окружение; по умолчанию — окружение установки (``APP_ENV``).
+
+    Returns:
+        dict: ``env``, ``experts``, ``aliases_added``.
+    """
+    from configs import settings
+    from search_experts.org_aliases import run
+
+    if not settings.CONFLICT_ORG_DIRECTORY_ENABLED:
+        return {"skipped": True}
+    return run_async(run(environment or settings.ENVIRONMENT))

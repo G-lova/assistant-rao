@@ -112,6 +112,36 @@ class ScoringPipeline:
         return df
     
 
+    async def attach_org_guesses(self, df):
+        """
+        Восстанавливает ИНН места работы и диплома у кандидатов без реквизитов по справочнику организаций.
+
+        Добавляет столбцы ``expert_organization_inn_guess`` / ``expert_diplom_inn_guess`` и пояснения
+        ``expert_*_guess`` (``search_experts.org_directory``). Ошибка справочника подбор не останавливает:
+        такие эксперты проверяются по названиям.
+
+        Args:
+            df (pandas.DataFrame): Кандидаты.
+
+        Returns:
+            pandas.DataFrame: Датафрейм с восстановленными ИНН (или исходный).
+        """
+        from configs import settings
+        from search_experts import org_directory
+
+        if not settings.CONFLICT_ORG_DIRECTORY_ENABLED or not self._has_valid_experts(df):
+            return df
+        try:
+            from knowledge_store.scope import normalize_env
+            env = normalize_env(self.environment or settings.ENVIRONMENT)
+            directory = await org_directory.get_directory(env, self.data_fetcher)
+            return await asyncio.to_thread(org_directory.resolve_frame, df, directory,
+                                           settings.CONFLICT_ORG_DIRECTORY_THRESHOLD, settings.CONFLICT_ORG_DIRECTORY_MARGIN,
+                                           settings.CONFLICT_ORG_DIRECTORY_BRANCH_THRESHOLD)
+        except Exception as e:  # noqa: BLE001 — без справочника работает сравнение названий
+            logger.warning(f"Справочник организаций не применён: {type(e).__name__}: {e}")
+            return df
+
     def detect_conflicts(self, df):
         """
         Фильтрует экспертов, имеющих конфликт интересов с текущей экспертизой.
@@ -134,6 +164,11 @@ class ScoringPipeline:
         conflict_ids = set(reasons)
         if reasons:
             logger.info(f"Конфликт интересов с организациями экспертизы: {reasons}")
+            for col in ("expert_organization_guess", "expert_diplom_guess"):
+                if col in df.columns:
+                    notes = df.loc[df["expert_id"].isin(reasons) & df[col].notna(), ["expert_id", col]]
+                    for eid, note in notes.drop_duplicates().itertuples(index=False):
+                        logger.info(f"Эксперт {eid}: ИНН по справочнику ({col}): {note}")
 
         exclude_ids = self.conflict_detector.find_family_conflicts(df)
         if exclude_ids:
@@ -307,6 +342,9 @@ class ScoringPipeline:
             # Предобработка
             df = await asyncio.to_thread(self.preprocess_data, df)
             
+            # ИНН организаций экспертов без реквизитов — из справочника организаций
+            df = await self.attach_org_guesses(df)
+
             # Обнаружение конфликтов
             df = await asyncio.to_thread(self.detect_conflicts, df)
             
