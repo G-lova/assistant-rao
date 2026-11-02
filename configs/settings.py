@@ -435,6 +435,12 @@ PERIOD_SUMMARY_MINUTE = 23
 # (period_type, period_key, UNIQUE (period_type, export_date)) и доработки POST /api/risk-monitoring/daily-runs
 PERIOD_SUMMARY_PUSH_ENABLED = False
 
+# ── Рассуждение модели (configs/llm_resilience.py): prod_multimodal_llm тратила весь лимит ответа на рассуждение и
+# возвращала пустой ответ (02.11.2026). Выключаем рассуждение (chat_template_kwargs.enable_thinking = false); если
+# сервер его не выключает — один повтор с бо́льшим лимитом ответа
+LLM_DISABLE_THINKING = True
+LLM_THINKING_RETRY_MAX_TOKENS = 12000
+
 # ── Чтение Excel (configs/file_reader.py): потоково и с ограничениями — полная загрузка книги-сметы подвешивала
 # прогон (31.10.2026)
 EXCEL_MAX_ROWS = 300        # непустых строк на лист

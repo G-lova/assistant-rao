@@ -112,9 +112,64 @@ def fit_output(error: BaseException, kwargs: Dict[str, Any]) -> bool:
     raise ContextOverflow(limit, used, f"запрос {used} токенов не помещается в контекст {limit}: разделите текст") from error
 
 
-def _sdk(kwargs: Dict[str, Any]) -> Dict[str, Any]:
-    """Параметры запроса без служебных ключей (``_fits`` — счётчик уменьшений ответа)."""
-    return {k: v for k, v in kwargs.items() if not k.startswith("_")}
+_THINKING_REJECTED: set = set()   # серверы, отклонившие chat_template_kwargs (400) — больше не отправляем
+
+
+def _setting(name: str, default: Any) -> Any:
+    """Настройка из ``configs.settings`` (модуль работает и без неё)."""
+    try:
+        from configs import settings
+    except Exception:  # noqa: BLE001
+        return default
+    return getattr(settings, name, default)
+
+
+def _sdk(kwargs: Dict[str, Any], key: Optional[str] = None) -> Dict[str, Any]:
+    """Параметры запроса без служебных ключей (``_fits`` — счётчик уменьшений ответа, ``_boosted`` — лимит ответа
+    увеличен после рассуждения).
+
+    Рассуждение модели выключается (``chat_template_kwargs.enable_thinking = false``, ``LLM_DISABLE_THINKING``):
+    рассуждающая модель (02.11.2026: prod_multimodal_llm) тратила весь лимит ответа на рассуждение — около 10 тыс.
+    символов при ``max_tokens = 3000`` — и возвращала пустой ответ. Явно заданное вызывающим значение не меняется;
+    серверу, отклонившему параметр, он больше не отправляется.
+    """
+    out = {k: v for k, v in kwargs.items() if not k.startswith("_")}
+    if key not in _THINKING_REJECTED and _setting("LLM_DISABLE_THINKING", True):
+        extra = dict(out.get("extra_body") or {})
+        tpl = dict(extra.get("chat_template_kwargs") or {})
+        tpl.setdefault("enable_thinking", False)
+        extra["chat_template_kwargs"] = tpl
+        out["extra_body"] = extra
+    return out
+
+
+def _thinking_rejected(e: BaseException, key: str) -> bool:
+    """Сервер отклонил ``chat_template_kwargs`` (400) — запоминаем и повторяем без него."""
+    msg = str(e)
+    if getattr(e, "status_code", None) == 400 and ("chat_template_kwargs" in msg or "enable_thinking" in msg) \
+            and key not in _THINKING_REJECTED:
+        _THINKING_REJECTED.add(key)
+        logger.warning(f"LLM {key}: сервер не принимает chat_template_kwargs — рассуждение не выключается")
+        return True
+    return False
+
+
+def _boost_after_thinking(kwargs: Dict[str, Any], key: str) -> bool:
+    """Пустой ответ из-за рассуждения (``finish_reason = length``): один повтор с бо́льшим лимитом ответа
+    (``LLM_THINKING_RETRY_MAX_TOKENS``). Возвращает ``True``, если лимит увеличен."""
+    cap = int(_setting("LLM_THINKING_RETRY_MAX_TOKENS", 12000) or 0)
+    cur = int(kwargs.get("max_tokens") or 0)
+    if kwargs.get("_boosted") or not cap or cur >= cap:
+        return False
+    kwargs["max_tokens"] = min(cap, max(cur * 3, cur + 4000))
+    kwargs["_boosted"] = True
+    logger.warning(f"LLM {key}: ответ пуст — модель рассуждала до лимита {cur}; повтор с max_tokens={kwargs['max_tokens']}")
+    return True
+
+
+class _Text(str):
+    """Текст ответа с признаком «пусто, потому что рассуждение исчерпало лимит»."""
+    thinking_cut = False
 
 
 def split_halves(text: str) -> List[str]:
@@ -261,7 +316,7 @@ def _log_empty(kwargs: Dict[str, Any], text: str, choice: Any = None, finish: An
         reasoning: Длина рассуждения в потоковом ответе.
 
     Returns:
-        str: ``text`` без изменений.
+        str: ``text``; пустой — :class:`_Text` с признаком ``thinking_cut``.
     """
     if not text:
         if choice is not None:
@@ -271,6 +326,9 @@ def _log_empty(kwargs: Dict[str, Any], text: str, choice: Any = None, finish: An
             reasoning = len(r) if isinstance(r, str) else 0
         logger.warning(f"LLM {kwargs.get('model')}: пустой ответ (finish_reason={finish}, рассуждение {reasoning} "
                        f"симв., max_tokens={kwargs.get('max_tokens')}, схема={'да' if _has_schema(kwargs) else 'нет'})")
+        out = _Text(text)
+        out.thinking_cut = finish == "length" and reasoning > 0
+        return out
     return text
 
 
@@ -303,17 +361,23 @@ async def call_llm(client: Any, retries: int = len(RETRY_DELAYS) + 1, **kwargs: 
     last: Optional[BaseException] = None
     retries = max(1, retries)
     extra = 0   # смена потока / уменьшение ответа — не считаются попытками
-    for attempt in range(retries + 3):
+    for attempt in range(retries + 5):
         if attempt - extra >= retries:
             break
         await _breaker_wait(key)
         CALLS["requests"] += 1
         try:
             async with _gate(key):
-                text = await _bounded(_create(client, stream, _sdk(kwargs)), key)
+                text = await _bounded(_create(client, stream, _sdk(kwargs, key)), key)
             _breaker_record(key, True)
-            return text
+            if getattr(text, "thinking_cut", False) and _boost_after_thinking(kwargs, key):
+                extra += 1
+                continue
+            return str(text)
         except Exception as e:  # noqa: BLE001
+            if _thinking_rejected(e, key):
+                extra += 1
+                continue
             if stream and getattr(e, "status_code", None) == 400 and "stream" in str(e).lower():
                 logger.warning(f"LLM {key}: поток не поддерживается, перехожу на обычный ответ")
                 stream = False
@@ -362,17 +426,26 @@ class _Completions:
         retries = max(1, int(self._retries if self._retries is not None else PROXY_RETRIES))
         last: Optional[BaseException] = None
         extra = 0   # повторы из-за уменьшения ответа (не считаются попытками)
-        for attempt in range(retries + 2):
+        for attempt in range(retries + 4):
             if attempt - extra >= retries:
                 break
             await _breaker_wait(key)
             CALLS["requests"] += 1
             try:
                 async with _gate(key):
-                    resp = await _bounded(self._raw.chat.completions.create(**_sdk(kwargs)), key)
+                    resp = await _bounded(self._raw.chat.completions.create(**_sdk(kwargs, key)), key)
                 _breaker_record(key, True)
+                choice = (getattr(resp, "choices", None) or [None])[0]
+                text = _log_empty(kwargs, getattr(getattr(choice, "message", None), "content", None) or "", choice) \
+                    if choice is not None else "-"
+                if getattr(text, "thinking_cut", False) and _boost_after_thinking(kwargs, key):
+                    extra += 1
+                    continue
                 return resp
             except Exception as e:  # noqa: BLE001
+                if _thinking_rejected(e, key):
+                    extra += 1
+                    continue
                 CALLS["failed"] += 1
                 if fit_output(e, kwargs):   # переполнение контекста: меньший ответ (попытка не тратится)
                     extra += 1

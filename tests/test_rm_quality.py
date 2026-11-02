@@ -170,7 +170,7 @@ class GuidedFallbackTest(unittest.TestCase):
         async def create(**kw):
             """Имитация ``chat.completions.create``."""
             calls.append(kw)
-            if kw["extra_body"]:
+            if "guided_json" in (kw.get("extra_body") or {}):   # chat_template_kwargs сервер принимает
                 raise Err("unexpected field guided_json")
             msg = types.SimpleNamespace(content='{"ok": true}')
             return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg)])
@@ -827,6 +827,59 @@ class ModelOutageTest(unittest.TestCase):
                 self.assertEqual(lr._log_empty(kw, "", choice), "")
             self.assertIn("finish_reason=length, рассуждение 900", logs.output[0])
             self.assertEqual(lr._log_empty(kw, "{}", choice), "{}")
+
+
+class ThinkingModelTest(unittest.TestCase):
+    """Рассуждающая модель (prod_multimodal_llm, 02.11.2026): рассуждение до лимита и пустой ответ."""
+
+    def _client(self, answers, reject=False):
+        """Клиент модели: ответы по очереди; ``reject`` — 400 на chat_template_kwargs."""
+        import types
+
+        calls = []
+
+        class BadRequest(Exception):
+            """400."""
+            status_code = 400
+
+        async def create(**kw):
+            """chat.completions.create."""
+            calls.append(kw)
+            if reject and "chat_template_kwargs" in (kw.get("extra_body") or {}):
+                raise BadRequest("unexpected keyword chat_template_kwargs")
+            content, finish, reasoning = answers.pop(0)
+            msg = types.SimpleNamespace(content=content, reasoning_content=reasoning)
+            return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg, finish_reason=finish)])
+
+        raw = types.SimpleNamespace(chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create)),
+                                    base_url="http://llm-test-%d/" % id(calls))
+        return raw, calls
+
+    def test_disable_and_boost(self):
+        """Рассуждение выключается в запросе (схема сохраняется); пустой ответ после рассуждения — повтор с
+        бо́льшим лимитом; сервер, отклонивший параметр, получает запрос без него."""
+        import asyncio
+
+        from tests.stubs import stubbed_import
+
+        with stubbed_import("configs.llm_resilience") as lr:
+            lr.STREAM = False
+            raw, calls = self._client([(None, "length", "x" * 9000), ('{"a": 1}', "stop", None)])
+            out = asyncio.run(lr.call_llm(raw, model="m", max_tokens=3000, messages=[],
+                                          extra_body={"guided_json": {"type": "object"}}))
+            self.assertEqual(out, '{"a": 1}')
+            self.assertEqual(calls[0]["extra_body"]["chat_template_kwargs"], {"enable_thinking": False})
+            self.assertEqual(calls[0]["extra_body"]["guided_json"], {"type": "object"})
+            self.assertEqual(calls[1]["max_tokens"], 9000)
+            self.assertNotIn("_boosted", calls[1])
+
+            raw, calls = self._client([("ok", "stop", None)], reject=True)
+            self.assertEqual(asyncio.run(lr.call_llm(raw, model="m", max_tokens=100, messages=[])), "ok")
+            self.assertNotIn("chat_template_kwargs", calls[-1].get("extra_body") or {})
+
+            rc = lr.ResilientClient(self._client([("", "length", "y" * 500), ("{}", "stop", None)])[0])
+            resp = asyncio.run(rc.chat.completions.create(model="m", max_tokens=3000, messages=[]))
+            self.assertEqual(resp.choices[0].message.content, "{}")
 
 
 class EisNoDataTest(unittest.TestCase):
