@@ -14,6 +14,7 @@ VALUE_RE = re.compile(r"<v>(.*?)</v>", re.S)
 TEXT_RE = re.compile(r"<t\b[^>]*>(.*?)</t>", re.S)
 ROW_RE = re.compile(r"<row\b[^>]*>(.*?)</row>", re.S)
 MAX_CHARS = 2_000_000
+MAX_ROWS = 2000   # непустых строк на лист: лист сметы бывает на сотни тысяч строк
 
 
 def _unescape(s: str) -> str:
@@ -65,6 +66,8 @@ def xlsx_raw_text(path: str) -> str:
                 cells = [c.strip() for c in cells if c and c.strip()]
                 if cells:
                     lines.append(" | ".join(cells))
+                    if len(lines) >= MAX_ROWS:
+                        break
             if lines:
                 block = f"Лист {n}:\n" + "\n".join(lines)
                 out.append(block)

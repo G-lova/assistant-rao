@@ -56,7 +56,7 @@ class RiskMonitoringAPI:
 
     GET   /api/risk-monitoring/ai-analysis?table=...&id=...
     PATCH /api/risk-monitoring/ai-analysis  {table, id, ai_analysis}
-    POST  /api/risk-monitoring/daily-runs   {export_date, status, stages, started_at, finished_at, ai_analysis} → id
+    POST  /api/risk-monitoring/daily-runs   {export_date, status, stages, started_at, finished_at, period_type?, period_key?} → id
     """
 
     def __init__(self, http_manager: HTTPClientManager, environment: str = None, rate: float = 0.9):
@@ -174,7 +174,8 @@ class RiskMonitoringAPI:
         return self._sibling("daily-runs")
 
     async def upsert_daily_run(self, export_date: str, status: str = None, stages: Dict[str, Any] = None,
-                               started_at: str = None, finished_at: str = None) -> Dict[str, Any]:
+                               started_at: str = None, finished_at: str = None, period_type: str = None,
+                               period_key: str = None) -> Dict[str, Any]:
         """Создаёт строку ``risk_monitoring_daily_runs`` или обновляет её состояние (upsert по дате выгрузки).
 
         Передаются только заданные поля: у существующей записи обновляются только они; ``stages`` заменяется
@@ -187,12 +188,16 @@ class RiskMonitoringAPI:
             stages: Полный набор состояний этапов.
             started_at: Начало прогона, ISO 8601 с часовым поясом.
             finished_at: Окончание прогона (не раньше начала).
+            period_type: ``week`` / ``month`` — сводка периода (``export_date`` — последний день периода, upsert по
+                ``period_type + export_date``); не задан — дневная строка, как прежде (ТЗ 31.10.2026).
+            period_key: ``2026-W43`` / ``2026-10``.
 
         Returns:
             Dict[str, Any]: ``data`` ответа (``id``, ``export_date``, ``status``).
         """
         body: Dict[str, Any] = {"export_date": export_date}
-        for k, v in (("status", status), ("stages", stages), ("started_at", started_at), ("finished_at", finished_at)):
+        for k, v in (("status", status), ("stages", stages), ("started_at", started_at), ("finished_at", finished_at),
+                     ("period_type", period_type), ("period_key", period_key)):
             if v is not None:
                 body[k] = v
         if status == "running":

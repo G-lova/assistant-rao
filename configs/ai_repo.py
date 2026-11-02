@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 import json
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -60,6 +61,34 @@ class AIRepo:
         """Закрывает пул соединений."""
         if self.pool:
             await self.pool.close()
+
+    @asynccontextmanager
+    async def advisory_lock(self, name: str):
+        """Межпроцессная блокировка по имени (``pg_try_advisory_lock``) на отдельном соединении — не из пула.
+
+        Блокировка держится, пока открыт блок, и снимается сама, если процесс упал или соединение оборвалось
+        (перезапуск воркера не оставляет «вечной» блокировки).
+
+        Args:
+            name: Имя блокировки (например, ``rm_daily:stage:2026-08-03``).
+
+        Yields:
+            bool: ``True`` — блокировка взята; ``False`` — её держит другой процесс.
+        """
+        conn = await asyncpg.connect(host=Config.DB_HOST, port=int(Config.DB_PORT), database=Config.DB_NAME,
+                                     user=Config.DB_USER, password=Config.DB_PASSWORD)
+        try:
+            got = bool(await conn.fetchval("SELECT pg_try_advisory_lock(hashtext($1))", name))
+            try:
+                yield got
+            finally:
+                if got:
+                    try:
+                        await conn.execute("SELECT pg_advisory_unlock(hashtext($1))", name)
+                    except Exception:  # noqa: BLE001 — закрытие соединения снимет блокировку
+                        pass
+        finally:
+            await conn.close()
 
     # ---------- ссылки внешний файл -> документ ----------
 

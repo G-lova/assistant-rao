@@ -15,6 +15,9 @@ WITH expertise_info AS (
 		    ELSE ''
 		END AS expertise_director,
 		u.organization AS expertise_organization,
+		u.director AS expertise_director_name,
+		u.inn AS expertise_inn,
+		u.kpp AS expertise_kpp,
 		e.priceContract, 
 		e.exucutorContract, 
 		CASE e.examination
@@ -325,6 +328,10 @@ blocked_experts AS (
 		END AS expert_surname,
 		u.organization AS expert_organization,
 		u.diplom AS expert_diplom, 
+		u.organization_inn AS expert_organization_inn,
+		u.organization_kpp AS expert_organization_kpp,
+		u.diplom_inn AS expert_diplom_inn,
+		u.diplom_kpp AS expert_diplom_kpp,
 		(CASE WHEN u.email IS NOT NULL THEN 1 ELSE 0 END 
 			+ CASE WHEN u.contactEmail IS NOT NULL THEN 1 ELSE 0 END
 			+ CASE WHEN u.organization IS NOT NULL THEN 1 ELSE 0 END

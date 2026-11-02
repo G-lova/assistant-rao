@@ -507,7 +507,9 @@ def build_file_analysis(*, file_meta: Dict[str, Any], type_info: Optional[Dict[s
     risks = merge_risks(to_external_risks(rc.get("risks") or [], "ai_file", fz), extra_risks or [], fz=fz)
     pr = profile or {}
     raw = (extraction or {}).get("raw_data") or {}
-    resume = pr.get("resume") or raw.get("summary") or rc.get("summary") or ""
+    from risk_monitoring import text_format
+
+    resume = text_format.normalize(pr.get("resume") or raw.get("summary") or rc.get("summary") or "")
     confidence = clamp01(pr.get("confidence"))
     if confidence is None:
         confidence = clamp01((type_info or {}).get("confidence"))

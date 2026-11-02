@@ -170,7 +170,7 @@ class GuidedFallbackTest(unittest.TestCase):
         async def create(**kw):
             """Имитация ``chat.completions.create``."""
             calls.append(kw)
-            if kw["extra_body"]:
+            if "guided_json" in (kw.get("extra_body") or {}):   # chat_template_kwargs сервер принимает
                 raise Err("unexpected field guided_json")
             msg = types.SimpleNamespace(content='{"ok": true}')
             return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg)])
@@ -783,6 +783,121 @@ class ModelRestartTest(unittest.TestCase):
         self.assertTrue(OCR_ERROR_RE.search('Страница 2 (OCR): {"has_text": false, "processing_quality": {"status": "error"}}'))
         self.assertTrue(OCR_ERROR_RE.search("Страница 3 (OCR):\n[Ошибка при анализе изображения]"))
         self.assertFalse(OCR_ERROR_RE.search("Страница 1:\nСтатус заявки: ошибка заполнения"))
+
+
+class ModelOutageTest(unittest.TestCase):
+    """Сбой и пустые ответы модели (01–02.11.2026): 503 при OCR и content = null не роняют чтение и анализ."""
+
+    def test_ocr_503_marker(self):
+        """OCR страницы при 503 — метка ошибки, а не None (раньше чтение PDF падало на .strip())."""
+        import asyncio
+        import tempfile
+        import types
+        from unittest import mock
+
+        from tests.stubs import stubbed_import
+
+        class Unavailable(Exception):
+            """503 сервера модели."""
+            status_code = 503
+
+        async def fail(*a, **kw):
+            """Сервер модели недоступен."""
+            raise Unavailable("No running instances available")
+
+        with stubbed_import("risk_monitoring.pdf_text") as pt, stubbed_import("risk_monitoring.llm_json") as lj:
+            proc = types.SimpleNamespace(client=None, model="m", ocr_prompt="p", OCR_SCHEMA={}, rate_limiter=None)
+            with tempfile.NamedTemporaryFile(suffix=".jpg") as f, mock.patch.object(lj, "call_llm", fail):
+                f.write(b"\xff\xd8\xff")
+                f.flush()
+                out = asyncio.run(pt.ocr_image(proc, f.name, "доп соглашение.pdf", 1.0))
+        self.assertEqual(out, "[Ошибка при анализе изображения]")
+
+    def test_empty_answer_logged(self):
+        """Пустой ответ модели записывается с причиной окончания и длиной рассуждения; текст не меняется."""
+        import types
+
+        from tests.stubs import stubbed_import
+
+        with stubbed_import("configs.llm_resilience") as lr:
+            choice = types.SimpleNamespace(finish_reason="length",
+                                           message=types.SimpleNamespace(content=None, reasoning_content="x" * 900))
+            kw = {"model": "prod_multimodal_llm", "max_tokens": 4000, "extra_body": {"guided_json": {}}}
+            with self.assertLogs(lr.logger, level="WARNING") as logs:
+                self.assertEqual(lr._log_empty(kw, "", choice), "")
+            self.assertIn("finish_reason=length, рассуждение 900", logs.output[0])
+            self.assertEqual(lr._log_empty(kw, "{}", choice), "{}")
+
+
+class ThinkingModelTest(unittest.TestCase):
+    """Рассуждающая модель (prod_multimodal_llm, 02.11.2026): рассуждение до лимита и пустой ответ."""
+
+    def _client(self, answers, reject=False):
+        """Клиент модели: ответы по очереди; ``reject`` — 400 на chat_template_kwargs."""
+        import types
+
+        calls = []
+
+        class BadRequest(Exception):
+            """400."""
+            status_code = 400
+
+        async def create(**kw):
+            """chat.completions.create."""
+            calls.append(kw)
+            if reject and "chat_template_kwargs" in (kw.get("extra_body") or {}):
+                raise BadRequest("unexpected keyword chat_template_kwargs")
+            content, finish, reasoning = answers.pop(0)
+            msg = types.SimpleNamespace(content=content, reasoning_content=reasoning)
+            return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg, finish_reason=finish)])
+
+        raw = types.SimpleNamespace(chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create)),
+                                    base_url="http://llm-test-%d/" % id(calls))
+        return raw, calls
+
+    def test_disable_and_boost(self):
+        """Рассуждение выключается в запросе (схема сохраняется); пустой ответ после рассуждения — повтор с
+        бо́льшим лимитом; сервер, отклонивший параметр, получает запрос без него."""
+        import asyncio
+
+        from tests.stubs import stubbed_import
+
+        with stubbed_import("configs.llm_resilience") as lr:
+            lr.STREAM = False
+            raw, calls = self._client([(None, "length", "x" * 9000), ('{"a": 1}', "stop", None)])
+            out = asyncio.run(lr.call_llm(raw, model="m", max_tokens=3000, messages=[],
+                                          extra_body={"guided_json": {"type": "object"}}))
+            self.assertEqual(out, '{"a": 1}')
+            self.assertEqual(calls[0]["extra_body"]["chat_template_kwargs"], {"enable_thinking": False})
+            self.assertEqual(calls[0]["extra_body"]["guided_json"], {"type": "object"})
+            self.assertEqual(calls[1]["max_tokens"], 9000)
+            self.assertNotIn("_boosted", calls[1])
+
+            raw, calls = self._client([("ok", "stop", None)], reject=True)
+            self.assertEqual(asyncio.run(lr.call_llm(raw, model="m", max_tokens=100, messages=[])), "ok")
+            self.assertNotIn("chat_template_kwargs", calls[-1].get("extra_body") or {})
+
+            rc = lr.ResilientClient(self._client([("", "length", "y" * 500), ("{}", "stop", None)])[0])
+            resp = asyncio.run(rc.chat.completions.create(model="m", max_tokens=3000, messages=[]))
+            self.assertEqual(resp.choices[0].message.content, "{}")
+
+
+class EisNoDataTest(unittest.TestCase):
+    """Ответ ЕИС «данных нет» (dataInfo/noData, типовые положения 02.11.2026) — не ошибка."""
+
+    def test_no_data(self):
+        """noData = true распознаётся; ответ с archiveUrl и пустой ответ — нет."""
+        from tests.stubs import stubbed_import
+
+        def resp(info):
+            """SOAP-ответ ЕИС."""
+            return {"soap:Envelope": {"soap:Body": {"ns3:getDocsByOrgRegionResponse": {"dataInfo": info}}}}
+
+        with stubbed_import("configs.eis_parsing") as ep:
+            cls = next(v for v in vars(ep).values() if isinstance(v, type) and hasattr(v, "_eis_no_data"))
+            self.assertTrue(cls._eis_no_data(resp({"noData": "true"})))
+            self.assertFalse(cls._eis_no_data(resp({"archiveUrl": "https://int.zakupki.gov.ru/a.zip"})))
+            self.assertFalse(cls._eis_no_data({}))
 
 
 class EventRiskShapeTest(unittest.TestCase):

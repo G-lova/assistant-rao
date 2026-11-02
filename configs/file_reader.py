@@ -32,6 +32,81 @@ from evaluate_documents.ocr import OCRProcessor
 logger = get_logger(__name__)
 
 
+def excel_limits() -> dict:
+    """Ограничения чтения Excel из настроек (``EXCEL_MAX_ROWS``, ``EXCEL_MAX_COLS``, ``EXCEL_MAX_SHEETS``,
+    ``EXCEL_MAX_CHARS``); без настроек — значения по умолчанию."""
+    try:
+        from configs import settings as cfg
+    except Exception:  # noqa: BLE001 — модуль используется и без настроек
+        cfg = None
+    return {"max_rows": int(getattr(cfg, "EXCEL_MAX_ROWS", 500)), "max_cols": int(getattr(cfg, "EXCEL_MAX_COLS", 60)),
+            "max_sheets": int(getattr(cfg, "EXCEL_MAX_SHEETS", 20)),
+            "max_chars": int(getattr(cfg, "EXCEL_MAX_CHARS", 300_000))}
+
+
+def xlsx_text_limited(path: str, max_rows: int = 500, max_cols: int = 60, max_sheets: int = 20,
+                      max_chars: int = 300_000) -> str:
+    """Текст .xlsx потоковым чтением (openpyxl ``read_only``) с ограничениями — память и время не зависят от
+    размеченного размера листа.
+
+    Пустые строки и ячейки пропускаются; читается не больше ``max_rows`` непустых строк и ``max_cols`` столбцов на
+    лист, ``max_sheets`` листов и ``max_chars`` символов всего. Обрезанный лист помечается.
+
+    Args:
+        path: Путь к .xlsx.
+        max_rows: Непустых строк на лист.
+        max_cols: Столбцов на строку.
+        max_sheets: Листов.
+        max_chars: Символов всего.
+
+    Returns:
+        str: «Лист: имя», затем строки с ячейками через « | »; листы через пустую строку.
+    """
+    from openpyxl import load_workbook
+
+    wb = load_workbook(path, read_only=True, data_only=True)
+    out, size = [], 0
+    try:
+        for n, ws in enumerate(wb.worksheets):
+            if n >= max_sheets:
+                out.append(f"[Листов больше {max_sheets}, остальные не прочитаны]")
+                break
+            lines, scanned = [], 0
+            for row in ws.iter_rows(max_col=max_cols, values_only=True):
+                scanned += 1
+                cells = [str(v).strip() for v in row if v is not None and str(v).strip()]
+                if cells:
+                    lines.append(" | ".join(cells))
+                    if len(lines) >= max_rows:
+                        lines.append(f"[Лист обрезан: прочитано {max_rows} строк]")
+                        break
+                if scanned >= max_rows * 20:   # лист из пустых строк (форматирование до конца листа)
+                    break
+            if lines:
+                block = f"Лист: {ws.title}\n" + "\n".join(lines)
+                out.append(block)
+                size += len(block)
+                if size >= max_chars:
+                    break
+    finally:
+        wb.close()
+    return "\n\n".join(out)[:max_chars].strip()
+
+
+def _frames_text(excel_data: dict) -> str:
+    """Текст листов, прочитанных pandas (.xls): «Лист: имя» и таблица (до 20 строк), пробелы схлопнуты."""
+    result = []
+    for sheet_name, df in excel_data.items():
+        result.append(f"Лист: {sheet_name}")
+        df = df.fillna('').astype(str)
+        for col in df.columns:
+            if 'unnamed' in str(col).lower():
+                df = df.rename(columns={col: f'Колонка_{df.columns.get_loc(col)}'})
+        result.append(df.to_string(index=False, max_rows=20))
+        result.append("")
+    return re.sub(r'\s+', ' ', "\n".join(result).strip())
+
+
 class FileReader:
     """
     """
@@ -297,10 +372,9 @@ class FileReader:
         """
         Читает содержимое Excel-файла (.xls или .xlsx) и преобразует его в текстовый формат.
 
-        Функция поддерживает оба формата Excel, используя `openpyxl` для .xlsx и попытки чтения .xls
-        сначала через `openpyxl`, затем — через `xlrd`. При неудаче запускается резервный метод
-        с использованием LibreOffice. Каждый лист представляется как таблица в текстовом виде
-        с заголовками столбцов и данными. Результат объединяется в единую строку.
+        .xlsx читается потоково (:func:`xlsx_text_limited`, openpyxl ``read_only``) с ограничениями строк, столбцов,
+        листов и символов (``EXCEL_MAX_*``): память и время не зависят от размеченного размера листа. .xls — через
+        `openpyxl`, затем `xlrd` (не больше ``EXCEL_MAX_ROWS`` строк на лист), при неудаче — LibreOffice.
 
         Args:
             file_path (str): Путь к Excel-файлу на диске.
@@ -321,53 +395,30 @@ class FileReader:
         """
         if not os.path.exists(file_path):
             raise ValueError(f"Файл не найден: {file_path}")
-            
+        limits = excel_limits()
         try:
-            # Для .xls файлов используем openpyxl вместо xlrd
-            if ext == '.xls':
+            if ext == '.xlsx':
+                # Потоковое чтение с ограничением строк и столбцов: полная загрузка pandas/openpyxl книги-сметы
+                # (2 МБ, лист размечен до 1 048 576 строк) занимала гигабайты памяти и подвешивала прогон
+                # (РМ 31.10.2026: три сметы ТГУ одновременно — воркер завис на 1,5 ч без логов)
+                full_text = await asyncio.to_thread(xlsx_text_limited, file_path, **limits)
+                if not full_text:
+                    raise ValueError("в книге нет листов с текстом")
+            elif ext == '.xls':
                 try:
-                    # Пробуем прочитать с openpyxl
                     excel_data = await asyncio.to_thread(
-                        pd.read_excel,
-                        file_path,
-                        sheet_name=None,
-                        engine="openpyxl"
-                    )
+                        pd.read_excel, file_path, sheet_name=None, engine="openpyxl", nrows=limits["max_rows"])
                 except Exception as openpyxl_error:
                     logger.warning(f"openpyxl не смог прочитать .xls файл: {openpyxl_error}. Пробуем xlrd...")
                     try:
-                        # Пробуем старую версию xlrd
-                        excel_data = await asyncio.to_thread(pd.read_excel,file_path, sheet_name=None, engine='xlrd')
+                        excel_data = await asyncio.to_thread(
+                            pd.read_excel, file_path, sheet_name=None, engine='xlrd', nrows=limits["max_rows"])
                     except Exception as xlrd_error:
                         logger.warning(f"xlrd также не сработал: {xlrd_error}. Пробуем LibreOffice...")
                         return await self.read_excel_with_libreoffice(file_path)
-            elif ext == '.xlsx':
-                excel_data = await asyncio.to_thread(pd.read_excel,file_path, sheet_name=None, engine='openpyxl')
+                full_text = await asyncio.to_thread(_frames_text, excel_data)
             else:
                 raise ValueError("Поддерживаются только файлы .xls и .xlsx")
-
-            result = []
-            
-            for sheet_name, df in excel_data.items():
-                result.append(f"Лист: {sheet_name}")
-                # Заменяем NaN на пустые строки и преобразуем все в строки
-                df = df.fillna('').astype(str)
-                
-                # Форматируем таблицу для лучшей читаемости
-                for col in df.columns:
-                    # Очищаем названия колонок от технической информации
-                    if 'unnamed' in str(col).lower():
-                        df = df.rename(columns={col: f'Колонка_{df.columns.get_loc(col)}'})
-                
-                # Используем компактное представление таблицы
-                table_text = df.to_string(index=False, max_rows=20)  # Ограничиваем количество строк
-                result.append(table_text)
-                result.append("")  # Одна пустая строка между листами
-            
-            # Убираем лишние пустые строки в конце и множественные пробелы
-            full_text = "\n".join(result).strip()
-            # Заменяем множественные пробелы на один пробел
-            full_text = re.sub(r'\s+', ' ', full_text)
             logger.info(f"Успешно извлечен текст из Excel: {len(full_text)} символов")
             return full_text
 

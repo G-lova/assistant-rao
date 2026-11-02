@@ -1,5 +1,7 @@
 import asyncio
 import json
+
+from configs import settings
 import re
 from evaluate_documents.evidence_check import drop_nulls, verify_extraction
 from json_repair import repair_json
@@ -292,7 +294,7 @@ class TypeDataExtractor:
                     ],
                     extra_body={
                         "guided_json": json.loads(schema)},
-                    max_tokens=3000,
+                    max_tokens=settings.EXTRACTION_MAX_TOKENS,
                     temperature=0
                 )
                 if penalize:  # повтор после зацикливания: штраф за повторяющиеся токены
@@ -304,7 +306,7 @@ class TypeDataExtractor:
 
             raw_response = response.choices[0].message.content.strip()
             logger.info(f"Получен ответ длиной {len(raw_response)} символов для чанка '{document_name}'")
-            logger.info(raw_response)
+            logger.debug(raw_response)  # полный ответ — только в отладке: журнал рос до 4,7 МБ за прогон (30.10.2026)
 
             # Парсим JSON
             try:
@@ -789,13 +791,13 @@ class TypeDataExtractor:
                             "content": "Сделай единое summary документа. 3-10 предложений."},
                         {"role": "user", "content": f"Вот summary каждого чанка:\n\n{summary_string}"}
                     ],
-                    max_tokens=3000,
+                    max_tokens=settings.EXTRACTION_MAX_TOKENS,
                     temperature=0
                 )
 
                 raw_response = response.choices[0].message.content.strip()
                 logger.info(f"Объединение summary для '{document_name}'")
-                logger.info(raw_response)
+                logger.debug(raw_response)  # полный ответ — только в отладке: журнал рос до 4,7 МБ за прогон (30.10.2026)
 
                 merged["raw_data"]["summary"] = raw_response
 

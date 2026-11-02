@@ -17,22 +17,22 @@ from typing import Any, Dict, List, Optional, Tuple
 from configs.config import Config
 from configs.logger import get_logger
 from configs import settings
-from risk_monitoring import control_checks, org_profile, passport, progress, rm_sql
+from risk_monitoring import control_checks, org_profile, passport, progress, rm_sql, text_format
 from risk_monitoring.contract_analyzer import _none
 from risk_monitoring.xml_events import canonical_org
 
 logger = get_logger(__name__)
 
 EXTERNAL_TABLE = "risk_monitoring_organisations"
-PROMPT_VERSION = "org-resume-5"
+PROMPT_VERSION = "org-resume-6"
 ROLES = ("customer", "supplier")
 
 RESUME_SYSTEM = (
     "Ты — аналитик риск-мониторинга госзакупок. Тебе дан список фактов об организации в роли {role} за период. "
-    "Перескажи их связным резюме: 3–5 предложений, по-русски, без вступлений — объём закупок, признаки риска "
+    "Перескажи их резюме: до 6 предложений, по-русски, без вступлений — объём закупок, признаки риска "
     "(если есть), что проверить. Используй только эти факты: не добавляй цифр, сравнений и выводов, которых в них "
     "нет, не пересчитывай доли. Если признаков риска нет или данных мало — так и напиши, не ищи риски сам. "
-    "Не используй коды рисков и правил (вида DOC-002, FIN-004, BEH-005, pz_p1) — называй риски словами, понятными заказчику. Ответ — обычный текст, без JSON и разметки.")
+    "Не используй коды рисков и правил (вида DOC-002, FIN-004, BEH-005, pz_p1) — называй риски словами, понятными заказчику. " + text_format.instruction())
 ROLE_NAMES = {"customer": "заказчика", "supplier": "поставщика"}
 
 
@@ -275,7 +275,7 @@ class OrgAnalyzer:
                                            json.dumps(payload, ensure_ascii=False, default=str),
                                            max_tokens=1200, temperature=0.2)
             self.stats["llm_resume"] += 1
-            return text or fallback
+            return text_format.normalize(text or fallback)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Резюме организации {name} шаблоном: {type(e).__name__}: {e}")
             return fallback

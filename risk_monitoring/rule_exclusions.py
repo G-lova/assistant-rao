@@ -33,7 +33,10 @@ SYSTEM = (
     "документов закупки, есть ли законное исключение из перечисленных. Отвечай только по тексту фрагментов. "
     "status: excluded — исключение прямо следует из текста (приведи точную цитату из фрагмента и file_id); "
     "confirmed — из текста видно, что исключения нет; unclear — в фрагментах об этом ничего нет. "
-    "Не придумывай цитаты: цитата должна дословно совпадать с текстом фрагмента. reason — одно предложение по-русски.")
+    "Не придумывай цитаты: цитата должна дословно совпадать с текстом фрагмента. reason — одно предложение по-русски. "
+    "Ответ — только JSON-объект вида {\"checks\": [{\"indicator\": \"pz_p2\", \"status\": \"unclear\", "
+    "\"exclusion_id\": null, \"reason\": \"…\", \"quote\": null, \"file_id\": null}]}, без пояснений, "
+    "markdown и текста вне JSON.")
 
 SCHEMA = {
     "type": "object",
@@ -112,7 +115,10 @@ def build_prompt(keys: Sequence[str], frags: Sequence[Dict[str, Any]], cfg: Dict
     lines.append("\nФрагменты документов закупки:")
     for f in frags:
         lines.append(f"\n[file_id={f['file_id']}] {f['file_name']}\n{f['text']}")
-    lines.append("\nВерни checks — по одному элементу на каждый показатель.")
+    # без явного «только JSON» модель отвечала markdown-списком «**checks:** - **pz_p2** …», а guided_json сервер
+    # не применял (qwen3-vl-30b-a3b-instruct, 30.10.2026)
+    lines.append("\nВерни JSON-объект {\"checks\": [...]} — по одному элементу на каждый показатель: "
+                 + ", ".join(keys) + ". Только JSON, без markdown.")
     return "\n".join(lines)
 
 
@@ -199,5 +205,17 @@ async def check_rules(llm: Any, values: Optional[Dict[str, Any]], texts: Dict[in
     if not frags:
         return {k: {"status": "unclear", "reason": "в документах нет фрагментов по теме показателя",
                     "version": cfg.get("version")} for k in keys}
-    data = await llm.ask(SYSTEM, build_prompt(keys, frags, cfg, titles or {}), schema=SCHEMA, max_tokens=2000)
+    prompt = build_prompt(keys, frags, cfg, titles or {})
+    max_tokens = getattr(settings, "RULE_EXCLUSION_MAX_TOKENS", 4000)
+    try:
+        data = await llm.ask(SYSTEM, prompt, schema=SCHEMA, max_tokens=max_tokens, list_key="checks")
+    except ValueError:
+        # модель с «мышлением» не дала JSON (30.10.2026: «В ответе модели нет JSON» у закупок 1542, 1543) —
+        # запасная модель без мышления, если она есть
+        fallback = getattr(llm, "fallback", None)
+        if fallback is None:
+            raise
+        logger.warning(f"Перепроверка правил: модель {getattr(llm, 'model', '')} не дала JSON, "
+                       f"запасная {getattr(fallback, 'model', '')}")
+        data = await fallback.ask(SYSTEM, prompt, schema=SCHEMA, max_tokens=max_tokens, list_key="checks")
     return verify(data.get("checks") or [], keys, texts, cfg)

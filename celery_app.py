@@ -121,6 +121,9 @@ celery_app.conf.update(
         'rm_analyze_contracts_task': {'queue': 'risk_monitoring'},
         'rm_analyze_orgs_task': {'queue': 'risk_monitoring'},
         'rm_typal_clauses_task': {'queue': 'risk_monitoring'},
+        # публикации экспертов: скачивание, OCR и модель — та же очередь, что у документов экспертиз
+        'expert_publications_task': {'queue': 'evaluation'},
+        'org_aliases_task': {'queue': 'evaluation'},
         'main.get_experts_task': {
             'queue': 'scoring',
             'retry_policy': {
@@ -168,6 +171,18 @@ celery_app.conf.update(
             'task': 'rm_typal_clauses_task',
             'schedule': crontab(hour=5, minute=40),
             'options': {'queue': 'risk_monitoring'},
+        },
+        # Псевдонимы организаций для конфликта интересов: написание эксперта, у которого появился ИНН
+        'org-aliases-daily': {
+            'task': 'org_aliases_task',
+            'schedule': crontab(hour=settings.ORG_ALIASES_HOUR, minute=settings.ORG_ALIASES_MINUTE),
+            'options': {'queue': 'evaluation'},
+        },
+        # Публикации экспертов раз в сутки: снимок источников из внешней БД → новые / изменённые / удалённые, затем разбор очереди
+        'expert-publications-sync': {
+            'task': 'expert_publications_task',
+            'schedule': crontab(hour=settings.EXPERT_PUB_SYNC_HOUR, minute=settings.EXPERT_PUB_SYNC_MINUTE),
+            'options': {'queue': 'evaluation'},
         },
     },
 )

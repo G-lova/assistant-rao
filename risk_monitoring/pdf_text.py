@@ -165,9 +165,10 @@ async def ocr_image(processor: Any, image_path: str, file_name: str, penalty: fl
                 continue
             logger.error(f"pdf_text: OCR {file_name}/{os.path.basename(image_path)}: {type(e).__name__}: {e}")
             break
-        # Метка ловится AIFileAnalyzer (OCR_ERROR_RE): файл с потерянными страницами не сохраняется и
-        # анализируется повторно при следующем запуске
-        return "[Ошибка при анализе изображения]"
+    # Метка ловится AIFileAnalyzer (OCR_ERROR_RE): файл с потерянными страницами не сохраняется и анализируется
+    # повторно при следующем запуске. Метка — после цикла: внутри цикла она была недостижима, и при сбое модели
+    # (503, 01.11.2026) функция возвращала None — чтение PDF падало на .strip()
+    return "[Ошибка при анализе изображения]"
 
 
 def shrink_image(path: str, factor: float) -> Tuple[int, int]:

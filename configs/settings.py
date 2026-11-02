@@ -51,6 +51,10 @@ DOC_DEDUP_ENABLED = True
 # Кэш результата TypeDataExtractor: тот же файл с тем же типом, объектом и именем повторно модели не отправляется
 # (параметр force в /evaluate-documents кэш обходит)
 DOC_EXTRACTION_CACHE_ENABLED = True
+# Лимит ответа модели при извлечении данных из документа (data_extractor, type_data_extractor; экспертиза и РМ).
+# 3000 не хватало: ответы обрывались на ~10 тыс. символов («Unterminated string», часть данных терялась, 30.10.2026).
+# При длинном запросе ответ всё равно уменьшается до размера контекста (configs.llm_resilience.fit_output)
+EXTRACTION_MAX_TOKENS = 4000
 # Сопоставление экспертизы с карточкой закупки риск-мониторинга после индексации (запросы к внешней БД)
 PE_RM_LINK_ENABLED = True
 # Параллельность /evaluate-documents на один вызов: запросы к LLM, файлы (чтение/OCR + извлечение), скачивание ссылок
@@ -90,6 +94,79 @@ MODEL_TEMPERATURE = 0.7
 MODEL_MAX_TOKENS = 4096
 # Размер пакета запроса эмбеддингов
 EMBEDDING_BATCH_SIZE = 16
+
+# ---------------------------------------------------------------- конфликт интересов (подбор экспертов)
+# Место работы и организация, выдавшая диплом, сравниваются с заказчиком по ИНН/КПП (users.organization_inn / _kpp,
+# diplom_inn / _kpp); у кого реквизитов нет — по названиям, как раньше. Тот же ИНН с другим КПП — головная организация
+# и её филиал (одно юрлицо): False — конфликт, True — конфликт только при совпадении и ИНН, и КПП
+CONFLICT_INN_SAME_KPP_ONLY = False
+# Без реквизитов (старый метод): fuzz.ratio ≥ 85 названий организаций по целой строке. В users от 02.11.2026 названия —
+# полные официальные, общая ОПФ («ФЕДЕРАЛЬНОЕ ГОСУДАРСТВЕННОЕ БЮДЖЕТНОЕ …») даёт ratio ≥ 85 почти любой паре вузов:
+# 25 991 совпадение «эксперт ↔ заказчик», ни одно не подтверждено ИНН. False — только same_organization (без ОПФ)
+CONFLICT_ORG_NAME_FUZZY = False
+# Эксперт без ИНН: ИНН восстанавливается по названию из справочника организаций (search_experts.org_directory:
+# официальные названия портала + псевдонимы org_name_aliases, TF-IDF символьных n-грамм по названию без ОПФ).
+# Кроме сходства ≥ THRESHOLD названия должны совпасть по словам в обе стороны (search_experts.org_directory.covers:
+# «Новосибирский государственный университет» ≠ «… технический университет»); ближайшая другая организация не ближе
+# MARGIN. Названия подразделений («… институт (филиал) ФГБОУ ВО X») — с порогом BRANCH_THRESHOLD. Справочник
+# обновляется раз в TTL_SEC на процесс. Проверка 02.11.2026 (404 эксперта с ИНН, без своей записи в справочнике):
+# ИНН восстановлен у 285, верно 281 (99 %; расхождения — в основном эксперт сменил место работы); пары «эксперт
+# работает у заказчика» — 237 из 265, 2 ложных. Без ИНН: место работы 327 → 94 с ИНН, диплом 479 → 69
+CONFLICT_ORG_DIRECTORY_ENABLED = True
+CONFLICT_ORG_DIRECTORY_THRESHOLD = 0.8
+CONFLICT_ORG_DIRECTORY_BRANCH_THRESHOLD = 0.7
+CONFLICT_ORG_DIRECTORY_MARGIN = 0.03
+CONFLICT_ORG_DIRECTORY_TTL_SEC = 3600
+# Соавторство (search_experts.coauthors, публикации — миграция 011): соавтор — контактное лицо или руководитель
+# заказчика → эксперт исключается; кандидаты-соавторы → остаётся более подходящий. Учитываются публикации последних
+# CONFLICT_COAUTHOR_YEARS лет (год неизвестен — учитывается; None — все)
+CONFLICT_COAUTHORS_ENABLED = True
+CONFLICT_COAUTHOR_YEARS = 5
+# Пополнение псевдонимов (org_aliases_task), время московское — до синхронизации публикаций (01:20)
+ORG_ALIASES_HOUR = 1
+ORG_ALIASES_MINUTE = 5
+
+# ---------------------------------------------------------------- публикации экспертов (подбор экспертов)
+# Файлы (media: documentPublication / documentMonographs) и ссылки анкеты (linkPublication / linkMonographs)
+# разбираются во внутреннюю БД (миграция 011) и учитываются в similarity при подборе экспертов
+EXPERT_PUB_SYNC_ENABLED = True
+# Синхронизация с внешней БД: снимок источников всех экспертов (≈ 1,5 тыс. файлов и 3 тыс. ссылок — два SQL-запроса)
+# сравнивается с внутренним; новые — в очередь, исчезнувшие — removed. Раз в сутки (Celery beat, время московское):
+# до ночной очистки текстов (03:30) и утреннего прогона риск-мониторинга (05:40–06:00). Чтобы не ждать до ночи,
+# портал вызывает POST /expert-publications/sync с expert_ids после сохранения анкеты
+EXPERT_PUB_SYNC_HOUR = 1
+EXPERT_PUB_SYNC_MINUTE = 20
+# Источников, обрабатываемых за один запуск задачи (скачивание, чтение/OCR, модель); остальные — в следующий
+EXPERT_PUB_BATCH = 40
+# Время на обработку за запуск, с (меньше task_soft_time_limit = 1500)
+EXPERT_PUB_BUDGET_SEC = 1200
+# Неудавшийся источник повторяется не чаще раза в столько часов и не больше EXPERT_PUB_MAX_ATTEMPTS раз
+EXPERT_PUB_RETRY_HOURS = 12
+EXPERT_PUB_MAX_ATTEMPTS = 3
+# Какие ссылки анкеты обрабатывать. eLibrary (63 % ссылок) не обрабатывается: правила сайта запрещают
+# автоматический сбор, при массовых запросах — капча и блокировка IP. Scopus — только с ключом Elsevier API;
+# ResearchGate / Google Scholar блокируют сбор. Такие ссылки хранятся со статусом unsupported
+EXPERT_PUB_LINK_TYPES = ("doi", "file", "cloud", "journal")
+# Метаданные по DOI (title, abstract, авторы, год, журнал): OpenAlex, при отказе — Crossref
+EXPERT_PUB_OPENALEX_URL = "https://api.openalex.org/works/doi:"
+EXPERT_PUB_CROSSREF_URL = "https://api.crossref.org/works/"
+EXPERT_PUB_HTTP_TIMEOUT = 30
+# Текст файла, передаваемый модели для разбора (символов на запрос) и максимум запросов на файл
+# (список трудов на 300 позиций режется на части)
+EXPERT_PUB_LLM_CHUNK_CHARS = 12000
+EXPERT_PUB_LLM_MAX_CHUNKS = 6
+EXPERT_PUB_MAX_PER_SOURCE = 300
+# Similarity по публикациям: среднее сходство K самых близких публикаций эксперта с текстом экспертизы, вклад
+# публикации убывает вдвое за HALF_LIFE лет, но не ниже FLOOR (старая монография по профилю всё же значима)
+EXPERT_PUB_SIMILARITY_ENABLED = True
+EXPERT_PUB_TOP_K = 3
+EXPERT_PUB_HALF_LIFE_YEARS = 7
+EXPERT_PUB_RECENCY_FLOOR = 0.5
+# Итоговая similarity эксперта с публикациями: (1 − w) × сходство анкеты + w × сходство публикаций. Эксперт без
+# разобранных публикаций сохраняет сходство анкеты (не штрафуется)
+EXPERT_PUB_SIMILARITY_WEIGHT = 0.4
+# Публикации, где фамилии эксперта нет среди авторов (author_verified = false), не учитываются
+EXPERT_PUB_REQUIRE_AUTHOR = True
 
 # Повторы HTTP-запросов (async_retry): попыток, первая задержка (с), множитель задержки
 RETRY_MAX_ATTEMPTS = 3
@@ -146,6 +223,7 @@ RULE_EXCLUSION_CHECK_ENABLED = True
 RULE_EXCLUDED_LEVEL_FACTOR = 0.3     # уровень риска при найденном исключении × это значение
 RULE_EXCLUDED_CONFIDENCE = 0.6       # уверенность риска при найденном исключении (не выше)
 RULE_EXCLUSION_MAX_CHARS = 12000     # фрагментов документов в запросе к модели, символов
+RULE_EXCLUSION_MAX_TOKENS = 4000     # лимит ответа модели при перепроверке правил (модели с «мышлением» тратят часть)
 
 # ---------------------------------------------------------------- динамика риска (концепция, гл. 10–11)
 # События риска (11.7): изменение силы риска (уровень × уверенность) на столько — повышение / снижение
@@ -384,6 +462,22 @@ BENCHMARK_RISK_LEVEL = 0.4           # уровень FIN-001 (для разде
 PERIOD_SUMMARY_ENABLED = True
 PERIOD_SUMMARY_HOUR = 11
 PERIOD_SUMMARY_MINUTE = 23
+# Запись сводок периода в risk_monitoring_daily_runs (period_type = week / month): включить после миграции таблицы
+# (period_type, period_key, UNIQUE (period_type, export_date)) и доработки POST /api/risk-monitoring/daily-runs
+PERIOD_SUMMARY_PUSH_ENABLED = False
+
+# ── Рассуждение модели (configs/llm_resilience.py): prod_multimodal_llm тратила весь лимит ответа на рассуждение и
+# возвращала пустой ответ (02.11.2026). Выключаем рассуждение (chat_template_kwargs.enable_thinking = false); если
+# сервер его не выключает — один повтор с бо́льшим лимитом ответа
+LLM_DISABLE_THINKING = True
+LLM_THINKING_RETRY_MAX_TOKENS = 12000
+
+# ── Чтение Excel (configs/file_reader.py): потоково и с ограничениями — полная загрузка книги-сметы подвешивала
+# прогон (31.10.2026)
+EXCEL_MAX_ROWS = 300        # непустых строк на лист
+EXCEL_MAX_COLS = 60         # столбцов
+EXCEL_MAX_SHEETS = 20       # листов
+EXCEL_MAX_CHARS = 60_000    # символов всего (~20 тыс. токенов): смета на 300 тыс. символов — десятки запросов извлечения
 
 # ── Жалобы в профилях организаций (заявитель раскрывается только в жалобе; участники процедур в ЕИС скрыты)
 CUSTOMER_COMPLAINTS_JUSTIFIED_MIN = 2   # обоснованных жалоб на закупки заказчика за период → BEH-001
@@ -396,3 +490,7 @@ CHECK_LOOKBACK_DAYS = 365           # проверки за этот перио�
 CHECK_RISK_LEVELS = {"customer": 0.7, "other": 0.3}
 CHECK_PRESCRIPTION_BONUS = 0.1      # выдано предписание
 CUSTOMER_CHECK_VIOLATIONS_MIN = 1   # проверок заказчика с нарушениями → BEH-001
+
+# ── Оформление заключений ИИ (risk_monitoring/text_format.py): "plain" — абзацы и списки «— » без символов разметки
+# (читается и как простой текст, и как markdown); "markdown" — для интерфейса, который рендерит markdown
+AI_TEXT_FORMAT = "plain"

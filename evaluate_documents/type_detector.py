@@ -129,9 +129,14 @@ class TypeDetector:
                 logger.error(f"Таймаут при анализе '{filename}'")
                 return None
 
-            raw_response = response.choices[0].message.content.strip()
+            raw_response = (response.choices[0].message.content or "").strip()
+            if not raw_response:
+                # модель вернула пустой ответ (content = null, 02.11.2026: prod_multimodal_llm) — не исключение
+                logger.warning(f"Пустой ответ модели (определение типа) для '{filename}': "
+                               f"finish_reason={getattr(response.choices[0], 'finish_reason', None)}")
+                return None
             logger.info(f"Получен ответ длиной {len(raw_response)} символов для чанка '{filename}'")
-            logger.info(raw_response)
+            logger.debug(raw_response)  # полный ответ — только в отладке: журнал рос до 4,7 МБ за прогон (30.10.2026)
 
             # Парсим JSON
             try:

@@ -72,6 +72,58 @@ def _not_looping(result: Any) -> bool:
     return dedupe_repeats(copy.deepcopy(result))[1] < LOOP_MIN
 
 
+
+EXT_RE = re.compile(r"^\.[a-z0-9]{1,6}$")
+
+
+def file_ext(file_name: Optional[str], download_ext: Optional[str], path: Optional[str] = None) -> str:
+    """Расширение файла: из имени, если оно похоже на расширение; иначе из скачивания; иначе по содержимому.
+
+    Имена печатных форм ЕИС бывают без расширения и с точкой внутри («Печатная форма контракта № … (версия 1,
+    док. 17812043522260000230006)»): ``splitext`` давал «. 1781…0006)», и файл не читался.
+
+    Args:
+        file_name: Имя файла.
+        download_ext: Расширение, определённое при скачивании.
+        path: Путь к файлу (для определения по содержимому).
+
+    Returns:
+        str: Расширение с точкой, в нижнем регистре (``.bin`` — не определено).
+    """
+    ext = os.path.splitext(file_name or "")[1].lower()
+    if EXT_RE.match(ext):
+        return ext
+    ext = str(download_ext or "").lower()
+    if EXT_RE.match(ext) and ext != ".bin":
+        return ext
+    if path:
+        try:
+            with open(path, "rb") as f:
+                head = f.read(4096)
+        except OSError:
+            head = b""
+        low = head.lstrip()[:512].lower()
+        if low.startswith(b"%pdf"):
+            return ".pdf"
+        if b"<html" in low or low.startswith(b"<!doctype html"):
+            return ".html"
+        if low.startswith(b"<?xml"):
+            return ".html" if b"<html" in head.lower() else ".xml"
+        if low.startswith(b"{\\rtf"):
+            return ".rtf"
+        if head.startswith(b"\xd0\xcf\x11\xe0"):
+            return ".doc"
+        try:
+            from configs.utils import get_file_extension
+
+            sniffed = get_file_extension(content=head)
+            if EXT_RE.match(sniffed or ""):
+                return sniffed
+        except Exception:  # noqa: BLE001 — нет python-magic: формат не определён
+            pass
+    return ".bin"
+
+
 class FileUnavailable(Exception):
     """Файл не удалось скачать (ожидаемая ситуация, без traceback в логах)."""
 
@@ -1079,7 +1131,11 @@ class AIFileAnalyzer:
         try:
             sha = sha256_file(tmp_path)
             size = os.path.getsize(tmp_path)
-            ext = os.path.splitext(file_name)[1].lower() or res.get("file_extension") or ".bin"
+            ext = file_ext(file_name, res.get("file_extension"), tmp_path)
+            if os.path.splitext(file_name or "")[1].lower() != ext:
+                # имя без расширения («… (версия 1, док. 1781…0006)» у печатных форм): читатель берёт формат по
+                # имени, поэтому передаём имя с настоящим расширением (30.10.2026: «Неподдерживаемый формат»)
+                file_name = f"{file_name}{ext}"
             progress.note(f"файл скачан: {size / 1024:.0f} КБ, {ext}")
             doc = await self.repo.get_document_by_sha(sha)
             reuse = doc and doc["text"] and not self.recompute and (

@@ -88,6 +88,94 @@ class PeriodTest(unittest.TestCase):
         self.assertEqual(repo.saved, 1)
 
 
+class PeriodPushTest(unittest.TestCase):
+    """Запись сводки периода в risk_monitoring_daily_runs (period_type / period_key)."""
+
+    class Api:
+        """API внешней БД в памяти."""
+
+        def __init__(self, fail=False):
+            """Запросы и признак сбоя."""
+            self.calls, self.fail = [], fail
+
+        async def upsert_daily_run(self, export_date, status=None, **kw):
+            """POST daily-runs."""
+            if self.fail:
+                raise RuntimeError("422")
+            self.calls.append(("post", export_date, status, kw))
+            return {"id": 77}
+
+        async def patch_ai_analysis(self, table, rid, ai):
+            """PATCH ai-analysis."""
+            self.calls.append(("patch", table, rid, ai["period"]["key"]))
+
+    def test_format(self):
+        """period.type / key вместо kind / period; сравнение со сводкой прежнего формата."""
+        prev = {"period": {"kind": "week", "period": "2026-W42"}}
+        s = ps.build_period_summary("week", "2026-W43", {"2026-10-19": _daily("2026-10-19")}, prev,
+                                    today=date(2026, 10, 28))
+        self.assertEqual((s["period"]["type"], s["period"]["key"]), ("week", "2026-W43"))
+        self.assertNotIn("kind", s["period"])
+        self.assertEqual(s["comparison"]["period"], "2026-W42")
+
+    def test_push(self):
+        """Неделя — строка с последним днём периода, period_type и period_key, затем ai_analysis по id."""
+        api = self.Api()
+        s = {"period": {"key": "2026-10"}, "pipeline": {"status": "completed", "finished_at": "2026-11-01T11:30:00"}}
+        ok, err = asyncio.run(ps.push_period("stage", "month", "2026-10", s, api=api))
+        self.assertTrue(ok)
+        self.assertIsNone(err)
+        post, patch = api.calls
+        self.assertEqual(post[1:3], ("2026-10-31", "completed"))
+        self.assertEqual((post[3]["period_type"], post[3]["period_key"]), ("month", "2026-10"))
+        self.assertRegex(post[3]["finished_at"], r"[+-]\d\d:\d\d$")
+        self.assertEqual(patch, ("patch", "risk_monitoring_daily_runs", 77, "2026-10"))
+        ok, err = asyncio.run(ps.push_period("stage", "month", "2026-10", s, api=self.Api(fail=True)))
+        self.assertFalse(ok)
+        self.assertIn("422", err)
+
+    def test_backfill(self):
+        """Собранная, но не записанная сводка дозаписывается без пересборки; записанная — не отправляется снова."""
+        from unittest import mock
+
+        from risk_monitoring import daily
+
+        class Repo:
+            """Хранилище в памяти с признаком записи."""
+
+            def __init__(self):
+                """Одна ежедневная сводка."""
+                self.data = {(daily.KIND, daily.run_key("2026-10-19")): {"ai_analysis": _daily("2026-10-19")}}
+
+            async def get_rm_results(self, env, kind, ids):
+                """Результаты по id."""
+                return {i: self.data[(kind, i)] for i in ids if (kind, i) in self.data}
+
+            async def save_rm_result(self, env, kind, eid, ai, pushed, err):
+                """Сохранение."""
+                self.data[(kind, eid)] = {"ai_analysis": ai, "pushed": pushed}
+
+        repo, sent = Repo(), []
+
+        async def fake_push(env, kind, period, s, api=None):
+            """Отправка без сети."""
+            sent.append(period)
+            return True, None
+
+        run = lambda: asyncio.run(ps.run_period(repo, "stage", "week", "2026-W43", use_llm=False,  # noqa: E731
+                                                today=date(2026, 10, 28)))
+        with mock.patch.object(settings, "PERIOD_SUMMARY_PUSH_ENABLED", False):
+            s = run()
+        self.assertEqual(s["status"], "partial")
+        self.assertEqual(sent, [])
+        with mock.patch.object(settings, "PERIOD_SUMMARY_PUSH_ENABLED", True), \
+                mock.patch.object(ps, "push_period", fake_push):
+            self.assertTrue(run().get("unchanged"))
+            self.assertEqual(sent, ["2026-W43"])
+            run()
+            self.assertEqual(sent, ["2026-W43"])
+
+
 class ComplaintsTest(unittest.TestCase):
     """Жалобы: заявитель из XML, сводка документов одной жалобы, метрики и риски организаций."""
 

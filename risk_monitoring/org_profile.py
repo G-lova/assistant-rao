@@ -624,5 +624,9 @@ def default_resume(role: str, name: str, section: Dict[str, Any], settings: Any 
     """Резюме секции шаблоном (без модели): название и факты :func:`resume_facts`."""
     if settings is None:
         from configs import settings
+    from risk_monitoring import text_format
+
     who = "Заказчик" if role == "customer" else "Поставщик"
-    return f"{who} {name}. " + " ".join(resume_facts(role, section, settings))
+    facts = resume_facts(role, section, settings)
+    # факты — списком, итоговый балл — отдельным абзацем (формат заключений ИИ)
+    return text_format.compose(f"{who} {name}. {facts[-1]}", facts[:-1], intro="Основное:") if facts else f"{who} {name}."

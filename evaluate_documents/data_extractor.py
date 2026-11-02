@@ -1,5 +1,7 @@
 import asyncio
 import json
+
+from configs import settings
 import re
 from evaluate_documents.evidence_check import drop_nulls, verify_extraction
 from json_repair import repair_json
@@ -193,7 +195,7 @@ class DataExtractor:
                     ],
                     extra_body={
                         "guided_json": json.loads(schema)},
-                    max_tokens=3000,
+                    max_tokens=settings.EXTRACTION_MAX_TOKENS,
                     temperature=0
                 )
                 if penalize:  # повтор после зацикливания: штраф за повторяющиеся токены
@@ -203,9 +205,14 @@ class DataExtractor:
                 logger.error(f"Таймаут при анализе '{filename}'")
                 return None
 
-            raw_response = response.choices[0].message.content.strip()
+            raw_response = (response.choices[0].message.content or "").strip()
+            if not raw_response:
+                # модель вернула пустой ответ (content = null, 02.11.2026: prod_multimodal_llm) — не исключение
+                logger.warning(f"Пустой ответ модели (извлечение данных) для '{filename}': "
+                               f"finish_reason={getattr(response.choices[0], 'finish_reason', None)}")
+                return None
             logger.info(f"Получен ответ длиной {len(raw_response)} символов для чанка '{filename}'")
-            logger.info(raw_response)
+            logger.debug(raw_response)  # полный ответ — только в отладке: журнал рос до 4,7 МБ за прогон (30.10.2026)
 
             # Парсим JSON
             try:
@@ -634,13 +641,14 @@ class DataExtractor:
                             "content": "Сделай единое summary документа. 3-10 предложений."},
                         {"role": "user", "content": f"Вот summary каждого чанка:\n\n{summary_string}"}
                     ],
-                    max_tokens=3000,
+                    max_tokens=settings.EXTRACTION_MAX_TOKENS,
                     temperature=0
                 )
 
-                raw_response = response.choices[0].message.content.strip()
+                # пустой ответ модели — остаются summary частей
+                raw_response = (response.choices[0].message.content or "").strip() or summary_string
                 logger.info(f"Объединение summary для '{filename}'")
-                logger.info(raw_response)
+                logger.debug(raw_response)  # полный ответ — только в отладке: журнал рос до 4,7 МБ за прогон (30.10.2026)
 
                 merged["raw_data"]["summary"] = raw_response
 

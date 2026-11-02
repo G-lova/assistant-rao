@@ -468,12 +468,21 @@ async def _daily_run(environment: str, export_date: str, force: bool, push: bool
             return {"status": "already_done", "date": d, "summary": stored["ai_analysis"]}
         # и с force: два прогона одной даты параллельно делят документы и перезаписывают сводку друг друга
         # (21.10.2026: прогоны 21:58 и 22:16 шли одновременно)
-        if daily.running_fresh(stored):
-            logger.info(f"Ежедневный прогон {d} ({env}) уже идёт — второй не запускается")
-            return {"status": "already_running", "date": d}
-        run = daily.DailyRun(mgr, environment, repo, push_results=push, use_llm=use_llm, stages=stages)
-        summary = await run.run(d)
-        return {"status": "done", "date": d, "summary": summary}
+        # Идёт ли прогон — решает блокировка в Postgres, а не отметка «выполняется»: отметка с устаревшим пульсом не
+        # защищала от гонки (31.10.2026: два запуска за 2026-08-03 в 21:20:21), а со свежим пульсом после
+        # перезапуска воркера блокировала продолжение ещё 10 минут, хотя прогона уже не было (02.11.2026 12:01).
+        # Блокировка атомарная и снимается сама при падении процесса.
+        async with repo.advisory_lock(f"rm_daily:{env}:{d}") as got:
+            if not got:
+                logger.info(f"Ежедневный прогон {d} ({env}) уже идёт в другом процессе — второй не запускается")
+                return {"status": "already_running", "date": d}
+            stored = (await repo.get_rm_results(env, daily.KIND, [daily.run_key(d)])).get(daily.run_key(d))
+            if not force and daily.completed(stored):
+                # первый запуск закончил прогон, пока второй ждал в очереди
+                return {"status": "already_done", "date": d, "summary": stored["ai_analysis"]}
+            run = daily.DailyRun(mgr, environment, repo, push_results=push, use_llm=use_llm, stages=stages)
+            summary = await run.run(d)
+            return {"status": "done", "date": d, "summary": summary}
 
 
 def continuation_delay(status: str, chain: int, cfg: Any = None) -> Any:
@@ -609,6 +618,23 @@ def rm_daily_watchdog_task(self) -> Dict[str, Any]:
     return {k: v for k, v in out.items() if k != "summary"} if isinstance(out, dict) else out
 
 
+async def _run_alive(env: str, export_date: str) -> bool:
+    """Идёт ли прогон за дату: блокировку ``rm_daily:<env>:<дата>`` держит живой процесс.
+
+    Отметка «выполняется» со свежим пульсом остаётся и после перезапуска воркера — по ней продолжение ждало
+    устаревания пульса (02.11.2026). Если блокировку проверить не удалось — считаем, что прогон идёт.
+    """
+    from configs.ai_repo import AIRepo
+
+    try:
+        async with AIRepo() as repo:
+            async with repo.advisory_lock(f"rm_daily:{env}:{export_date}") as got:
+                return not got
+    except Exception as e:  # noqa: BLE001 — без проверки не запускаем второй прогон
+        logger.warning(f"Блокировка прогона {export_date} не проверена: {type(e).__name__}: {e}")
+        return True
+
+
 @celery_app.task(bind=True, name="rm_daily_resume_task", soft_time_limit=300, time_limit=360)
 def rm_daily_resume_task(self) -> Dict[str, Any]:
     """Страховка по расписанию (каждые ``DAILY_RESUME_EVERY_MIN`` минут): незавершённые ежедневные прогоны
@@ -643,7 +669,7 @@ def rm_daily_resume_task(self) -> Dict[str, Any]:
             ai = r["ai_analysis"] or {}
             d = ai.get("date") or daily.key_date(r["external_id"])
             pipe = ai.get("pipeline") or {}
-            if r["status"] == "running" and daily.running_fresh({"ai_analysis": ai}):
+            if r["status"] == "running" and await _run_alive(env, d):
                 skipped.append({"date": d, "reason": "идёт"})
                 continue
             age = (now - r["analyzed_at"]).total_seconds() if r.get("analyzed_at") else None

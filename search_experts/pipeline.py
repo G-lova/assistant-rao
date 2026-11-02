@@ -56,7 +56,9 @@ class ScoringPipeline:
             http_manager=http_manager
         )
         self.conflict_detector = ConflictDetector()
-        
+        self.environment = environment
+        self.embedding_model = embedding_config.model
+
         self.sql_queries_path = paths_config.sql_queries
     
     
@@ -110,16 +112,69 @@ class ScoringPipeline:
         return df
     
 
+    async def attach_org_guesses(self, df):
+        """
+        Восстанавливает ИНН места работы и диплома у кандидатов без реквизитов по справочнику организаций.
+
+        Добавляет столбцы ``expert_organization_inn_guess`` / ``expert_diplom_inn_guess`` и пояснения
+        ``expert_*_guess`` (``search_experts.org_directory``). Ошибка справочника подбор не останавливает:
+        такие эксперты проверяются по названиям.
+
+        Args:
+            df (pandas.DataFrame): Кандидаты.
+
+        Returns:
+            pandas.DataFrame: Датафрейм с восстановленными ИНН (или исходный).
+        """
+        from configs import settings
+        from search_experts import org_directory
+
+        if not settings.CONFLICT_ORG_DIRECTORY_ENABLED or not self._has_valid_experts(df):
+            return df
+        try:
+            from knowledge_store.scope import normalize_env
+            env = normalize_env(self.environment or settings.ENVIRONMENT)
+            directory = await org_directory.get_directory(env, self.data_fetcher)
+            return await asyncio.to_thread(org_directory.resolve_frame, df, directory,
+                                           settings.CONFLICT_ORG_DIRECTORY_THRESHOLD, settings.CONFLICT_ORG_DIRECTORY_MARGIN,
+                                           settings.CONFLICT_ORG_DIRECTORY_BRANCH_THRESHOLD)
+        except Exception as e:  # noqa: BLE001 — без справочника работает сравнение названий
+            logger.warning(f"Справочник организаций не применён: {type(e).__name__}: {e}")
+            return df
+
+    async def load_coauthors(self, df):
+        """
+        Загружает авторов публикаций кандидатов для проверки соавторства (``search_experts.coauthors``).
+
+        Результат — ``self.coauthor_publications`` (``expert_id`` → публикации с авторами); при выключенной проверке
+        или ошибке внутренней БД — пустой словарь (соавторство не проверяется, подбор продолжается).
+
+        Args:
+            df (pandas.DataFrame): Кандидаты.
+        """
+        from configs import settings
+        from search_experts import coauthors
+
+        self.coauthor_publications = {}
+        if not settings.CONFLICT_COAUTHORS_ENABLED or not self._has_valid_experts(df):
+            return
+        try:
+            from knowledge_store.scope import normalize_env
+            env = normalize_env(self.environment or settings.ENVIRONMENT)
+            self.coauthor_publications = await coauthors.load_coauthors(
+                env, df["expert_id"].dropna().astype(int).unique().tolist(), coauthors.min_year(settings.CONFLICT_COAUTHOR_YEARS))
+        except Exception as e:  # noqa: BLE001 — без публикаций соавторство не проверяется
+            logger.warning(f"Соавторы не загружены: {type(e).__name__}: {e}")
+
     def detect_conflicts(self, df):
         """
         Фильтрует экспертов, имеющих конфликт интересов с текущей экспертизой.
 
-        Применяет нечёткое сравнение (fuzzy matching) между текстом экспертизы и описанием эксперта,
-        а также сравнивает фамилию заказчика экспертизы с фамилиями экспертов в группе.
-
-        Исключает записи, где степень совпадения fuzzy matching превышает порог (85%), выявлены потенциальные семейные связи
-        или организация эксперта совпадает с заказчиком/исполнителем после снятия ОПФ
-        (`ConflictDetector.find_organization_conflicts`), что указывает на возможный конфликт.
+        Соавторство с контактным лицом или руководителем заказчика (``search_experts.coauthors``) — тоже конфликт.
+        Организации эксперта (место работы и организация, выдавшая диплом) сравниваются с заказчиком по ИНН/КПП,
+        если реквизиты есть у эксперта и заказчика, а без реквизитов — прежним методом по названиям (fuzzy matching
+        ≥ 85 % и сравнение без учёта ОПФ). Исполнитель контракта и ФИО сравниваются по названиям
+        (``ConflictDetector.organization_conflict_reasons``). Отдельно — возможные семейные связи по фамилиям.
 
         Args:
             df (pandas.DataFrame): Датафрейм с текстами и сходством.
@@ -129,19 +184,27 @@ class ScoringPipeline:
         """
         if not self._has_valid_experts(df):
             return df
-        
-        df['conflict_fuzzy'] = df.apply(self.conflict_detector.fuzzy_match, axis=1).astype(int)
-        conflict_ids = set(df.loc[df['conflict_fuzzy'] >= 85, 'expert_id'].unique())
+
+        reasons = self.conflict_detector.find_requisite_conflicts(df)
+        conflict_ids = set(reasons)
+        if reasons:
+            logger.info(f"Конфликт интересов с организациями экспертизы: {reasons}")
+            for col in ("expert_organization_guess", "expert_diplom_guess"):
+                if col in df.columns:
+                    notes = df.loc[df["expert_id"].isin(reasons) & df[col].notna(), ["expert_id", col]]
+                    for eid, note in notes.drop_duplicates().itertuples(index=False):
+                        logger.info(f"Эксперт {eid}: ИНН по справочнику ({col}): {note}")
 
         exclude_ids = self.conflict_detector.find_family_conflicts(df)
         if exclude_ids:
             conflict_ids |= exclude_ids
 
-        # место работы эксперта = заказчик или исполнитель (без учёта записи ОПФ: «ФГБОУ ВО» vs полная форма)
-        org_ids = self.conflict_detector.find_organization_conflicts(df)
-        if org_ids:
-            logger.info(f"Эксперты работают в организации заказчика/исполнителя: {org_ids}")
-            conflict_ids |= org_ids
+        # соавтор — контактное лицо или руководитель заказчика
+        from search_experts import coauthors
+        co = coauthors.customer_coauthor_conflicts(df, getattr(self, "coauthor_publications", {}) or {})
+        if co:
+            logger.info(f"Соавторство с заказчиком (coauthor_customer): {co}")
+            conflict_ids |= set(co)
 
         if conflict_ids:
             logger.info(f"Обнаружен конфликт интересов у экспертов: {conflict_ids}")
@@ -181,7 +244,41 @@ class ScoringPipeline:
         )
         
         df["similarity_embeddings"] = cosine_similarity(exp_emb, expert_embs).flatten()
+        df = await self.apply_publication_similarity(df, exp_emb[0])
         return df.sort_values(by="similarity_embeddings", ascending=False)
+
+    async def apply_publication_similarity(self, df, expertise_embedding):
+        """
+        Добавляет к сходству анкеты сходство публикаций и монографий эксперта (внутренняя БД, миграция 011).
+
+        Итог — ``(1 − w) × сходство анкеты + w × сходство публикаций`` (``settings.EXPERT_PUB_SIMILARITY_WEIGHT``);
+        эксперт без разобранных публикаций сохраняет сходство анкеты. Ошибка внутренней БД подбор не останавливает:
+        сходство остаётся прежним (предупреждение в журнале).
+
+        Args:
+            df (pandas.DataFrame): Кандидаты со столбцом 'similarity_embeddings'.
+            expertise_embedding: Эмбеддинг текста экспертизы.
+
+        Returns:
+            pandas.DataFrame: Датафрейм со столбцами 'similarity_profile', 'similarity_publications',
+            'publications_count', 'publication_top' и обновлённым 'similarity_embeddings'.
+        """
+        from configs import settings
+        from search_experts.publications import similarity
+
+        if not settings.EXPERT_PUB_SIMILARITY_ENABLED:
+            return df
+        try:
+            from knowledge_store.scope import normalize_env
+            env = normalize_env(self.environment or settings.ENVIRONMENT)
+            scores = await similarity.publication_scores(
+                env, df["expert_id"].dropna().astype(int).unique().tolist(), list(expertise_embedding), self.embedding_model)
+        except Exception as e:  # noqa: BLE001 — подбор работает и без публикаций
+            logger.warning(f"Сходство публикаций не учтено: {type(e).__name__}: {e}")
+            return df
+        if scores:
+            logger.info(f"Публикации учтены у {len(scores)} из {df['expert_id'].nunique()} кандидатов")
+        return similarity.blend(df, scores, settings.EXPERT_PUB_SIMILARITY_WEIGHT)
     
 
     def detect_nepotism(self, df):
@@ -195,6 +292,9 @@ class ScoringPipeline:
         например «Иванов» / «Иванова»). При обнаружении такой пары исключается эксперт
         с более низким значением метрики `similarity_embeddings`, что предполагает
         его меньшую релевантность или соответствие требованиям экспертизы.
+
+        Так же разрешаются пары кандидатов-соавторов (``search_experts.coauthors.expert_coauthor_pairs``):
+        остаётся эксперт с большим сходством.
 
         После определения идентификаторов экспертов для исключения, соответствующие строки
         удаляются из переданного датафрейма.
@@ -219,6 +319,14 @@ class ScoringPipeline:
         if exclude_ids:
             logger.info(f"Обнаружена семейственность у экспертов: {exclude_ids}")
             experts_to_exclude |= exclude_ids
+
+        # кандидаты-соавторы: остаётся более подходящий (coauthor_expert)
+        from search_experts import coauthors
+        pairs = coauthors.expert_coauthor_pairs(df, getattr(self, "coauthor_publications", {}) or {})
+        if pairs:
+            excluded = coauthors.exclude_coauthor_pairs(df, pairs)
+            logger.info(f"Соавторство кандидатов (coauthor_expert): пары {pairs}, исключены {excluded}")
+            experts_to_exclude |= excluded
 
         df = df[~df["expert_id"].isin(experts_to_exclude)]
         return df
@@ -277,6 +385,12 @@ class ScoringPipeline:
             # Предобработка
             df = await asyncio.to_thread(self.preprocess_data, df)
             
+            # ИНН организаций экспертов без реквизитов — из справочника организаций
+            df = await self.attach_org_guesses(df)
+
+            # Соавторы кандидатов (публикации во внутренней БД)
+            await self.load_coauthors(df)
+
             # Обнаружение конфликтов
             df = await asyncio.to_thread(self.detect_conflicts, df)
             
@@ -399,6 +513,10 @@ class ScoringPipeline:
                         "total_rate": f"{round(row.scoring * 100, 2)}",
                         "predict_rate": None, # добавить предсказание модели, когда будет реализовано
                         "semantic_rate": f"{round(row.similarity_embeddings * 100, 2)}",
+                        # сходство публикаций и самая близкая публикация (None — публикаций нет или учёт выключен)
+                        "publication_rate": None if pd.isna(getattr(row, "similarity_publications", float("nan")))
+                        else f"{round(row.similarity_publications * 100, 2)}",
+                        "publication_top": getattr(row, "publication_top", None),
                         "distance_rate": f"{round(row.distance_rate * 100, 2)}",
                         "criterion_rate": None if pd.isna(row.criterion_rating) else f"{round(row.criterion_rating * 100, 2)}",
                         "div_rate": f"{round(row.avg_rating * 100, 2)}",
