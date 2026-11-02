@@ -74,10 +74,24 @@ class EISParser:
             return None
 
 
+    @staticmethod
+    def _eis_no_data(response_dict: Dict) -> bool:
+        """Ответ ЕИС «данных нет» (``dataInfo/noData = true``) — штатная ситуация, а не ошибка."""
+        try:
+            body = (response_dict.get('soap:Envelope') or {}).get('soap:Body') or {}
+            for key, value in body.items():
+                if 'Response' in key and isinstance(value, dict):
+                    info = value.get('dataInfo')
+                    if isinstance(info, dict) and str(info.get('noData', '')).lower() == 'true':
+                        return True
+        except AttributeError:
+            return False
+        return False
+
     def _extract_eis_archive_url(self, response_dict: Dict) -> Optional[str]:
         """Извлекает URL архива из ответа SOAP API ЕИС"""
         try:
-            logger.info(f"Попытка извлечения URL архива из ответа: {json.dumps(response_dict, indent=2, ensure_ascii=False)}")
+            logger.debug(f"Попытка извлечения URL архива из ответа: {json.dumps(response_dict, indent=2, ensure_ascii=False)}")
 
             # Основная структура SOAP ответа
             envelope = response_dict.get('soap:Envelope', {})
@@ -122,7 +136,10 @@ class EISParser:
                             
                     
 
-            logger.error("Не удалось найти URL архива в ответе ЕИС")
+            if self._eis_no_data(response_dict):
+                logger.info("ЕИС: данных за запрошенный период нет (noData)")
+            else:
+                logger.error("Не удалось найти URL архива в ответе ЕИС")
             return None
 
         except Exception as e:
@@ -311,9 +328,8 @@ class EISParser:
                     return {"status": "error", "error": f"SOAP ошибка: {response.status}", "eis_response": {}}
 
                 soap_response = await response.text()
-                logger.info(f"Ответ ЕИС: {soap_response}")
+                logger.debug(f"Ответ ЕИС: {soap_response}")
                 response_content = await asyncio.to_thread(xmltodict.parse, soap_response)
-                print(response_content)
 
             # === 4. Парсим archiveUrl ===
             archive_url = self._extract_eis_archive_url(response_content)
@@ -328,6 +344,7 @@ class EISParser:
                 return {
                     "status": "error", 
                     "error": "Не найден archiveUrl в ответе ЕИС",
+                    "no_data": self._eis_no_data(response_content),
                     "eis_response": response_content
                     }
 

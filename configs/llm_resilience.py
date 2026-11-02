@@ -224,17 +224,60 @@ async def _create(client: Any, stream: bool, kwargs: Dict[str, Any]) -> str:
     c = client.with_options(max_retries=0) if hasattr(client, "with_options") else client
     if not stream:
         resp = await c.chat.completions.create(**kwargs)
-        return resp.choices[0].message.content or ""
+        return _log_empty(kwargs, resp.choices[0].message.content or "", resp.choices[0])
     parts: List[str] = []
     resp = await c.chat.completions.create(**kwargs, stream=True)
     if not hasattr(resp, "__aiter__"):  # сервер или обёртка вернули обычный ответ
-        return resp.choices[0].message.content or ""
+        return _log_empty(kwargs, resp.choices[0].message.content or "", resp.choices[0])
+    finish, reasoning = None, 0
     async for chunk in resp:
         if getattr(chunk, "choices", None):
-            delta = getattr(chunk.choices[0], "delta", None)
-            if delta is not None and getattr(delta, "content", None):
+            choice = chunk.choices[0]
+            finish = getattr(choice, "finish_reason", None) or finish
+            delta = getattr(choice, "delta", None)
+            if delta is None:
+                continue
+            if getattr(delta, "content", None):
                 parts.append(delta.content)
-    return "".join(parts)
+            r = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
+            if isinstance(r, str):
+                reasoning += len(r)
+    return _log_empty(kwargs, "".join(parts), None, finish, reasoning)
+
+
+def _log_empty(kwargs: Dict[str, Any], text: str, choice: Any = None, finish: Any = None,
+               reasoning: int = 0) -> str:
+    """Возвращает текст ответа; пустой ответ записывает в журнал с причиной окончания и длиной рассуждения.
+
+    Пустой ``content`` при ``finish_reason = length`` и длинном рассуждении — модель потратила лимит
+    ``max_tokens`` на рассуждение; ``stop`` без рассуждения — сервер не применил схему ответа или модель ответила
+    пусто (02.11.2026: prod_multimodal_llm, около половины ответов пустые).
+
+    Args:
+        kwargs: Параметры запроса (``model``, ``max_tokens``, схема).
+        text: Текст ответа.
+        choice: ``choices[0]`` обычного ответа (из него берутся причина и рассуждение).
+        finish: Причина окончания потокового ответа.
+        reasoning: Длина рассуждения в потоковом ответе.
+
+    Returns:
+        str: ``text`` без изменений.
+    """
+    if not text:
+        if choice is not None:
+            finish = getattr(choice, "finish_reason", None)
+            msg = getattr(choice, "message", None)
+            r = getattr(msg, "reasoning_content", None) or getattr(msg, "reasoning", None)
+            reasoning = len(r) if isinstance(r, str) else 0
+        logger.warning(f"LLM {kwargs.get('model')}: пустой ответ (finish_reason={finish}, рассуждение {reasoning} "
+                       f"симв., max_tokens={kwargs.get('max_tokens')}, схема={'да' if _has_schema(kwargs) else 'нет'})")
+    return text
+
+
+def _has_schema(kwargs: Dict[str, Any]) -> bool:
+    """Запрос со схемой ответа (``guided_json`` / ``response_format``)."""
+    extra = kwargs.get("extra_body") or {}
+    return bool(extra.get("guided_json") or kwargs.get("response_format") or extra.get("response_format"))
 
 
 async def call_llm(client: Any, retries: int = len(RETRY_DELAYS) + 1, **kwargs: Any) -> str:

@@ -785,6 +785,68 @@ class ModelRestartTest(unittest.TestCase):
         self.assertFalse(OCR_ERROR_RE.search("Страница 1:\nСтатус заявки: ошибка заполнения"))
 
 
+class ModelOutageTest(unittest.TestCase):
+    """Сбой и пустые ответы модели (01–02.11.2026): 503 при OCR и content = null не роняют чтение и анализ."""
+
+    def test_ocr_503_marker(self):
+        """OCR страницы при 503 — метка ошибки, а не None (раньше чтение PDF падало на .strip())."""
+        import asyncio
+        import tempfile
+        import types
+        from unittest import mock
+
+        from tests.stubs import stubbed_import
+
+        class Unavailable(Exception):
+            """503 сервера модели."""
+            status_code = 503
+
+        async def fail(*a, **kw):
+            """Сервер модели недоступен."""
+            raise Unavailable("No running instances available")
+
+        with stubbed_import("risk_monitoring.pdf_text") as pt, stubbed_import("risk_monitoring.llm_json") as lj:
+            proc = types.SimpleNamespace(client=None, model="m", ocr_prompt="p", OCR_SCHEMA={}, rate_limiter=None)
+            with tempfile.NamedTemporaryFile(suffix=".jpg") as f, mock.patch.object(lj, "call_llm", fail):
+                f.write(b"\xff\xd8\xff")
+                f.flush()
+                out = asyncio.run(pt.ocr_image(proc, f.name, "доп соглашение.pdf", 1.0))
+        self.assertEqual(out, "[Ошибка при анализе изображения]")
+
+    def test_empty_answer_logged(self):
+        """Пустой ответ модели записывается с причиной окончания и длиной рассуждения; текст не меняется."""
+        import types
+
+        from tests.stubs import stubbed_import
+
+        with stubbed_import("configs.llm_resilience") as lr:
+            choice = types.SimpleNamespace(finish_reason="length",
+                                           message=types.SimpleNamespace(content=None, reasoning_content="x" * 900))
+            kw = {"model": "prod_multimodal_llm", "max_tokens": 4000, "extra_body": {"guided_json": {}}}
+            with self.assertLogs(lr.logger, level="WARNING") as logs:
+                self.assertEqual(lr._log_empty(kw, "", choice), "")
+            self.assertIn("finish_reason=length, рассуждение 900", logs.output[0])
+            self.assertEqual(lr._log_empty(kw, "{}", choice), "{}")
+
+
+class EisNoDataTest(unittest.TestCase):
+    """Ответ ЕИС «данных нет» (dataInfo/noData, типовые положения 02.11.2026) — не ошибка."""
+
+    def test_no_data(self):
+        """noData = true распознаётся; ответ с archiveUrl и пустой ответ — нет."""
+        from tests.stubs import stubbed_import
+
+        def resp(info):
+            """SOAP-ответ ЕИС."""
+            return {"soap:Envelope": {"soap:Body": {"ns3:getDocsByOrgRegionResponse": {"dataInfo": info}}}}
+
+        with stubbed_import("configs.eis_parsing") as ep:
+            cls = next(v for v in vars(ep).values() if isinstance(v, type) and hasattr(v, "_eis_no_data"))
+            self.assertTrue(cls._eis_no_data(resp({"noData": "true"})))
+            self.assertFalse(cls._eis_no_data(resp({"archiveUrl": "https://int.zakupki.gov.ru/a.zip"})))
+            self.assertFalse(cls._eis_no_data({}))
+
+
 class EventRiskShapeTest(unittest.TestCase):
     """XML 3209 (15.10.2026): модель вернула verification_needed = 1 — событие падало с TypeError."""
 

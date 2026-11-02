@@ -205,7 +205,12 @@ class DataExtractor:
                 logger.error(f"Таймаут при анализе '{filename}'")
                 return None
 
-            raw_response = response.choices[0].message.content.strip()
+            raw_response = (response.choices[0].message.content or "").strip()
+            if not raw_response:
+                # модель вернула пустой ответ (content = null, 02.11.2026: prod_multimodal_llm) — не исключение
+                logger.warning(f"Пустой ответ модели (извлечение данных) для '{filename}': "
+                               f"finish_reason={getattr(response.choices[0], 'finish_reason', None)}")
+                return None
             logger.info(f"Получен ответ длиной {len(raw_response)} символов для чанка '{filename}'")
             logger.debug(raw_response)  # полный ответ — только в отладке: журнал рос до 4,7 МБ за прогон (30.10.2026)
 
@@ -640,7 +645,8 @@ class DataExtractor:
                     temperature=0
                 )
 
-                raw_response = response.choices[0].message.content.strip()
+                # пустой ответ модели — остаются summary частей
+                raw_response = (response.choices[0].message.content or "").strip() or summary_string
                 logger.info(f"Объединение summary для '{filename}'")
                 logger.debug(raw_response)  # полный ответ — только в отладке: журнал рос до 4,7 МБ за прогон (30.10.2026)
 
