@@ -62,6 +62,52 @@ def _org_tokens(text):
     return tokens
 
 
+def normalize_inn(value):
+    """
+    Приводит ИНН к строке из 10 (юрлицо) или 12 (ИП, физлицо) цифр.
+
+    Значение из БД может прийти числом (``7106003011.0`` после pandas) или с пробелами.
+
+    Args:
+        value (str | int | float | Any): ИНН.
+
+    Returns:
+        str | None: ИНН или ``None``, если значение пустое, некорректной длины или из одних нулей.
+    """
+    if value is None or (isinstance(value, float) and value != value):
+        return None
+    text = str(value).strip()
+    if re.fullmatch(r"\d+\.0", text):
+        text = text[:-2]
+    digits = re.sub(r"\D", "", text)
+    if len(digits) in (9, 11):   # ведущий ноль потерян при выгрузке числом (ИНН регионов 01–09)
+        digits = "0" + digits
+    if len(digits) not in (10, 12) or not digits.strip("0"):
+        return None
+    return digits
+
+
+def normalize_kpp(value):
+    """
+    Приводит КПП к 9 знакам (цифры; 5–6-й знаки могут быть заглавными латинскими буквами).
+
+    Args:
+        value (str | int | float | Any): КПП.
+
+    Returns:
+        str | None: КПП или ``None``, если значение пустое или некорректное.
+    """
+    if value is None or (isinstance(value, float) and value != value):
+        return None
+    text = str(value).strip().upper()
+    if re.fullmatch(r"\d+\.0", text):
+        text = text[:-2]
+    text = re.sub(r"\s", "", text)
+    if len(text) == 8 and text.isdigit():   # ведущий ноль потерян при выгрузке числом
+        text = "0" + text
+    return text if re.fullmatch(r"[0-9]{4}[0-9A-Z]{2}[0-9]{3}", text) and text.strip("0") else None
+
+
 def _same_token(a, b):
     """
     Сравнивает два слова с допуском на опечатку.
@@ -169,6 +215,134 @@ class ConflictDetector:
                     or ConflictDetector.same_organization(row.expert_organization, row.exucutorContract):
                 to_exclude.add(row.expert_id)
         return to_exclude
+
+    @staticmethod
+    def requisites_match(inn_a, kpp_a, inn_b, kpp_b):
+        """
+        Сравнивает организации по реквизитам (ИНН, КПП).
+
+        ИНН определяет юридическое лицо, КПП — его подразделение: у головной организации причина постановки
+        на учёт «01», у филиала — «43», у обособленного подразделения — «45» (5–6-й знаки КПП). Филиалы
+        зарегистрированы в системе отдельными заказчиками с тем же ИНН (234 повтора ИНН среди заказчиков, 02.11.2026).
+
+        Args:
+            inn_a: ИНН первой организации (например, места работы эксперта).
+            kpp_a: КПП первой организации.
+            inn_b: ИНН второй организации (например, заказчика экспертизы).
+            kpp_b: КПП второй организации.
+
+        Returns:
+            str | None | bool: ``None`` — у одной из сторон нет корректного ИНН (сравнивать по реквизитам нельзя);
+            ``False`` — разные юридические лица; ``"same"`` — тот же ИНН и тот же КПП (или КПП неизвестен);
+            ``"branch"`` — тот же ИНН, другой КПП (головная организация и филиал одного юрлица).
+        """
+        a, b = normalize_inn(inn_a), normalize_inn(inn_b)
+        if not a or not b:
+            return None
+        if a != b:
+            return False
+        ka, kb = normalize_kpp(kpp_a), normalize_kpp(kpp_b)
+        return "branch" if ka and kb and ka != kb else "same"
+
+    @staticmethod
+    def _requisites_conflict(match):
+        """Считается ли совпадение реквизитов конфликтом (филиал — только при ``CONFLICT_INN_SAME_KPP_ONLY = False``)."""
+        if match == "same":
+            return True
+        if match == "branch":
+            from configs import settings
+            return not getattr(settings, "CONFLICT_INN_SAME_KPP_ONLY", False)
+        return False
+
+    @staticmethod
+    def organization_conflict_reasons(row):
+        """
+        Причины конфликта интересов эксперта с организациями экспертизы.
+
+        Место работы и организация, выдавшая диплом, сравниваются с заказчиком по ИНН/КПП, если реквизиты есть у
+        обеих сторон; иначе — прежним методом по названиям:
+
+        - место работы ↔ заказчик: ИНН/КПП, без реквизитов — ``fuzz.ratio`` ≥ 85 и ``same_organization``;
+        - диплом ↔ заказчик: ИНН/КПП, без реквизитов — прежнее сравнение ``fuzz.ratio`` (≥ 85);
+        - место работы ↔ исполнитель контракта: только по названиям (ИНН исполнителя в экспертизе нет);
+        - ФИО эксперта ↔ контакт заказчика, заказчик, исполнитель: по названиям всегда (это не реквизиты организаций).
+
+        Если реквизиты есть и не совпали, сравнение этой пары по названиям не выполняется: ИНН точнее, а нечёткое
+        сравнение названий даёт ложные совпадения. ``fuzz.ratio`` названий организаций по целой строке выключается
+        ``settings.CONFLICT_ORG_NAME_FUZZY = False`` (остаётся сравнение без учёта ОПФ ``same_organization``).
+
+        Args:
+            row (pandas.Series | dict): Строка кандидата: expert_name, expertise_name, expert_organization,
+                expertise_organization, exucutorContract, expert_diplom (названия нормализованы
+                ``TextProcessor.normalize_text``) и реквизиты expertise_inn, expertise_kpp, expert_organization_inn,
+                expert_organization_kpp, expert_diplom_inn, expert_diplom_kpp (могут отсутствовать).
+
+        Returns:
+            list[str]: Причины: ``inn_work``, ``inn_work_branch``, ``inn_diplom``, ``inn_diplom_branch``,
+            ``name_work``, ``name_diplom``, ``name_executor``, ``name_person``; пустой список — конфликта нет.
+        """
+        get = row.get if hasattr(row, "get") else (lambda k, d=None: getattr(row, k, d))
+
+        def ratio(a, b):
+            # пустое поле с пустым не «совпадает» (fuzzywuzzy и так даёт 0 — защита от другой реализации ratio)
+            va, vb = get(a), get(b)
+            if not isinstance(va, str) or not isinstance(vb, str) or not va.strip() or not vb.strip():
+                return 0
+            return fuzz.ratio(va, vb)
+
+        reasons = []
+        cust_inn, cust_kpp = get("expertise_inn"), get("expertise_kpp")
+
+        # место работы ↔ заказчик
+        work = ConflictDetector.requisites_match(get("expert_organization_inn"), get("expert_organization_kpp"), cust_inn, cust_kpp)
+        from configs import settings
+        org_fuzzy = getattr(settings, "CONFLICT_ORG_NAME_FUZZY", True)
+        if work is None:
+            fuzzy_hit = org_fuzzy and max(ratio("expertise_name", "expert_organization"),
+                                          ratio("expert_organization", "expertise_organization")) >= 85
+            if fuzzy_hit or ConflictDetector.same_organization(get("expert_organization"), get("expertise_organization")):
+                reasons.append("name_work")
+        elif ConflictDetector._requisites_conflict(work):
+            reasons.append("inn_work" if work == "same" else "inn_work_branch")
+
+        # диплом ↔ заказчик
+        diplom = ConflictDetector.requisites_match(get("expert_diplom_inn"), get("expert_diplom_kpp"), cust_inn, cust_kpp)
+        if diplom is None:
+            if ratio("expertise_name", "expert_diplom") >= 85:
+                reasons.append("name_diplom")
+        elif ConflictDetector._requisites_conflict(diplom):
+            reasons.append("inn_diplom" if diplom == "same" else "inn_diplom_branch")
+
+        # место работы ↔ исполнитель контракта (реквизитов исполнителя нет)
+        if (org_fuzzy and ratio("expert_organization", "exucutorContract") >= 85) \
+                or ConflictDetector.same_organization(get("expert_organization"), get("exucutorContract")):
+            reasons.append("name_executor")
+
+        # ФИО эксперта ↔ контакт заказчика, заказчик, исполнитель (ИП)
+        if max(ratio("expert_name", "expertise_name"), ratio("expert_name", "expertise_organization"),
+               ratio("expert_name", "exucutorContract")) >= 85:
+            reasons.append("name_person")
+        return reasons
+
+    @staticmethod
+    def find_requisite_conflicts(group):
+        """
+        Эксперты с конфликтом интересов с организациями экспертизы и причины
+        (:meth:`organization_conflict_reasons` для каждой строки).
+
+        Args:
+            group (pandas.DataFrame): Кандидаты одной экспертизы.
+
+        Returns:
+            dict: ``expert_id`` → список причин; только эксперты с конфликтом.
+        """
+        out = {}
+        for _, row in group.iterrows():
+            reasons = ConflictDetector.organization_conflict_reasons(row)
+            if reasons:
+                out.setdefault(row["expert_id"], [])
+                out[row["expert_id"]] += [r for r in reasons if r not in out[row["expert_id"]]]
+        return out
 
     @staticmethod
     def fuzzy_match(row):

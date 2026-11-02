@@ -116,12 +116,10 @@ class ScoringPipeline:
         """
         Фильтрует экспертов, имеющих конфликт интересов с текущей экспертизой.
 
-        Применяет нечёткое сравнение (fuzzy matching) между текстом экспертизы и описанием эксперта,
-        а также сравнивает фамилию заказчика экспертизы с фамилиями экспертов в группе.
-
-        Исключает записи, где степень совпадения fuzzy matching превышает порог (85%), выявлены потенциальные семейные связи
-        или организация эксперта совпадает с заказчиком/исполнителем после снятия ОПФ
-        (`ConflictDetector.find_organization_conflicts`), что указывает на возможный конфликт.
+        Организации эксперта (место работы и организация, выдавшая диплом) сравниваются с заказчиком по ИНН/КПП,
+        если реквизиты есть у эксперта и заказчика, а без реквизитов — прежним методом по названиям (fuzzy matching
+        ≥ 85 % и сравнение без учёта ОПФ). Исполнитель контракта и ФИО сравниваются по названиям
+        (``ConflictDetector.organization_conflict_reasons``). Отдельно — возможные семейные связи по фамилиям.
 
         Args:
             df (pandas.DataFrame): Датафрейм с текстами и сходством.
@@ -131,19 +129,15 @@ class ScoringPipeline:
         """
         if not self._has_valid_experts(df):
             return df
-        
-        df['conflict_fuzzy'] = df.apply(self.conflict_detector.fuzzy_match, axis=1).astype(int)
-        conflict_ids = set(df.loc[df['conflict_fuzzy'] >= 85, 'expert_id'].unique())
+
+        reasons = self.conflict_detector.find_requisite_conflicts(df)
+        conflict_ids = set(reasons)
+        if reasons:
+            logger.info(f"Конфликт интересов с организациями экспертизы: {reasons}")
 
         exclude_ids = self.conflict_detector.find_family_conflicts(df)
         if exclude_ids:
             conflict_ids |= exclude_ids
-
-        # место работы эксперта = заказчик или исполнитель (без учёта записи ОПФ: «ФГБОУ ВО» vs полная форма)
-        org_ids = self.conflict_detector.find_organization_conflicts(df)
-        if org_ids:
-            logger.info(f"Эксперты работают в организации заказчика/исполнителя: {org_ids}")
-            conflict_ids |= org_ids
 
         if conflict_ids:
             logger.info(f"Обнаружен конфликт интересов у экспертов: {conflict_ids}")
