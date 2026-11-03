@@ -157,6 +157,41 @@ def verify(checks: Sequence[Dict[str, Any]], keys: Sequence[str], texts: Dict[in
     return out
 
 
+def data_checks(values: Optional[Dict[str, Any]], passport: Optional[Dict[str, Any]],
+                cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, Any]]:
+    """Исключения по полям паспорта закупки (блок ``data_exclusions`` справочника), без модели.
+
+    Например, FIN-005 (``pz_p2``, «обеспечение исполнения не установлено / минимальное») при закупке у единственного
+    поставщика (ч. 1 ст. 93 44-ФЗ): обеспечение законно не требуется (ч. 2 ст. 96), поэтому риск понижается так же,
+    как при исключении, найденном в документах. Показатели, решённые здесь, модели не отправляются.
+
+    Args:
+        values: Значения показателей закупки.
+        passport: Паспорт закупки (``method_code`` — код способа ``izvejenie.vidz_code``, ``method`` — название).
+        cfg: Справочник (по умолчанию — ``config/rule_exclusions.json``).
+
+    Returns:
+        Dict[str, Dict[str, Any]]: ``показатель → rule_check`` со статусом ``excluded``; пусто — исключений нет.
+    """
+    cfg = cfg or load_config()
+    passport = passport or {}
+    code, name = str(passport.get("method_code") or "").strip(), str(passport.get("method") or "").strip()
+    out: Dict[str, Dict[str, Any]] = {}
+    for key, rules in (cfg.get("data_exclusions") or {}).items():
+        if not _fired((values or {}).get(key)):
+            continue
+        for exc in rules:
+            by_code = bool(code and exc.get("method_code_re") and re.search(exc["method_code_re"], code, re.I))
+            by_name = bool(name and exc.get("method_re") and re.search(exc["method_re"], name, re.I))
+            if not (by_code or by_name):
+                continue
+            out[key] = {"status": "excluded", "reason": f"Способ закупки: {name or code}.", "version": cfg.get("version"),
+                        "exclusion_id": exc["id"], "exclusion": exc["title"], "norm": exc["norm"],
+                        "evidence": {"src": "eis", "field": "method", "fragment": name or code}}
+            break
+    return out
+
+
 def apply_checks(risks: List[Dict[str, Any]], checks: Dict[str, Dict[str, Any]], settings: Any) -> int:
     """Блок ``rule_check`` у рисков сработавших показателей; при исключении — понижение уровня и уверенности.
 

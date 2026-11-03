@@ -202,6 +202,23 @@ def no_risk_by_name(file_name: Optional[str]) -> bool:
     return bool(NO_RISK_NAME_RE.search(file_name or ""))
 
 
+def is_execution_document(row: Dict[str, Any]) -> bool:
+    """Документ исполнения контракта: вложение XML ``contractProcedure`` (акты, УПД, счета, платёжки …).
+
+    Риски содержания документации (DOC, AI) в нём не ищутся: требований к участникам в таких документах нет,
+    а модель находила «противоречия» в суммах и сроках актов — у закупки 1535 105 таких файлов, DOC-006 / DOC-007
+    в каждом (03.11.2026). Исполнение проверяется по событиям ЕИС (CTR-015…CTR-024).
+
+    Args:
+        row: Строка файла (``source_xml_tag`` / ``source_xml_type`` / ``xml_source_type``, ``owner_type``).
+
+    Returns:
+        bool: ``True`` для документа исполнения.
+    """
+    tag = row.get("source_xml_tag") or row.get("source_xml_type") or row.get("xml_source_type")
+    return bool(tag) and xml_group(tag, row.get("owner_type")) == "execution"
+
+
 def allowed_codes(detected_type: str, print_group: Optional[str] = None) -> List[str]:
     """Коды рисков, которые ищутся в тексте документа данного типа.
 

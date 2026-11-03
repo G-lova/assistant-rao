@@ -5,6 +5,8 @@ SELECT
     f.id,
     f.risk_monitoring_contract_id AS card_id,
     f.xml_source_id,
+    f.owner_type,
+    f.xml_source_type,
     f.file_name,
     f.eis_version,
     f.download_status,

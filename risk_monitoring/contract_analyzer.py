@@ -462,21 +462,29 @@ class ContractAnalyzer:
         """
         from risk_monitoring import rule_exclusions as rx
 
-        if not settings.RULE_EXCLUSION_CHECK_ENABLED or self.llm is None or not rx.fired_with_exclusions(
-                item.get("values"), suspect=settings.RULE_SUSPECT_INDICATORS):
+        if not settings.RULE_EXCLUSION_CHECK_ENABLED:
             return {}
+        # Исключения по полям паспорта (например, FIN-005 при ЕП) — без модели; такие показатели модели не отправляются
+        by_data = rx.data_checks(item.get("values"), built.get("passport"))
+        if by_data:
+            rx.apply_checks(built["risks"], by_data, settings)
+            built["rule_checks"] = dict(by_data)
+        values = {k: v for k, v in (item.get("values") or {}).items() if k not in by_data}
+        if self.llm is None or not rx.fired_with_exclusions(values, suspect=settings.RULE_SUSPECT_INDICATORS):
+            return by_data
         try:
             async with progress.step("перепроверка сработавших правил по документам (исключения)") as st:
                 if texts is None:
                     texts = await self._texts(item["files"])
                 names = {int(f["id"]): f.get("file_name") for f in item["files"] if f.get("id") is not None}
                 titles = {k: risk_catalog.title(c) for k, c in cp.INDICATOR_TO_CODE.items()}
-                checks = await rx.check_rules(self.llm, item.get("values"), texts, names, settings, titles)
+                checks = await rx.check_rules(self.llm, values, texts, names, settings, titles)
                 lowered = rx.apply_checks(built["risks"], checks, settings)
                 st["detail"] = f"показателей {len(checks)}, исключений {lowered}"
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Перепроверка правил не выполнена: {type(e).__name__}: {e}")
-            return {}
+            return by_data
+        checks = {**checks, **by_data}
         if checks:
             built["rule_checks"] = checks
         return checks

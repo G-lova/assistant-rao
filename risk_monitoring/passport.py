@@ -214,10 +214,28 @@ def primary_source(sources: Iterable[str]) -> Optional[str]:
     return next((s for s in SOURCE_PRIORITY if s in norm), next(iter(sorted(norm)), None))
 
 
+def _model_only(r: Dict[str, Any]) -> bool:
+    """Риск найден только моделью (все его источники — ``ai_file`` / ``ai_event`` / ``ai`` / ``version_diff``).
+
+    Риск без источников считается не модельным: так ведут себя риски правил, у которых источник не указан.
+
+    Args:
+        r: Риск во внешнем формате.
+
+    Returns:
+        bool: ``True``, если других источников нет.
+    """
+    srcs = {s for s in list(r.get("sources") or []) + [r.get("source")] if s}
+    return bool(srcs) and srcs <= AI_ONLY_SOURCES | {"version_diff"}
+
+
 def merge_risks(*lists: Iterable[Dict[str, Any]], fz: Any = None) -> List[Dict[str, Any]]:
     """Объединяет списки рисков по ``rule_id`` и дополняет их сведениями каталога.
 
-    Уровень и уверенность — максимум; описания — первое непустое (остальные не теряются в evidence);
+    Уровень — максимум по рискам правил (реестр, правило, комплект, аналитика), если такие есть: ИИ работает поверх
+    правил и не повышает их уровень (событие «цена контракта изменена на 3 %» — правило 0,5, модель ставила 0,9;
+    03.11.2026). Если правил по коду нет — максимум по рискам модели. Уверенность — максимум;
+    описания — первое непустое (остальные не теряются в evidence);
     цитаты и действия эксперта — объединение без повторов; ``sources`` — все источники риска, ``source`` — главный
     из них (:func:`primary_source`).
     Риски, неприменимые к закону закупки (ст. 111 44-ФЗ для 223-ФЗ), отбрасываются.
@@ -230,11 +248,14 @@ def merge_risks(*lists: Iterable[Dict[str, Any]], fz: Any = None) -> List[Dict[s
         List[Dict[str, Any]]: По одному риску на код, по убыванию ``level × confidence``.
     """
     merged: Dict[str, Dict[str, Any]] = {}
+    rule_levels: Dict[str, float] = {}
     for lst in lists:
         for r in lst or []:
             code = r.get("rule_id")
             if not code:
                 continue
+            if not _model_only(r) and (r.get("level") or 0) > 0:
+                rule_levels[code] = max(rule_levels.get(code, 0.0), float(r.get("level") or 0))
             cur = merged.get(code)
             if cur is None:
                 cur = dict(r)
@@ -267,6 +288,8 @@ def merge_risks(*lists: Iterable[Dict[str, Any]], fz: Any = None) -> List[Dict[s
                     cur["sources"].append(src)
     out = [r for r in merged.values() if risk_catalog.applicable(r["rule_id"], fz)]
     for r in out:
+        if r["rule_id"] in rule_levels:
+            r["level"] = rule_levels[r["rule_id"]]
         r["evidence"] = r["evidence"][:MAX_EVIDENCE_PER_RISK]
         r["source"] = primary_source(r["sources"])   # колонка source в risk_monitoring_document_risks
         apply_catalog(r, fz)

@@ -761,7 +761,8 @@ class AIFileAnalyzer:
             type_info, type_decode = await self._doc_type(document_id, chunks, file_name, extraction, row, None,
                                                           fallback_doc=reuse_doc)
             summary = (extraction.get("raw_data") or {}).get("summary")
-            allowed = [] if doc_kind.no_risk_by_name(file_name) else doc_kind.allowed_codes(type_info["detected_type"], None)
+            allowed = ([] if doc_kind.no_risk_by_name(file_name) or doc_kind.is_execution_document(row)
+                       else doc_kind.allowed_codes(type_info["detected_type"], None))
             profile = await self._cached(document_id, "document_profile",
                                          lambda: self.profiler.profile(text, file_name, type_decode, summary, purchase),
                                          model=self.model, fallback_doc=reuse_doc)

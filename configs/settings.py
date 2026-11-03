@@ -462,9 +462,9 @@ BENCHMARK_RISK_LEVEL = 0.4           # уровень FIN-001 (для разде
 PERIOD_SUMMARY_ENABLED = True
 PERIOD_SUMMARY_HOUR = 11
 PERIOD_SUMMARY_MINUTE = 23
-# Запись сводок периода в risk_monitoring_daily_runs (period_type = week / month): включить после миграции таблицы
-# (period_type, period_key, UNIQUE (period_type, export_date)) и доработки POST /api/risk-monitoring/daily-runs
-PERIOD_SUMMARY_PUSH_ENABLED = False
+# Запись сводок периода в risk_monitoring_daily_runs (period_type = week / month). Включено 03.11.2026: требует миграции
+# таблицы (period_type, period_key, UNIQUE (period_type, export_date)) и доработки POST /api/risk-monitoring/daily-runs
+PERIOD_SUMMARY_PUSH_ENABLED = True
 
 # ── Рассуждение модели (configs/llm_resilience.py): prod_multimodal_llm тратила весь лимит ответа на рассуждение и
 # возвращала пустой ответ (02.11.2026). Выключаем рассуждение (chat_template_kwargs.enable_thinking = false); если
