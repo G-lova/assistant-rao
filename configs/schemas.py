@@ -91,6 +91,21 @@ class ExpertsScoringRequest(BaseModel):
     details: bool = False
 
 
+class ExpertsRatingRequest(BaseModel):
+    """Запрос ``POST /get-experts-rating``.
+
+    Attributes:
+        by_period: Рассчитать рейтинг за период из запроса (``start_date`` — ``end_date``). По умолчанию выключен:
+            период — с ``settings.EXPERT_RATING_DEFAULT_START`` (01.01.2025) по текущий момент, даты запроса
+            не учитываются.
+        start_date: Начало периода, ``YYYY-MM-DD`` (обязательно при ``by_period``).
+        end_date: Конец периода, ``YYYY-MM-DD`` или ``YYYY-MM-DD HH:MM:SS`` (обязательно при ``by_period``).
+    """
+    by_period: bool = False
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+
+
 class ExpertPublicationsSyncRequest(BaseModel):
     """Запрос ``POST /expert-publications/sync``.
 

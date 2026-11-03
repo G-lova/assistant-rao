@@ -1,8 +1,10 @@
 import asyncio
-from datetime import date
+from datetime import date, datetime
 import json
+import re
 import sys
 import os
+from typing import Optional, Tuple
 
 from configs.config import Config
 from configs.http_client_manager import HTTPClientManager
@@ -16,6 +18,52 @@ sys.path.insert(0, project_root)
 
 # Настройка логирования
 logger = get_logger(__name__)
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}(:\d{2})?)?$")
+
+
+def resolve_rating_period(by_period: bool, start_date: Optional[str], end_date: Optional[str],
+                          now: Optional[datetime] = None) -> Tuple[str, str]:
+    """
+    Период расчёта рейтинга экспертов.
+
+    Флаг выключен — с ``settings.EXPERT_RATING_DEFAULT_START`` по текущий момент (``YYYY-MM-DD HH:MM:SS`` по
+    ``settings.EXPERT_RATING_TIMEZONE``: в SQL даты сравниваются через BETWEEN, и «сегодня» без времени отсекло бы
+    события текущего дня); даты запроса не учитываются. Флаг включён — даты запроса как есть.
+
+    Args:
+        by_period: Рассчитать за период из запроса.
+        start_date: Начало периода из запроса.
+        end_date: Конец периода из запроса.
+        now: Текущий момент (для тестов); по умолчанию — сейчас в часовом поясе настроек.
+
+    Returns:
+        Tuple[str, str]: ``(start_date, end_date)``.
+
+    Raises:
+        ValueError: Флаг включён, а дат нет, формат не ``YYYY-MM-DD[ HH:MM[:SS]]`` или начало позже конца.
+    """
+    from configs import settings
+
+    if not by_period:
+        if now is None:
+            from zoneinfo import ZoneInfo
+            now = datetime.now(ZoneInfo(settings.EXPERT_RATING_TIMEZONE))
+        return settings.EXPERT_RATING_DEFAULT_START, now.strftime("%Y-%m-%d %H:%M:%S")
+    start, end = (start_date or "").strip(), (end_date or "").strip()
+    if not start or not end:
+        raise ValueError("При by_period = true обязательны start_date и end_date")
+    for value in (start, end):
+        if not _DATE_RE.match(value):
+            raise ValueError(f"Дата {value!r} не в формате YYYY-MM-DD")
+        try:
+            datetime.strptime(value[:10], "%Y-%m-%d")
+        except ValueError:
+            raise ValueError(f"Некорректная дата {value!r}")
+    if start[:10] > end[:10]:
+        raise ValueError(f"Начало периода {start} позже конца {end}")
+    return start, end
+
 
 async def rating(start_date, end_date, x_api_database, http_manager: HTTPClientManager):
     """

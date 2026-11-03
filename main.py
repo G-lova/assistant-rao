@@ -21,7 +21,7 @@ from configs.eis_parsing import EISParser
 from configs.http_client_manager import HTTPClientManager
 from configs.llm_client import get_llm
 from configs.logger import setup_logging, get_logger
-from configs.schemas import EISParseRequest, EvaluateRequest, SummaryOpinionRequest, ExpertsScoringRequest, ExpertPublicationsSyncRequest, FileEntity, RAOConclusionRequest, ViolationsReportRequest
+from configs.schemas import EISParseRequest, EvaluateRequest, SummaryOpinionRequest, ExpertsScoringRequest, ExpertsRatingRequest, ExpertPublicationsSyncRequest, FileEntity, RAOConclusionRequest, ViolationsReportRequest
 from configs.utils import APIKeyMiddleware, split_large_text
 from configs.working_with_db import get_async_summary_report_from_db, get_contract_info_from_db
 from evaluate_documents.send_subject_service import SendSubjectService
@@ -330,43 +330,44 @@ async def expert_publications_sync(
 
 @app.post("/get-experts-rating")
 async def get_experts_rating(
-    request_body: Dict[str, str] = Body(...),
+    request: Optional[ExpertsRatingRequest] = None,
     x_api_database: str = Header(default="dev", alias="X-API-Database")
 ):
     """
-    Получает рейтинг экспертов для заданного временного периода.
-    Принимает в теле запроса даты начала и конца периода, за который необходимо получить рейтинг. 
-    Вызывает бизнес-логику для получения рейтинга экспертов и возвращает результат. 
-    В случае ошибок возвращает соответствующий HTTP статус и сообщение.
+    Получает рейтинг экспертов за период.
+
+    По умолчанию (``by_period = false``) период — с ``settings.EXPERT_RATING_DEFAULT_START`` (01.01.2025) по текущий
+    момент, даты в запросе не учитываются. С ``by_period = true`` — за период из запроса (``start_date``,
+    ``end_date`` обязательны). Вызывает бизнес-логику для получения рейтинга экспертов и возвращает результат.
 
     Args:
-        request_body (Dict[str, str]): Тело запроса в формате JSON с полями:
-            - start_date (str): Дата начала периода в формате "YYYY-MM-DD"
-            - end_date (str): Дата конца периода в формате "YYYY-MM-DD"
+        request (ExpertsRatingRequest | None): Тело запроса в формате JSON (можно не передавать) с полями:
+            - by_period (bool, по умолчанию false): Рассчитать за период из запроса
+            - start_date (str): Дата начала периода в формате "YYYY-MM-DD" (при by_period)
+            - end_date (str): Дата конца периода в формате "YYYY-MM-DD" (при by_period)
         x_api_database (str): Заголовок с указанием среды базы данных ('dev', 'prod', 'stage')
 
     Raises:
-        HTTPException: 400 - если отсутствуют start_date или end_date
+        HTTPException: 400 - by_period без дат, неверный формат даты или начало позже конца
         HTTPException: 500 - при ошибке получения рейтинга экспертов
 
     Returns:
         dict: Словарь, где ключ — идентификатор эксперта, значение — рейтинг.
     """
+    from src.rating import resolve_rating_period
+
+    request = request or ExpertsRatingRequest()   # без тела — рейтинг с 01.01.2025 по текущий момент
     try:
-        start_date = request_body.get("start_date")
-        end_date = request_body.get("end_date")
+        start_date, end_date = resolve_rating_period(request.by_period, request.start_date, request.end_date)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-        if not start_date or not end_date:
-            raise HTTPException(
-                status_code=400,
-                detail="Указание временного периода обязательно"
-            )
-
-        # Вызываем бизнес-логику (например, метод rating)
+    try:
         ratings = await rating(start_date, end_date, x_api_database, http_manager)
 
         logger.info(
-            f"Успешно Получено {len(ratings)} рейтингов экспертов (DB: {x_api_database}, период: {start_date}–{end_date})"
+            f"Успешно Получено {len(ratings)} рейтингов экспертов (DB: {x_api_database}, период: {start_date}–{end_date}, "
+            f"by_period={request.by_period})"
         )
 
         return ratings
