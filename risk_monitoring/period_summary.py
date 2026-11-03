@@ -389,6 +389,11 @@ async def push_period(environment: str, kind: str, period: str, s: Dict[str, Any
                                        period_type=kind, period_key=period)
         if row.get("id") is None:
             raise RuntimeError(f"API daily-runs не вернул id: {row}")
+        if row.get("period_type") != kind:
+            # API без поддержки периодов игнорирует period_type и возвращает дневную строку за export_date:
+            # ai_analysis сводки периода затёр бы дневную сводку — не пишем (ТЗ: ответ содержит period_type)
+            raise RuntimeError(f"API daily-runs вернул строку period_type={row.get('period_type')!r} вместо {kind!r} "
+                               f"(id {row.get('id')}): периоды не поддерживаются, ai_analysis не записан")
         await a.patch_ai_analysis("risk_monitoring_daily_runs", int(row["id"]), s)
 
     try:
