@@ -1,5 +1,5 @@
 import asyncio
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import json
 import re
 import sys
@@ -22,14 +22,38 @@ logger = get_logger(__name__)
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}(:\d{2})?)?$")
 
 
+def _parse_date(value: str) -> datetime:
+    """Дата запроса ``YYYY-MM-DD[ HH:MM[:SS]]`` как datetime (для сравнения границ периода).
+
+    Args:
+        value: Дата.
+
+    Returns:
+        datetime: Разобранная дата.
+
+    Raises:
+        ValueError: Формат не тот или дата не существует (``2026-02-30``).
+    """
+    if not _DATE_RE.match(value):
+        raise ValueError(f"Дата {value!r} не в формате YYYY-MM-DD")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"Некорректная дата {value!r}")
+
+
 def resolve_rating_period(by_period: bool, start_date: Optional[str], end_date: Optional[str],
                           now: Optional[datetime] = None) -> Tuple[str, str]:
     """
     Период расчёта рейтинга экспертов.
 
-    Флаг выключен — с ``settings.EXPERT_RATING_DEFAULT_START`` по текущий момент (``YYYY-MM-DD HH:MM:SS`` по
-    ``settings.EXPERT_RATING_TIMEZONE``: в SQL даты сравниваются через BETWEEN, и «сегодня» без времени отсекло бы
-    события текущего дня); даты запроса не учитываются. Флаг включён — даты запроса как есть.
+    Флаг выключен — с ``settings.EXPERT_RATING_DEFAULT_START`` по завтрашнюю дату (``YYYY-MM-DD``, сегодня + 1 день
+    по ``settings.EXPERT_RATING_TIMEZONE``): в SQL даты сравниваются через BETWEEN, дата без времени — полночь, так
+    текущий день попадает в период целиком, а результат не меняется в течение дня. Даты запроса не учитываются.
+
+    Флаг включён — даты запроса; если начало позже конца, они меняются местами (предупреждение в журнале).
 
     Args:
         by_period: Рассчитать за период из запроса.
@@ -41,7 +65,7 @@ def resolve_rating_period(by_period: bool, start_date: Optional[str], end_date: 
         Tuple[str, str]: ``(start_date, end_date)``.
 
     Raises:
-        ValueError: Флаг включён, а дат нет, формат не ``YYYY-MM-DD[ HH:MM[:SS]]`` или начало позже конца.
+        ValueError: Флаг включён, а дат нет, формат не ``YYYY-MM-DD[ HH:MM[:SS]]`` или дата не существует.
     """
     from configs import settings
 
@@ -49,19 +73,13 @@ def resolve_rating_period(by_period: bool, start_date: Optional[str], end_date: 
         if now is None:
             from zoneinfo import ZoneInfo
             now = datetime.now(ZoneInfo(settings.EXPERT_RATING_TIMEZONE))
-        return settings.EXPERT_RATING_DEFAULT_START, now.strftime("%Y-%m-%d %H:%M:%S")
+        return settings.EXPERT_RATING_DEFAULT_START, (now.date() + timedelta(days=1)).isoformat()
     start, end = (start_date or "").strip(), (end_date or "").strip()
     if not start or not end:
         raise ValueError("При by_period = true обязательны start_date и end_date")
-    for value in (start, end):
-        if not _DATE_RE.match(value):
-            raise ValueError(f"Дата {value!r} не в формате YYYY-MM-DD")
-        try:
-            datetime.strptime(value[:10], "%Y-%m-%d")
-        except ValueError:
-            raise ValueError(f"Некорректная дата {value!r}")
-    if start[:10] > end[:10]:
-        raise ValueError(f"Начало периода {start} позже конца {end}")
+    if _parse_date(start) > _parse_date(end):
+        logger.warning(f"Рейтинг экспертов: начало периода {start} позже конца {end} — даты переставлены")
+        start, end = end, start
     return start, end
 
 

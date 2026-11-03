@@ -96,8 +96,8 @@ class ExpertsRatingRequest(BaseModel):
 
     Attributes:
         by_period: Рассчитать рейтинг за период из запроса (``start_date`` — ``end_date``). По умолчанию выключен:
-            период — с ``settings.EXPERT_RATING_DEFAULT_START`` (01.01.2025) по текущий момент, даты запроса
-            не учитываются.
+            период — с ``settings.EXPERT_RATING_DEFAULT_START`` (01.01.2025) по завтрашнюю дату (текущий день
+            целиком), даты запроса не учитываются. Начало позже конца — даты меняются местами.
         start_date: Начало периода, ``YYYY-MM-DD`` (обязательно при ``by_period``).
         end_date: Конец периода, ``YYYY-MM-DD`` или ``YYYY-MM-DD HH:MM:SS`` (обязательно при ``by_period``).
     """

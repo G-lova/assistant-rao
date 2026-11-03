@@ -336,9 +336,9 @@ async def get_experts_rating(
     """
     Получает рейтинг экспертов за период.
 
-    По умолчанию (``by_period = false``) период — с ``settings.EXPERT_RATING_DEFAULT_START`` (01.01.2025) по текущий
-    момент, даты в запросе не учитываются. С ``by_period = true`` — за период из запроса (``start_date``,
-    ``end_date`` обязательны). Вызывает бизнес-логику для получения рейтинга экспертов и возвращает результат.
+    По умолчанию (``by_period = false``) период — с ``settings.EXPERT_RATING_DEFAULT_START`` (01.01.2025) по
+    завтрашнюю дату (текущий день целиком), даты в запросе не учитываются. С ``by_period = true`` — за период из
+    запроса (``start_date``, ``end_date`` обязательны; начало позже конца — даты меняются местами). Вызывает бизнес-логику для получения рейтинга экспертов и возвращает результат.
 
     Args:
         request (ExpertsRatingRequest | None): Тело запроса в формате JSON (можно не передавать) с полями:
@@ -348,7 +348,7 @@ async def get_experts_rating(
         x_api_database (str): Заголовок с указанием среды базы данных ('dev', 'prod', 'stage')
 
     Raises:
-        HTTPException: 400 - by_period без дат, неверный формат даты или начало позже конца
+        HTTPException: 400 - by_period без дат или неверный формат даты
         HTTPException: 500 - при ошибке получения рейтинга экспертов
 
     Returns:
@@ -356,7 +356,7 @@ async def get_experts_rating(
     """
     from src.rating import resolve_rating_period
 
-    request = request or ExpertsRatingRequest()   # без тела — рейтинг с 01.01.2025 по текущий момент
+    request = request or ExpertsRatingRequest()   # без тела — рейтинг с 01.01.2025 по завтрашнюю дату
     try:
         start_date, end_date = resolve_rating_period(request.by_period, request.start_date, request.end_date)
     except ValueError as e:
