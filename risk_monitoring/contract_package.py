@@ -248,15 +248,16 @@ def file_risks(files: Sequence[Dict[str, Any]], statuses: Dict[Tuple[int, str], 
     Returns:
         Tuple[List[Dict[str, Any]], set]: Риски (``source = ai_file``) и коды, подтверждённые аналитиком.
     """
-    from risk_monitoring.doc_kind import no_risk_by_name
+    from risk_monitoring.doc_kind import is_execution_document, no_risk_by_name
     from risk_monitoring.document_risk_analyzer import rejected_by_rules
 
     out, confirmed = [], set()
     for f in files:
         if f.get("superseded_by"):
             continue
-        # акт монтажа, смета, платёжка …: риски по тексту в них больше не ищутся, старый результат не учитывается
-        skip_by_name = no_risk_by_name(f.get("file_name"))
+        # акт монтажа, смета, платёжка, документы исполнения (contractProcedure): риски по тексту в них больше
+        # не ищутся, старый результат не учитывается
+        skip_by_name = no_risk_by_name(f.get("file_name")) or is_execution_document(f)
         for r in as_json(f.get("risks")) or []:
             code = r.get("rule_id")
             st = statuses.get((int(f["id"]), code))
@@ -668,7 +669,9 @@ def consistency_risks(items: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 # ------------------------------------------------------------------ профиль и балл
-AI_SOURCES = {"ai_file", "ai_event", "version_diff"}
+# Источники «только модель». ``ai`` — упрощённая метка (passport.primary_source при RISK_SOURCE_LABELS = "simple"),
+# которую merge_risks добавляет в sources: без неё скидка AI_UNCONFIRMED_WEIGHT не применялась (03.11.2026)
+AI_SOURCES = {"ai_file", "ai_event", "version_diff", "ai"}
 
 
 def _weight(r: Dict[str, Any], confirmed: Iterable[str], confirmed_weight: float, ai_weight: float = 1.0) -> float:
