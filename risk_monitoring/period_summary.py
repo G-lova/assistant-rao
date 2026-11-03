@@ -68,6 +68,18 @@ def period_bounds(kind: str, period: str) -> Tuple[date, date]:
     raise ValueError("вид периода — week или month")
 
 
+def normalize_period(kind: str, period: str) -> str:
+    """Каноническое обозначение периода: ``2026-W2`` → ``2026-W02``, ``2026-1`` → ``2026-01``.
+
+    Ключ записи у нас и ``period_key`` во внешней БД должны совпадать с тем, что вычисляет сервер API
+    (03.11.2026: запрос с ``2026-W2`` — сводка не появилась в ``risk_monitoring_daily_runs``).
+
+    Raises:
+        ValueError: Неверный вид или обозначение периода.
+    """
+    return period_of(kind, period_bounds(kind, period)[0])
+
+
 def period_of(kind: str, d: date) -> str:
     """Обозначение периода, в который входит дата."""
     if kind == "week":
@@ -307,11 +319,12 @@ async def run_period(repo: Any, environment: str, kind: str, period: str, use_ll
 
     Returns:
         Dict[str, Any]: Сводка периода (``status`` в ``pipeline``: ``completed`` / ``partial``; ``unchanged`` —
-        возвращена сохранённая).
+        возвращена сохранённая) и ``pushed`` / ``push_error`` — записана ли во внешнюю БД.
     """
     from risk_monitoring import daily, passport
 
     env = environment.lower()
+    period = normalize_period(kind, period)
     ds = days(kind, period)
     keys = {daily.run_key(d): d for d in ds}
     stored = await repo.get_rm_results(env, daily.KIND, list(keys))
@@ -327,7 +340,8 @@ async def run_period(repo: Any, environment: str, kind: str, period: str, use_ll
             # собрана раньше, во внешнюю БД не дошла (или отправка была выключена) — дозаписываем без пересборки
             pushed, error = await push_period(env, kind, period, old)
             await repo.save_rm_result(env, KINDS[kind], pkey, old, pushed, error)
-        return {**old, "unchanged": True}
+            return {**old, "unchanged": True, "pushed": pushed, "push_error": error}
+        return {**old, "unchanged": True, "pushed": bool((have.get(pkey) or {}).get("pushed"))}
     resume, used = default_resume(s), False
     if use_llm and settings.PACKAGE_LLM_RESUME and dailies:
         try:
@@ -354,7 +368,8 @@ async def run_period(repo: Any, environment: str, kind: str, period: str, use_ll
     await repo.save_rm_result(env, KINDS[kind], pkey, s, pushed, error)
     logger.info(f"Сводка за {s['period']['title']} ({env}): дней {len(s['days']['completed'])}/{s['days']['total']}, "
                 f"статус {s['pipeline']['status']}")
-    return s
+    # признак записи во внешнюю БД — в ответе задачи (в сохранённую сводку не входит)
+    return {**s, "pushed": pushed, "push_error": error}
 
 
 async def push_period(environment: str, kind: str, period: str, s: Dict[str, Any],

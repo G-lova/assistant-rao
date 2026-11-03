@@ -34,6 +34,9 @@ class PeriodTest(unittest.TestCase):
         self.assertEqual(ps.last_closed("month", date(2026, 10, 28)), "2026-09")
         with self.assertRaises(ValueError):
             ps.period_bounds("year", "2026")
+        # обозначение без ведущего нуля приводится к виду, который вычисляет сервер API (03.11.2026)
+        self.assertEqual(ps.normalize_period("week", "2026-W2"), "2026-W02")
+        self.assertEqual(ps.normalize_period("month", "2026-1"), "2026-01")
 
     def test_build(self):
         """Суммы за дни, пропуски, последняя оценка закупки, сравнение с прошлым периодом, факты без кодов."""

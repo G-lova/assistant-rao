@@ -435,11 +435,13 @@ async def run_period_summary(kind: str, req: PeriodRequest,
     if req.force and not Config.risk_monitoring_debug():
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
                             detail="Пересборка готовой сводки (force) доступна только в режиме отладки (RISK_MONITORING_DEBUG)")
+    from risk_monitoring import period_summary
     from risk_monitoring.tasks import rm_period_task
 
-    task = rm_period_task.apply_async(kwargs={"environment": x_api_database, "kinds": [kind], "period": req.period,
+    period = period_summary.normalize_period(kind, req.period) if req.period else None   # 2026-W2 → 2026-W02
+    task = rm_period_task.apply_async(kwargs={"environment": x_api_database, "kinds": [kind], "period": period,
                                               "use_llm": req.use_llm, "force": req.force}, queue="risk_monitoring")
-    return {"task_id": task.id, "kind": kind, "period": req.period, "status": "queued"}
+    return {"task_id": task.id, "kind": kind, "period": period, "status": "queued"}
 
 
 @router.get("/summary/{kind}/{period}")

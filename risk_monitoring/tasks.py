@@ -443,7 +443,8 @@ def rm_period_task(self, environment: str = None, kinds: List[str] = None, perio
                 s = await ps.run_period(repo, environment, kind, p, use_llm=use_llm, force=force)
                 out[kind] = {"period": p, "status": (s.get("pipeline") or {}).get("status"),
                              "unchanged": bool(s.get("unchanged")),
-                             "days": len((s.get("days") or {}).get("completed") or [])}
+                             "days": len((s.get("days") or {}).get("completed") or []),
+                             "pushed": s.get("pushed"), "push_error": s.get("push_error")}
         return out
 
     out = asyncio.run(_pulsed(run(), self.name, self.request.id))
