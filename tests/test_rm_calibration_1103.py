@@ -4,7 +4,8 @@
 1. скидка для рисков, найденных только моделью, работает и при упрощённой метке источника ``ai``;
 2. CR-004 «Аванс без достаточного обеспечения» требует нарушения требований к обеспечению, а не только признака;
 3. при объединении рисков уровень правила не повышается уровнем модели;
-4. в документах исполнения (``contractProcedure``) риски содержания документации не учитываются.
+4. в документах исполнения (``contractProcedure``) риски содержания документации не учитываются;
+5. FIN-005 (``pz_p2``) при закупке у единственного поставщика понижается без модели (исключение по способу).
 """
 import unittest
 
@@ -12,6 +13,7 @@ from configs import settings
 from risk_monitoring import composite_risks as cr
 from risk_monitoring import contract_package as cp
 from risk_monitoring import doc_kind, passport
+from risk_monitoring import rule_exclusions as rx
 
 
 def _r(code, level=0.8, conf=1.0, **kw):
@@ -115,6 +117,37 @@ class ExecutionDocumentTest(unittest.TestCase):
         risks, confirmed = cp.file_risks(files, {(2, "DOC-006"): cp.CONFIRMED_STATUS})
         self.assertEqual({r["rule_id"] for r in risks}, {"DOC-006", "DOC-002"})
         self.assertEqual(confirmed, {"DOC-006"})
+
+
+class Fin005SingleSupplierTest(unittest.TestCase):
+    """Исключение FIN-005 при законном отсутствии обеспечения (ЕП, ч. 1 ст. 93 44-ФЗ)."""
+
+    def test_single_supplier_by_code(self):
+        """Код способа EP… и сработавший pz_p2 — исключение single_supplier_93 из паспорта (src = eis)."""
+        out = rx.data_checks({"pz_p2": 1}, {"method_code": "EP44", "method": "Закупка у единственного поставщика"})
+        self.assertEqual(out["pz_p2"]["status"], "excluded")
+        self.assertEqual(out["pz_p2"]["exclusion_id"], "single_supplier_93")
+        self.assertEqual(out["pz_p2"]["evidence"]["src"], "eis")
+
+    def test_single_supplier_by_name(self):
+        """Кода нет — по названию способа."""
+        out = rx.data_checks({"pz_p2": "1"}, {"method": "Закупка у единственного поставщика (подрядчика, исполнителя)"})
+        self.assertIn("pz_p2", out)
+
+    def test_competitive_not_excluded(self):
+        """Электронный аукцион и запрос котировок — исключения нет; показатель не сработал — тоже нет."""
+        self.assertEqual(rx.data_checks({"pz_p2": 1}, {"method_code": "EA20", "method": "Электронный аукцион"}), {})
+        self.assertEqual(rx.data_checks({"pz_p2": 1}, {"method_code": "ZK20", "method": "Запрос котировок"}), {})
+        self.assertEqual(rx.data_checks({"pz_p2": 0}, {"method_code": "EP44"}), {})
+
+    def test_apply_lowers_rule_risk(self):
+        """Риск FIN-005 от правила pz_p2 понижается (уровень × RULE_EXCLUDED_LEVEL_FACTOR), ссылка на ЕИС добавлена."""
+        risk = _r("FIN-005", settings.RULE_RISK_LEVEL, 1.0, sources=["rule"], evidence=[{"src": "rule:pz_p2"}])
+        checks = rx.data_checks({"pz_p2": 1}, {"method_code": "EP44"})
+        self.assertEqual(rx.apply_checks([risk], checks, settings), 1)
+        self.assertAlmostEqual(risk["level"], round(settings.RULE_RISK_LEVEL * settings.RULE_EXCLUDED_LEVEL_FACTOR, 3))
+        self.assertLessEqual(risk["confidence"], settings.RULE_EXCLUDED_CONFIDENCE)
+        self.assertEqual(risk["rule_check"]["norm"], "ч. 1 ст. 93, ч. 2 ст. 96 44-ФЗ")
 
 
 if __name__ == "__main__":

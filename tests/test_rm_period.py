@@ -1,6 +1,7 @@
 """Сводки за неделю и месяц (``risk_monitoring.period_summary``) и жалобы в профилях организаций."""
 import asyncio
 import unittest
+from unittest import mock
 from datetime import date
 
 from configs import settings
@@ -81,8 +82,10 @@ class PeriodTest(unittest.TestCase):
                 self.data[(kind, eid)] = {"ai_analysis": ai}
 
         repo = Repo()
-        s1 = asyncio.run(ps.run_period(repo, "stage", "week", "2026-W43", use_llm=False, today=date(2026, 10, 28)))
-        s2 = asyncio.run(ps.run_period(repo, "stage", "week", "2026-W43", use_llm=False, today=date(2026, 10, 28)))
+        # Запись во внешнюю БД выключена: при включённой неудавшаяся запись повторяется и сводка сохраняется ещё раз
+        with mock.patch.object(settings, "PERIOD_SUMMARY_PUSH_ENABLED", False):
+            s1 = asyncio.run(ps.run_period(repo, "stage", "week", "2026-W43", use_llm=False, today=date(2026, 10, 28)))
+            s2 = asyncio.run(ps.run_period(repo, "stage", "week", "2026-W43", use_llm=False, today=date(2026, 10, 28)))
         self.assertEqual(s1["pipeline"]["status"], "partial")
         self.assertTrue(s2.get("unchanged"))
         self.assertEqual(repo.saved, 1)
