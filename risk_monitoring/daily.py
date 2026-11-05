@@ -916,7 +916,7 @@ class DailyRun:
                 st_xml["seconds"] += round(time.monotonic() - t)
             cache.release_xml()
             logger.info(f"Ежедневный прогон: пачка {n}/{len(parts)} — файлы {st_files}, события {st_xml}; "
-                        f"запросов к внешней БД {cache.queries}")
+                        f"запросов к внешней БД {cache.queries}; внутренних обращений {cache.internal}")
         self.stages["files"], self.stages["xml"] = st_files, st_xml
 
     async def _supplier_ids(self, found: List[Dict[str, Any]]) -> Any:
@@ -1072,7 +1072,8 @@ class DailyRun:
                                "prompt_versions": {"daily_resume": PROMPT_VERSION} if used_llm else {},
                                "llm": {"requests": CALLS["requests"] - before.get("requests", 0),
                                        "failed": CALLS["failed"] - before.get("failed", 0)},
-                               "external_queries": dict(cache.queries)}
+                               "external_queries": dict(cache.queries),
+                               "internal_calls": dict(cache.internal)}
         summary["pipeline"]["runs"] = self.__dict__.get("runs", []) + [
             {"started_at": started, "finished_at": summary["pipeline"]["finished_at"],
              "status": summary["pipeline"]["status"]}]

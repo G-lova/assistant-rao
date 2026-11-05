@@ -5,7 +5,7 @@
 Но типовой текст повторяется у разных заказчиков, а требование конкретного заказчика — нет. Поэтому:
 
 1. Для цитаты каждого риска считается эмбеддинг и ищутся ближайшие чанки документов (и риск-мониторинга,
-   и экспертиз) — ``AIRepo.find_chunks_all``.
+   и экспертиз) — ``AIRepo.find_chunks_many`` (все цитаты файла одним запросом на нарезку).
 2. Чанк засчитывается, если он почти дословно содержит цитату: ≥ 80 % шинглов из 5 слов цитаты есть в чанке
    (:func:`contains`).
 3. Для документов таких чанков определяются закупки (карточки РМ и экспертизы) и, для карточек, заказчики.
@@ -114,20 +114,26 @@ def count_sources(doc_ids: Iterable[int], sources: Sequence[Dict[str, Any]], org
 async def typical_fragments(fragments: List[str], *, embedder: Any, repo: Any, env: str, document_id: int,
                             own_card: Optional[int], own_org: Optional[Any], embedding_model: str,
                             fetch_orgs: Callable[[List[int]], Awaitable[Dict[int, Any]]],
-                            own_org_name: Optional[str] = None) -> Dict[str, int]:
+                            own_org_name: Optional[str] = None, cache: Any = None) -> Dict[str, int]:
     """Число разных заказчиков для каждой цитаты (только цитаты, найденные хотя бы у одного другого).
+
+    С кэшем прогона (``cache`` — ``RunCache``) цитата, уже проверенная в этом прогоне (типовой текст повторяется
+    у файлов одного заказчика и у редакций документа), не отправляется ни на эмбеддинги, ни в поиск, а закупки
+    документа запрашиваются один раз. Документы, сохранённые позже в том же прогоне, для такой цитаты не
+    учитываются — заказчиков может оказаться на одного-двух меньше, фильтр от этого только осторожнее.
 
     Args:
         fragments: Цитаты рисков.
-        embedder: ``EmbeddingClient``.
-        repo: ``AIRepo``.
+        embedder: Клиент эмбеддингов (``get_embeddings``).
+        repo: ``AIRepo`` (``find_chunks_many`` или ``find_chunks_all``, ``document_sources``).
         env: Окружение.
         document_id: Текущий документ (его чанки не считаются).
-        own_card: Карточка закупки текущего файла.
+        own_card: Карточка текущего файла.
         own_org: Заказчик текущего файла.
-        embedding_model: Модель эмбеддингов (как у чанков).
+        embedding_model: Модель эмбеддингов.
         fetch_orgs: ``список карточек → {карточка: заказчик}`` (запрос к внешней БД).
         own_org_name: Название заказчика текущего файла.
+        cache: Кэш прогона (``fragment_docs``, ``doc_sources``, ``count_internal``); ``None`` — без кэша.
 
     Returns:
         Dict[str, int]: ``цитата → число заказчиков``.
@@ -135,19 +141,56 @@ async def typical_fragments(fragments: List[str], *, embedder: Any, repo: Any, e
     frags = [f for f in dict.fromkeys(fragments) if len(WORD_RE.findall(f or "")) >= MIN_WORDS]
     if not frags:
         return {}
-    vectors = await embedder.get_embeddings(frags, strict=True)
-    found: Dict[str, set] = {}
-    for frag, vec in zip(frags, vectors):
-        rows = await repo.find_chunks_all(list(vec), embedding_model, limit=30)
-        docs = {int(r["document_id"]) for r in rows
-                if int(r["document_id"]) != int(document_id) and contains(frag, r["text"])}
-        if docs:
-            found[frag] = docs
+    known: Dict[str, set] = cache.fragment_docs if cache is not None else {}
+    count = cache.count_internal if cache is not None else (lambda name, n=1: None)
+    todo = [f for f in frags if _key(f) not in known]
+    if todo:
+        vectors = await embedder.get_embeddings(todo, strict=True)
+        count("boilerplate.embeddings")
+        per_frag = None
+        if hasattr(repo, "find_chunks_many"):
+            try:
+                per_frag = await repo.find_chunks_many([list(v) for v in vectors], embedding_model, limit=30)
+                count("boilerplate.chunk_search", 2)
+            except Exception as e:  # noqa: BLE001 — поиск по одной цитате работает как раньше
+                logger.warning(f"Пакетный поиск чанков не выполнен, ищем по одной цитате: {type(e).__name__}: {e}")
+        if per_frag is None:
+            per_frag = []
+            for vec in vectors:
+                per_frag.append(await repo.find_chunks_all(list(vec), embedding_model, limit=30))
+                count("boilerplate.chunk_search", 2)
+        for frag, rows in zip(todo, per_frag):
+            # свой документ тоже запоминается: кэш общий для всех файлов прогона, свой исключается ниже
+            known[_key(frag)] = {int(r["document_id"]) for r in rows if contains(frag, r["text"])}
+    found = {f: known[_key(f)] - {int(document_id)} for f in frags}
+    found = {f: d for f, d in found.items() if d}
     if not found:
         return {}
     all_docs = sorted({d for docs in found.values() for d in docs})
-    sources = [dict(r) for r in await repo.document_sources(env, all_docs)]
+    sources = await _sources(repo, env, all_docs, cache, count)
     cards = sorted({int(s["rm_card_id"]) for s in sources if s.get("rm_card_id") is not None}
                    | {int(s["source_id"]) for s in sources if s["kind"] == "rm"})
     orgs = await fetch_orgs(cards) if cards else {}
     return {frag: count_sources(docs, sources, orgs, own_card, own_org, own_org_name) for frag, docs in found.items()}
+
+
+def _key(fragment: str) -> str:
+    """Ключ цитаты в кэше прогона: слова в нижнем регистре (пунктуация и регистр не важны)."""
+    return " ".join(WORD_RE.findall((fragment or "").lower().replace("ё", "е")))
+
+
+async def _sources(repo: Any, env: str, doc_ids: List[int], cache: Any,
+                   count: Callable[..., None]) -> List[Dict[str, Any]]:
+    """Закупки документов (``AIRepo.document_sources``); с кэшем прогона — каждый документ один раз."""
+    if cache is None:
+        count("boilerplate.document_sources")
+        return [dict(r) for r in await repo.document_sources(env, doc_ids)]
+    store: Dict[int, List[Dict[str, Any]]] = cache.doc_sources
+    missing = [d for d in doc_ids if d not in store]
+    if missing:
+        count("boilerplate.document_sources")
+        for d in missing:
+            store[d] = []
+        for r in await repo.document_sources(env, missing):
+            store.setdefault(int(r["document_id"]), []).append(dict(r))
+    return [r for d in doc_ids for r in store.get(d, [])]

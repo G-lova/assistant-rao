@@ -8,7 +8,10 @@
 * :meth:`RunCache.keyed` — строки запроса по ключу: запрашиваются только ещё не запрошенные id, пачками;
 * ``archives`` — общий ``ArchiveCache`` (архив скачивается один раз, удаляет его владелец кэша);
 * ``parsed`` — разобранные XML (``id → (тег, версия, тело)``);
-* ``links`` — привязка XML без закупки (``xml_id → link``).
+* ``links`` — привязка XML без закупки (``xml_id → link``);
+* ``fragment_docs``, ``doc_sources``, :meth:`card_orgs` — проверка типовых формулировок (``boilerplate``):
+  документы с цитатой, закупки документов и заказчики всех закупок — один раз за прогон;
+* ``internal`` — счётчики обращений к внутренней БД и сервису эмбеддингов (в ``pipeline`` сводки).
 """
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Set
 
@@ -47,6 +50,12 @@ class RunCache:
         self.covered_cards: Set[int] = set()
         # XML, файлы которых (и их предыдущих версий) уже загружены целиком — по ссылкам вложений не дозапрашиваются
         self.covered_xml: Set[int] = set()
+        # проверка типовых формулировок: нормализованная цитата → документы, где она найдена (вместе со своим)
+        self.fragment_docs: Dict[str, Set[int]] = {}
+        # документ ai_documents → его закупки (строки AIRepo.document_sources)
+        self.doc_sources: Dict[int, List[Dict[str, Any]]] = {}
+        self._card_orgs: Optional[Dict[int, Any]] = None
+        self.internal: Dict[str, int] = {}
 
     def seed(self, name: str, rows: Iterable[Dict[str, Any]], key: str, ids: Iterable[Any]) -> None:
         """Кладёт в кэш строки, полученные одним запросом по дате (``daily_xml.sql`` …), и отмечает ``ids`` как
@@ -85,6 +94,42 @@ class RunCache:
     def count(self, name: str) -> None:
         """Учёт запросов к внешней БД (для журнала и тестов)."""
         self.queries[name] = self.queries.get(name, 0) + 1
+
+    def count_internal(self, name: str, n: int = 1) -> None:
+        """Учёт обращений к внутренней БД и сервису эмбеддингов (``boilerplate.embeddings`` …)."""
+        self.internal[name] = self.internal.get(name, 0) + n
+
+    async def card_orgs(self, fetch: Fetch, cards: Iterable[int]) -> Dict[int, Any]:
+        """Заказчики карточек закупок: все карточки — одним запросом ``card_orgs_all.sql`` при первом обращении,
+        карточки, которых в нём не было (созданы позже), — ``card_orgs.sql``.
+
+        Раньше ``card_orgs.sql`` уходил почти на каждый файл с рисками: у каждой цитаты свои похожие документы и
+        свои закупки (сотни запросов за прогон, 05.11.2026).
+
+        Args:
+            fetch: ``_query`` анализатора.
+            cards: Нужные карточки.
+
+        Returns:
+            Dict[int, Any]: ``карточка → заказчик`` (только найденные).
+        """
+        if self._card_orgs is None:
+            self._card_orgs = {}
+            try:
+                self.count("card_orgs_all.sql")
+                for r in await fetch("card_orgs_all.sql"):
+                    k = _norm(r.get("id"))
+                    if k is not None:
+                        self._card_orgs[k] = r.get("org_id")
+            except Exception:  # noqa: BLE001 — без общего запроса карточки запрашиваются пачками
+                self._card_orgs = {}
+            self.fetched.setdefault("card_orgs.sql", set()).update(self._card_orgs)
+        want = [k for k in (_norm(c) for c in cards) if k is not None]
+        missing = [c for c in want if c not in self._card_orgs]
+        if missing:
+            for k, r in (await self.one_each(fetch, "card_orgs.sql", missing, "id")).items():
+                self._card_orgs[k] = r.get("org_id")
+        return {c: self._card_orgs[c] for c in want if c in self._card_orgs}
 
     async def keyed(self, fetch: Fetch, name: str, ids: Iterable[Any], key: str, head: Sequence[Any] = (),
                     list_name: str = "ids", size: Optional[int] = None) -> Dict[Any, List[Dict[str, Any]]]:

@@ -448,6 +448,45 @@ class AIRepo:
             )
         return out
 
+    async def find_chunks_many(
+        self, embeddings: Sequence[Sequence[float]], embedding_model: str, limit: int = 30
+    ) -> List[List[asyncpg.Record]]:
+        """:meth:`find_chunks_all` для нескольких векторов сразу: два запроса (по нарезке) на все векторы вместо
+        двух на каждый. ``LATERAL`` с ``ORDER BY embedding <=> вектор LIMIT`` использует те же частичные
+        HNSW-индексы для каждого вектора.
+
+        Args:
+            embeddings: Векторы фрагментов.
+            embedding_model: Модель эмбеддингов.
+            limit: Сколько чанков каждой нарезки вернуть на вектор.
+
+        Returns:
+            List[List[asyncpg.Record]]: Для каждого вектора (в том же порядке) — ``document_id``, ``text``,
+            ``similarity``.
+        """
+        out: List[List[asyncpg.Record]] = [[] for _ in embeddings]
+        if not embeddings:
+            return out
+        vecs = [_vec(e) for e in embeddings]
+        for chunker in ("rm_tokens_800", "pages_v2"):
+            rows = await self.pool.fetch(
+                f"""
+                SELECT q.i::int AS i, c.document_id, c.text, c.similarity
+                FROM unnest($1::text[]) WITH ORDINALITY AS q(t, i)
+                CROSS JOIN LATERAL (
+                    SELECT document_id, text, 1 - (embedding <=> q.t::vector) AS similarity
+                    FROM ai_document_chunks
+                    WHERE embedding_model = $2 AND chunker = '{chunker}'
+                    ORDER BY embedding <=> q.t::vector
+                    LIMIT $3
+                ) c
+                """,
+                vecs, embedding_model, limit,
+            )
+            for r in rows:
+                out[int(r["i"]) - 1].append(r)
+        return out
+
     async def document_sources(self, env: str, document_ids: Sequence[int]) -> List[asyncpg.Record]:
         """Закупки, в которых встречается документ: карточки риск-мониторинга и экспертизы.
 
