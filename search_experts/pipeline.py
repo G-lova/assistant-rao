@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import aiofiles
 import pandas as pd
@@ -372,36 +373,54 @@ class ScoringPipeline:
             pandas.DataFrame: Датафрейм с отфильтрованными и ранжированными экспертами,
             содержащий колонки 'expert_id' и 'rating'.
         """
+        timings = {}
+        started = time.perf_counter()
+
+        def mark(step):
+            """Запоминает длительность шага (с) с предыдущей отметки."""
+            nonlocal started
+            now = time.perf_counter()
+            timings[step] = round(now - started, 2)
+            started = now
+
         try:
             # Загрузка SQL запроса
             sql_query = await load_sql_query_async(sql_file_path)
             
             # Получение данных
             df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[expertise_id] * 4)
+            mark("sql")
         
             if df.empty or df['expert_id'].isna().all() or (df['expert_id'].astype(str) == 'None').all():
                 raise Exception("Доступных экспертов нет")
             
             # Предобработка
             df = await asyncio.to_thread(self.preprocess_data, df)
+            mark("preprocess")
             
             # ИНН организаций экспертов без реквизитов — из справочника организаций
             df = await self.attach_org_guesses(df)
+            mark("org_directory")
 
             # Соавторы кандидатов (публикации во внутренней БД)
             await self.load_coauthors(df)
+            mark("coauthors_load")
 
             # Обнаружение конфликтов
             df = await asyncio.to_thread(self.detect_conflicts, df)
+            mark("conflicts")
             
             # Расчет схожестей
             df = await self.calculate_similarities(df)
+            mark("similarity")
             
             # Расчет семейственности
             df = await asyncio.to_thread(self.detect_nepotism, df)
+            mark("nepotism")
             
             # Расчет рейтингов
             df = await asyncio.to_thread(self.calculate_ratings, df)
+            mark("ratings")
             
             return df
         
@@ -410,6 +429,10 @@ class ScoringPipeline:
                 return pd.DataFrame(columns=['expert_id', 'scoring'])
             else:
                 raise
+        finally:
+            # время шагов подбора (с): sql — запрос к порталу, similarity — эмбеддинги и публикации
+            logger.info(f"Подбор экспертов для экспертизы {expertise_id}: время шагов {timings}, "
+                        f"всего {round(sum(timings.values()), 2)} с")
 
     def sort_experts(self, df, sort_column: str = "scoring"):
         

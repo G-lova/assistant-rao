@@ -211,8 +211,17 @@ def customer_coauthor_conflicts(df, publications: Dict[int, list]) -> Dict[int, 
     return out
 
 
+def _surname_keys(person: Person) -> Set[str]:
+    """Ключи индекса по фамилии: как написано и в транслитерации (латинская запись соавтора — тот же ключ)."""
+    return {person.surname, translit(person.surname)}
+
+
 def expert_coauthor_pairs(df, publications: Dict[int, list]) -> List[Tuple[int, int, str]]:
     """Пары кандидатов-соавторов.
+
+    Кандидаты индексируются по фамилии (кириллица и транслитерация), поэтому соавтор публикации сравнивается только
+    с однофамильцами-кандидатами: O(соавторов), а не O(публикаций × кандидатов) — на 900 кандидатах и 3,9 тыс.
+    публикаций полный перебор занимал ~3 минуты (05.11.2026).
 
     Args:
         df (pandas.DataFrame): Кандидаты (``expert_id``, ``expert_name``).
@@ -221,16 +230,25 @@ def expert_coauthor_pairs(df, publications: Dict[int, list]) -> List[Tuple[int, 
     Returns:
         List[Tuple[int, int, str]]: ``(expert_id, соавтор-кандидат, название публикации)``.
     """
-    people = {int(e): parse_person(n) for e, n in df[["expert_id", "expert_name"]].drop_duplicates("expert_id").itertuples(index=False)}
+    names = {int(e): n for e, n in df[["expert_id", "expert_name"]].drop_duplicates("expert_id").itertuples(index=False)}
+    index: Dict[str, List[Tuple[int, Person]]] = {}
+    for eid, name in names.items():
+        person = parse_person(name)
+        if person:
+            for key in _surname_keys(person):
+                index.setdefault(key, []).append((eid, person))
     pairs, seen = [], set()
-    for eid, me in people.items():
-        for title, year, authors in publications.get(eid, []):
-            co = coauthors_of(df.loc[df["expert_id"] == eid, "expert_name"].iloc[0], authors)
-            for other, person in people.items():
-                if other == eid or person is None or frozenset((eid, other)) in seen:
-                    continue
-                if any(same_person(c, person) for c in co):
-                    seen.add(frozenset((eid, other)))
+    for eid, pubs in publications.items():
+        if eid not in names:
+            continue
+        for title, year, authors in pubs:
+            for co in coauthors_of(names[eid], authors):
+                found = index.get(co.surname, []) + index.get(translit(co.surname), [])
+                for other, person in found:
+                    pair = frozenset((eid, other))
+                    if other == eid or pair in seen or not same_person(co, person):
+                        continue
+                    seen.add(pair)
                     pairs.append((eid, other, str(title)[:120]))
     return pairs
 

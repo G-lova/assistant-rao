@@ -102,6 +102,7 @@ class OrgDirectory:
             self.inns.append(inn)
             self.kpps.append(normalize_kpp(kpp))
             self.kinds.append(kind)
+        self._resolved: Dict[tuple, Optional[OrgMatch]] = {}   # кэш resolve: справочник живёт TTL на процесс
         self.vectorizer = None
         self.matrix = None
         if cores:
@@ -135,6 +136,14 @@ class OrgDirectory:
         """
         if self.matrix is None:
             return None
+        key = (name, threshold, margin, top, branch_threshold)
+        if key not in self._resolved:
+            self._resolved[key] = self._resolve(name, threshold, margin, top, branch_threshold)
+        return self._resolved[key]
+
+    def _resolve(self, name, threshold, margin, top, branch_threshold) -> Optional[OrgMatch]:
+        """Поиск без кэша (см. :meth:`resolve`): названия кандидатов повторяются от запроса к запросу, поэтому
+        результат кэшируется на время жизни справочника (на 900 кандидатах без кэша — ~2,7 с на запрос)."""
         core = _core(name)
         if len(core) < 3:
             return None
@@ -305,15 +314,12 @@ def resolve_frame(df, directory: OrgDirectory, threshold: float, margin: float, 
     """
     from search_experts.conflict_detector import normalize_inn
 
-    cache: Dict[str, Optional[OrgMatch]] = {}
     for field in ("organization", "diplom"):
         inns, notes = [], []
         for name, inn in zip(df.get(f"expert_{field}", [None] * len(df)), df.get(f"expert_{field}_inn", [None] * len(df))):
             match = None
             if not normalize_inn(inn) and isinstance(name, str) and name.strip():
-                if name not in cache:
-                    cache[name] = directory.resolve(name, threshold, margin, branch_threshold=branch_threshold)
-                match = cache[name]
+                match = directory.resolve(name, threshold, margin, branch_threshold=branch_threshold)
             inns.append(match.inn if match else None)
             notes.append(f"{match.name} ({match.score:.2f}, {match.kind})" if match else None)
         df[f"expert_{field}_inn_guess"] = inns
