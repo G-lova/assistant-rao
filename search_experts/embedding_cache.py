@@ -128,4 +128,6 @@ async def get_embeddings(client, texts: Sequence[str], model: Optional[str] = No
             except Exception as e:  # noqa: BLE001 — векторы уже есть, кэш дополнится в следующий раз
                 logger.warning(f"Эмбеддинги не записаны в кэш: {type(e).__name__}: {e}")
     logger.info(f"Эмбеддинги: {len(unique)} текстов, из кэша {len(unique) - len(missing)}, посчитано {len(missing)}")
-    return np.array([cached[s] for s in shas], dtype=np.float32)
+    # float64, как у сервиса: иначе similarity_embeddings становится float32 и смешивание со сходством публикаций
+    # (float64) даёт FutureWarning pandas о несовместимом типе (05.11.2026)
+    return np.array([cached[s] for s in shas], dtype=np.float64)

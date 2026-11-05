@@ -108,6 +108,7 @@ def blend(df, scores: Dict[int, Dict[str, Any]], weight: float):
 
     w = min(max(float(weight), 0.0), 1.0)
     ids = df["expert_id"].astype(int)
+    df["similarity_embeddings"] = df["similarity_embeddings"].astype("float64")
     df["similarity_profile"] = df["similarity_embeddings"]
     df["similarity_publications"] = ids.map(lambda i: scores[i]["score"] if i in scores else np.nan)
     df["publications_count"] = ids.map(lambda i: scores[i]["count"] if i in scores else 0)
