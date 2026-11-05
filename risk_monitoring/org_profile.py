@@ -313,6 +313,10 @@ def customer_section(contracts: Sequence[Dict[str, Any]], black: Sequence[Dict[s
             sec["score"] = model["score"]
             sec["zone"] = model["zone"]
             sec["delta"] = round(model["score"] - previous_score, 1) if previous_score is not None else None
+        else:
+            # Псвод не посчитан — заказчик не оценён: зона по поведенческому баллу почти всегда «зелёная» и вводила
+            # в заблуждение (14 из 154 заказчиков прода, 05.11.2026); поведенческий балл остаётся в behaviour_score
+            sec["zone"] = None
     return sec
 
 
@@ -616,7 +620,11 @@ def resume_facts(role: str, section: Dict[str, Any], settings: Any) -> List[str]
                      + "; ".join(parts) + ".")
         if section.get("behaviour_score"):
             facts.append(f"Поведенческие признаки по совокупности закупок оценены отдельно: {_num(section['behaviour_score'])}.")
-    facts.append(f"Балл риска {_num(section['score'])} ({zones.get(section['zone'], section['zone'])}).")
+    if section.get("zone"):
+        facts.append(f"Балл риска {_num(section['score'])} ({zones.get(section['zone'], section['zone'])}).")
+    else:
+        facts.append("Качество закупочной деятельности не оценено (нет закупок для расчёта сводного показателя); "
+                     f"поведенческий балл {_num(section['score'])}.")
     return facts
 
 

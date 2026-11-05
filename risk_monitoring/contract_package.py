@@ -230,6 +230,58 @@ def build_passport(card: Dict[str, Any], dataset: Dict[str, Any], files: Sequenc
 
 
 # ------------------------------------------------------------------ риски из источников
+# Причины, по которым риск документа не учтён в балле закупки (``ai_analysis.not_in_score``, 05.11.2026)
+NOT_IN_SCORE_REASONS = {
+    "rule_covered": "показатель внешней системы посчитан и не сработал — утверждение модели опровергнуто данными ЕИС",
+    "quotes_rejected": "все цитаты риска отсеяны правилами отбора",
+    "execution_document": "документ исполнения контракта (акт, УПД, счёт): риски документации в нём не ищутся",
+    "service_document": "служебный документ (смета, платёжное поручение и т. п.): риски по тексту в нём не ищутся",
+    "same_quote": "та же цитата уже учтена в более сильном риске другого кода",
+}
+
+
+def _refs(risk: Dict[str, Any]) -> List[Tuple[str, int]]:
+    """Строки документов, на которые ссылается риск: ``[("file", 5367), ("xml", 812)]`` по ``evidence[].src``."""
+    out: List[Tuple[str, int]] = []
+    for e in risk.get("evidence") or []:
+        src = str((e or {}).get("src") or "") if isinstance(e, dict) else ""
+        scope, _, rid = src.partition(":")
+        if scope in ("file", "xml") and rid.isdigit() and (scope, int(rid)) not in out:
+            out.append((scope, int(rid)))
+    return out
+
+
+def _not_counted(dropped: Optional[List[Dict[str, Any]]], risk: Dict[str, Any], reason: str) -> None:
+    """Запись «риск документа не учтён в балле» для каждой строки документа, на которую ссылается риск."""
+    if dropped is None or not risk.get("rule_id"):
+        return
+    for scope, rid in _refs(risk):
+        dropped.append({"rule_id": risk["rule_id"], f"{scope}_id": rid, "reason": reason})
+
+
+def not_in_score(dropped: Sequence[Dict[str, Any]], risks: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Итоговый список ``ai_analysis.not_in_score``: строки ``document_risks`` (файл или XML + код), риск которых
+    сервис не учёл в балле закупки, с причиной (:data:`NOT_IN_SCORE_REASONS`).
+
+    Строка, на которую ссылается учтённый риск того же кода, в список не попадает; у строки — первая причина.
+
+    Args:
+        dropped: Записи ``{rule_id, file_id | xml_id, reason}`` в порядке отсева.
+        risks: Учтённые риски закупки.
+
+    Returns:
+        List[Dict[str, Any]]: Записи без повторов, по коду и строке.
+    """
+    counted = {(scope, rid, r.get("rule_id")) for r in risks for scope, rid in _refs(r)}
+    out: Dict[Tuple[str, int, str], Dict[str, Any]] = {}
+    for d in dropped:
+        scope = "file" if "file_id" in d else "xml"
+        key = (scope, int(d[f"{scope}_id"]), d["rule_id"])
+        if key not in counted and key not in out:
+            out[key] = d
+    return [out[k] for k in sorted(out, key=lambda k: (k[2], k[0], k[1]))]
+
+
 def _ev_src(risk: Dict[str, Any], src: str, **extra: Any) -> Dict[str, Any]:
     """Копия риска, у каждой цитаты которого указан источник (``file:<id>`` / ``xml:<id>``)."""
     r = dict(risk)
@@ -238,12 +290,15 @@ def _ev_src(risk: Dict[str, Any], src: str, **extra: Any) -> Dict[str, Any]:
     return r
 
 
-def file_risks(files: Sequence[Dict[str, Any]], statuses: Dict[Tuple[int, str], int]) -> Tuple[List[Dict[str, Any]], set]:
+def file_risks(files: Sequence[Dict[str, Any]], statuses: Dict[Tuple[int, str], int],
+               dropped: Optional[List[Dict[str, Any]]] = None) -> Tuple[List[Dict[str, Any]], set]:
     """Риски действующих редакций файлов без отклонённых и устранённых аналитиком.
 
     Args:
         files: Файлы (``id``, ``file_name``, ``risks``, ``superseded_by``).
         statuses: ``(file_id, rule_id) → status`` из ``risk_monitoring_document_risks``.
+        dropped: Куда дописать риски, не учтённые сервисом (документ исполнения, служебный документ, цитаты
+            отсеяны) — для ``not_in_score``; ``None`` — не собирать.
 
     Returns:
         Tuple[List[Dict[str, Any]], set]: Риски (``source = ai_file``) и коды, подтверждённые аналитиком.
@@ -257,11 +312,16 @@ def file_risks(files: Sequence[Dict[str, Any]], statuses: Dict[Tuple[int, str], 
             continue
         # акт монтажа, смета, платёжка, документы исполнения (contractProcedure): риски по тексту в них больше
         # не ищутся, старый результат не учитывается
-        skip_by_name = no_risk_by_name(f.get("file_name")) or is_execution_document(f)
+        execution = is_execution_document(f)
+        skip_by_name = execution or no_risk_by_name(f.get("file_name"))
         for r in as_json(f.get("risks")) or []:
             code = r.get("rule_id")
             st = statuses.get((int(f["id"]), code))
-            if not code or st in IGNORED_RISK_STATUSES or (skip_by_name and st != CONFIRMED_STATUS):
+            if not code or st in IGNORED_RISK_STATUSES:
+                continue
+            if skip_by_name and st != CONFIRMED_STATUS:
+                _not_counted(dropped, {"rule_id": code, "evidence": [{"src": f"file:{f['id']}"}]},
+                             "execution_document" if execution else "service_document")
                 continue
             # файл мог быть проанализирован до уточнения правил отбора: риск, все цитаты которого правила
             # отбрасывают, в закупку не идёт (подтверждённый аналитиком — остаётся)
@@ -269,6 +329,7 @@ def file_risks(files: Sequence[Dict[str, Any]], statuses: Dict[Tuple[int, str], 
             if st != CONFIRMED_STATUS and evs and all(
                     rejected_by_rules({"code": code, "title": r.get("title"), "explanation": r.get("description"),
                                        "evidence": {"fragment": e["fragment"]}}) for e in evs):
+                _not_counted(dropped, {"rule_id": code, "evidence": [{"src": f"file:{f['id']}"}]}, "quotes_rejected")
                 continue
             if st == CONFIRMED_STATUS:
                 confirmed.add(code)
@@ -321,7 +382,8 @@ def _norm_fragment(e: Dict[str, Any]) -> str:
     return re.sub(r"\s+", " ", str(e.get("fragment") or "")).strip().lower()[:300]
 
 
-def drop_same_quote(risks: Sequence[Dict[str, Any]], confirmed: Iterable[str] = ()) -> List[Dict[str, Any]]:
+def drop_same_quote(risks: Sequence[Dict[str, Any]], confirmed: Iterable[str] = (),
+                    dropped: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     """Риск модели, все цитаты которого уже приведены в более сильном риске, не учитывается отдельно.
 
     Модель ставит на одну цитату два кода (1387: устаревшие инструкции Госарбитража — DOC-006 и DOC-010; 1001:
@@ -331,6 +393,7 @@ def drop_same_quote(risks: Sequence[Dict[str, Any]], confirmed: Iterable[str] = 
     Args:
         risks: Риски закупки после ``merge_risks`` (по убыванию значимости).
         confirmed: Коды, подтверждённые аналитиком.
+        dropped: Куда дописать снятые дубли (причина ``same_quote``) — для ``not_in_score``.
 
     Returns:
         List[Dict[str, Any]]: Риски без дублей по цитатам.
@@ -346,6 +409,7 @@ def drop_same_quote(risks: Sequence[Dict[str, Any]], confirmed: Iterable[str] = 
                         None)
             if host is not None:
                 host.setdefault("related_codes", []).append(r["rule_id"])
+                _not_counted(dropped, r, "same_quote")
                 continue
         out.append(r)
     order = {id(r): i for i, r in enumerate(risks)}
@@ -395,7 +459,8 @@ def events_feed(xmls: Sequence[Dict[str, Any]], limit: int = 50) -> List[Dict[st
 
 
 def drop_rule_covered(risks: Sequence[Dict[str, Any]], values: Optional[Dict[str, Any]],
-                      confirmed: Iterable[str] = (), fz: Any = None, suspect: Iterable[str] = ()) -> List[Dict[str, Any]]:
+                      confirmed: Iterable[str] = (), fz: Any = None, suspect: Iterable[str] = (),
+                      dropped: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     """Риски модели по кодам, которые проверяет показатель внешней системы (FIN-004 ↔ pz_p1, FIN-005 ↔ pz_p2 …).
 
     По концепции ИИ работает поверх правил и не заменяет их (2.8, 2.9):
@@ -414,6 +479,7 @@ def drop_rule_covered(risks: Sequence[Dict[str, Any]], values: Optional[Dict[str
         confirmed: Коды, подтверждённые аналитиком.
         fz: Закон закупки.
         suspect: Показатели с известными ошибками (``RULE_SUSPECT_INDICATORS``).
+        dropped: Куда дописать опровергнутые правилом риски (причина ``rule_covered``) — для ``not_in_score``.
 
     Returns:
         List[Dict[str, Any]]: Риски модели без опровергнутых правилами; подтверждающие правило — как доказательства.
@@ -424,6 +490,7 @@ def drop_rule_covered(risks: Sequence[Dict[str, Any]], values: Optional[Dict[str
         code = r.get("rule_id")
         decision = None if code in keep else rule_decision(code, values, fz, suspect)
         if decision == "not_fired":
+            _not_counted(dropped, r, "rule_covered")
             continue
         if decision == "fired":
             r = {**r, "level": 0.0, "description": "", "law": None, "corroborates_rule": CODE_TO_INDICATOR[code]}
@@ -700,6 +767,23 @@ def decayed_or(weights: Iterable[float], decay: float) -> float:
     return 1 - p
 
 
+def score_contributions(weights: Sequence[float], decay: float) -> List[float]:
+    """Вклад каждого фактора в балл: ``балл − балл без фактора``, пунктов (0–100, одна десятая).
+
+    Из-за затухания вклады не складываются в балл: без главного риска его место занимает следующий.
+
+    Args:
+        weights: Веса факторов (уровень × уверенность × множители).
+        decay: Затухание :func:`decayed_or`.
+
+    Returns:
+        List[float]: Вклады в порядке ``weights``.
+    """
+    ws = list(weights)
+    total = 100 * decayed_or(ws, decay)
+    return [round(total - 100 * decayed_or(ws[:i] + ws[i + 1:], decay), 1) for i in range(len(ws))]
+
+
 def money(v: Optional[float]) -> str:
     """Сумма с пробелами между разрядами: 5 684 136,00."""
     return f"{v:,.2f}".replace(",", " ").replace(".", ",") if v is not None else "—"
@@ -725,11 +809,16 @@ def profile(risks: Sequence[Dict[str, Any]], previous_score: Optional[float] = N
         confirmed_weight: Множитель подтверждённых.
         zones: Пороги зон.
 
+    Каждому риску ставится ``score_contribution`` — вклад в балл, пунктов: насколько балл упадёт без этого риска
+    (:func:`score_contributions`).
+
     Returns:
         Dict[str, Any]: ``score``, ``zone``, ``delta``, ``previous_score``, ``components``, ``top_factors``.
     """
     confirmed = set(confirmed)
     weights = {id(r): _weight(r, confirmed, confirmed_weight, ai_weight) for r in risks}
+    for r, c in zip(risks, score_contributions([weights[id(r)] for r in risks], decay)):
+        r["score_contribution"] = c
     by_cat: Dict[str, List[float]] = {}
     for r in risks:
         by_cat.setdefault(risk_catalog.category(r.get("rule_id", "")), []).append(weights[id(r)])
@@ -876,10 +965,12 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
     cons = consistency(p, files, settings.CONSISTENCY_TOLERANCE)
     matches = registry_matches(black, p["supplier"], as_date(p["dates"]["contract"]))
     rnp_found = rnp_matches(rnp, p["supplier"], as_date(p["dates"]["contract"]))
-    f_risks, confirmed = file_risks(files, statuses)
+    dropped: List[Dict[str, Any]] = []
+    f_risks, confirmed = file_risks(files, statuses, dropped)
     file_ids = {int(f["id"]) for f in files if f.get("id") is not None}
     rejected = {code for (fid, code), st in statuses.items() if st == REJECTED_STATUS and fid in file_ids}
-    f_risks = drop_rule_covered(f_risks, values, confirmed, fz, getattr(settings, "RULE_SUSPECT_INDICATORS", ()))
+    f_risks = drop_rule_covered(f_risks, values, confirmed, fz, getattr(settings, "RULE_SUSPECT_INDICATORS", ()),
+                                dropped)
     fav = favourite_supplier(p, supplier_counts, settings)
     from risk_monitoring import control_checks, purchase_profiles
 
@@ -889,7 +980,7 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
         favourite_risks(p, fav), purchase_profiles.execution_risks(execution, settings),
         control_checks.check_risks(checks, p.get("purchase_number"), (p.get("customer") or {}).get("inn"), settings),
         consistency_risks(cons), completeness_risks(comp, settings.COMPLETENESS_RISK), fz=fz)
-    risks = drop_same_quote(risks, confirmed)
+    risks = drop_same_quote(risks, confirmed, dropped)
     prof = profile(risks, previous_score, confirmed, settings.CONFIRMED_WEIGHT, tuple(settings.SCORE_ZONES),
                    settings.SCORE_DECAY, settings.AI_UNCONFIRMED_WEIGHT)
     events = events_feed(xmls)
@@ -918,6 +1009,8 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
                            for c in checks if p.get("purchase_number") and str(p["purchase_number"]) in c["purchases"]],
         "events": events,
         "risks": risks,
+        # строки рисков документов, которые сервис не учёл в балле, с причиной (05.11.2026)
+        "not_in_score": not_in_score(dropped, risks),
         "total_risk": passport.total_risk(risks),
         "profile": prof,
         "confirmed_codes": sorted(confirmed),

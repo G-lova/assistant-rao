@@ -34,6 +34,9 @@ class PeriodTest(unittest.TestCase):
         self.assertEqual(ps.last_closed("month", date(2026, 10, 28)), "2026-09")
         with self.assertRaises(ValueError):
             ps.period_bounds("year", "2026")
+        # обозначение без ведущего нуля приводится к виду, который вычисляет сервер API (03.11.2026)
+        self.assertEqual(ps.normalize_period("week", "2026-W2"), "2026-W02")
+        self.assertEqual(ps.normalize_period("month", "2026-1"), "2026-01")
 
     def test_build(self):
         """Суммы за дни, пропуски, последняя оценка закупки, сравнение с прошлым периодом, факты без кодов."""
@@ -97,16 +100,16 @@ class PeriodPushTest(unittest.TestCase):
     class Api:
         """API внешней БД в памяти."""
 
-        def __init__(self, fail=False):
-            """Запросы и признак сбоя."""
-            self.calls, self.fail = [], fail
+        def __init__(self, fail=False, period_type=None):
+            """Запросы, признак сбоя и period_type в ответе (``day`` — API без поддержки периодов)."""
+            self.calls, self.fail, self.period_type = [], fail, period_type
 
         async def upsert_daily_run(self, export_date, status=None, **kw):
             """POST daily-runs."""
             if self.fail:
                 raise RuntimeError("422")
             self.calls.append(("post", export_date, status, kw))
-            return {"id": 77}
+            return {"id": 77, "period_type": self.period_type or kw.get("period_type")}
 
         async def patch_ai_analysis(self, table, rid, ai):
             """PATCH ai-analysis."""
@@ -136,6 +139,11 @@ class PeriodPushTest(unittest.TestCase):
         ok, err = asyncio.run(ps.push_period("stage", "month", "2026-10", s, api=self.Api(fail=True)))
         self.assertFalse(ok)
         self.assertIn("422", err)
+        old_api = self.Api(period_type="day")   # API ещё не знает period_type — вернул дневную строку
+        ok, err = asyncio.run(ps.push_period("stage", "month", "2026-10", s, api=old_api))
+        self.assertFalse(ok)
+        self.assertIn("периоды не поддерживаются", err)
+        self.assertEqual([c[0] for c in old_api.calls], ["post"])   # ai_analysis дневной строки не затёрт
 
     def test_backfill(self):
         """Собранная, но не записанная сводка дозаписывается без пересборки; записанная — не отправляется снова."""

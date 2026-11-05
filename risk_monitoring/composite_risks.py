@@ -50,7 +50,7 @@ def detect(risks: Sequence[Dict[str, Any]], rejected: Iterable[str] = (), cfg: O
 
     Args:
         risks: Риски закупки (после затухания и перепроверки исключений).
-        rejected: Коды, отклонённые аналитиком (не учитываются).
+        rejected: Коды, отклонённые аналитиком: компоненты не учитываются, отклонённый составной риск не выводится.
         cfg: Шаблоны (по умолчанию :func:`load_config`).
         prev: Составные риски прошлого анализа — переносится ``first_detected_at``.
 
@@ -72,6 +72,8 @@ def detect(risks: Sequence[Dict[str, Any]], rejected: Iterable[str] = (), cfg: O
     old = {r.get("rule_id"): r for r in prev or []}
     out: List[Dict[str, Any]] = []
     for p in cfg.get("patterns") or []:
+        if p.get("code") in rejected:      # составной риск отклонён аналитиком (05.11.2026)
+            continue
         if p.get("all_of"):
             picks = []
             for group in p["all_of"]:

@@ -405,6 +405,74 @@ def rm_decay_task(self, environment: str = None, push: bool = None) -> Dict[str,
     return out
 
 
+@celery_app.task(bind=True, name="rm_decisions_task", soft_time_limit=600, time_limit=660)
+def rm_decisions_task(self, environment: str = None, push: bool = None, minutes: int = None,
+                      contract_ids: List[int] = None) -> Dict[str, Any]:
+    """Пересчёт балла закупок после решений аналитиков по рискам (``risk_monitoring.risk_decisions``).
+
+    Кандидаты — закупки, у которых строки ``risk_monitoring_document_risks`` менялись за последние ``minutes`` минут
+    (или переданные ``contract_ids``). Пересчитываются по сохранённому ``ai_analysis`` без модели — только если
+    изменился отпечаток решений; результат сохраняется у нас и записывается во внешнюю БД.
+
+    Args:
+        environment: Окружение (по умолчанию ``DAILY_ENVIRONMENT``).
+        push: Записывать во внешнюю БД (по умолчанию ``DAILY_PUSH``).
+        minutes: Окно поиска изменённых строк (по умолчанию ``RISK_DECISION_LOOKBACK_MIN``).
+        contract_ids: Пересчитать эти закупки (отладка, ручной запуск).
+
+    Returns:
+        Dict[str, Any]: ``candidates``, ``updated``, ``pushed``, ``errors``.
+    """
+    from configs import settings
+
+    if not settings.RISK_DECISION_RECALC_ENABLED and contract_ids is None:
+        return {"skipped": "RISK_DECISION_RECALC_ENABLED = False"}
+    environment = environment or settings.DAILY_ENVIRONMENT
+    push = settings.DAILY_PUSH if push is None else push
+    minutes = int(minutes or settings.RISK_DECISION_LOOKBACK_MIN)
+
+    async def run() -> Dict[str, Any]:
+        """Кандидаты пачками по 200: решения, сохранённый анализ, пересчёт, запись."""
+        from configs.ai_repo import AIRepo
+        from configs.http_client_manager import HTTPClientManager
+        from risk_monitoring import risk_decisions as rdec
+        from risk_monitoring.contract_analyzer import EXTERNAL_TABLE, ContractAnalyzer
+
+        env = environment.lower()
+        async with HTTPClientManager(timeout=60.0) as mgr, AIRepo() as repo:
+            ca = ContractAnalyzer(mgr, environment, repo=repo, push_results=False, use_llm=False,
+                                  analyze_documents=False)
+            ids = [int(i) for i in contract_ids] if contract_ids else [
+                int(r["contract_id"]) for r in await ca._safe_query("risk_decisions_changed.sql", [minutes])
+                if r.get("contract_id") is not None]
+            out = {"candidates": len(ids), "updated": 0, "pushed": 0, "errors": 0}
+            for i in range(0, len(ids), 200):
+                chunk = ids[i:i + 200]
+                by = rdec.group_rows(await ca._safe_query("risk_decisions.sql", ids=chunk))
+                stored = await repo.get_rm_results(env, "contract", chunk)
+                for cid in chunk:
+                    new = rdec.recalc((stored.get(cid) or {}).get("ai_analysis") or {}, by.get(cid), settings)
+                    if new is None:
+                        continue
+                    out["updated"] += 1
+                    pushed, err = False, None
+                    if push:
+                        try:
+                            await ca.risk_api.patch_ai_analysis(EXTERNAL_TABLE, cid, new)
+                            pushed = True
+                            out["pushed"] += 1
+                        except Exception as e:  # noqa: BLE001 — сохраним у себя, дозапишется позже
+                            err = str(e)
+                            out["errors"] += 1
+                    await repo.save_rm_result(env, "contract", cid, new, pushed, err)
+        return out
+
+    out = asyncio.run(_pulsed(run(), self.name, self.request.id))
+    if out.get("updated"):
+        logger.info(f"Пересчёт после решений аналитиков: {out}")
+    return out
+
+
 @celery_app.task(bind=True, name="rm_period_task", soft_time_limit=900, time_limit=960)
 def rm_period_task(self, environment: str = None, kinds: List[str] = None, period: str = None,
                    use_llm: bool = True, force: bool = False) -> Dict[str, Any]:
@@ -443,7 +511,8 @@ def rm_period_task(self, environment: str = None, kinds: List[str] = None, perio
                 s = await ps.run_period(repo, environment, kind, p, use_llm=use_llm, force=force)
                 out[kind] = {"period": p, "status": (s.get("pipeline") or {}).get("status"),
                              "unchanged": bool(s.get("unchanged")),
-                             "days": len((s.get("days") or {}).get("completed") or [])}
+                             "days": len((s.get("days") or {}).get("completed") or []),
+                             "pushed": s.get("pushed"), "push_error": s.get("push_error")}
         return out
 
     out = asyncio.run(_pulsed(run(), self.name, self.request.id))

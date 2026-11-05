@@ -237,12 +237,14 @@ class ContractAnalyzer:
         await self._fill_xml_from_internal(xmls)
         rules = await self._safe_query("contract_rules.sql", ids=ids)
         statuses_rows = await self._safe_query("file_risk_statuses.sql", ids=[int(f["id"]) for f in files]) if files else []
+        # решения аналитиков по всем строкам рисков закупки (закупка, файлы, события) — 05.11.2026
+        decisions = await self._safe_query("risk_decisions.sql", ids=ids)
         inns = sorted({str(i) for i in ((cp.as_json(c.get("dataset")) or {}).get("supplier", {}).get("post_inn") for c in cards) if i})
         black = await self._safe_query("black_list.sql", inns=inns) if inns else []
         rnp = await self._safe_query("rnp_entries.sql", inns=inns) if inns else []
         supplier_counts = await self._supplier_counts(cards)
         return {"cards": cards, "files": files, "xmls": xmls, "rules": rules, "statuses": statuses_rows, "black": black, "rnp": rnp,
-                "supplier_counts": supplier_counts}
+                "supplier_counts": supplier_counts, "decisions": decisions}
 
     async def _supplier_counts(self, cards: List[Dict[str, Any]]) -> Dict[int, Dict[str, int]]:
         """Контракты заказчика каждой закупки за период по поставщикам (для BEH-006 «любимый поставщик»).
@@ -322,6 +324,9 @@ class ContractAnalyzer:
                 statuses[(int(s["file_id"]), s["rule_id"])] = int(s["status"])
             except (TypeError, ValueError):
                 continue
+        from risk_monitoring import risk_decisions
+
+        self.decisions = risk_decisions.group_rows(data.get("decisions") or [])
         black_by_inn: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         for b in data["black"]:
             black_by_inn[str(b.get("inn") or "").strip()].append(b)
@@ -365,6 +370,12 @@ class ContractAnalyzer:
                                            rnp=getattr(self, "rnp_by_inn", {}).get(inn, []),
                                            checks=getattr(self, "checks", []))
         h = built.pop("input_hash")
+        decided = (getattr(self, "decisions", None) or {}).get(cid)
+        if decided:
+            from risk_monitoring import risk_decisions
+
+            # решения по рискам правил и событий тоже меняют результат (без решений отпечаток прежний)
+            h = cp.input_hash(h, risk_decisions.decisions_hash(decided))
         progress.note(f"сборка: рисков {len(built['risks'])}, балл {built['profile']['score']} ({built['profile']['zone']})")
         if not self.force and card.get("rm_status") == "completed" and card.get("prev_hash") == h:
             progress.note("входные данные не изменились — пересчёт не нужен")
@@ -387,7 +398,7 @@ class ContractAnalyzer:
             versions["rule_exclusions"] = load_config().get("version")
         pipeline = passport.pipeline_block(STAGE, "completed", self.model if (used_llm or checks) else None,
                                            versions, debug=self.force)
-        pipeline.update(schema_version=cp.SCHEMA_VERSION, input_hash=h,
+        pipeline.update(schema_version=cp.SCHEMA_VERSION, input_hash=h, decisions_hash=built.pop("decisions_hash", None),
                         inputs={"files": len(item["files"]), "xml": len(item["xmls"]),
                                 "rules": bool(item["values"]), "black_list": len(black_by_inn.get(inn, []))})
         ai = {**built, "resume": resume, "pipeline": pipeline, "analyzed_at": passport.now_iso()}
@@ -498,9 +509,14 @@ class ContractAnalyzer:
             item: Входные данные закупки (``files``, ``values``).
             prev_ai: Прошлый ``ai_analysis`` закупки из нашего хранилища (пусто — первая оценка).
         """
+        from risk_monitoring import risk_decisions
         from risk_monitoring import risk_dynamics as rd
 
         prev = prev_ai.get("risks") or []
+        cid = int((item.get("card") or {}).get("id") or 0)
+        entry = (getattr(self, "decisions", None) or {}).get(cid)
+        # решения аналитика по всем строкам кода: снятые риски — в rejected_risks, подтверждённые весят больше
+        risk_decisions.apply(built, entry, prev_ai.get("rejected_risks") or ())
         confirmed = set(built.get("confirmed_codes") or [])
         for r in built["risks"]:
             if r.get("rule_id") in confirmed:
@@ -509,8 +525,9 @@ class ContractAnalyzer:
         if settings.COMPOSITE_RISKS_ENABLED:
             from risk_monitoring import composite_risks as cr
 
-            built["composite_risks"] = cr.detect(built["risks"], built.get("rejected_codes") or (),
-                                                 prev=prev_ai.get("composite_risks") or ())
+            built["composite_risks"] = [c for c in cr.detect(built["risks"], built.get("rejected_codes") or (),
+                                                             prev=prev_ai.get("composite_risks") or ())
+                                        if not risk_decisions.excluded(c, entry)]
             if built["composite_risks"]:
                 progress.note("составные риски: " + ", ".join(c["title"] for c in built["composite_risks"]))
         rescore(built, settings)
