@@ -16,6 +16,29 @@ sys.path.insert(0, project_root)
 
 logger = get_logger(__name__)
 
+def top_preview(results, limit: int = 10) -> str:
+    """Первые эксперты ответа для журнала: «425 (80.08), 523 (78.38), …» или «425, 523, …» без деталей.
+
+    Args:
+        results: Ответ ``ScoringPipeline.get_top_results`` — список ID или список ``{id: {..., 'total_rate'}}``.
+        limit: Сколько показать.
+
+    Returns:
+        str: Строка; пустой ответ — «нет экспертов».
+    """
+    if not results:
+        return "нет экспертов"
+    items = []
+    for r in list(results)[:limit]:
+        if isinstance(r, dict):
+            eid, d = next(iter(r.items()))
+            items.append(f"{eid} ({d.get('total_rate')})" if isinstance(d, dict) else str(eid))
+        else:
+            items.append(str(r))
+    more = f" … всего {len(results)}" if len(results) > limit else ""
+    return ", ".join(items) + more
+
+
 async def scoring(expertise_id: int, details: bool, x_api_database: str, http_manager: HTTPClientManager) -> list:
     """
     Запускает пайплайн скоринга экспертов для заданной экспертизы.
@@ -39,7 +62,6 @@ async def scoring(expertise_id: int, details: bool, x_api_database: str, http_ma
     # Настройка логирования
 
     try:
-        logger.info("Starting scoring pipeline...")
 
         # Создание пайплайна
         pipeline = ScoringPipeline(http_manager, x_api_database)
@@ -47,7 +69,6 @@ async def scoring(expertise_id: int, details: bool, x_api_database: str, http_ma
         # Параметры запуска
         sql_file_name = "experts_for_expertise.sql"
 
-        logger.info(f"Processing expertise_id: {expertise_id}, DB: {x_api_database}")
 
         # Запуск пайплайна
         df = await pipeline.run_pipeline(sql_file_name, expertise_id)
@@ -55,10 +76,10 @@ async def scoring(expertise_id: int, details: bool, x_api_database: str, http_ma
         # Получение результатов
         top_results = await asyncio.to_thread(pipeline.get_top_results, df, details)
 
-        logger.info(f"Scoring pipeline completed successfully: expertise_id={expertise_id}, DB={x_api_database}, details={details}")
-
-        # Вывод результатов
-        print(f'Эксперты в порядке убывания рейтинга:\n{top_results}')
+        # итог одной строкой: время шагов и отсев кандидатов; первые 10 в ответе; полный ответ — на DEBUG
+        logger.info(f"{pipeline.log_ctx} готово: {pipeline.summary()}")
+        logger.info(f"{pipeline.log_ctx} первые в ответе: {top_preview(top_results)}")
+        logger.debug(f"{pipeline.log_ctx} ответ полностью: {top_results}")
 
         # # Сохранение результатов
         # output_dir = os.path.join(project_root, "data", "outputs")
@@ -72,7 +93,7 @@ async def scoring(expertise_id: int, details: bool, x_api_database: str, http_ma
         return top_results
 
     except Exception as e:
-        logger.error(f"Error in scoring pipeline: {e}", exc_info=True)
+        logger.error(f"[подбор {expertise_id}/{x_api_database}] ошибка: {e}", exc_info=True)
         raise
 
     # finally:
