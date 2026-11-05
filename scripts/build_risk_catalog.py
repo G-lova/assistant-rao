@@ -19,6 +19,8 @@ SOURCE = ROOT / "docs" / "risk_catalog.md"
 TARGET = ROOT / "risk_monitoring" / "config" / "risk_catalog.json"
 
 ROW_RE = re.compile(r"^\|\s*([A-Z]+-\d{3})\s*\|")
+# строка раздела «Описания рисков»: «- **FIN-001** — текст»
+DESCRIPTION_RE = re.compile(r"^-\s+\*\*([A-Z]+-\d{3})\*\*\s+—\s+(.+)$")
 INDICATOR_RE = re.compile(r"^(?P<code>[a-z]{2}_[pn]\d+)\s*\(№\s*(?P<no>\d+)\s*(?P<status>[✅⏸])\s*\)$")
 KINDS = {"риск": "risk", "нарушение": "violation", "ИИ": "ai"}
 EMPTY = {"—", "-", ""}
@@ -86,14 +88,22 @@ def build(source: Path = SOURCE) -> Dict[str, Any]:
         source: Путь к ``docs/risk_catalog.md``.
 
     Returns:
-        Dict[str, Any]: ``{"version", "risks": [...]}``.
+        Dict[str, Any]: ``{"version", "risks": [...]}``; у риска ``description`` — из раздела «Описания рисков»
+        (``None``, если описания нет).
 
     Raises:
-        ValueError: Повтор кода или показателя.
+        ValueError: Повтор кода или показателя; описание для кода, которого нет в таблицах.
     """
     text = source.read_text(encoding="utf-8")
     version = re.search(r"`(rm-catalog-[\w.-]+)`", text)
     risks: List[Dict[str, Any]] = [parse_row(line) for line in text.splitlines() if ROW_RE.match(line)]
+    descriptions = {m[1]: m[2].strip() for m in map(DESCRIPTION_RE.match, text.splitlines()) if m}
+    unknown = sorted(set(descriptions) - {r["code"] for r in risks})
+    if unknown:
+        raise ValueError(f"описания для кодов, которых нет в таблицах: {unknown}")
+    # описание — сразу после названия
+    risks = [{k: v for k, v in [*list(r.items())[:3], ("description", descriptions.get(r["code"])),
+                                *list(r.items())[3:]]} for r in risks]
     codes = [r["code"] for r in risks]
     dup = {c for c in codes if codes.count(c) > 1}
     if dup:

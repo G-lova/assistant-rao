@@ -247,6 +247,12 @@ RISK_DECAY_RECALC_ENABLED = True
 RISK_DECAY_RECALC_WEEKDAY = 1        # понедельник (crontab day_of_week)
 RISK_DECAY_RECALC_HOUR = 4
 RISK_DECAY_MIN_CHANGE = 1.0          # балл изменился меньше — не перезаписывать
+# Пересчёт закупки после решения аналитика (05.11.2026): решения по всем строкам рисков (закупка, файлы, события)
+# читаются из risk_monitoring_document_risks; закупки, где строки менялись за RISK_DECISION_LOOKBACK_MIN минут
+# (updated_at, время БД), пересчитываются без модели, если изменился отпечаток решений (risk_monitoring.risk_decisions)
+RISK_DECISION_RECALC_ENABLED = True
+RISK_DECISION_RECALC_EVERY_MIN = 2   # период задачи rm_decisions_task, минут
+RISK_DECISION_LOOKBACK_MIN = 15      # окно поиска изменённых строк, минут (с запасом на пропущенный запуск)
 # Приоритет проверки (10.14): веса составляющих (сумма 1); итог × (0,5 + 0,5 × доверие)
 PRIORITY_WEIGHTS = {"risk": 0.4, "growth": 0.25, "money": 0.15, "novelty": 0.2}
 # Уровень риска от сработавшего правила внешней системы (rule_values): признак риска («нет обеспечения заявки»,

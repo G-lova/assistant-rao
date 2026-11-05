@@ -1,6 +1,6 @@
 """Единый каталог рисков и типов событий риск-мониторинга.
 
-Риски (версия ``rm-catalog-2``) читаются из ``risk_monitoring/config/risk_catalog.json``. JSON собирается
+Риски (версия ``rm-catalog-3``, с описаниями ``description``) читаются из ``risk_monitoring/config/risk_catalog.json``. JSON собирается
 скриптом ``scripts/build_risk_catalog.py`` из документа ``docs/risk_catalog.md``, который согласуют
 методологи и разработчики внешней системы. Правило каталога: каждому показателю внешней системы
 (``pz_p1 … pc_n6``) соответствует ровно один код, сами показатели не меняются. Риски концепции без
@@ -101,6 +101,18 @@ def title(code: str) -> str:
         str: Название или сам код, если его нет в каталоге.
     """
     return (RISKS.get(code) or {}).get("title") or code
+
+
+def description(code: str) -> Optional[str]:
+    """Описание риска для подсказок: что он означает и чем опасен (``rm-catalog-3``).
+
+    Args:
+        code: Код риска.
+
+    Returns:
+        Optional[str]: Описание или ``None`` для кода вне каталога.
+    """
+    return (RISKS.get(code) or {}).get("description")
 
 
 def kind(code: str) -> Optional[str]:

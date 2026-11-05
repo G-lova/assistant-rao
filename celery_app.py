@@ -167,6 +167,12 @@ celery_app.conf.update(
                                 minute=17),
             'options': {'queue': 'risk_monitoring'},
         },
+        # Пересчёт балла закупок после решений аналитиков по рискам (без модели, по сохранённому анализу)
+        'rm-decisions-recalc': {
+            'task': 'rm_decisions_task',
+            'schedule': crontab(minute=f"*/{settings.RISK_DECISION_RECALC_EVERY_MIN}"),
+            'options': {'queue': 'risk_monitoring'},
+        },
         'typal-clauses-daily': {
             'task': 'rm_typal_clauses_task',
             'schedule': crontab(hour=5, minute=40),
