@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import aiofiles
 import pandas as pd
@@ -15,6 +16,22 @@ from search_experts.conflict_detector import ConflictDetector
 
 
 logger = get_logger(__name__)
+
+
+def brief(ids, limit: int = 15) -> str:
+    """Короткая запись множества ID для журнала: «29: [43, 113, …] (+14)».
+
+    Args:
+        ids: ID (множество, список, ключи словаря).
+        limit: Сколько ID показать.
+
+    Returns:
+        str: Число и первые ``limit`` ID по возрастанию.
+    """
+    items = sorted(int(i) for i in ids)
+    head = ", ".join(map(str, items[:limit]))
+    more = f" (+{len(items) - limit})" if len(items) > limit else ""
+    return f"{len(items)}: [{head}]{more}"
 
 
 class ScoringPipeline:
@@ -139,7 +156,7 @@ class ScoringPipeline:
                                            settings.CONFLICT_ORG_DIRECTORY_THRESHOLD, settings.CONFLICT_ORG_DIRECTORY_MARGIN,
                                            settings.CONFLICT_ORG_DIRECTORY_BRANCH_THRESHOLD)
         except Exception as e:  # noqa: BLE001 — без справочника работает сравнение названий
-            logger.warning(f"Справочник организаций не применён: {type(e).__name__}: {e}")
+            logger.warning(f"{getattr(self, 'log_ctx', '[подбор]')} Справочник организаций не применён: {type(e).__name__}: {e}")
             return df
 
     async def load_coauthors(self, df):
@@ -164,7 +181,7 @@ class ScoringPipeline:
             self.coauthor_publications = await coauthors.load_coauthors(
                 env, df["expert_id"].dropna().astype(int).unique().tolist(), coauthors.min_year(settings.CONFLICT_COAUTHOR_YEARS))
         except Exception as e:  # noqa: BLE001 — без публикаций соавторство не проверяется
-            logger.warning(f"Соавторы не загружены: {type(e).__name__}: {e}")
+            logger.warning(f"{getattr(self, 'log_ctx', '[подбор]')} Соавторы не загружены: {type(e).__name__}: {e}")
 
     def detect_conflicts(self, df):
         """
@@ -185,30 +202,35 @@ class ScoringPipeline:
         if not self._has_valid_experts(df):
             return df
 
-        reasons = self.conflict_detector.find_requisite_conflicts(df)
-        conflict_ids = set(reasons)
+        from collections import Counter
+        from search_experts import coauthors
+
+        ctx = getattr(self, "log_ctx", "[подбор]")
+        reasons = {eid: list(r) for eid, r in self.conflict_detector.find_requisite_conflicts(df).items()}
         if reasons:
-            logger.info(f"Конфликт интересов с организациями экспертизы: {reasons}")
+            logger.debug(f"{ctx} конфликт с организациями экспертизы: {reasons}")
             for col in ("expert_organization_guess", "expert_diplom_guess"):
                 if col in df.columns:
                     notes = df.loc[df["expert_id"].isin(reasons) & df[col].notna(), ["expert_id", col]]
                     for eid, note in notes.drop_duplicates().itertuples(index=False):
-                        logger.info(f"Эксперт {eid}: ИНН по справочнику ({col}): {note}")
+                        logger.debug(f"{ctx} эксперт {eid}: ИНН по справочнику ({col}): {note}")
 
-        exclude_ids = self.conflict_detector.find_family_conflicts(df)
-        if exclude_ids:
-            conflict_ids |= exclude_ids
+        for eid in self.conflict_detector.find_family_conflicts(df) or ():
+            reasons.setdefault(eid, []).append("family")
 
         # соавтор — контактное лицо или руководитель заказчика
-        from search_experts import coauthors
         co = coauthors.customer_coauthor_conflicts(df, getattr(self, "coauthor_publications", {}) or {})
-        if co:
-            logger.info(f"Соавторство с заказчиком (coauthor_customer): {co}")
-            conflict_ids |= set(co)
+        for eid, note in co.items():
+            reasons.setdefault(eid, []).append("coauthor_customer")
+            logger.debug(f"{ctx} эксперт {eid}: соавторство с заказчиком: {note}")
 
-        if conflict_ids:
-            logger.info(f"Обнаружен конфликт интересов у экспертов: {conflict_ids}")
-            df = df[~df["expert_id"].isin(conflict_ids)]
+        if reasons:
+            counts = Counter(r for rs in reasons.values() for r in set(rs))
+            why = ", ".join(f"{k} {v}" for k, v in counts.most_common())
+            logger.info(f"{ctx} конфликт интересов: исключено {brief(reasons)}; причины: {why}")
+            if hasattr(self, "funnel"):
+                self.funnel["конфликт"], self.funnel["конфликт_причины"] = len(reasons), why
+            df = df[~df["expert_id"].isin(reasons)]
 
         return df
     
@@ -217,8 +239,9 @@ class ScoringPipeline:
         """
         Вычисляет косинусное сходство между эмбеддингами текста экспертизы и описаний экспертов.
 
-        Генерирует векторные представления текстов с помощью внешнего embedding API,
-        рассчитывает попарное сходство и добавляет результат в новый столбец датафрейма.
+        Векторные представления текстов берутся из кэша внутренней БД (``search_experts.embedding_cache``,
+        миграция 013), недостающие считаются внешним embedding API; рассчитывает попарное сходство и добавляет
+        результат в новый столбец датафрейма.
         Возвращает датафрейм, отсортированный по убыванию сходства.
 
         Args:
@@ -235,13 +258,10 @@ class ScoringPipeline:
         exp_text = df["expertise_text_feature"].iloc[0]
         expert_texts = df["expert_text_feature"].tolist()
 
-        exp_emb_task = self.embedding_client.get_embeddings([exp_text])
-        expert_embs_task = self.embedding_client.get_embeddings(expert_texts)
-
-        exp_emb, expert_embs = await asyncio.gather(
-            exp_emb_task,
-            expert_embs_task
-        )
+        # один вызов на экспертизу и кандидатов: векторы из кэша внутренней БД, в сервис — только новые тексты
+        from search_experts import embedding_cache
+        embs = await embedding_cache.get_embeddings(self.embedding_client, [exp_text] + expert_texts, self.embedding_model)
+        exp_emb, expert_embs = embs[:1], embs[1:]
         
         df["similarity_embeddings"] = cosine_similarity(exp_emb, expert_embs).flatten()
         df = await self.apply_publication_similarity(df, exp_emb[0])
@@ -274,10 +294,11 @@ class ScoringPipeline:
             scores = await similarity.publication_scores(
                 env, df["expert_id"].dropna().astype(int).unique().tolist(), list(expertise_embedding), self.embedding_model)
         except Exception as e:  # noqa: BLE001 — подбор работает и без публикаций
-            logger.warning(f"Сходство публикаций не учтено: {type(e).__name__}: {e}")
+            logger.warning(f"{getattr(self, 'log_ctx', '[подбор]')} Сходство публикаций не учтено: {type(e).__name__}: {e}")
             return df
         if scores:
-            logger.info(f"Публикации учтены у {len(scores)} из {df['expert_id'].nunique()} кандидатов")
+            logger.info(f"{getattr(self, 'log_ctx', '[подбор]')} публикации учтены у {len(scores)} из "
+                        f"{df['expert_id'].nunique()} кандидатов")
         return similarity.blend(df, scores, settings.EXPERT_PUB_SIMILARITY_WEIGHT)
     
 
@@ -314,19 +335,26 @@ class ScoringPipeline:
             return df
         
         experts_to_exclude = set()
+        ctx = getattr(self, "log_ctx", "[подбор]")
 
         exclude_ids = self.conflict_detector.find_nepotism(df)
         if exclude_ids:
-            logger.info(f"Обнаружена семейственность у экспертов: {exclude_ids}")
+            logger.info(f"{ctx} семейственность (совпадение фамилий): исключено {brief(exclude_ids)}")
             experts_to_exclude |= exclude_ids
+            if hasattr(self, "funnel"):
+                self.funnel["семейственность"] = len(exclude_ids)
 
         # кандидаты-соавторы: остаётся более подходящий (coauthor_expert)
         from search_experts import coauthors
         pairs = coauthors.expert_coauthor_pairs(df, getattr(self, "coauthor_publications", {}) or {})
         if pairs:
-            excluded = coauthors.exclude_coauthor_pairs(df, pairs)
-            logger.info(f"Соавторство кандидатов (coauthor_expert): пары {pairs}, исключены {excluded}")
+            excluded = coauthors.exclude_coauthor_pairs(df, pairs) - experts_to_exclude
+            logger.info(f"{ctx} соавторство кандидатов: пар {len(pairs)}, исключено {brief(excluded)}")
+            for a, b, title in pairs:
+                logger.debug(f"{ctx} соавторы {a} и {b}: {title}")
             experts_to_exclude |= excluded
+            if hasattr(self, "funnel") and excluded:
+                self.funnel["соавторы"] = len(excluded)
 
         df = df[~df["expert_id"].isin(experts_to_exclude)]
         return df
@@ -372,44 +400,88 @@ class ScoringPipeline:
             pandas.DataFrame: Датафрейм с отфильтрованными и ранжированными экспертами,
             содержащий колонки 'expert_id' и 'rating'.
         """
+        timings = {}
+        self.timings, self.funnel = timings, {}
+        self.log_ctx = f"[подбор {expertise_id}/{self.environment}]"
+        started = time.perf_counter()
+
+        def mark(step):
+            """Запоминает длительность шага (с) с предыдущей отметки."""
+            nonlocal started
+            now = time.perf_counter()
+            timings[step] = round(now - started, 2)
+            started = now
+
         try:
             # Загрузка SQL запроса
             sql_query = await load_sql_query_async(sql_file_path)
             
             # Получение данных
             df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[expertise_id] * 4)
+            mark("sql")
+            self.funnel["кандидатов"] = int(df["expert_id"].nunique()) if "expert_id" in df.columns else 0
         
             if df.empty or df['expert_id'].isna().all() or (df['expert_id'].astype(str) == 'None').all():
                 raise Exception("Доступных экспертов нет")
             
             # Предобработка
             df = await asyncio.to_thread(self.preprocess_data, df)
+            mark("preprocess")
             
             # ИНН организаций экспертов без реквизитов — из справочника организаций
             df = await self.attach_org_guesses(df)
+            mark("org_directory")
 
             # Соавторы кандидатов (публикации во внутренней БД)
             await self.load_coauthors(df)
+            mark("coauthors_load")
 
             # Обнаружение конфликтов
             df = await asyncio.to_thread(self.detect_conflicts, df)
+            mark("conflicts")
             
             # Расчет схожестей
             df = await self.calculate_similarities(df)
+            mark("similarity")
             
             # Расчет семейственности
             df = await asyncio.to_thread(self.detect_nepotism, df)
+            mark("nepotism")
             
             # Расчет рейтингов
             df = await asyncio.to_thread(self.calculate_ratings, df)
+            mark("ratings")
             
             return df
         
         except Exception as e:
             if str(e) == "Доступных экспертов нет":
+                logger.info(f"{self.log_ctx} доступных экспертов нет (SQL {timings.get('sql')} с)")
                 return pd.DataFrame(columns=['expert_id', 'scoring'])
-            else:
-                raise
+            logger.error(f"{self.log_ctx} ошибка на шаге после {list(timings) or ['старт']}: {type(e).__name__}: {e}")
+            raise
+
+    def summary(self) -> str:
+        """
+        Итог подбора одной строкой: время шагов и отсев кандидатов по этапам.
+
+        Пример: «26.2 с (sql 7.97, similarity 17.15, …) | кандидатов 369 → конфликт −12 (inn_work 5, family 4) →
+        семейственность −29 → соавторы −1 → ограничения −1 → в ответе 326».
+
+        Returns:
+            str: Строка для журнала.
+        """
+        t = getattr(self, "timings", {}) or {}
+        f = getattr(self, "funnel", {}) or {}
+        steps = ", ".join(f"{k} {v}" for k, v in t.items() if v >= 0.01)
+        parts = [f"кандидатов {f.get('кандидатов', '?')}"]
+        for key in ("конфликт", "семейственность", "соавторы", "ограничения"):
+            if f.get(key):
+                why = f.get(f"{key}_причины")
+                parts.append(f"{key} −{f[key]}" + (f" ({why})" if why else ""))
+        if "в ответе" in f:
+            parts.append(f"в ответе {f['в ответе']}")
+        return f"{round(sum(t.values()), 2)} с ({steps}) | " + " → ".join(parts)
 
     def sort_experts(self, df, sort_column: str = "scoring"):
         
@@ -497,11 +569,17 @@ class ScoringPipeline:
                 for constraint_id in constraint_list:
                     excluded_experts.add(int(constraint_id))
 
-        if excluded_experts:
-            logger.info(f"Обнаружены constraint_experts: {sorted(list(excluded_experts))}")
-        
         # Применяем фильтрацию к датафрейму
+        before = df["expert_id"].nunique()
         df = df.loc[filtered_indices]
+        dropped = before - df["expert_id"].nunique()
+        if excluded_experts:
+            logger.info(f"{getattr(self, 'log_ctx', '[подбор]')} ограничения пар экспертов (constraint_experts): "
+                        f"исключено из ответа {dropped}, в ограничениях {brief(excluded_experts)}")
+        if hasattr(self, "funnel"):
+            if dropped:
+                self.funnel["ограничения"] = int(dropped)
+            self.funnel["в ответе"] = int(df["expert_id"].nunique())
         
         # Формирование списка экспертов для вывода
         if details:
