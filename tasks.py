@@ -120,17 +120,37 @@ def index_documents_task(self, expertise_id: int, environment: str = None):
 
 @celery_app.task(name="purge_expired_texts_task")
 def purge_expired_texts_task():
-    """Ночная очистка текстов и чанков с истёкшим сроком хранения (``PE_TEXT_RETENTION_DAYS``).
+    """Ночная очистка текстов и чанков с истёкшим сроком хранения (``PE_TEXT_RETENTION_DAYS``) и кэша эмбеддингов
+    подбора экспертов (векторы, не использованные 90 дней).
 
     Returns:
-        dict: ``{"purged": N}`` либо ``{"skipped": True}``, если хранилище выключено.
+        dict: ``{"embeddings_purged": N, "purged": N}`` либо ``{"embeddings_purged": N, "skipped": True}``, если
+        хранилище выключено.
     """
     from knowledge_store.indexer import purge_expired_texts
     from knowledge_store.safe import is_enabled
 
+    result = {"embeddings_purged": run_async(_purge_text_embeddings())}
     if not is_enabled():
-        return {"skipped": True}
-    return {"purged": run_async(purge_expired_texts())}
+        return {**result, "skipped": True}
+    return {**result, "purged": run_async(purge_expired_texts())}
+
+
+async def _purge_text_embeddings():
+    """Удаляет из кэша эмбеддингов подбора экспертов векторы, не использованные 90 дней (миграция 013).
+
+    Returns:
+        int | None: Сколько удалено; ``None`` — внутренняя БД недоступна (очистка текстов продолжается).
+    """
+    from knowledge_store.db import connection
+    from search_experts.embedding_cache import purge_unused
+
+    try:
+        async with connection() as conn:
+            return await purge_unused(conn, 90)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Кэш эмбеддингов не очищен: {type(e).__name__}: {e}")
+        return None
 
 
 @celery_app.task(bind=True, name="generate_summary_opinion_task")

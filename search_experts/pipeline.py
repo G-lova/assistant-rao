@@ -218,8 +218,9 @@ class ScoringPipeline:
         """
         Вычисляет косинусное сходство между эмбеддингами текста экспертизы и описаний экспертов.
 
-        Генерирует векторные представления текстов с помощью внешнего embedding API,
-        рассчитывает попарное сходство и добавляет результат в новый столбец датафрейма.
+        Векторные представления текстов берутся из кэша внутренней БД (``search_experts.embedding_cache``,
+        миграция 013), недостающие считаются внешним embedding API; рассчитывает попарное сходство и добавляет
+        результат в новый столбец датафрейма.
         Возвращает датафрейм, отсортированный по убыванию сходства.
 
         Args:
@@ -236,13 +237,10 @@ class ScoringPipeline:
         exp_text = df["expertise_text_feature"].iloc[0]
         expert_texts = df["expert_text_feature"].tolist()
 
-        exp_emb_task = self.embedding_client.get_embeddings([exp_text])
-        expert_embs_task = self.embedding_client.get_embeddings(expert_texts)
-
-        exp_emb, expert_embs = await asyncio.gather(
-            exp_emb_task,
-            expert_embs_task
-        )
+        # один вызов на экспертизу и кандидатов: векторы из кэша внутренней БД, в сервис — только новые тексты
+        from search_experts import embedding_cache
+        embs = await embedding_cache.get_embeddings(self.embedding_client, [exp_text] + expert_texts, self.embedding_model)
+        exp_emb, expert_embs = embs[:1], embs[1:]
         
         df["similarity_embeddings"] = cosine_similarity(exp_emb, expert_embs).flatten()
         df = await self.apply_publication_similarity(df, exp_emb[0])
