@@ -370,11 +370,12 @@ class ContractAnalyzer:
                                            rnp=getattr(self, "rnp_by_inn", {}).get(inn, []),
                                            checks=getattr(self, "checks", []))
         h = built.pop("input_hash")
-        decided = (getattr(self, "decisions", None) or {}).get(cid)
-        if decided:
-            from risk_monitoring import risk_decisions
+        from risk_monitoring import risk_decisions
 
-            # решения по рискам правил и событий тоже меняют результат (без решений отпечаток прежний)
+        decided = (getattr(self, "decisions", None) or {}).get(cid)
+        if decided and any(st != risk_decisions.PENDING for st in (decided.get("rows") or {}).values()):
+            # решения по рискам правил и событий тоже меняют результат; строки «на рассмотрении» — нет
+            # (без решений отпечаток прежний, повторного анализа с моделью не будет)
             h = cp.input_hash(h, risk_decisions.decisions_hash(decided))
         progress.note(f"сборка: рисков {len(built['risks'])}, балл {built['profile']['score']} ({built['profile']['zone']})")
         if not self.force and card.get("rm_status") == "completed" and card.get("prev_hash") == h:
