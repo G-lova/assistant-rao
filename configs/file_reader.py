@@ -1,4 +1,3 @@
-import uuid
 
 import aiofiles
 import asyncio
@@ -93,6 +92,60 @@ def xlsx_text_limited(path: str, max_rows: int = 500, max_cols: int = 60, max_sh
     return "\n\n".join(out)[:max_chars].strip()
 
 
+SOFFICE_TIMEOUT = 60
+
+
+async def run_soffice(args: list, timeout: int = SOFFICE_TIMEOUT) -> subprocess.CompletedProcess:
+    """Запускает LibreOffice (``soffice --headless``) со своим временным профилем.
+
+    - Профиль (``lo_profile_*``) удаляется после запуска — раньше каталог оставался в /tmp после каждой
+      конвертации.
+    - Процесс запускается в своей группе; по таймауту завершается вся группа. ``subprocess.run(timeout=…)``
+      завершал только запускающий скрипт, а ``soffice.bin`` продолжал работать и занимать процессор
+      (06.11.2026: «Контракт 464-ЭК_2026.docx», конвертация дольше 60 с).
+    - Свой профиль у каждого запуска: параллельные конвертации не мешают друг другу.
+
+    Args:
+        args: Аргументы после ``soffice --headless …`` (``--convert-to``, ``--outdir``, файл).
+        timeout: Таймаут, секунд.
+
+    Returns:
+        subprocess.CompletedProcess: Результат с ``stdout`` и ``stderr``.
+
+    Raises:
+        subprocess.TimeoutExpired: Не уложился в таймаут (процессы завершены).
+        subprocess.CalledProcessError: Ненулевой код возврата.
+        FileNotFoundError: LibreOffice не установлен.
+    """
+    import signal
+
+    profile = tempfile.mkdtemp(prefix="lo_profile_")
+    cmd = ["soffice", "--headless", "--norestore", "--nofirststartwizard",
+           f"-env:UserInstallation=file://{profile}", *args]
+
+    def run() -> subprocess.CompletedProcess:
+        """Запуск с ожиданием; по таймауту — завершение группы процессов."""
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                start_new_session=True)
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.communicate()
+            raise
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, cmd, out, err)
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+    try:
+        return await asyncio.to_thread(run)
+    finally:
+        shutil.rmtree(profile, ignore_errors=True)
+
+
 def _frames_text(excel_data: dict) -> str:
     """Текст листов, прочитанных pandas (.xls): «Лист: имя» и таблица (до 20 строк), пробелы схлопнуты."""
     result = []
@@ -138,30 +191,13 @@ class FileReader:
         При ошибке конвертации возвращается к обычному способу чтения
         исходного документа.
         """
-        profile_dir = f"/tmp/lo_profile_{uuid.uuid4().hex}"
-        
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
                 tmpdir_path = Path(tmpdir)
 
                 logger.info(f"Конвертация {original_filename} в PDF...")
-                result = await asyncio.to_thread(
-                    subprocess.run,
-                    [
-                        "soffice",
-                        "--headless",
-                        "--norestore",
-                        "--nofirststartwizard",
-                        f"-env:UserInstallation=file://{profile_dir}",
-                        "--convert-to", "pdf:writer_pdf_Export",
-                        "--outdir", str(tmpdir_path),
-                        file_path
-                    ],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=60  # Таймаут 60 секунд на конвертацию
-                )
+                result = await run_soffice(
+                    ["--convert-to", "pdf:writer_pdf_Export", "--outdir", str(tmpdir_path), file_path])
                 
                 # LibreOffice сохраняет PDF с тем же именем, что и исходный файл
                 pdf_path = tmpdir_path / f"{Path(file_path).stem}.pdf"
@@ -179,6 +215,11 @@ class FileReader:
         #     logger.info(f"Пробуем обычный способ чтения {ext.upper()} файла: {original_filename}")
         #     return await self.read_doc_file(file_path, ext, original_filename)
             
+        except subprocess.TimeoutExpired:
+            # большой документ: без трассировки, текст читается напрямую
+            logger.warning(f"Конвертация {ext.upper()} → PDF для {original_filename} дольше {SOFFICE_TIMEOUT} с — "
+                           f"читаем {ext.upper()} напрямую")
+            return await self.read_doc_file(file_path, ext, original_filename)
         except Exception as e:
             logger.error(f"Ошибка конвертации {ext.upper()} → PDF для {original_filename}: {e}", exc_info=True)
             logger.info(f"Пробуем обычный способ чтения {ext.upper()} файла: {original_filename}")
@@ -218,18 +259,8 @@ class FileReader:
 
                     # Пробуем конвертацию DOC → DOCX через LibreOffice
                     try:
-                        await asyncio.to_thread(
-                            subprocess.run,
-                            [
-                                "soffice",
-                                "--headless",
-                                "--convert-to", "docx",
-                                file_path,
-                                "--outdir", str(tmpdir)
-                            ],
-                            check=True,
-                            capture_output=True
-                        )
+                        # таймаут и свой профиль: раньше без таймаута — зависший LibreOffice держал прогон
+                        await run_soffice(["--convert-to", "docx", "--outdir", str(tmpdir), file_path])
 
                         docx_path = tmpdir / (Path(file_path).stem + ".docx")
                         if docx_path.exists():
@@ -245,12 +276,11 @@ class FileReader:
                         if ext == '.doc':
                             try:
                                 # Пробуем antiword
-                                text = await asyncio.to_thread(
-                                    subprocess.run,
-                                    ["antiword", file_path],
-                                    capture_output=True,
-                                    text=True
-                                ).stdout.strip()
+                                # .stdout — у результата, а не у корутины (раньше antiword не срабатывал никогда)
+                                res = await asyncio.to_thread(
+                                    subprocess.run, ["antiword", file_path], capture_output=True, text=True,
+                                    timeout=SOFFICE_TIMEOUT)
+                                text = (res.stdout or "").strip()
 
                                 if text:
                                     return text
@@ -448,38 +478,22 @@ class FileReader:
         Returns:
             str: Текстовое представление всех листов файла, включая:
                 - название каждого листа,
-                - табличные данные в виде строки (ограничено 20 строками на лист),
-                - очищенные от NaN значений ячейки.
-                Все множественные пробелы заменяются на одиночные. В случае успеха — возвращает полный текст;
-                при ошибке — выбрасывает исключение с детализацией проблемы.
+                - строки с ячейками через « | » (не больше ``EXCEL_MAX_ROWS`` строк на лист, см. ``xlsx_text_limited``).
+                При ошибке — выбрасывает исключение с детализацией проблемы.
         """
         temp_dir = None
         try:
             temp_dir = tempfile.mkdtemp()
             temp_xlsx_path = os.path.join(temp_dir, "converted.xlsx")
             
-            # Проверяем доступность LibreOffice
             try:
-                result = await asyncio.to_thread(subprocess.run, ['libreoffice', '--version'], capture_output=True, text=True, timeout=10)
-                if result.returncode != 0:
-                    raise RuntimeError("LibreOffice не установлен или недоступен")
-            except (subprocess.TimeoutExpired, FileNotFoundError):
+                await run_soffice(['--convert-to', 'xlsx:Calc MS Excel 2007 XML', '--outdir', temp_dir, file_path])
+            except FileNotFoundError:
                 raise RuntimeError("LibreOffice не доступен")
-            
-            # Конвертируем в xlsx
-            cmd = [
-                'libreoffice',
-                '--headless',
-                '--convert-to',
-                'xlsx:Calc MS Excel 2007 XML',
-                '--outdir',
-                temp_dir,
-                file_path
-            ]
-            
-            result = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=60)
-            if result.returncode != 0:
-                raise RuntimeError(f"Ошибка конвертации: {result.stderr}")
+            except subprocess.TimeoutExpired:
+                raise RuntimeError(f"Конвертация дольше {SOFFICE_TIMEOUT} с")
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(f"Ошибка конвертации: {e.stderr}")
             
             # Ищем сконвертированный файл
             converted_files = [f for f in os.listdir(temp_dir) if f.endswith('.xlsx')]
@@ -487,22 +501,8 @@ class FileReader:
                 raise RuntimeError("Не удалось найти сконвертированный файл")
             
             temp_xlsx_path = os.path.join(temp_dir, converted_files[0])
-            excel_data = await asyncio.to_thread(pd.read_excel,temp_xlsx_path, sheet_name=None, engine='openpyxl')
-            
-            result = []
-            for sheet_name, df in excel_data.items():
-                result.append(f"Лист: {sheet_name}")
-                df = df.fillna('').astype(str)
-                
-                # Компактное представление
-                table_text = df.to_string(index=False, max_rows=20)
-                result.append(table_text)
-                result.append("")  # Одна пустая строка между листами
-            
-            full_text = "\n".join(result).strip()
-            # Заменяем множественные пробелы на один пробел
-            full_text = re.sub(r'\s+', ' ', full_text)
-            return full_text
+            # потоково и с ограничениями, как .xlsx (полная загрузка pandas подвешивала прогон на больших книгах)
+            return await asyncio.to_thread(xlsx_text_limited, temp_xlsx_path, **excel_limits())
             
         except Exception as e:
             logger.error(f"Ошибка конвертации через LibreOffice: {str(e)}")
