@@ -226,9 +226,61 @@ def absence_contradicted(r: Dict[str, Any], text: str) -> bool:
     return bool(named) and all(rx.search(text) for rx in named)
 
 
+# Поля структурированных данных ЕИС («trademark: …», «countryFullName: …», «vatCode: …») — служебные данные
+# XML и печатных форм, а не текст требований: по ним модель находила DOC-002 / DOC-003 / DOC-001 (838 из 8 000
+# рисков выгрузки 06.11.2026)
+# Риски содержания документа: по служебным полям ЕИС они не ищутся. Финансовые и сроковые признаки (FIN, CTR,
+# противоречия DOC-007) по этим полям допустимы — «isAdvancePayment: true … paymentSum» — факт аванса
+EIS_FIELD_CODES = {"DOC-001", "DOC-002", "DOC-003", "DOC-004", "DOC-005", "DOC-006", "DOC-010", "AI-001", "AI-003",
+                   "AI-005"}
+
+
+def eis_fields(fragment: str) -> bool:
+    """Цитата из структурированных данных ЕИС: начинается с поля вида ``ключ:`` (латиница, camelCase) или
+    содержит два и более таких поля."""
+    frag = (fragment or "").strip()
+    keys = list(re.finditer(r"(?<![А-Яа-яЁёA-Za-z])([a-z][a-z0-9]*[A-Z][A-Za-z0-9]*|trademark|vatcode|vatname)\s*:?\s",
+                            frag))
+    if not keys:
+        return False
+    return keys[0].start() == 0 or len(keys) >= 2
+
+
+# Незаполненные поля формы («____», «[указать]») — норма проекта контракта и форм, а не неполнота, неоднозначность
+# или противоречие (157 рисков выгрузки 06.11.2026)
+BLANK_RE = re.compile(r"_{4,}|\[\s*(указать|заполнить)[^\]]*\]", re.IGNORECASE)
+BLANK_CODES = {"DOC-001", "DOC-006", "DOC-007", "AI-002", "AI-003", "FIN-016"}
+BLANK_CLAIM_RE = re.compile(r"не\s+(указан|заполнен|определ|конкретизир)|пуст|отсутств|неоднознач|прочерк|пропуск",
+                            re.IGNORECASE)
+
+
+def blank_form(r: Dict[str, Any]) -> bool:
+    """Риск о незаполненном поле формы: в цитате пропуски «____», а модель пишет «не указано», «неоднозначно»."""
+    frag = ((r.get("evidence") or {}).get("fragment")) or ""
+    text = f"{r.get('title') or ''} {r.get('explanation') or r.get('description') or ''}"
+    return r.get("code") in BLANK_CODES and bool(BLANK_RE.search(frag)) and bool(BLANK_CLAIM_RE.search(text))
+
+
+# Ставка НДС 22 % действует с 01.01.2026 (Федеральный закон от 28.11.2025 № 425-ФЗ); модель по старым знаниям
+# называла её ошибкой (27 рисков выгрузки 06.11.2026)
+VAT22_CLAIM_RE = re.compile(r"(ндс|налог\w* на добавленную)[^.]{0,80}22\s*%|22\s*%[^.]{0,80}(ндс|налог\w* на добавленную)",
+                            re.IGNORECASE)
+# именно о ставке («ставка 22 % не действует», «должна быть 20 %»), а не об ошибке расчёта суммы НДС
+VAT_STALE_RE = re.compile(r"не\s+действ|устарев|утратил|действующ\w*\s+ставк|ставк\w*[^.]{0,60}(ошибочн|некорректн|неверн)"
+                          r"|(ошибочн|некорректн|неверн)\w*[^.]{0,30}ставк", re.IGNORECASE)
+
+
+def stale_vat(r: Dict[str, Any]) -> bool:
+    """Модель считает саму ставку НДС 22 % недействующей или ошибочной (а не ошибку расчёта суммы НДС —
+    такие DOC-007 остаются)."""
+    text = f"{r.get('title') or ''} {r.get('explanation') or r.get('description') or ''}"
+    return bool(VAT22_CLAIM_RE.search(text)) and bool(VAT_STALE_RE.search(text))
+
+
 def rejected_by_rules(r: Dict[str, Any]) -> bool:
     """Риск модели отбрасывается правилами: требование закона, «или эквивалент» у DOC-002, самоопровержение,
-    типовая норма, строка итогов, обеспечение в пределах закона, DOC-002 без признаков товарного знака.
+    типовая норма, строка итогов, обеспечение в пределах закона, DOC-002 без признаков товарного знака,
+    цитата из полей структурированных данных ЕИС, пустое поле формы, «НДС 22 % не действует».
 
     Применяется и к свежему ответу модели, и к результату из кэша (правила уточняются, а кэш остаётся).
 
@@ -244,7 +296,8 @@ def rejected_by_rules(r: Dict[str, Any]) -> bool:
     with_equivalent = r.get("code") == "DOC-002" and (re.search(r"эквивалент", frag, re.IGNORECASE)
                                                        or DOC002_NOT_RE.search(frag))
     return bool(by_law or with_equivalent or self_denial(r) or statutory(r) or table_total(r) or security_in_range(r)
-                or garbled(frag) or (r.get("code") == "DOC-002" and not brand_like(frag)))
+                or garbled(frag) or (r.get("code") == "DOC-002" and not brand_like(frag))
+                or (r.get("code") in EIS_FIELD_CODES and eis_fields(frag)) or blank_form(r) or stale_vat(r))
 
 
 # Близкие по смыслу коды: на одну цитату остаётся один код группы

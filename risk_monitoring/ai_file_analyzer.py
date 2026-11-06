@@ -128,6 +128,21 @@ class FileUnavailable(Exception):
     """Файл не удалось скачать (ожидаемая ситуация, без traceback в логах)."""
 
 
+def _with_service_doc001(compact: Dict[str, Any], text: str, detected_type: Optional[str],
+                         allowed: bool) -> Dict[str, Any]:
+    """DOC-001 модели убирается (в том числе из результата кэша); DOC-001 сервиса по оглавлению документа
+    (``doc_sections``) добавляется, если код допустим для типа документа и обязательного раздела нет."""
+    from risk_monitoring import doc_sections
+
+    compact = dict(compact or {})
+    risks = [r for r in compact.get("risks") or [] if r.get("code") != "DOC-001" or doc_sections.is_service_risk(r)]
+    service = doc_sections.doc001_risk(text, detected_type) if allowed else None
+    if service and not any(r.get("code") == "DOC-001" for r in risks):
+        risks.append(service)
+    compact["risks"] = risks
+    return compact
+
+
 def _source_label(url: Optional[str], source_url: Optional[str]) -> str:
     """Откуда скачивали: «хранилище host» или «ЕИС host» (без пути и параметров — в ссылке могут быть токены)."""
     from urllib.parse import urlsplit
@@ -769,14 +784,18 @@ class AIFileAnalyzer:
                                                           fallback_doc=reuse_doc)
             summary = (extraction.get("raw_data") or {}).get("summary")
             allowed = ([] if doc_kind.no_risk_by_name(file_name) or doc_kind.is_execution_document(row)
-                       else doc_kind.allowed_codes(type_info["detected_type"], None))
+                       else doc_kind.allowed_codes(type_info["detected_type"], None,
+                                                   post_award=doc_kind.is_post_award(row, type_info["detected_type"])))
             profile = await self._cached(document_id, "document_profile",
                                          lambda: self.profiler.profile(text, file_name, type_decode, summary, purchase),
                                          model=self.model, fallback_doc=reuse_doc)
             risk_context = {"detected_type": type_info.get("detected_type"), "type_decode": type_decode,
                             "summary": summary, "purchase": purchase, "law": law,
                             "norms": norms.digest(type_info.get("detected_type"), fz)}
-            risk_version = (f"{self.versions['risk_analysis']}:{_hash_version(allowed)}:"
+            # DOC-001 «нет раздела» модель не ищет: она видит документ частями; раздел проверяет сервис по
+            # оглавлению всего текста (doc_sections)
+            model_codes = [c for c in allowed if c != "DOC-001"]
+            risk_version = (f"{self.versions['risk_analysis']}:{_hash_version(model_codes)}:"
                             f"{norms.version(type_info.get('detected_type'), fz)}")
             self._risk_version = risk_version
             prev_risk = (await self._get_cached(reuse_doc, "risk_analysis", risk_version, self.model)) if reuse_doc else None
@@ -784,13 +803,15 @@ class AIFileAnalyzer:
                 mode = "incremental"
                 risk = await self._cached(
                     document_id, "risk_analysis",
-                    lambda: self._incremental_risks(prev_risk, prev_ctx["text"], text, file_name, risk_context, allowed),
+                    lambda: self._incremental_risks(prev_risk, prev_ctx["text"], text, file_name, risk_context,
+                                                    model_codes),
                     compact=self.risk_analyzer.to_compact, keep=lambda r: not r.get("partial"),
                     version=risk_version, model=self.model)
             else:
                 mode = "full"
                 risk = await self._cached(document_id, "risk_analysis",
-                                          lambda: self.risk_analyzer.analyze(text, file_name, risk_context, codes=allowed),
+                                          lambda: self.risk_analyzer.analyze(text, file_name, risk_context,
+                                                                             codes=model_codes),
                                           compact=self.risk_analyzer.to_compact,
                                           keep=lambda r: not r.get("partial"),
                                           version=risk_version, model=self.model)
@@ -826,6 +847,9 @@ class AIFileAnalyzer:
             risk, typical = await self._drop_typical(risk, document_id, row)
             st["detail"] = f"снято {len(typical)}" if typical else "типовых не найдено"
         risk_compact = self.risk_analyzer.to_compact(risk) if risk else {}
+        if not print_kind:
+            risk_compact = _with_service_doc001(risk_compact, text, type_info.get("detected_type"),
+                                                "DOC-001" in (allowed or []))
 
         prev_codes = await self._previous_codes(previous, prev_ctx, allowed) if previous else None
         pages = len({m.group(1) for m in PAGE_MARKER_RE.finditer(text)}) or None
