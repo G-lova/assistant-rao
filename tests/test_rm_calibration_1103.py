@@ -112,10 +112,16 @@ class ExecutionDocumentTest(unittest.TestCase):
             {"id": 2, "file_name": "Документ 2.pdf", "xml_source_type": "contractProcedure", "owner_type": "contract",
              "risks": [_r("DOC-006", 0.9, 0.95, evidence=[{"fragment": "срок"}])]},
             {"id": 3, "file_name": "Проект контракта.docx", "xml_source_type": "contract", "owner_type": "contract",
-             "risks": [_r("DOC-002", 0.9, 0.95, evidence=[{"fragment": "товарный знак"}])]},
+             # во вложении XML контракта риски документации закупки (DOC-002 …) не учитываются (06.11.2026) —
+             # противоречие (DOC-007) учитывается
+             "risks": [_r("DOC-007", 0.9, 0.95, evidence=[{"fragment": "срок 10 дней и срок 20 дней"}]),
+                       _r("DOC-002", 0.9, 0.95, evidence=[{"fragment": "товарный знак"}])]},
         ]
-        risks, confirmed = cp.file_risks(files, {(2, "DOC-006"): cp.CONFIRMED_STATUS})
-        self.assertEqual({r["rule_id"] for r in risks}, {"DOC-006", "DOC-002"})
+        dropped = []
+        risks, confirmed = cp.file_risks(files, {(2, "DOC-006"): cp.CONFIRMED_STATUS}, dropped)
+        self.assertEqual({(r["rule_id"], r["evidence"][0]["src"]) for r in risks},
+                         {("DOC-006", "file:2"), ("DOC-007", "file:3")})
+        self.assertIn({"rule_id": "DOC-002", "file_id": 3, "reason": "post_award_document"}, dropped)
         self.assertEqual(confirmed, {"DOC-006"})
 
 

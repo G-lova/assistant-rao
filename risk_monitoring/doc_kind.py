@@ -219,16 +219,43 @@ def is_execution_document(row: Dict[str, Any]) -> bool:
     return bool(tag) and xml_group(tag, row.get("owner_type")) == "execution"
 
 
-def allowed_codes(detected_type: str, print_group: Optional[str] = None) -> List[str]:
+# Риски документации закупки (ограничение конкуренции, требования к участникам и товару): в заключённом
+# контракте, доп. соглашении и их приложениях поставляемый товар называется конкретно, участников уже нет —
+# DOC-002 и подобные там ложны (968 из 1 653 DOC-002 выгрузки 06.11.2026 — в документах после заключения)
+POST_AWARD_EXCLUDED = ("DOC-002", "DOC-003", "DOC-004", "DOC-005", "AI-001", "AI-003", "AI-005")
+POST_AWARD_TYPES = {"docDopConsentContractFiles"}
+
+
+def is_post_award(row: Dict[str, Any], detected_type: Optional[str] = None) -> bool:
+    """Документ после заключения контракта: вложение XML контракта (``contract…``) или доп. соглашение.
+
+    Проект контракта во вложениях извещения — документация закупки (там DOC-002 и подобные ищутся).
+
+    Args:
+        row: Строка файла (``source_xml_tag`` / ``source_xml_type`` / ``xml_source_type``, ``owner_type``).
+        detected_type: Тип документа.
+
+    Returns:
+        bool: ``True`` — риски документации закупки не ищутся.
+    """
+    if detected_type in POST_AWARD_TYPES:
+        return True
+    tag = row.get("source_xml_tag") or row.get("source_xml_type") or row.get("xml_source_type")
+    return xml_group(tag, row.get("owner_type")) == "contract"
+
+
+def allowed_codes(detected_type: str, print_group: Optional[str] = None, post_award: bool = False) -> List[str]:
     """Коды рисков, которые ищутся в тексте документа данного типа.
 
     Args:
         detected_type: Тип документа.
         print_group: Группа печатной формы (``None`` — не печатная форма).
+        post_award: Документ после заключения контракта (:func:`is_post_award`) — без рисков документации закупки.
 
     Returns:
         List[str]: Коды (пустой список — поиск рисков в тексте не проводится).
     """
     if print_group is not None:
         return list(PRINT_FORM_ALLOWED.get(print_group, []))
-    return list(ALLOWED_BY_TYPE.get(detected_type, _DEFAULT))
+    codes = list(ALLOWED_BY_TYPE.get(detected_type, _DEFAULT))
+    return [c for c in codes if c not in POST_AWARD_EXCLUDED] if post_award else codes

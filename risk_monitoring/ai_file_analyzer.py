@@ -769,7 +769,8 @@ class AIFileAnalyzer:
                                                           fallback_doc=reuse_doc)
             summary = (extraction.get("raw_data") or {}).get("summary")
             allowed = ([] if doc_kind.no_risk_by_name(file_name) or doc_kind.is_execution_document(row)
-                       else doc_kind.allowed_codes(type_info["detected_type"], None))
+                       else doc_kind.allowed_codes(type_info["detected_type"], None,
+                                                   post_award=doc_kind.is_post_award(row, type_info["detected_type"])))
             profile = await self._cached(document_id, "document_profile",
                                          lambda: self.profiler.profile(text, file_name, type_decode, summary, purchase),
                                          model=self.model, fallback_doc=reuse_doc)

@@ -236,6 +236,8 @@ NOT_IN_SCORE_REASONS = {
     "quotes_rejected": "все цитаты риска отсеяны правилами отбора",
     "execution_document": "документ исполнения контракта (акт, УПД, счёт): риски документации в нём не ищутся",
     "service_document": "служебный документ (смета, платёжное поручение и т. п.): риски по тексту в нём не ищутся",
+    "post_award_document": "документ после заключения контракта (контракт, доп. соглашение): риски документации "
+                           "закупки — товарный знак, требования к участникам и товару — в нём не ищутся",
     "same_quote": "та же цитата уже учтена в более сильном риске другого кода",
 }
 
@@ -297,13 +299,14 @@ def file_risks(files: Sequence[Dict[str, Any]], statuses: Dict[Tuple[int, str], 
     Args:
         files: Файлы (``id``, ``file_name``, ``risks``, ``superseded_by``).
         statuses: ``(file_id, rule_id) → status`` из ``risk_monitoring_document_risks``.
-        dropped: Куда дописать риски, не учтённые сервисом (документ исполнения, служебный документ, цитаты
-            отсеяны) — для ``not_in_score``; ``None`` — не собирать.
+        dropped: Куда дописать риски, не учтённые сервисом (документ исполнения, служебный документ, риск
+            документации закупки в документе после заключения контракта, цитаты отсеяны) — для ``not_in_score``;
+            ``None`` — не собирать.
 
     Returns:
         Tuple[List[Dict[str, Any]], set]: Риски (``source = ai_file``) и коды, подтверждённые аналитиком.
     """
-    from risk_monitoring.doc_kind import is_execution_document, no_risk_by_name
+    from risk_monitoring.doc_kind import POST_AWARD_EXCLUDED, is_execution_document, is_post_award, no_risk_by_name
     from risk_monitoring.document_risk_analyzer import rejected_by_rules
 
     out, confirmed = [], set()
@@ -314,6 +317,9 @@ def file_risks(files: Sequence[Dict[str, Any]], statuses: Dict[Tuple[int, str], 
         # не ищутся, старый результат не учитывается
         execution = is_execution_document(f)
         skip_by_name = execution or no_risk_by_name(f.get("file_name"))
+        # контракт, доп. соглашение и их приложения: риски документации закупки (DOC-002 …) в них больше не
+        # ищутся, старый результат не учитывается (06.11.2026)
+        post_award = is_post_award(f, f.get("detected_type"))
         for r in as_json(f.get("risks")) or []:
             code = r.get("rule_id")
             st = statuses.get((int(f["id"]), code))
@@ -322,6 +328,9 @@ def file_risks(files: Sequence[Dict[str, Any]], statuses: Dict[Tuple[int, str], 
             if skip_by_name and st != CONFIRMED_STATUS:
                 _not_counted(dropped, {"rule_id": code, "evidence": [{"src": f"file:{f['id']}"}]},
                              "execution_document" if execution else "service_document")
+                continue
+            if post_award and code in POST_AWARD_EXCLUDED and st != CONFIRMED_STATUS:
+                _not_counted(dropped, {"rule_id": code, "evidence": [{"src": f"file:{f['id']}"}]}, "post_award_document")
                 continue
             # файл мог быть проанализирован до уточнения правил отбора: риск, все цитаты которого правила
             # отбрасывают, в закупку не идёт (подтверждённый аналитиком — остаётся)

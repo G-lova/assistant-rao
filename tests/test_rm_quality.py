@@ -1219,3 +1219,47 @@ class OrgResumeFactsTest(unittest.TestCase):
                  "supplier_inn": str(i)} for i in range(5)]
         facts = " ".join(org_profile.resume_facts("customer", org_profile.customer_section(rows, [], settings, None), settings))
         self.assertIn("ни один не преобладает", facts)
+
+
+class FindingsCleanup1106Test(unittest.TestCase):
+    """Ложные риски модели по выгрузке 06.11.2026: документы после заключения контракта, служебные поля ЕИС,
+    пустые поля формы, «НДС 22 % не действует»."""
+
+    def test_post_award_scope(self):
+        """Во вложениях XML контракта и в доп. соглашении нет DOC-002 / DOC-003 / AI-001 …; в проекте контракта
+        из извещения — есть."""
+        from tests.stubs import stubbed_import
+
+        with stubbed_import("risk_monitoring.doc_kind") as dk:
+            contract_row = {"xml_source_type": "contract", "owner_type": "contract"}
+            notice_row = {"xml_source_type": "epNotification", "owner_type": "notice"}
+            self.assertTrue(dk.is_post_award(contract_row, "docContractPostTovarFiles"))
+            self.assertTrue(dk.is_post_award(notice_row, "docDopConsentContractFiles"))
+            self.assertFalse(dk.is_post_award(notice_row, "docProjContractFiles"))
+            after = dk.allowed_codes("docContractPostTovarFiles", None, post_award=True)
+            self.assertNotIn("DOC-002", after)
+            self.assertIn("DOC-007", after)
+            self.assertIn("FIN-016", after)
+            self.assertIn("DOC-002", dk.allowed_codes("docProjContractFiles", None))
+
+    def test_rules(self):
+        """Служебные поля ЕИС снимают риски содержания, но не финансовые; пустое поле формы; ставка НДС 22 %."""
+        from tests.stubs import stubbed_import
+
+        with stubbed_import("risk_monitoring.document_risk_analyzer") as m:
+            def risk(code, frag, expl=""):
+                """Риск модели."""
+                return {"code": code, "evidence": {"fragment": frag}, "explanation": expl, "title": ""}
+
+            self.assertTrue(m.rejected_by_rules(risk("DOC-002", "trademark: ELTEX (Коммутатор MES2300-08P)")))
+            self.assertTrue(m.rejected_by_rules(risk("DOC-003", "countryFullName: Французская Республика")))
+            self.assertFalse(m.rejected_by_rules(risk("FIN-009", "isAdvancePayment: true\npaymentSum: 34418783.00",
+                                                      "аванс 50 % цены контракта")))
+            self.assertTrue(m.rejected_by_rules(risk("DOC-006", "Наименование Товара: _________",
+                                                     "Требования к маркировке неоднозначны")))
+            self.assertTrue(m.rejected_by_rules(risk(
+                "DOC-010", "включая НДС (22%): 78 009 руб.",
+                "Указана ставка НДС 22%, которая не является действующей; действующая ставка 20%.")))
+            self.assertFalse(m.rejected_by_rules(risk(
+                "DOC-007", "Цена контракта 497 301,00 руб., в т. ч. НДС 22% 80 000 руб.",
+                "Сумма НДС 22% рассчитана неверно: 497 301 × 22/122 = 89 677,23 руб.")))
