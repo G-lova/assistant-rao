@@ -861,16 +861,18 @@ class AIFileAnalyzer:
             return risk, []
         frags = [((r.get("evidence") or {}).get("fragment") or "") for r in risk["risks"]]
 
+        cache = self._run_cache()
+
         async def fetch_orgs(cards: List[int]) -> Dict[int, Any]:
-            """Заказчики карточек из внешней БД — каждая карточка один раз за прогон."""
-            got = await self._run_cache().one_each(self._query, "card_orgs.sql", cards, "id")
-            return {int(k): r.get("org_id") for k, r in got.items()}
+            """Заказчики карточек: все — одним запросом на прогон, новые карточки — дозапросом."""
+            return {int(k): v for k, v in (await cache.card_orgs(self._query, cards)).items()}
 
         try:
             counts = await boilerplate.typical_fragments(
                 frags, embedder=self.embedder, repo=self.repo, env=self.env, document_id=document_id,
                 own_card=row.get("risk_monitoring_contract_id"), own_org=row.get("organisation_id"),
-                embedding_model=self.embedding_model, fetch_orgs=fetch_orgs, own_org_name=row.get("customer_name"))
+                embedding_model=self.embedding_model, fetch_orgs=fetch_orgs, own_org_name=row.get("customer_name"),
+                cache=cache)
         except Exception as e:  # noqa: BLE001 — без фильтра риски остаются
             logger.warning(f"Проверка типовых формулировок не выполнена (документ {document_id}): {type(e).__name__}: {e}")
             return risk, []

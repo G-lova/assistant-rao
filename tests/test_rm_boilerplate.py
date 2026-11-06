@@ -67,6 +67,61 @@ class TypicalFragmentsTest(unittest.TestCase):
         self.assertEqual(out, {FRAG: 3})
 
 
+class TypicalFragmentsCacheTest(unittest.TestCase):
+    """Кэш прогона (05.11.2026): цитата, проверенная в прогоне, не идёт повторно на эмбеддинги и в поиск;
+    закупки документа и заказчики карточек запрашиваются один раз."""
+
+    def test_cache(self):
+        """Второй файл с той же цитатой (другая пунктуация) — без эмбеддингов и поиска; свой документ не считается;
+        векторный поиск — одним вызовом на все цитаты; заказчики — одним запросом на прогон."""
+        from risk_monitoring.run_cache import RunCache
+
+        calls = {"emb": 0, "many": 0, "sources": [], "sql": []}
+
+        class Emb:
+            async def get_embeddings(self, texts, strict=False):
+                calls["emb"] += 1
+                return [[0.1] * 4 for _ in texts]
+
+        class Repo:
+            async def find_chunks_many(self, vecs, model, limit=30):
+                calls["many"] += 1
+                return [[{"document_id": d, "text": "раздел 3. " + FRAG} for d in (7, 8, 9, 42)] for _ in vecs]
+
+            async def document_sources(self, env, ids):
+                calls["sources"].append(sorted(ids))
+                rows = {7: {"kind": "rm", "source_id": 70}, 8: {"kind": "rm", "source_id": 80},
+                        9: {"kind": "pe", "source_id": 900}, 42: {"kind": "rm", "source_id": 1}}
+                return [{"document_id": d, **rows[d]} for d in ids if d in rows]
+
+        async def query(name, head=(), **lists):
+            """Внешняя БД: все карточки без 80 (создана позже) — она дозапрашивается."""
+            calls["sql"].append(name)
+            if name == "card_orgs_all.sql":
+                return [{"id": 70, "org_id": "A"}, {"id": 1, "org_id": "own"}]
+            return [{"id": i, "org_id": "B"} for i in lists["ids"] if i == 80]
+
+        cache = RunCache()
+
+        async def orgs(cards):
+            return await cache.card_orgs(query, cards)
+
+        async def run(frag, doc, own_card, own_org):
+            return await boilerplate.typical_fragments(
+                [frag], embedder=Emb(), repo=Repo(), env="dev", document_id=doc, own_card=own_card,
+                own_org=own_org, embedding_model="m", fetch_orgs=orgs, cache=cache)
+
+        self.assertEqual(asyncio.run(run(FRAG, 42, 1, "own")), {FRAG: 3})
+        # тот же текст в другом файле другого заказчика: документ 42 теперь чужой, 7 — свой
+        other = FRAG.upper().replace(".", ";")
+        self.assertEqual(asyncio.run(run(other, 7, 70, "A")), {other: 3})
+        self.assertEqual((calls["emb"], calls["many"]), (1, 1))
+        self.assertEqual(calls["sources"], [[7, 8, 9], [42]])
+        self.assertEqual(calls["sql"], ["card_orgs_all.sql", "card_orgs.sql"])
+        self.assertEqual(cache.internal, {"boilerplate.embeddings": 1, "boilerplate.chunk_search": 2,
+                                          "boilerplate.document_sources": 2})
+
+
 class NormsTest(unittest.TestCase):
     """Выжимка норм под тип документа."""
 

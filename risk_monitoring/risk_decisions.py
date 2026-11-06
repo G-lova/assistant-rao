@@ -23,7 +23,7 @@
 import copy
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 IGNORED = {2, 4}         # отклонён, устранён
@@ -66,8 +66,13 @@ def group_rows(rows: Iterable[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
 
 
 def decisions_hash(entry: Optional[Dict[str, Any]]) -> str:
-    """Отпечаток решений по закупке: меняется только при смене статуса какой-либо строки."""
-    rows = sorted(f"{s}:{i}:{c}={st}" for (s, i, c), st in ((entry or {}).get("rows") or {}).items())
+    """Отпечаток решений по закупке: только строки с решением (статус ≠ 0).
+
+    Строки «на рассмотрении» не входят: дашборды создают их при каждом приёме анализа (в том числе строки составных
+    рисков), и без этого после каждого анализа шёл лишний пересчёт (06.11.2026).
+    """
+    rows = sorted(f"{s}:{i}:{c}={st}" for (s, i, c), st in ((entry or {}).get("rows") or {}).items()
+                  if st != PENDING)
     return hashlib.sha256(json.dumps(rows, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
 
 
@@ -219,6 +224,7 @@ def recalc(ai: Dict[str, Any], entry: Optional[Dict[str, Any]], cfg: Any,
         new["not_in_score"] = cp.not_in_score(new["not_in_score"], new["risks"])
     pipe = dict(new.get("pipeline") or {})
     pipe["decisions_hash"] = h
-    pipe["decisions_recalc_at"] = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+    # тот же формат, что analyzed_at (локальное время сервиса без смещения) — 06.11.2026
+    pipe["decisions_recalc_at"] = (now or datetime.now()).strftime("%Y-%m-%dT%H:%M:%S")
     new["pipeline"] = pipe
     return new

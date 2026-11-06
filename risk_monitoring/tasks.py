@@ -410,8 +410,8 @@ def rm_decisions_task(self, environment: str = None, push: bool = None, minutes:
                       contract_ids: List[int] = None) -> Dict[str, Any]:
     """Пересчёт балла закупок после решений аналитиков по рискам (``risk_monitoring.risk_decisions``).
 
-    Кандидаты — закупки, у которых строки ``risk_monitoring_document_risks`` менялись за последние ``minutes`` минут
-    (или переданные ``contract_ids``). Пересчитываются по сохранённому ``ai_analysis`` без модели — только если
+    Кандидаты — закупки, где аналитик менял статус рисков за последние ``minutes`` минут (``status_changed_at``;
+    нет колонки — ``updated_at``) или переданные ``contract_ids``. Пересчитываются по сохранённому ``ai_analysis`` без модели — только если
     изменился отпечаток решений; результат сохраняется у нас и записывается во внешнюю БД.
 
     Args:
@@ -442,9 +442,16 @@ def rm_decisions_task(self, environment: str = None, push: bool = None, minutes:
         async with HTTPClientManager(timeout=60.0) as mgr, AIRepo() as repo:
             ca = ContractAnalyzer(mgr, environment, repo=repo, push_results=False, use_llm=False,
                                   analyze_documents=False)
-            ids = [int(i) for i in contract_ids] if contract_ids else [
-                int(r["contract_id"]) for r in await ca._safe_query("risk_decisions_changed.sql", [minutes])
-                if r.get("contract_id") is not None]
+            if contract_ids:
+                rows = [{"contract_id": i} for i in contract_ids]
+            else:
+                try:   # по времени решения аналитика; нет колонки в окружении — по времени изменения строки
+                    rows = await ca._query("risk_decisions_changed.sql", [minutes])
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"Поиск решений по status_changed_at не выполнен ({type(e).__name__}: {e}), "
+                                   f"ищем по updated_at")
+                    rows = await ca._safe_query("risk_decisions_changed_updated.sql", [minutes])
+            ids = sorted({int(r["contract_id"]) for r in rows if r.get("contract_id") is not None})
             out = {"candidates": len(ids), "updated": 0, "pushed": 0, "errors": 0}
             for i in range(0, len(ids), 200):
                 chunk = ids[i:i + 200]

@@ -121,6 +121,19 @@ class DecisionsTest(unittest.TestCase):
         self.assertIn("DOC-002", new["confirmed_codes"])
         self.assertGreater(new["profile"]["score"], ai["profile"]["score"])
 
+    def test_pending_rows_do_not_change_hash(self):
+        """Новые строки «на рассмотрении» (приём анализа, строки составных рисков) не меняют отпечаток — без лишнего
+        пересчёта; смена статуса — меняет."""
+        base = _entry(("contract", 1, "FIN-005", 2))
+        more = _entry(("contract", 1, "FIN-005", 2), ("contract", 1, "CR-001", 0), ("file", 3, "DOC-002", 0))
+        self.assertEqual(rdec.decisions_hash(base), rdec.decisions_hash(more))
+        self.assertNotEqual(rdec.decisions_hash(base), rdec.decisions_hash(_entry(("contract", 1, "FIN-005", 1))))
+
+    def test_recalc_time_format(self):
+        """Время пересчёта — в формате analyzed_at (без смещения)."""
+        new = rdec.recalc(self._ai(), _entry(("contract", 1, "FIN-005", 2)), settings)
+        self.assertRegex(new["pipeline"]["decisions_recalc_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$")
+
     def test_no_rows_no_recalc(self):
         """Строк решений нет (запрос не удался) — пересчёта нет, подтверждения не сбрасываются."""
         self.assertIsNone(rdec.recalc(self._ai(), None, settings))
