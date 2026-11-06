@@ -128,6 +128,14 @@ class FileUnavailable(Exception):
     """Файл не удалось скачать (ожидаемая ситуация, без traceback в логах)."""
 
 
+def _source_label(url: Optional[str], source_url: Optional[str]) -> str:
+    """Откуда скачивали: «хранилище host» или «ЕИС host» (без пути и параметров — в ссылке могут быть токены)."""
+    from urllib.parse import urlsplit
+
+    host = urlsplit(url or "").netloc or "?"
+    return f"{'ЕИС' if source_url and url == source_url else 'хранилище'} {host}"
+
+
 def sha256_file(path: str) -> str:
     """SHA-256 файла блоками.
 
@@ -668,9 +676,8 @@ class AIFileAnalyzer:
 
         try:
             async with progress.step("скачивание файла и чтение текста") as st:
-                document_id, text, sha, size = await self._load_document(
-                    file_id, row["url"], file_name, card_id=row.get("risk_monitoring_contract_id"),
-                    **({"local_path": local_path} if local_path else {}))
+                document_id, text, sha, size = await self._load_with_fallback(
+                    file_id, row, file_name, **({"local_path": local_path} if local_path else {}))
                 st["detail"] = f"документ {document_id}, {len(text or '')} символов" if text else "текст не извлечён"
         finally:
             if volumes_dir:
@@ -1101,6 +1108,27 @@ class AIFileAnalyzer:
         ai["archive_volume"] = {"first_file_id": first.get("id"), "first_file_name": first.get("file_name"),
                                 "volumes": [{"file_id": v.get("id"), "file_name": v.get("file_name")} for v in vols]}
         return ai
+
+    async def _load_with_fallback(self, file_id: int, row: Dict[str, Any], file_name: str, **kw: Any):
+        """:meth:`_load_document` по ``url`` строки; если файл из хранилища внешней системы (``path``) не скачался —
+        повтор по ссылке ЕИС (``source_url``).
+
+        06.11.2026: хранилище отвечало 403 на все файлы пачки (88 из 88), хотя у файлов есть ссылка ЕИС. В ошибке —
+        откуда скачивали (хранилище или ЕИС, хост без пути): по одному коду 403 источник не понять.
+        """
+        url, source_url = row["url"], row.get("source_url")
+        card_id = row.get("risk_monitoring_contract_id")
+        try:
+            return await self._load_document(file_id, url, file_name, card_id=card_id, **kw)
+        except FileUnavailable as e:
+            first = f"{e} ({_source_label(url, source_url)})"
+            if kw.get("local_path") or not source_url or source_url == url:
+                raise FileUnavailable(first) from None
+            logger.warning(f"Файл {file_id}: {first} — скачиваем по ссылке ЕИС")
+        try:
+            return await self._load_document(file_id, source_url, file_name, card_id=card_id)
+        except FileUnavailable as e:
+            raise FileUnavailable(f"{first}; ЕИС: {e} ({_source_label(source_url, source_url)})") from None
 
     async def _load_document(self, file_id: int, url: str, file_name: str, card_id: Optional[int] = None,
                              local_path: Optional[str] = None):
