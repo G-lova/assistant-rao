@@ -236,6 +236,8 @@ NOT_IN_SCORE_REASONS = {
     "quotes_rejected": "все цитаты риска отсеяны правилами отбора",
     "execution_document": "документ исполнения контракта (акт, УПД, счёт): риски документации в нём не ищутся",
     "service_document": "служебный документ (смета, платёжное поручение и т. п.): риски по тексту в нём не ищутся",
+    "doc001_by_model": "«нет обязательного раздела» модели по части документа: раздел проверяется сервисом по "
+                       "оглавлению всего документа",
     "post_award_document": "документ после заключения контракта (контракт, доп. соглашение): риски документации "
                            "закупки — товарный знак, требования к участникам и товару — в нём не ищутся",
     "same_quote": "та же цитата уже учтена в более сильном риске другого кода",
@@ -307,6 +309,7 @@ def file_risks(files: Sequence[Dict[str, Any]], statuses: Dict[Tuple[int, str], 
         Tuple[List[Dict[str, Any]], set]: Риски (``source = ai_file``) и коды, подтверждённые аналитиком.
     """
     from risk_monitoring.doc_kind import POST_AWARD_EXCLUDED, is_execution_document, is_post_award, no_risk_by_name
+    from risk_monitoring.doc_sections import is_service_risk as is_service_doc001
     from risk_monitoring.document_risk_analyzer import rejected_by_rules
 
     out, confirmed = [], set()
@@ -328,6 +331,11 @@ def file_risks(files: Sequence[Dict[str, Any]], statuses: Dict[Tuple[int, str], 
             if skip_by_name and st != CONFIRMED_STATUS:
                 _not_counted(dropped, {"rule_id": code, "evidence": [{"src": f"file:{f['id']}"}]},
                              "execution_document" if execution else "service_document")
+                continue
+            # DOC-001 «нет раздела» модели (видела часть документа) не учитывается; учитывается DOC-001 сервиса по
+            # оглавлению всего документа (doc_sections, 06.11.2026)
+            if code == "DOC-001" and st != CONFIRMED_STATUS and not is_service_doc001(r):
+                _not_counted(dropped, {"rule_id": code, "evidence": [{"src": f"file:{f['id']}"}]}, "doc001_by_model")
                 continue
             if post_award and code in POST_AWARD_EXCLUDED and st != CONFIRMED_STATUS:
                 _not_counted(dropped, {"rule_id": code, "evidence": [{"src": f"file:{f['id']}"}]}, "post_award_document")
