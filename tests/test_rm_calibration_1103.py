@@ -158,3 +158,35 @@ class Fin005SingleSupplierTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SecurityAntidumpingTest(unittest.TestCase):
+    """Контракт 501 (09.11.2026): обеспечение 45 % цены контракта при снижении цены на 45,5 % — антидемпинговые
+    меры (ч. 1 ст. 37 44-ФЗ), а не превышение предела 30 % (ч. 6 ст. 96)."""
+
+    P501 = {"security": {"contract": "554346.84"}, "contract_price": 1231881.88, "nmck": 2260334.62,
+            "price_reduction_pct": 45.5, "method_code": "EAP20"}
+
+    def test_within_law(self):
+        """45 % при снижении ≥ 25 % — в пределах; 45 % без антидемпинга — нет."""
+        ok = cp.security_within_law(self.P501)
+        self.assertTrue(ok["within"])
+        self.assertTrue(ok["antidumping"])
+        self.assertEqual(ok["pct_price"], 45.0)
+        bad = cp.security_within_law({**self.P501, "contract_price": 2_000_000, "price_reduction_pct": 11.5,
+                                      "security": {"contract": 900_000}})
+        self.assertFalse(bad["within"])
+        self.assertIsNone(cp.security_within_law({"contract_price": 1}))
+
+    def test_file_risk_and_rule(self):
+        """FIN-007 модели не идёт в балл (security_within_law); pz_n3 — исключение по данным ЕИС."""
+        from risk_monitoring import rule_exclusions as rx
+
+        risks = [{"rule_id": "FIN-007", "evidence": [{"src": "file:7"}]}, {"rule_id": "DOC-007", "evidence": []}]
+        dropped = []
+        kept = cp.drop_security_within_law(risks, self.P501, set(), dropped)
+        self.assertEqual([r["rule_id"] for r in kept], ["DOC-007"])
+        self.assertEqual(dropped[0]["reason"], "security_within_law")
+        self.assertEqual(len(cp.drop_security_within_law(risks, self.P501, {"FIN-007"})), 2)
+        check = rx.data_checks({"pz_n3": 1}, self.P501, {"version": "t", "data_exclusions": {}})["pz_n3"]
+        self.assertEqual((check["status"], check["exclusion_id"]), ("excluded", "security_antidumping_37"))

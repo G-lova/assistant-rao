@@ -126,6 +126,7 @@ def garbled(fragment: str) -> bool:
         return False
     words = [t for t in tokens if GARBLED_WORD_RE.fullmatch(t.strip(".,;:!?«»\"()[]"))]
     return len(words) / len(tokens) < 0.35
+ANTIDUMPING_RE = re.compile(r"антидемпинг|ст(\.|ать\w*)\s*37|полтора|1[,.]5\s*раз|снижен\w*[^.]{0,60}25\s*%", re.I)
 SECURITY_PCT_RE = re.compile(r"обеспечени\w*[^.]{0,120}?(\d+(?:[.,]\d+)?)\s*(%|процент)", re.IGNORECASE)
 
 
@@ -145,6 +146,9 @@ def security_in_range(risk: Dict[str, Any]) -> bool:
     if not m:
         return False
     pct = float(m.group(1).replace(",", "."))
+    if risk["code"] != "FIN-006" and 30 < pct <= 45 and ANTIDUMPING_RE.search(
+            f"{(risk.get('evidence') or {}).get('fragment') or ''} {risk.get('explanation') or risk.get('description') or ''}"):
+        return True   # 30 % × 1,5 — антидемпинговые меры (ч. 1 ст. 37 44-ФЗ), контракт 501
     return 0.5 <= pct <= (10 if risk["code"] == "FIN-006" else 30)
 
 

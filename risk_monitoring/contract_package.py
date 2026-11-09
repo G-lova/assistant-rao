@@ -238,6 +238,8 @@ NOT_IN_SCORE_REASONS = {
     "service_document": "служебный документ (смета, платёжное поручение и т. п.): риски по тексту в нём не ищутся",
     "doc001_by_model": "«нет обязательного раздела» модели по части документа: раздел проверяется сервисом по "
                        "оглавлению всего документа",
+    "security_within_law": "обеспечение исполнения по данным ЕИС в пределах закона с учётом антидемпинговых мер "
+                           "(30 % цены, при снижении цены на 25 % и более — 45 %, ч. 6 ст. 96, ч. 1 ст. 37 44-ФЗ)",
     "post_award_document": "документ после заключения контракта (контракт, доп. соглашение): риски документации "
                            "закупки — товарный знак, требования к участникам и товару — в нём не ищутся",
     "same_quote": "та же цитата уже учтена в более сильном риске другого кода",
@@ -292,6 +294,61 @@ def _ev_src(risk: Dict[str, Any], src: str, **extra: Any) -> Dict[str, Any]:
     evs = [dict(e, src=src, **extra) for e in (risk.get("evidence") or []) if isinstance(e, dict)]
     r["evidence"] = evs or [dict(src=src, **extra)]
     return r
+
+
+ANTIDUMPING_REDUCTION_PCT = 25.0   # ч. 1 ст. 37 44-ФЗ: цена снижена на 25 % и более от НМЦК
+ANTIDUMPING_FACTOR = 1.5           # … обеспечение в полтора раза больше указанного в извещении
+SECURITY_MAX_PCT = 30.0            # ч. 6 ст. 96 44-ФЗ
+
+
+def security_within_law(p: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Обеспечение исполнения контракта в пределах закона с учётом антидемпинговых мер — по данным ЕИС.
+
+    Контракт 501 (09.11.2026): обеспечение 554 346,84 руб. = 45 % цены контракта 1 231 881,88 руб. Это 30 % ×
+    1,5: цена снижена на 45,5 % от НМЦК, и по ч. 1 ст. 37 44-ФЗ обеспечение увеличено в полтора раза. Модель
+    сравнила 45 % с пределом 30 % ч. 6 ст. 96 и назвала это превышением.
+
+    Предел считается от цены контракта и от НМЦК (база уточняется у методиста — берётся бо́льший):
+    30 %, при снижении цены на 25 % и более — 45 %.
+
+    Args:
+        p: Паспорт закупки (``security.contract``, ``contract_price``, ``nmck``, ``price_reduction_pct``).
+
+    Returns:
+        Optional[Dict[str, Any]]: ``within`` (в пределах закона), доли от цены и НМЦК, предел, признак
+        антидемпинга; ``None`` — данных не хватает.
+    """
+    sec = num(((p or {}).get("security") or {}).get("contract"))
+    price, nmck = num(p.get("contract_price")), num(p.get("nmck"))
+    if not sec or sec <= 0 or not (price or nmck):
+        return None
+    reduction = p.get("price_reduction_pct")
+    if reduction is None and price and nmck:
+        reduction = (1 - price / nmck) * 100
+    antidumping = reduction is not None and reduction >= ANTIDUMPING_REDUCTION_PCT
+    factor = ANTIDUMPING_FACTOR if antidumping else 1.0
+    limit = max(b for b in (price, nmck) if b) * SECURITY_MAX_PCT / 100 * factor
+    return {"within": sec <= limit + 1.0, "antidumping": antidumping, "limit": round(limit, 2),
+            "pct_price": round(sec / price * 100, 2) if price else None,
+            "pct_nmck": round(sec / nmck * 100, 2) if nmck else None,
+            "reduction_pct": round(reduction, 2) if reduction is not None else None}
+
+
+def drop_security_within_law(risks: List[Dict[str, Any]], p: Dict[str, Any], confirmed: set,
+                             dropped: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    """FIN-007 модели («обеспечение превышает законный максимум») не учитывается, если по данным ЕИС обеспечение
+    в пределах закона с учётом антидемпинговых мер (:func:`security_within_law`). Подтверждённый аналитиком
+    риск остаётся."""
+    check = security_within_law(p)
+    if not check or not check["within"] or "FIN-007" in confirmed:
+        return risks
+    out = []
+    for r in risks:
+        if r.get("rule_id") == "FIN-007":
+            _not_counted(dropped, r, "security_within_law")
+            continue
+        out.append(r)
+    return out
 
 
 def file_risks(files: Sequence[Dict[str, Any]], statuses: Dict[Tuple[int, str], int],
@@ -984,6 +1041,7 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
     rnp_found = rnp_matches(rnp, p["supplier"], as_date(p["dates"]["contract"]))
     dropped: List[Dict[str, Any]] = []
     f_risks, confirmed = file_risks(files, statuses, dropped)
+    f_risks = drop_security_within_law(f_risks, p, confirmed, dropped)
     file_ids = {int(f["id"]) for f in files if f.get("id") is not None}
     rejected = {code for (fid, code), st in statuses.items() if st == REJECTED_STATUS and fid in file_ids}
     f_risks = drop_rule_covered(f_risks, values, confirmed, fz, getattr(settings, "RULE_SUSPECT_INDICATORS", ()),
