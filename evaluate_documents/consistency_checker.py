@@ -109,6 +109,9 @@ class ConsistencyChecker:
             f"ДАННЫЕ ПО ДОКУМЕНТАМ:\n{json.dumps(digest, ensure_ascii=False, default=str)}"
         )
         tokens = count_tokens(user_content)
+        logger.info(f"Итоговая проверка: сводка уровня {level}, {tokens} токенов; факты, посчитанные кодом: "
+                    f"{json.dumps(facts, ensure_ascii=False)}")
+        logger.info(f"Итоговая проверка: сообщение модели: {user_content}")
         if level:
             logger.info(f"Сводка для итоговой проверки сокращена до уровня {level} ({tokens} токенов)")
         if tokens > DIGEST_MAX_TOKENS + 2000:

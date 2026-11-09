@@ -138,7 +138,7 @@ def to_external_risks(compact_risks: Iterable[Dict[str, Any]], source: str = "ai
         code = r.get("code") or r.get("rule_id")
         if not code:
             continue
-        level = risk_catalog.SEVERITY_LEVEL.get(r.get("severity"), clamp01(r.get("level")) or 0.3)
+        level = risk_catalog.model_level(code, r.get("severity"), clamp01(r.get("level")) or 0.3)
         items.append({
             "rule_id": code,
             "title": r.get("title") or risk_catalog.title(code),
@@ -155,6 +155,8 @@ def to_external_risks(compact_risks: Iterable[Dict[str, Any]], source: str = "ai
             }] if r.get("fragment") else list(r.get("evidence") or []),
             "verification_needed": as_text_list(r.get("verification_needed")),
             "severity": r.get("severity"),
+            # шкала уровня (risk_levels.json): high прежних результатов (без критериев в промпте) не повышает уровень
+            "level_scale": r.get("level_scale") or risk_catalog.LEVELS.get("version"),
             "source": source,
         })
     return merge_risks(items, fz=fz)

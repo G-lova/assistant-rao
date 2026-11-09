@@ -53,3 +53,66 @@ def get_logger(name):
         logging.Logger: Настроенный экземпляр логгера.
     """
     return logging.getLogger(name)
+
+
+# ---------------- контекст журнала: «[prod:7185] …» у всех записей задачи ----------------
+import contextvars
+from contextlib import contextmanager
+
+_LOG_CONTEXT: "contextvars.ContextVar[str]" = contextvars.ContextVar("log_context", default="")
+_FACTORY_INSTALLED = False
+
+
+@contextmanager
+def log_context(label: str):
+    """Добавляет метку ко всем записям журнала внутри блока (и в порождённых им asyncio-задачах).
+
+    Несколько экспертиз обрабатываются одним воркером параллельно, и строки разных прогонов перемешивались:
+    по записи «Документ 'Договор.pdf' …» нельзя было понять, к какой экспертизе она относится. Метка
+    (обычно ``окружение:id``) попадает в начало сообщения: ``[prod:7185] Документ 'Договор.pdf' …``. Вложенные
+    метки соединяются через « / ».
+
+    Args:
+        label: Метка; пустая — без изменений.
+
+    Yields:
+        None
+    """
+    _install_record_factory()
+    if not label:
+        yield
+        return
+    current = _LOG_CONTEXT.get()
+    token = _LOG_CONTEXT.set(f"{current} / {label}" if current else str(label))
+    try:
+        yield
+    finally:
+        _LOG_CONTEXT.reset(token)
+
+
+def current_log_context() -> str:
+    """Текущая метка журнала (пустая строка вне :func:`log_context`)."""
+    return _LOG_CONTEXT.get()
+
+
+def _install_record_factory() -> None:
+    """Подключает к ``logging`` фабрику записей, добавляющую метку контекста (один раз на процесс).
+
+    Фабрика, а не фильтр обработчика: обработчики журнала у Celery и у приложения разные, а фабрика действует на
+    все записи независимо от обработчиков.
+    """
+    global _FACTORY_INSTALLED
+    if _FACTORY_INSTALLED:
+        return
+    original = logging.getLogRecordFactory()
+
+    def factory(*args, **kwargs):
+        """Создаёт запись и добавляет метку контекста в начало сообщения."""
+        record = original(*args, **kwargs)
+        label = _LOG_CONTEXT.get()
+        if label and isinstance(record.msg, str) and not record.msg.startswith(f"[{label}]"):
+            record.msg = f"[{label}] {record.msg}"
+        return record
+
+    logging.setLogRecordFactory(factory)
+    _FACTORY_INSTALLED = True

@@ -1,7 +1,9 @@
 import asyncio
+from collections import Counter
+import time
 import copy
 import json
-from typing import Any
+from typing import Any, Optional
 import pandas as pd
 import asyncio
 import datetime
@@ -11,7 +13,7 @@ from configs.data_fetcher import DataFetcher
 from configs.file_reader import FileReader
 from configs.http_client_manager import HTTPClientManager
 from configs.llm_client import get_llm
-from configs.logger import get_logger
+from configs.logger import get_logger, log_context
 from configs.utils import load_sql_query, split_large_text
 from configs.working_with_db import save_evaluation_result
 from evaluate_documents.completeness_checker import CompletenessChecker
@@ -36,6 +38,16 @@ LLM_CHUNK_SIZE = 10000  # размер блока текста для TypeDataEx
 async def _ready(value):
     """Корутина, сразу возвращающая ``value`` (готовый результат в общем списке задач ``asyncio.gather``)."""
     return value
+
+
+
+def _status(result: dict, key: str) -> str:
+    """«allow: описание…» для строки журнала по одному показателю проверки полноты."""
+    ind = (result or {}).get(key) if isinstance(result, dict) else None
+    if not isinstance(ind, dict):
+        return "—"
+    description = str(ind.get("description") or ind.get("issues") or "")[:200]
+    return f"{ind.get('status')}" + (f" ({description})" if description else "")
 
 
 class TasksPipeline:
@@ -99,6 +111,8 @@ class TasksPipeline:
         self.file_semaphore = asyncio.Semaphore(self.config.EVAL_FILE_CONCURRENCY)   # чтение/OCR + извлечение файла
         self.link_semaphore = asyncio.Semaphore(self.config.EVAL_LINK_CONCURRENCY)   # скачивание ссылок
         self.type_data_extractor.semaphore = self.llm_semaphore                      # блоки текста — под общим лимитом
+        self._stats = Counter()     # счётчики прогона для итоговой строки журнала
+        self._timings = {}          # время этапов, с
 
 
     async def process_link(self, link):
@@ -108,11 +122,14 @@ class TasksPipeline:
         try:
             async with self.link_semaphore:
                 parse_result = await self.cloud_parser.parse_cloud_storage_link(link.media_links, link.id)
-            logger.info(f'Результат парсинга {link.media_links}: {parse_result}')
+            files = parse_result.get("files", [parse_result])
+            logger.info(f"Ссылка {link.doc_code} {link.media_links}: {parse_result.get('status')}, файлов {len(files)}"
+                        + (f", ошибка: {parse_result.get('error')}" if parse_result.get("error") else ""))
+            logger.info(f"Результат разбора ссылки {link.media_links}: {parse_result}")
 
             tasks = []
             for file_info in parse_result.get("files", [parse_result]):
-                logger.info(f'file_info: {file_info}')
+                logger.info(f"Файл ссылки {link.doc_code}: {file_info}")
                 if parse_result.get("status") == "success":
                     file_path = file_info.get("file_path")
                     filename = file_info.get("filename", f"doc_from_link_{file_info.get('original_url')}")
@@ -123,9 +140,12 @@ class TasksPipeline:
             successful_results = []
             for file_info, result in zip(parse_result.get("files", [parse_result]), results):
                 if isinstance(result, Exception):
-                    logger.error(f'Ошибка при обработке документа {file_info.get("filename", file_info.get("original_url"))}: {result}')
+                    self._stats["files_failed"] += 1
+                    logger.error(f'Ошибка при обработке документа {file_info.get("filename", file_info.get("original_url"))}: '
+                                 f'{type(result).__name__}: {result}')
                     continue
                 if result != None:
+                    self._stats["files_ok"] += 1
                     result['raw_data']['filename'] = file_info.get("filename")
                     result['raw_data']['url'] = file_info.get("original_url")
                     successful_results.append(result)
@@ -239,10 +259,13 @@ class TasksPipeline:
         """
         cached = await ks_hooks.find_cached_text(file_path, force=self.force)
         if cached:
-            logger.info(f"Текст {filename} взят из хранилища (документ {cached['id']}, {cached.get('reader')}), OCR не нужен")
+            logger.info(f"Текст '{filename}' взят из хранилища (документ {cached['id']}, {cached.get('reader')}), OCR не нужен")
             extracted_text = cached["text"]
         else:
+            read_started = time.monotonic()
             extracted_text = await self.file_reader.read_file(file_path, filename)
+            logger.info(f"Текст '{filename}' прочитан за {time.monotonic() - read_started:.1f} с: "
+                        f"{len(extracted_text or '')} символов")
         if not extracted_text or "[Нет читаемого текста]" in extracted_text:
             raise ValueError("Не удалось извлечь текст")
 
@@ -252,6 +275,8 @@ class TasksPipeline:
             force=self.force)
 
         chunks = split_large_text(extracted_text, max_chunk_size=LLM_CHUNK_SIZE)
+        logger.info(f"Текст '{filename}' ({len(extracted_text)} символов) разбит на {len(chunks)} блок(ов) "
+                    f"по ≤{LLM_CHUNK_SIZE} токенов")
         if not chunks:
             fallback = {
                 "type_compliance": {"status": "deny", "detected_type": "unknown", "issues": ["Пустой документ"]},
@@ -267,7 +292,7 @@ class TasksPipeline:
         model = getattr(self.type_data_extractor, "model", None)
         extracted_data = await ks_hooks.cached_extraction(ks_doc_id, version, model, force=self.force)
         if extracted_data is not None:
-            logger.info(f"Извлечённые данные {filename} взяты из кэша общего документа")
+            logger.info(f"Извлечённые данные '{filename}' взяты из кэша общего документа")
         else:
             extracted_data = await self.type_data_extractor.extract_data_from_document(chunks, filename, link.doc_code, link.object)
             if isinstance(extracted_data, str):
@@ -285,11 +310,53 @@ class TasksPipeline:
     
 
     async def run_pipeline(self):
+        """Проверка комплекта документов экспертизы: разбор файлов, полнота, итоговое заключение.
+
+        Все записи журнала прогона помечаются «[окружение:id экспертизы]» (:func:`configs.logger.log_context`), в
+        конце пишется итог прогона одной строкой (:meth:`_log_run_summary`).
+
+        Returns:
+            dict: Итоговое заключение (``raw_data`` в документах сокращён до имени, файла и ссылки).
         """
-        
+        label = f"{self.x_api_database}:{self.df['id'].iloc[0]}"
+        with log_context(label):
+            self._stats = Counter()
+            self._timings = {}
+            self._run_started = time.monotonic()
+            result = None
+            try:
+                result = await self._run_pipeline()
+                return result
+            finally:
+                self._log_run_summary(result)
+
+    def _log_run_summary(self, result: Optional[dict]) -> None:
+        """Итог прогона одной строкой: файлы, типы, отсутствующие документы, статус, время этапов.
+
+        Args:
+            result: Итоговое заключение (``None`` — прогон упал).
+        """
+        stats = getattr(self, "_stats", Counter())
+        timings = ", ".join(f"{k} {v:.0f} с" for k, v in getattr(self, "_timings", {}).items())
+        total = time.monotonic() - getattr(self, "_run_started", time.monotonic())
+        types = ", ".join(f"{k}×{v}" for k, v in sorted(stats.items()) if k.startswith("type:"))
+        missed = (getattr(self, "_missed_documents", None) or [])
+        status = (result or {}).get("overall_status") if isinstance(result, dict) else None
+        logger.info(
+            f"Итог прогона: {'статус ' + str(status) if result is not None else 'ОШИБКА'}; ссылок {stats['links']} "
+            f"(с ошибкой {stats['links_failed']}), файлов разобрано {stats['files_ok']}, с ошибкой "
+            f"{stats['files_failed']}; типы: {types.replace('type:', '') or '—'}; отсутствуют обязательные: "
+            f"{len(missed)}{' (' + '; '.join(missed[:5]) + ')' if missed else ''}; этапы: {timings or '—'}; "
+            f"всего {total:.0f} с")
+
+    async def _run_pipeline(self):
+        """Тело :meth:`run_pipeline` (без метки журнала и итога).
+
+        Returns:
+            dict: Итоговое заключение.
         """
         try:
-            logger.info(f"Запуск фоновой задачи обработки документов", extra={"expertise_id": self.df['id'].iloc[0]})
+            logger.info("Запуск проверки комплекта документов")
 
             # формирование итоговых данных для подачи в финальный запрос
             data_for_final_evaluation = {
@@ -351,15 +418,20 @@ class TasksPipeline:
                 media_links_exploded = media_links_exploded[media_links_exploded['media_links'].notna()]
                 
                 links = list(media_links_exploded.itertuples())
+                self._stats["links"] += len(links)
+                stage_started = time.monotonic()
                 extracted_results = await asyncio.gather(*(self.process_link(link) for link in links),
                                                          return_exceptions=True)
+                self._timings["разбор файлов"] = time.monotonic() - stage_started
 
                 # Обрабатываем результаты: ссылка и её результат остаются в одной паре (раньше пары собирались
                 # заново после фильтрации, и пропуск одного результата сдвинул бы все последующие)
                 successful_extracted_results = []
                 for link, result in zip(links, extracted_results):
                     if isinstance(result, Exception):
-                        logger.error(f"Ошибка при анализе ссылки {link}: {result}")
+                        self._stats["links_failed"] += 1
+                        logger.error(f"Ошибка при анализе ссылки {link.doc_code} {link.media_links}: "
+                                     f"{type(result).__name__}: {result}")
                         continue
                     if result is not None:
                         successful_extracted_results.append((link, result))
@@ -372,6 +444,7 @@ class TasksPipeline:
                         if isinstance(res, str):
                             res = json.loads(res)
                         detected_type = res.get('type_compliance') if isinstance(res.get('type_compliance'), str) else res.get('type_compliance', {}).get("detected_type", "unknown")
+                        self._stats[f"type:{detected_type}"] += 1
                         # заполнение столбца данными о предоставленных документах 
                         # if link.doc_code == 'linkDocs':
                         #     self.df.loc[self.df['doc_code'] == 'linkDocs', 'provided_docs'] = 1
@@ -389,6 +462,8 @@ class TasksPipeline:
 
             # формирование итоговых данных для подачи в финальный запрос
             data_for_final_evaluation["missed_documents"] = self.df.loc[self.df['missed_docs'] == 1, 'doc_code'].map(DOCUMENT_TYPE_MAPPING).dropna().unique().tolist()
+            self._missed_documents = data_for_final_evaluation["missed_documents"]
+            stage_started = time.monotonic()
             data_for_final_evaluation["documents"] = []
             # ====== Оценка полноты и соответствия данных в документе ======
             completeness_tasks = []
@@ -411,10 +486,16 @@ class TasksPipeline:
                 
             for completeness, row in zip(completeness_results, self.df[self.df['documents_results'].map(bool)].itertuples()):
                 if isinstance(completeness, Exception):
-                    logger.error(f"Ошибка при оценке полноты документов типа {row.doc_code}")
+                    logger.error(f"Ошибка при оценке полноты документов типа {row.doc_code}: "
+                                 f"{type(completeness).__name__}: {completeness}")
                     continue
                 if isinstance(completeness, str):
                     completeness = json.loads(completeness)
+                logger.info(
+                    f"Полнота {row.doc_code} «{DOCUMENT_TYPE_MAPPING.get(row.doc_code, row.doc_code)}» "
+                    f"({'обязательный' if row.required_docs == 1 else 'необязательный'}, файлов "
+                    f"{len(row.documents_results)}): тип {_status(completeness, 'type_compliance')}, читаемость "
+                    f"{_status(completeness, 'readability')}, полнота {_status(completeness, 'completeness')}")
                 data_for_final_evaluation["documents"].append({
                     "doc_code": row.doc_code,
                     "doc_type": 'Ссылка на ЕИС' if row.doc_code == "linkDocs" else DOCUMENT_TYPE_MAPPING.get(row.doc_code, "Неизвестный документ"),
@@ -423,6 +504,9 @@ class TasksPipeline:
                     **completeness
                 })
 
+            self._timings["полнота"] = time.monotonic() - stage_started
+            missed = data_for_final_evaluation["missed_documents"]
+            logger.info(f"Отсутствуют обязательные документы ({len(missed)}): {'; '.join(missed) or '—'}")
             # сортировка документов внутри data_for_final_evaluation["documents"] по приоритету (обязательные документы и ссылка на ЕИС в приоритете)
             data_for_final_evaluation["documents"].sort(key=lambda x: (x["required"] != "Обязательный", x["doc_code"] != "linkDocs"))
 
@@ -431,7 +515,11 @@ class TasksPipeline:
             documents_snapshot = copy.deepcopy(data_for_final_evaluation["documents"])
 
             # ЭТАП 3: Оценка согласованности и эвристик и формирование финального отчета
+            stage_started = time.monotonic()
             final_evaluation_result = await self.consistency_checker.check_consistency(data_for_final_evaluation)
+            self._timings["итоговая проверка"] = time.monotonic() - stage_started
+            logger.info(f"Итоговое заключение: {final_evaluation_result.get('overall_status')} — "
+                        f"{final_evaluation_result.get('overall_summary')}")
 
             # Атомарная запись результата в raw_document_data (колонки по типам документов + summary_report) с ключом
             # (окружение, экспертиза). Прежний результат заранее не удаляется: если прогон упал, он остаётся.

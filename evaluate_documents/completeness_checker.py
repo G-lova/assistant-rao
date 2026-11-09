@@ -73,8 +73,8 @@ class CompletenessChecker:
                 В случае неустранимых ошибок парсинга возвращается резервный словарь
                 с "status": "deny" и обобщённым сообщением об ошибке.
         """
-        logger.info(f"Анализ на полноту и согласованность данных в документах")
-        logger.info(f"completeness_content: {content}")
+        logger.info(f"Анализ на полноту и согласованность данных в документах типа {document_code}")
+        logger.info(f"completeness_content ({document_code}): {content}")
 
         # Ждём «разрешения» от глобального лимитера ПЕРЕД запросом
         await self.rate_limiter.acquire()
@@ -121,7 +121,7 @@ class CompletenessChecker:
             return fallback
 
         raw_response = response.choices[0].message.content.strip()
-        logger.info(f"Сырой ответ модели: {raw_response}")
+        logger.info(f"Полнота {document_code}: сырой ответ модели: {raw_response}")
         
         # Парсим JSON
         try:

@@ -1,12 +1,13 @@
 import asyncio
 import json
+import time
 
 from configs import settings
 import re
 from evaluate_documents.evidence_check import drop_nulls, verify_extraction
 from json_repair import repair_json
 from string import Template
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from configs.logger import get_logger
 from configs.rate_limiter import TokenBucket
@@ -16,7 +17,8 @@ from configs.llm_resilience import ContextOverflow, split_halves
 from configs.utils import extract_json_objects
 
 
-from evaluate_documents.merge_utils import as_evidence, as_obj, as_text
+from evaluate_documents.merge_utils import as_evidence, as_obj, as_text, chunk_counts
+from evaluate_documents.doc_profiles import describe_raw_data, format_raw_data_for_log, schema_for_profile
 
 logger = get_logger(__name__)
 
@@ -61,89 +63,74 @@ class DataExtractor:
             self.DATA_EXTRACTOR_SCHEMA = f.read()
             
 
-    async def extract_data_from_document(self, chunks: List[str], filename: str) -> Dict[str, Any]:
-        """
-        Анализирует документ, разбитый на чанки, и возвращает объединённые структурированные данные.
+    async def extract_data_from_document(self, chunks: List[str], filename: str, profile: Optional[str] = None,
+                                         hint: str = "") -> Dict[str, Any]:
+        """Извлекает данные из документа, разбитого на блоки, и объединяет результаты блоков.
 
-        Метод:
-            1. Запускает параллельный анализ всех чанков через `extract_data_from_chunk`.
-            2. Игнорирует чанки, вызвавшие исключения, и логирует ошибки.
-            3. Объединяет успешные результаты с помощью `merge_chunk_results`.
-            4. При полной неудаче возвращает резервный ответ с пометкой об ошибке.
+        Блоки отправляются модели параллельно (не больше ``self.semaphore`` одновременно); блоки с ошибкой
+        пропускаются. После объединения значения, которых нет в тексте, отбрасываются (:func:`verify_extraction`).
 
         Args:
-            chunks (List[str]): Список текстовых фрагментов (чанков) исходного документа.
-            document_name (str): Имя документа (для логирования и идентификации).
+            chunks: Блоки текста документа.
+            filename: Имя файла (для журнала).
+            profile: Профиль полей (:mod:`evaluate_documents.doc_profiles`); ``None`` — полная схема (риск-мониторинг).
+            hint: Подсказка модели о типе документа (:func:`doc_profiles.profile_hint`).
 
         Returns:
-            str: JSON-строка с объединёнными результатами анализа в формате:
-                {
-                    "type_compliance": { ... },
-                    "readability": { ... },
-                    "raw_data": { ... }
-                }
-                Если ни один чанк не проанализирован успешно, возвращается JSON
-                с полем `readability.status = "неудовлетворительно"` и сообщением об ошибке.
+            dict: ``{"readability": {...}, "raw_data": {...}}``; при полной неудаче — ``readability.status = deny``
+            и пустой ``raw_data``.
         """
-        logger.info(f"Извлечение данных из '{filename}")
-        # Параллельный анализ всех чанков
-        tasks = []
-        for i, chunk in enumerate(chunks):
-            task_name = f"'{filename}' (блок {i+1})" if len(
-                chunks) > 1 else filename
-            task = self.extract_data_from_chunk(
-                content=chunk,
-                filename=task_name
-            )
-            tasks.append(task)
-            
-        # Запускаем все задачи параллельно
-        async with self.semaphore:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+        started = time.monotonic()
+        logger.info(f"Извлечение данных из '{filename}': блоков {len(chunks)}, профиль {profile or 'full'}")
 
-        # Обрабатываем результаты
+        async def limited(i, chunk):
+            """Запрос по одному блоку, заняв место в семафоре."""
+            async with self.semaphore:
+                name = f"'{filename}' (блок {i + 1}/{len(chunks)})" if len(chunks) > 1 else f"'{filename}'"
+                return await self.extract_data_from_chunk(content=chunk, filename=name, profile=profile, hint=hint)
+
+        results = await asyncio.gather(*(limited(i, c) for i, c in enumerate(chunks)), return_exceptions=True)
+
         successful_results = []
+        failed = 0
         for i, result in enumerate(results):
             if isinstance(result, Exception):
-                logger.error(f"Ошибка при анализе блока {i+1}: {result}")
+                failed += 1
+                logger.error(f"'{filename}': ошибка при анализе блока {i + 1}: {type(result).__name__}: {result}")
                 continue
             if isinstance(result, list):   # блок не поместился в контекст и разобран по частям
                 successful_results.extend(drop_nulls(r) for r in result if r)   # null из схемы → «поля нет»
-            elif result != None:
+            elif result is not None:
                 successful_results.append(drop_nulls(result))
+            else:
+                failed += 1
 
         if not successful_results:
-            fallback = {
-                "readability": {"status": "deny", "issues": ["Ошибка анализа документа"]},
-                "raw_data": {}
-            }
-            return fallback
-
-        # Объединяем результаты
-        try:
-            logger.info(f"Объединение извлеченных данных по чанкам для '{filename}'")
-            final_result = await self.merge_chunk_results(successful_results, filename)
-            logger.info(f"Объединение извлеченных данных по чанкам для '{filename}' прошло успешно: {final_result}")
-            # Значения, которых нет в тексте документа, отбрасываются (суммы, даты, номер, ИНН/КПП/ОГРН, метод НМЦК)
-            final_result = verify_extraction(final_result, "\n".join(chunks), filename)
-
-            # logger.info(f"Оптимизация объединенных данных для {document_name}")
-            # detected_type = final_result.get("type_compliance", {}).get("detected_type", doc_type)
-            # opt_result = await self.extract_data_from_chunk(json.dumps(final_result), document_name, detected_type)
-            # logger.info(f"opt_result: {opt_result}")
-
-            # return final_result if not opt_result else opt_result
-            return final_result
-        except Exception as e:
-            logger.error(f"Ошибка объединения извлеченных данных по чанкам: {e}")
+            logger.error(f"'{filename}': ни один блок не разобран ({len(chunks)} блоков)")
             return {
                 "readability": {"status": "deny", "issues": ["Ошибка анализа документа"]},
                 "raw_data": {}
             }
-    
+
+        try:
+            final_result = await self.merge_chunk_results(successful_results, filename)
+            # Значения, которых нет в тексте документа, отбрасываются (суммы, даты, номер, ИНН/КПП/ОГРН, метод НМЦК)
+            final_result = verify_extraction(final_result, "\n".join(chunks), filename)
+            logger.info(f"'{filename}': извлечено за {time.monotonic() - started:.1f} с "
+                        f"(блоков {len(chunks)}, с ошибкой {failed}): {describe_raw_data(final_result.get('raw_data'))}")
+            logger.info(f"'{filename}': извлечённые значения:{format_raw_data_for_log(final_result.get('raw_data'))}")
+            logger.info(f"'{filename}': результат извлечения: {json.dumps(final_result, ensure_ascii=False, default=str)}")
+            return final_result
+        except Exception as e:
+            logger.error(f"'{filename}': ошибка объединения данных блоков: {type(e).__name__}: {e}", exc_info=True)
+            return {
+                "readability": {"status": "deny", "issues": ["Ошибка анализа документа"]},
+                "raw_data": {}
+            }
 
     @async_retry(LLM_RETRY_CONFIG)
-    async def extract_data_from_chunk(self, content: str, filename: str, penalize: bool = False) -> Dict[str, Any]:
+    async def extract_data_from_chunk(self, content: str, filename: str, penalize: bool = False,
+                                      profile: Optional[str] = None, hint: str = "") -> Dict[str, Any]:
         """
         Анализирует отдельный текстовый чанк с помощью LLM и возвращает структурированные данные.
 
@@ -156,6 +143,9 @@ class DataExtractor:
         Args:
             content (str): Текст чанка для анализа.
             document_name (str): Имя или идентификатор чанка (для логирования).
+            penalize (bool): Повтор после зацикливания модели — со штрафом за повторы.
+            profile (str): Профиль полей (``None`` — полная схема).
+            hint (str): Подсказка о типе документа в начале сообщения.
 
         Returns:
             Optional[Dict[str, Any]]: Словарь с полями `readability` и `raw_data`,
@@ -166,8 +156,8 @@ class DataExtractor:
         await self.rate_limiter.acquire()
         
         try:
-            logger.info(f"Анализ чанка '{filename}'")
-            logger.info(f"Длина контента: {len(content)} символов")
+            started = time.monotonic()
+            logger.info(f"Анализ блока {filename}: {len(content)} символов, профиль {profile or 'full'}")
 
             img_result = ''
             content_splitted = content.split('"')
@@ -176,8 +166,8 @@ class DataExtractor:
                     img_result = content_splitted[i + 2]
 
 
-            schema = self.DATA_EXTRACTOR_SCHEMA.replace(
-                '"img_description"', f'"{img_result}"')
+            schema = schema_for_profile(json.loads(self.DATA_EXTRACTOR_SCHEMA.replace(
+                '"img_description"', json.dumps(img_result, ensure_ascii=False))), profile)
 
             # # Ограничиваем размер контента для предотвращения ошибок
             # if len(content) > 15000:
@@ -191,10 +181,10 @@ class DataExtractor:
                     messages=[
                         {"role": "system",
                             "content": self.data_extractor_prompt},
-                        {"role": "user", "content": f"Проанализируй текст, оцени его читаемость, извлеки данные:\n\n{content}"}
+                        {"role": "user", "content": f"{hint}Проанализируй текст, оцени его читаемость, извлеки данные:\n\n{content}"}
                     ],
                     extra_body={
-                        "guided_json": json.loads(schema)},
+                        "guided_json": schema},
                     max_tokens=settings.EXTRACTION_MAX_TOKENS,
                     temperature=0
                 )
@@ -211,13 +201,15 @@ class DataExtractor:
                 logger.warning(f"Пустой ответ модели (извлечение данных) для '{filename}': "
                                f"finish_reason={getattr(response.choices[0], 'finish_reason', None)}")
                 return None
-            logger.info(f"Получен ответ длиной {len(raw_response)} символов для чанка '{filename}'")
+            finish = getattr(response.choices[0], "finish_reason", None)
+            logger.info(f"Блок {filename}: ответ {len(raw_response)} символов за {time.monotonic() - started:.1f} с"
+                        + (f", finish_reason={finish}" if finish and finish != "stop" else ""))
             logger.debug(raw_response)  # полный ответ — только в отладке: журнал рос до 4,7 МБ за прогон (30.10.2026)
 
             # Парсим JSON
             try:
                 result = json.loads(raw_response)
-                logger.info("Удалось распарсить JSON.")
+                logger.info(f"Блок {filename}: JSON разобран")
                 if isinstance(result, list):
                     result = self.merge_json_objects(result)
                 result, removed = dedupe_repeats(result)
@@ -226,17 +218,17 @@ class DataExtractor:
                 return result
             
             except json.JSONDecodeError as e:
-                logger.warning(f"Первая попытка парсинга JSON не удалась: {e}")
+                logger.warning(f"Блок {filename}: JSON не разобран ({e}), восстанавливаю")
 
             # Поиск JSON структур вручную
             try:
                 result = json.loads(repair_json(raw_response))
 
                 if not result:
-                    logger.error("JSON структуры не найдены.")
+                    logger.error(f"Блок {filename}: в ответе нет JSON")
                     return None
                 
-                logger.info("Удалось распарсить JSON из извлечённого фрагмента вручную.")
+                logger.info(f"Блок {filename}: JSON восстановлен (ответ, вероятно, обрезан)")
                 if isinstance(result, list):
                     result = self.merge_json_objects(result)
                 result, removed = dedupe_repeats(result)
@@ -246,13 +238,14 @@ class DataExtractor:
                     # ответ обрезан и полон повторов — модель зациклилась; данные после цикла потеряны
                     logger.warning(f"'{filename}': модель зациклилась (повторов {removed}, ответ обрезан) — "
                                    f"повторяю запрос со штрафом за повторы")
-                    again = await self.extract_data_from_chunk(content=content, filename=filename, penalize=True)
+                    again = await self.extract_data_from_chunk(content=content, filename=filename, penalize=True,
+                                                               profile=profile, hint=hint)
                     if again:
                         return again
                 return result
             
             except json.JSONDecodeError:
-                logger.error("Не удалось распарсить ни одну JSON структуру.")
+                logger.error(f"Блок {filename}: JSON не удалось восстановить")
                 return None
 
         except ContextOverflow as e:
@@ -265,7 +258,8 @@ class DataExtractor:
             logger.warning(f"{filename}: {e} — делю на {len(parts)} части")
             results = []
             for i, part in enumerate(parts):
-                r = await self.extract_data_from_chunk(content=part, filename=f"{filename}, часть {i + 1}")
+                r = await self.extract_data_from_chunk(content=part, filename=f"{filename}, часть {i + 1}",
+                                                       profile=profile, hint=hint)
                 results.extend(r if isinstance(r, list) else [r] if r else [])
             return results or None
         except Exception as e:
@@ -356,9 +350,11 @@ class DataExtractor:
         summary = []
 
         # ---- МЕРДЖ ЧАНКОВ ----
-        for chunk in chunk_results:
+        for chunk_no, chunk in enumerate(chunk_results, 1):
             if not isinstance(chunk, dict):
                 continue
+            chunk_label = f"'{filename}', блок {chunk_no}/{len(chunk_results)}"
+            chunk_raw = chunk.get("raw_data") if isinstance(chunk.get("raw_data"), dict) else {}
 
             # --- RADABILITY ---
             readability = as_obj(chunk.get("readability"), "status")
@@ -395,25 +391,25 @@ class DataExtractor:
 
 
             # summary
-            logger.info(f"Объединение summary")
+            logger.info(f"Объединение summary ({chunk_label}): {chunk_counts(chunk_raw, ('summary',))}")
             if raw_data.get("summary", ""):
                 summary.append(as_text(raw_data.get("summary", "")))
 
 
             # document_name, contract number, nmck_method": если найден в chunk — сохраняем первый
-            logger.info(f"Объединение document_name")
+            logger.info(f"Объединение document_name ({chunk_label}): {chunk_counts(chunk_raw, ('document_name',))}")
             dn = as_obj(raw_data.get("document_name"), "value")
             if dn.get("value", "") and not merged["raw_data"]["document_name"]["value"]:
                 merged["raw_data"]["document_name"]["value"] = dn["value"]
                 merged["raw_data"]["document_name"]["confidence"] = dn.get("confidence", None)
                     
-            logger.info(f"Объединение contract_number")
+            logger.info(f"Объединение contract_number ({chunk_label}): {chunk_counts(chunk_raw, ('contract_number',))}")
             cn = as_obj(raw_data.get("contract_number"), "value")
             if cn.get("value", "") and not merged["raw_data"]["contract_number"]["value"]:
                 merged["raw_data"]["contract_number"]["value"] = cn["value"]
                 merged["raw_data"]["contract_number"]["evidence"] = cn.get("evidence", None)
 
-            logger.info(f"Объединение nmck")
+            logger.info(f"Объединение nmck ({chunk_label}): {chunk_counts(chunk_raw, ('nmck_method',))}")
             nmck = as_obj(raw_data.get("nmck_method"), "method")
             if nmck and nmck.get("method", ""):
                 if not merged["raw_data"]["nmck_method"]["method"]:
@@ -425,13 +421,13 @@ class DataExtractor:
                 )
 
             # даты, суммы, нормативные акты, отчетные документы, прочие данные
-            logger.info(f"Объединение dates, reporting_documentation, other_data")
+            logger.info(f"Объединение dates, reporting_documentation, other_data ({chunk_label}): {chunk_counts(chunk_raw, ('dates', 'reporting_documentation', 'other_data'))}")
             for key in ["dates", "reporting_documentation", "other_data"]:
                 raw_list = raw_data.get(key, [])
                 if isinstance(raw_list, list):
                     merged["raw_data"][key].extend(raw_list)
             
-            logger.info(f"Объединение finances")
+            logger.info(f"Объединение finances ({chunk_label}): {chunk_counts(chunk_raw, ('finances',))}")
             am = raw_data.get("finances", [])
             if isinstance(am, list):
                 for item in am:
@@ -443,7 +439,7 @@ class DataExtractor:
                         merged["raw_data"]["finances"].append(item)
 
             # law_references
-            logger.info(f"Объединение law_references")
+            logger.info(f"Объединение law_references ({chunk_label}): {chunk_counts(chunk_raw, ('law_references',))}")
             raw_laws = raw_data.get("law_references", [])
             if isinstance(raw_laws, list):
                 for law_item in raw_laws:
@@ -492,7 +488,7 @@ class DataExtractor:
                         merged["raw_data"]["law_references"].append(law_item)
 
             # организации
-            logger.info(f"Объединение organizations")
+            logger.info(f"Объединение organizations ({chunk_label}): {chunk_counts(chunk_raw, ('organizations',))}")
             organizations = raw_data.get("organizations", [])
             if isinstance(organizations, list):
                 for item in organizations:
@@ -536,13 +532,13 @@ class DataExtractor:
 
 
             # предмет закупки
-            logger.info(f"Объединение procurement_subject")
+            logger.info(f"Объединение procurement_subject ({chunk_label}): {chunk_counts(chunk_raw, ('procurement_subject',))}")
             ps = raw_data.get("procurement_subject", {})
             if isinstance(ps, dict) and ps.get("description", "") and ps.get("evidence", "") and not merged["raw_data"]["procurement_subject"]["description"]:
                     merged["raw_data"]["procurement_subject"]["description"] = ps["description"]
                     merged["raw_data"]["procurement_subject"]["evidence"] = ps.get("evidence")
 
-            logger.info(f"Объединение items")
+            logger.info(f"Объединение items ({chunk_label}): {chunk_counts(chunk_raw, ('items',))}")
             chunk_items = raw_data.get("items", [])
             if isinstance(chunk_items, list):
                 for new_item in chunk_items:
@@ -576,7 +572,7 @@ class DataExtractor:
 
 
             # execution_location
-            logger.info(f"Объединение execution_location")
+            logger.info(f"Объединение execution_location ({chunk_label}): {chunk_counts(chunk_raw, ('execution_location',))}")
             el = as_obj(raw_data.get("execution_location"), "address")
             if el:
                 for k in ["address", "special_conditions"]:

@@ -1,85 +1,44 @@
+"""Разбор документа для ``/evaluate-documents``: тип → извлечение по профилю типа → объединение → проверка.
+
+Раньше одна модель за один запрос на каждый блок текста и определяла тип, и оценивала читаемость, и извлекала все
+14 полей схемы; тип брался из первого блока. Теперь шаги разделены:
+
+1. :class:`TypeDetector` — тип документа по его началу и имени файла (один короткий запрос на документ);
+2. по типу выбирается профиль полей (:mod:`evaluate_documents.doc_profiles`): у акта не спрашивают метод НМЦК,
+   у декларации — сроки отчётных документов;
+3. :class:`DataExtractor` извлекает поля профиля по каждому блоку (блоки размечены страницами);
+4. платёжные поручения и XML площадок разбираются кодом (:mod:`evaluate_documents.rule_extractors`): платёжка,
+   разобранная полностью, модели для извлечения не отправляется;
+5. результаты блоков объединяются прежним образом, дубли убираются, значения сверяются с текстом.
+
+Формат результата прежний: ``type_compliance`` (``status``, ``detected_type``, ``issues``), ``readability``,
+``raw_data`` со всеми 14 полями (поля вне профиля — пустые значения шаблона).
+"""
 import asyncio
 import json
+import re
+import time
+from typing import Any, Dict, List, Optional
 
 from configs import settings
-import re
-from evaluate_documents.evidence_check import drop_nulls, verify_extraction
-from json_repair import repair_json
-from string import Template
-from typing import Any, Dict, List
-
 from configs.logger import get_logger
-from configs.rate_limiter import TokenBucket
-from configs.retry_utils import LLM_RETRY_CONFIG, async_retry
-from configs.llm_repetition import LOOP_MIN, dedupe_repeats, penalized
-from configs.llm_resilience import ContextOverflow, split_halves
-from configs.utils import extract_json_objects
-
-
-from evaluate_documents.merge_utils import as_evidence, as_text
+from evaluate_documents import rule_extractors
+from evaluate_documents.data_extractor import DataExtractor
+from evaluate_documents.doc_profiles import (
+    PAYMENT_RE, PROFILE_TITLES, annotate_pages, describe_raw_data, format_raw_data_for_log, profile_fields,
+    profile_for, profile_hint,
+)
+from evaluate_documents.evidence_check import drop_nulls, verify_raw_data
+from evaluate_documents.merge_utils import as_evidence, as_text, chunk_counts, dedupe_raw_data
+from evaluate_documents.type_detector import (  # noqa: F401 — реэкспорт: импортируются из этого модуля
+    ALLOWED_DOC_TYPES, DOCUMENT_TYPE_KEYWORDS, DOCUMENT_TYPE_MAPPING, TypeDetector,
+)
 
 logger = get_logger(__name__)
 
-DOCUMENT_TYPE_MAPPING = {
-    'docAcceptInafPostavFiles': 'Документация, подтверждающая невозможность (нецелесообразность) использования иных способов определения поставщика (исполнителя, подрядчика)',
-    'docActPriemTovFiles': 'Акт о приемке товара',
-    'docAssetSelOrgFiles': 'Положение о закупках организации',
-    'docCargoTaxFiles': 'Товарная накладная',
-    'docCertValidFiles': 'Сертификаты соответствия',
-    'docContractDoWorkFiles': 'Контракт на выполнение работ (оказание услуг)',
-    'docContractNIRFiles': 'Контракт на выполнение НИР (или НИОКР)',
-    'docContractPostTovarFiles': 'Контракт на поставку товара',
-    'docDocPriemActSdachFiles': 'Документ о приемке и/или акт сдачи-приемки работ (услуг)',
-    'docDopConsentContractFiles': 'Дополнительные соглашения к контракту',
-    'docDopMaterialsFiles': 'Дополнительные материалы',
-    'docExpertReportFiles': 'Экспертиза результатов исполнения контракта, проведенная членами приемочной комиссии или силами привлеченной экспертной организации',
-    'docIzvejenieFiles': 'Извещение',
-    'docMaterialValidNMCKFiles': 'Материалы, подтверждающие Обоснование н(м)цк',
-    'docOpusObjectZacupFiles': 'Описание объекта закупки',
-    'docObosnNMCKFiles': 'Обоснование н(м)цк',
-    'docPhotoCargoFiles': 'Фото товара',
-    'docPhotoFinishWorkFiles': 'Фото результатов выполнения работ (оказания услуг)',
-    'docPorViewOcenkFiles': 'Порядок рассмотрения и оценки заявок на конкурс',
-    'docProjContractFiles': 'Проект контракта',
-    'docPriemTovSchetFiles': 'Документ о приемке товара',
-    'docReportDoNIRFiles': 'Отчет о выполнении НИР, а также документы, подтверждающие исполнение требований к выполнению НИР',
-    'docTechDocFiles': 'Техническая документация, паспорт товара и пр.',
-    'docTrebContentRequestFiles': 'Требования к содержанию заявки на конкурс и инструкция по ее заполнению',
-    'docValidAllIfFiles': 'Документы, подтверждающие исполнение всех условий, предусмотренных контрактом',
-    'docValidCopyriteFiles': 'Документы, подтверждающие передачу авторских прав на результаты интеллектуальной собственности',
-    'docValidCountyFiles': 'Документы, подтверждающие страну происхождение товара',
-    'docValidGarantFiles': 'Документы, подтверждающие гарантийные обязательства ',
-    'docVziskPenyFiles': 'Документы по взысканию пени и штрафов',
-    'unknown': 'Неизвестный документ'
-}
-
-ALLOWED_DOC_TYPES = list(DOCUMENT_TYPE_MAPPING.keys())
-ALLOWED_DOC_TYPES.append('linkDocs')
-
-
-DOCUMENT_TYPE_KEYWORDS = {
-    "docAssetSelOrgFiles": ["положение о закупках"],
-    "docCargoTaxFiles": ["товарная накладная", "накладная торг-12", "торг-12"],
-    "docCertValidFiles": ["сертификат соответствия", "декларация соответствия"],
-    "docContractPostTovarFiles": ["контракт на поставку", "на поставку", "договор поставки", "поставка товара", "контракт"],
-    "docContractDoWorkFiles": ["контракт на выполнение работ", "договор подряда", "оказание услуг", "выполнение работ", "контракт"],
-    'docContractNIRFiles': ["контракт", "на выполнение НИР", "на выполнение НИОКР", "НИОКР", "НИР", "научно-исследовательских", "договор"],
-    "docDocPriemActSdachFiles": ["акт сдачи-приемки", "акт выполненных работ", "акт оказанных услуг"],
-    "docDopConsentContractFiles": ["дополнительное соглашение"],
-    "docIzvejenieFiles": ["извещение", "извещение о проведении", "уведомление о размещении"],
-    "docMaterialValidNMCKFiles": ["коммерческое предложение", "анализ рынка", "ценовая информация"],
-    "docObosnNMCKFiles": ["обоснование нмцк", "обоснование н(м)цк", "обоснование начальной", "обоснование максимальной цены"],
-    "docOpusObjectZacupFiles": ["описание объекта закупки", "техническое задание", "тз"],
-    "docPhotoCargoFiles": ["фото товара"],
-    "docPhotoFinishWorkFiles": ["фото выполненных работ", "фото результата работ"],
-    "docPriemTovSchetFiles": ["документ о приемке", "акт приемки", "универсальный передаточный документ", "упд"],
-    "docProjContractFiles": ["контракт", "договор"],
-    "docPorViewOcenkFiles": ["порядок рассмотрения и оценки"],
-    "docTechDocFiles": ["паспорт изделия", "паспорт товара", "техническая документация", "руководство по эксплуатации"],
-    "docTrebContentRequestFiles": ["требования к содержанию", "инструкция по заполнению заявки"],
-    "docValidGarantFiles": ["гарантийное письмо", "гарантийные обязательства"]
-}
-
+# Читаемость платёжного поручения, разобранного кодом (модель текст не оценивала)
+CODE_READABILITY = {"status": "allow", "image_description": "", "issues": [], "readability_score": 0.9,
+                    "main_language": "ru", "language_confidence": 1.0}
 
 
 def _as_obj(value, key: str) -> dict:
@@ -103,268 +62,156 @@ def _as_obj(value, key: str) -> dict:
     return {}
 
 
+
 class TypeDataExtractor:
-    """
-    Извлекает структурированные данные и оценивает читаемость документов с помощью LLM.
+    """Разбор документа: тип (:class:`TypeDetector`) → поля профиля (:class:`DataExtractor`) → объединение.
 
-    Класс предназначен для анализа одного или нескольких текстовых фрагментов (чанков) документа.
-    Для каждого чанка вызывается крупная языковая модель (LLM) с заданной JSON-схемой,
-    чтобы извлечь ключевые метаданные (номер контракта, даты, суммы, организации и др.)
-    и оценить качество текста (читаемость, язык, наличие артефактов OCR).
-
-    Поддерживает параллельную обработку чанков, объединение результатов и устойчивость
-    к ошибкам парсинга или таймаутам.
+    Интерфейс прежний (``extract_data_from_document(chunks, document_name, doc_type, expertise_object)``), им
+    пользуются пайплайн ``/evaluate-documents``, ``src/ai_file_analyzer.py`` и риск-мониторинг.
     """
+
     def __init__(self, llm_client, model):
-        """
-        Инициализирует экстрактор данных с клиентом LLM и моделью.
-
-        Загружает:
-            - промпт для извлечения данных из файла `prompts/data_extractor_prompt.txt`,
-            - JSON-схему из `schemas/data_extractor_schema.json`, в которую подставляется
-              список допустимых типов документов (`ALLOWED_DOC_TYPES`).
+        """Создаёт разборщик.
 
         Args:
-            llm_client: Экземпляр клиента LLM (совместимого с OpenAI API),
-                        поддерживающего метод `chat.completions.create`.
-            model (str): Название модели LLM (например, "gpt-4o", "llama3-70b" и т.д.).
+            llm_client: Клиент LLM (OpenAI-совместимый, ``chat.completions.create``).
+            model (str): Название модели.
         """
         self.client = llm_client
         self.model = model
+        self.semaphore = asyncio.Semaphore(3)   # одновременных запросов по блокам одного документа
+        self.type_detector = TypeDetector(llm_client, model)
+        self.data_extractor = DataExtractor(llm_client, model)
 
-
-        self.semaphore = asyncio.Semaphore(3)
-        self.rate_limiter = TokenBucket(rate=1.5)  # 1.5 запроса в секунду
-
-        with open("prompts/type_data_extractor_prompt.txt") as f:
-            self.type_data_extractor_prompt = f.read()
-
-        with open("schemas/type_data_extractor_schema.json") as f:
-            self.TYPE_DATA_EXTRACTOR_SCHEMA = f.read()
-            
-
-    async def extract_data_from_document(self, chunks: List[str], document_name: str, doc_type: str, expertise_object: int) -> Dict[str, Any]:
-        """
-        Анализирует документ, разбитый на чанки, и возвращает объединённые структурированные данные.
-
-        Метод:
-            1. Запускает параллельный анализ всех чанков через `extract_data_from_chunk`.
-            2. Игнорирует чанки, вызвавшие исключения, и логирует ошибки.
-            3. Объединяет успешные результаты с помощью `merge_chunk_results`.
-            4. При полной неудаче возвращает резервный ответ с пометкой об ошибке.
+    async def extract_data_from_document(self, chunks: List[str], document_name: str, doc_type: str,
+                                         expertise_object: int) -> Dict[str, Any]:
+        """Определяет тип документа, извлекает данные и оценивает читаемость.
 
         Args:
-            chunks (List[str]): Список текстовых фрагментов (чанков) исходного документа.
-            document_name (str): Имя документа (для логирования и идентификации).
+            chunks: Блоки текста документа.
+            document_name: Имя файла.
+            doc_type: Ожидаемый тип (поле экспертизы, куда загружен файл).
+            expertise_object: Объект экспертизы.
 
         Returns:
-            str: JSON-строка с объединёнными результатами анализа в формате:
-                {
-                    "type_compliance": { ... },
-                    "readability": { ... },
-                    "raw_data": { ... }
-                }
-                Если ни один чанк не проанализирован успешно, возвращается JSON
-                с полем `readability.status = "неудовлетворительно"` и сообщением об ошибке.
+            dict: ``type_compliance``, ``readability``, ``raw_data`` (формат прежний). Если ни один блок не
+            разобран — ``deny`` с причиной.
         """
-        # Параллельный анализ всех чанков
-        tasks = []
-        for i, chunk in enumerate(chunks):
-            task_name = f"{document_name} (блок {i+1})" if len(
-                chunks) > 1 else document_name
-            task = self.extract_data_from_chunk(
-                content=chunk,
-                document_name=task_name,
-                doc_type=doc_type
-            )
-            tasks.append(task)
-            
-        # Блоки идут к модели параллельно, но не больше, чем позволяет семафор: место занимает каждый блок
-        # (раньше семафор оборачивал gather целиком и не ограничивал число одновременных запросов)
-        async def limited(coro):
-            """Выполняет запрос по блоку, заняв место в семафоре."""
-            async with self.semaphore:
-                return await coro
+        started = time.monotonic()
+        chunks = annotate_pages(chunks)
+        text = "\n".join(chunks)
 
-        results = await asyncio.gather(*(limited(t) for t in tasks), return_exceptions=True)
+        # платёжное поручение — кодом (форма стабильная, модель ошибалась в суммах)
+        payment = None
+        if PAYMENT_RE.search(document_name or "") or PAYMENT_RE.search(text[:1500]):
+            payment = rule_extractors.parse_payment_order(text, document_name)
+            if payment:
+                logger.info(f"Документ '{document_name}': платёжное поручение разобрано кодом "
+                            f"({'полностью' if payment['complete'] else 'частично — дополнит модель'}):"
+                            f"{format_raw_data_for_log(payment['raw_data'])}")
+            else:
+                logger.info(f"Документ '{document_name}': похоже на платёжку, но форма не распознана — разбор моделью")
 
-        # Обрабатываем результаты
-        successful_results = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.error(f"Ошибка при анализе блока {i+1}: {result}")
-                continue
-            if isinstance(result, list):   # блок не поместился в контекст и разобран по частям
-                successful_results.extend(drop_nulls(r) for r in result if r)   # null из схемы → «поля нет»
-            elif result != None:
-                successful_results.append(drop_nulls(result))
+        async with self.semaphore:   # запрос к модели — под общим лимитом пайплайна
+            detection = await self.type_detector.detect(chunks, document_name)
+        detected_type = detection.get("detected_type")
+        profile = "payment" if payment else profile_for(detected_type, document_name, text[:3000])
+        logger.info(f"Документ '{document_name}': поле экспертизы {doc_type}, тип {detected_type}, профиль {profile} "
+                    f"({PROFILE_TITLES.get(profile, '')}): поля {', '.join(profile_fields(profile))}; "
+                    f"блоков {len(chunks)}, текст {len(text)} символов")
 
-        if not successful_results:
-            fallback = {
+        if payment and payment["complete"]:
+            source = "код"
+            chunk_results = [{"readability": dict(CODE_READABILITY), "raw_data": payment["raw_data"]}]
+        else:
+            source = "модель"
+            hint = profile_hint(profile, detected_type, DOCUMENT_TYPE_MAPPING.get(detected_type or "", ""))
+            chunk_results = await self._extract_chunks(chunks, document_name, profile, hint)
+
+        if not chunk_results:
+            logger.error(f"Документ '{document_name}': данные не извлечены ни из одного блока ({len(chunks)})")
+            return {
                 "type_compliance": {"status": "deny", "issues": ["Не удалось определить тип: документ пустой"], "detected_type": "unknown"},
                 "readability": {"status": "deny", "issues": ["Ошибка анализа документа"]},
                 "raw_data": {}
             }
-            return fallback
 
-        # Объединяем результаты
         try:
-            logger.info(f"Объединение извлеченных данных по чанкам для {document_name}")
-            final_result = await self.merge_chunk_results(successful_results, doc_type, expertise_object, document_name)
-            logger.info(f"Объединение извлеченных данных по чанкам для {document_name} прошло успешно: {final_result}")
-            # Значения, которых нет в тексте документа, отбрасываются (суммы, даты, номер, ИНН/КПП/ОГРН, метод НМЦК)
-            final_result = verify_extraction(final_result, "\n".join(chunks), document_name)
-
-            # logger.info(f"Оптимизация объединенных данных для {document_name}")
-            # detected_type = final_result.get("type_compliance", {}).get("detected_type", doc_type)
-            # opt_result = await self.extract_data_from_chunk(json.dumps(final_result), document_name, detected_type)
-            # logger.info(f"opt_result: {opt_result}")
-
-            # return final_result if not opt_result else opt_result
-            return final_result
+            merged = await self.merge_chunk_results(chunk_results, doc_type, expertise_object, document_name,
+                                                    detected_type=detected_type)
         except Exception as e:
-            logger.error(f"Ошибка объединения извлеченных данных по чанкам: {e}")
+            logger.error(f"Документ '{document_name}': ошибка объединения данных блоков: {type(e).__name__}: {e}",
+                         exc_info=True)
             return {
                 "type_compliance": {"status": "deny", "issues": ["Ошибка объединения извлеченных данных по чанкам"], "detected_type": "unknown"},
                 "readability": {"status": "deny", "issues": ["Ошибка анализа документа"]},
                 "raw_data": {}
             }
-    
 
-    @async_retry(LLM_RETRY_CONFIG)
-    async def extract_data_from_chunk(self, content: str, document_name: str, doc_type: str,
-                                      penalize: bool = False) -> Dict[str, Any]:
-        """
-        Анализирует отдельный текстовый чанк с помощью LLM и возвращает структурированные данные.
+        raw = merged["raw_data"]
+        if payment and not payment["complete"]:
+            rule_extractors.overlay(raw, payment["raw_data"])
+            source += " + код (платёжка)"
+        xml = rule_extractors.parse_flat_xml(text) if rule_extractors.looks_like_flat_xml(text) else None
+        if xml:
+            logger.info(f"Документ '{document_name}': XML площадки, значения тегов:{format_raw_data_for_log(xml)}")
+            rule_extractors.overlay(raw, xml)
+            source += " + XML"
+        removed = dedupe_raw_data(raw)
+        if removed:
+            logger.info(f"Документ '{document_name}': удалено дублей после объединения блоков: {removed}")
 
-        Метод:
-            - Обрезает контент до 15 000 символов, если он слишком длинный.
-            - Вызывает LLM с guided JSON для получения предсказуемого формата.
-            - Поддерживает таймаут (300 секунд) на выполнение запроса.
-            - При неудаче пытается извлечь JSON-структуру из неформатированного ответа.
+        # значения, которых нет в тексте документа, отбрасываются (суммы, даты, номер, ИНН/КПП/ОГРН, метод НМЦК)
+        merged["raw_data"], dropped = verify_raw_data(raw, text)
+        if dropped:
+            logger.warning(f"Документ '{document_name}': нет в тексте документа, отброшено {len(dropped)}:\n    "
+                           + "\n    ".join(dropped))
+
+        tc = merged.get("type_compliance", {})
+        logger.info(
+            f"Документ '{document_name}' ({doc_type}): тип {detected_type} [{detection.get('source')}] → "
+            f"{tc.get('status')}, профиль {profile}, блоков {len(chunks)}, извлечение: {source}, "
+            f"читаемость {merged.get('readability', {}).get('readability_score')}; "
+            f"{describe_raw_data(merged['raw_data'])}; дублей {removed}, отброшено {len(dropped)}; "
+            f"{time.monotonic() - started:.1f} с")
+        logger.info(f"Документ '{document_name}': извлечённые значения:{format_raw_data_for_log(merged['raw_data'])}")
+        logger.info(f"Документ '{document_name}': соответствие типу {tc}; читаемость {merged.get('readability')}")
+        logger.info(f"Документ '{document_name}': результат {json.dumps(merged, ensure_ascii=False, default=str)}")
+        return merged
+
+    async def _extract_chunks(self, chunks: List[str], document_name: str, profile: str,
+                              hint: str) -> List[Dict[str, Any]]:
+        """Извлечение по блокам через :class:`DataExtractor` (не больше ``self.semaphore`` запросов сразу).
 
         Args:
-            content (str): Текст чанка для анализа.
-            document_name (str): Имя или идентификатор чанка (для логирования).
+            chunks: Блоки текста (с метками страниц).
+            document_name: Имя файла.
+            profile: Профиль полей.
+            hint: Подсказка о типе документа.
 
         Returns:
-            Optional[Dict[str, Any]]: Словарь с полями `readability` и `raw_data`,
-                                      соответствующий схеме `DATA_EXTRACTOR_SCHEMA`,
-                                      или `None` в случае неустранимой ошибки.
+            list[dict]: Ответы по блокам (``readability``, ``raw_data``) без ``null``; блоки с ошибкой пропущены.
         """
-        # Ждём «разрешения» от глобального лимитера ПЕРЕД запросом
-        await self.rate_limiter.acquire()
-        
-        try:
-            logger.info(f"Анализ чанка '{document_name}'")
-            logger.info(f"Длина контента: {len(content)} символов")
+        async def limited(i, chunk):
+            """Запрос по одному блоку, заняв место в семафоре."""
+            async with self.semaphore:
+                name = f"{document_name} (блок {i + 1}/{len(chunks)})" if len(chunks) > 1 else document_name
+                return await self.data_extractor.extract_data_from_chunk(content=chunk, filename=name,
+                                                                         profile=profile, hint=hint)
 
-            # Загружаем промпт
-            prompt = Template(self.type_data_extractor_prompt).safe_substitute(
-                mapping=json.dumps(DOCUMENT_TYPE_MAPPING, ensure_ascii=False, indent=2)
-            )
-
-            img_result = ''
-            content_splitted = content.split('"')
-            for i, item in enumerate(content_splitted):
-                if item in ['image_description'] and i + 2 <= len(content_splitted) - 1:
-                    img_result = content_splitted[i + 2]
-
-
-            schema = self.TYPE_DATA_EXTRACTOR_SCHEMA.replace(
-                '"ALLOWED_DOC_TYPES"', json.dumps(ALLOWED_DOC_TYPES)).replace(
-                '"img_description"', f'"{img_result}"')
-
-            # # Ограничиваем размер контента для предотвращения ошибок
-            # if len(content) > 15000:
-            #     content = content[:15000] + "... [контент обрезан]"
-            #     logger.info(f"Контент обрезан до {len(content)} символов")
-
-            # Вызов модели с guided_json и таймаутом
-            try:
-                request = dict(
-                    model=self.model,
-                    messages=[
-                        {"role": "system",
-                            "content": prompt},
-                        {"role": "user", "content": f"""
-                            Определи тип этого документа. Соответствует ли он {doc_type if doc_type in ALLOWED_DOC_TYPES else "docDopMaterialsFiles"}: ({'Ссылка на ЕИС' if doc_type == 'linkDocs' else DOCUMENT_TYPE_MAPPING.get(doc_type, "Дополнительные материалы")})? 
-                            Проанализируй текст, оцени его читаемость, извлеки данные:\n\n{content}
-                        """}
-                    ],
-                    extra_body={
-                        "guided_json": json.loads(schema)},
-                    max_tokens=settings.EXTRACTION_MAX_TOKENS,
-                    temperature=0
-                )
-                if penalize:  # повтор после зацикливания: штраф за повторяющиеся токены
-                    request = penalized(request)
-                response = await self.client.chat.completions.create(**request)
-            except asyncio.TimeoutError:
-                logger.error(f"Таймаут при анализе {document_name}")
-                return None
-
-            raw_response = response.choices[0].message.content.strip()
-            logger.info(f"Получен ответ длиной {len(raw_response)} символов для чанка '{document_name}'")
-            logger.debug(raw_response)  # полный ответ — только в отладке: журнал рос до 4,7 МБ за прогон (30.10.2026)
-
-            # Парсим JSON
-            try:
-                result = json.loads(raw_response)
-                logger.info("Удалось распарсить JSON.")
-                if isinstance(result, list):
-                    result = self.merge_json_objects(result)
-                result, removed = dedupe_repeats(result)
-                if removed:
-                    logger.info(f"'{document_name}': убрано повторов записей: {removed}")
-                return result
-            
-            except json.JSONDecodeError as e:
-                logger.warning(f"Первая попытка парсинга JSON не удалась: {e}")
-
-            # Поиск JSON структур вручную
-            try:
-                result = json.loads(repair_json(raw_response))
-
-                if not result:
-                    logger.error("JSON структуры не найдены.")
-                    return None
-                
-                logger.info("Удалось распарсить JSON из извлечённого фрагмента вручную.")
-                if isinstance(result, list):
-                    result = self.merge_json_objects(result)
-                result, removed = dedupe_repeats(result)
-                if removed:
-                    logger.info(f"'{document_name}': убрано повторов записей: {removed}")
-                if removed >= LOOP_MIN and not penalize:
-                    # ответ обрезан и полон повторов — модель зациклилась; данные после цикла потеряны
-                    logger.warning(f"'{document_name}': модель зациклилась (повторов {removed}, ответ обрезан) — "
-                                   f"повторяю запрос со штрафом за повторы")
-                    again = await self.extract_data_from_chunk(content=content, document_name=document_name, doc_type=doc_type, penalize=True)
-                    if again:
-                        return again
-                return result
-            
-            except json.JSONDecodeError:
-                logger.error("Не удалось распарсить ни одну JSON структуру.")
-                return None
-
-        except ContextOverflow as e:
-            # блок не помещается в контекст модели (токенизатор модели считает кириллицу и XML плотнее, чем
-            # tiktoken при нарезке): делим пополам и извлекаем по частям; результаты объединяет вызывающий
-            parts = split_halves(content)
-            if len(parts) < 2:
-                logger.error(f"Блок {document_name} не делится и не помещается в контекст: {e}")
-                return None
-            logger.warning(f"{document_name}: {e} — делю на {len(parts)} части")
-            results = []
-            for i, part in enumerate(parts):
-                r = await self.extract_data_from_chunk(content=part, document_name=f"{document_name}, часть {i + 1}", doc_type=doc_type)
-                results.extend(r if isinstance(r, list) else [r] if r else [])
-            return results or None
-        except Exception as e:
-            logger.error(f"Ошибка при анализе {document_name}: {str(e)}")
-            return None
+        results = await asyncio.gather(*(limited(i, c) for i, c in enumerate(chunks)), return_exceptions=True)
+        out = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Документ '{document_name}': ошибка в блоке {i + 1}: {type(result).__name__}: {result}")
+                continue
+            if isinstance(result, list):   # блок не поместился в контекст и разобран по частям
+                out.extend(drop_nulls(r) for r in result if r)
+            elif result is not None:
+                out.append(drop_nulls(result))
+        if len(out) < len(chunks):
+            logger.warning(f"Документ '{document_name}': разобрано блоков {len(out)} из {len(chunks)}")
+        return out
 
     def merge_json_objects(self, json_strings) -> dict:
         """Объединяет список JSON-строк в один словарь."""
@@ -395,7 +242,8 @@ class TypeDataExtractor:
         return new_evidence if conf_new > conf_current else current_evidence
 
 
-    async def merge_chunk_results(self, chunk_results: List[Dict[str, Any]], doc_type: str, expertise_object: int, document_name: str) -> Dict[str, Any]:
+    async def merge_chunk_results(self, chunk_results: List[Dict[str, Any]], doc_type: str, expertise_object: int,
+                                  document_name: str, detected_type: Optional[str] = None) -> Dict[str, Any]:
         """
         Объединяет результаты анализа нескольких чанков в единый структурированный ответ.
 
@@ -412,6 +260,11 @@ class TypeDataExtractor:
         Args:
             chunk_results (List[Dict[str, Any]]): Список словарей, возвращённых LLM
                                                 для каждого чанка.
+            doc_type (str): Ожидаемый тип (код поля экспертизы, куда загружен файл).
+            expertise_object (int): Объект экспертизы (для правил соответствия ссылки на ЕИС).
+            document_name (str): Имя файла (для журнала).
+            detected_type (str): Тип, определённый :class:`TypeDetector` по началу документа. Если не передан —
+                как раньше, из ``type_compliance`` первого блока.
 
         Returns:
             Dict[str, Any]: Единый словарь в том же формате, но с агрегированными данными
@@ -452,7 +305,7 @@ class TypeDataExtractor:
 
         # --- TYPE_COMPLIANCE ---
         first = next((c for c in chunk_results if isinstance(c, dict)), {})
-        type_compliance = first.get("type_compliance", {})
+        type_compliance = {"detected_type": detected_type} if detected_type else first.get("type_compliance", {})
         detected_type = ""
 
         if type_compliance:
@@ -470,9 +323,11 @@ class TypeDataExtractor:
 
 
         # ---- МЕРДЖ ЧАНКОВ ----
-        for chunk in chunk_results:
+        for chunk_no, chunk in enumerate(chunk_results, 1):
             if not isinstance(chunk, dict):
                 continue
+            chunk_label = f"'{document_name}', блок {chunk_no}/{len(chunk_results)}"
+            chunk_raw = chunk.get("raw_data") if isinstance(chunk.get("raw_data"), dict) else {}
 
             # --- RADABILITY ---
             readability = _as_obj(chunk.get("readability"), "status")
@@ -509,25 +364,25 @@ class TypeDataExtractor:
 
 
             # summary
-            logger.info(f"Объединение summary")
+            logger.info(f"Объединение summary ({chunk_label}): {chunk_counts(chunk_raw, ('summary',))}")
             if raw_data.get("summary", ""):
                 summary.append(as_text(raw_data.get("summary", "")))
 
 
             # document_name, contract number, nmck_method": если найден в chunk — сохраняем первый
-            logger.info(f"Объединение document_name")
+            logger.info(f"Объединение document_name ({chunk_label}): {chunk_counts(chunk_raw, ('document_name',))}")
             dn = _as_obj(raw_data.get("document_name"), "value")
             if dn.get("value", "") and not merged["raw_data"]["document_name"]["value"]:
                 merged["raw_data"]["document_name"]["value"] = dn["value"]
                 merged["raw_data"]["document_name"]["confidence"] = dn.get("confidence", None)
                     
-            logger.info(f"Объединение contract_number")
+            logger.info(f"Объединение contract_number ({chunk_label}): {chunk_counts(chunk_raw, ('contract_number',))}")
             cn = _as_obj(raw_data.get("contract_number"), "value")
             if cn.get("value", "") and not merged["raw_data"]["contract_number"]["value"]:
                 merged["raw_data"]["contract_number"]["value"] = cn["value"]
                 merged["raw_data"]["contract_number"]["evidence"] = cn.get("evidence", None)
 
-            logger.info(f"Объединение nmck")
+            logger.info(f"Объединение nmck ({chunk_label}): {chunk_counts(chunk_raw, ('nmck_method',))}")
             nmck = _as_obj(raw_data.get("nmck_method"), "method")
             if nmck and nmck.get("method", ""):
                 if not merged["raw_data"]["nmck_method"]["method"]:
@@ -539,13 +394,13 @@ class TypeDataExtractor:
                 )
 
             # даты, суммы, нормативные акты, отчетные документы, прочие данные
-            logger.info(f"Объединение dates, reporting_documentation, other_data")
+            logger.info(f"Объединение dates, reporting_documentation, other_data ({chunk_label}): {chunk_counts(chunk_raw, ('dates', 'reporting_documentation', 'other_data'))}")
             for key in ["dates", "reporting_documentation", "other_data"]:
                 raw_list = raw_data.get(key, [])
                 if isinstance(raw_list, list):
                     merged["raw_data"][key].extend(raw_list)
             
-            logger.info(f"Объединение finances")
+            logger.info(f"Объединение finances ({chunk_label}): {chunk_counts(chunk_raw, ('finances',))}")
             am = raw_data.get("finances", [])
             if isinstance(am, list):
                 for item in am:
@@ -557,7 +412,7 @@ class TypeDataExtractor:
                         merged["raw_data"]["finances"].append(item)
 
             # law_references
-            logger.info(f"Объединение law_references")
+            logger.info(f"Объединение law_references ({chunk_label}): {chunk_counts(chunk_raw, ('law_references',))}")
             raw_laws = raw_data.get("law_references", [])
             if isinstance(raw_laws, list):
                 for law_item in raw_laws:
@@ -606,7 +461,7 @@ class TypeDataExtractor:
                         merged["raw_data"]["law_references"].append(law_item)
 
             # организации
-            logger.info(f"Объединение organizations")
+            logger.info(f"Объединение organizations ({chunk_label}): {chunk_counts(chunk_raw, ('organizations',))}")
             organizations = raw_data.get("organizations", [])
             if isinstance(organizations, list):
                 for item in organizations:
@@ -650,13 +505,13 @@ class TypeDataExtractor:
 
 
             # предмет закупки
-            logger.info(f"Объединение procurement_subject")
+            logger.info(f"Объединение procurement_subject ({chunk_label}): {chunk_counts(chunk_raw, ('procurement_subject',))}")
             ps = raw_data.get("procurement_subject", {})
             if isinstance(ps, dict) and ps.get("description", "") and ps.get("evidence", "") and not merged["raw_data"]["procurement_subject"]["description"]:
                     merged["raw_data"]["procurement_subject"]["description"] = ps["description"]
                     merged["raw_data"]["procurement_subject"]["evidence"] = ps.get("evidence")
 
-            logger.info(f"Объединение items")
+            logger.info(f"Объединение items ({chunk_label}): {chunk_counts(chunk_raw, ('items',))}")
             chunk_items = raw_data.get("items", [])
             if isinstance(chunk_items, list):
                 for new_item in chunk_items:
@@ -690,7 +545,7 @@ class TypeDataExtractor:
 
 
             # execution_location
-            logger.info(f"Объединение execution_location")
+            logger.info(f"Объединение execution_location ({chunk_label}): {chunk_counts(chunk_raw, ('execution_location',))}")
             el = _as_obj(raw_data.get("execution_location"), "address")
             if el:
                 for k in ["address", "special_conditions"]:
@@ -782,7 +637,10 @@ class TypeDataExtractor:
 
         # Объединение summary с помощью LLM
         summary_string = "\n".join(summary)
-        if summary_string:
+        if len(summary) == 1:
+            # один блок — его summary и есть summary документа, отдельный запрос к модели не нужен
+            merged["raw_data"]["summary"] = summary_string
+        elif summary_string:
             try:
                 response = await self.client.chat.completions.create(
                     model=self.model,

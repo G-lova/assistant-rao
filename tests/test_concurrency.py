@@ -34,12 +34,13 @@ class ConcurrencyTests(unittest.TestCase):
 
             async def scenario():
                 ex.semaphore = asyncio.Semaphore(2)
-                ex.extract_data_from_chunk = lambda content, document_name, doc_type: peak.work({"raw_data": {"c": content}})
-                ex.merge_chunk_results = mock.AsyncMock(side_effect=lambda results, *a: {"merged": [r["raw_data"]["c"] for r in results]})
-                return await ex.extract_data_from_document([str(i) for i in range(10)], "doc", "t", 6)
+                ex.data_extractor = mock.Mock()
+                ex.data_extractor.extract_data_from_chunk = (
+                    lambda content, filename, profile, hint: peak.work({"raw_data": {"c": content}}))
+                return await ex._extract_chunks([str(i) for i in range(10)], "doc", "general", "")
             result = asyncio.run(scenario())
             self.assertEqual(peak.peak, 2)
-            self.assertEqual(result["merged"], [str(i) for i in range(10)])
+            self.assertEqual([r["raw_data"]["c"] for r in result], [str(i) for i in range(10)])
 
     def test_pipeline_limited(self):
         """_limited держит место в семафоре на время каждого вызова."""

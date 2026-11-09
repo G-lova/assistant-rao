@@ -190,3 +190,34 @@ class SecurityAntidumpingTest(unittest.TestCase):
         self.assertEqual(len(cp.drop_security_within_law(risks, self.P501, {"FIN-007"})), 2)
         check = rx.data_checks({"pz_n3": 1}, self.P501, {"version": "t", "data_exclusions": {}})["pz_n3"]
         self.assertEqual((check["status"], check["exclusion_id"]), ("excluded", "security_antidumping_37"))
+
+
+class RiskLevelsTest(unittest.TestCase):
+    """Уровень риска модели: базовый по коду (risk_levels.json), оценка модели его сдвигает (09.11.2026)."""
+
+    def test_model_level(self):
+        """low — половина базового; high — 0,9 только для кодов с критериями; коды событий — прежняя шкала."""
+        from risk_monitoring import risk_catalog as rc
+
+        self.assertEqual(rc.model_level("DOC-006", "medium"), 0.3)
+        self.assertEqual(rc.model_level("DOC-006", "high"), 0.3)
+        self.assertEqual(rc.model_level("DOC-006", "low"), 0.15)
+        self.assertEqual(rc.model_level("DOC-002", "high"), 0.9)
+        self.assertEqual(rc.model_level("DOC-002", "medium"), 0.6)
+        self.assertEqual(rc.model_level("CTR-004", "high"), 0.9)   # код события ЕИС — без базового уровня
+        self.assertEqual(rc.model_level("DOC-012", None, 0.8), 0.8)
+
+    def test_stored_high_without_criteria(self):
+        """Сохранённый DOC-002 high (до критериев) считается medium; новый (level_scale) — high."""
+        from risk_monitoring import risk_catalog as rc
+
+        ev = [{"fragment": "Принтер HP LaserJet Pro M404dn"}]
+        old = {"rule_id": "DOC-002", "severity": "high", "level": 0.9, "confidence": 0.9, "evidence": ev,
+               "description": "Товарный знак без «или эквивалент»"}
+        new = dict(old, level_scale=rc.LEVELS["version"])
+        files = [{"id": 1, "file_name": "ТЗ.docx", "xml_source_type": "epNotification", "owner_type": "notice",
+                  "risks": [old]},
+                 {"id": 2, "file_name": "ТЗ2.docx", "xml_source_type": "epNotification", "owner_type": "notice",
+                  "risks": [new]}]
+        risks, _ = cp.file_risks(files, {})
+        self.assertEqual([r["level"] for r in risks], [0.6, 0.9])

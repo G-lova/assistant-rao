@@ -22,8 +22,11 @@ READER_RM_PDF = "rm_pdf_text"
 ROOT = Path(__file__).resolve().parent.parent
 EXTRACTION_ANALYSIS = "type_data_extraction"
 """Тип анализа в ``ai_document_analysis`` для кэша ``TypeDataExtractor`` (``/evaluate-documents``)."""
-EXTRACTION_SOURCES = ("prompts/type_data_extractor_prompt.txt", "schemas/type_data_extractor_schema.json",
-                      "evaluate_documents/type_data_extractor.py")
+EXTRACTION_SOURCES = ("prompts/type_detector_prompt.txt", "schemas/type_detector_schema.json",
+                      "prompts/data_extractor_prompt.txt", "schemas/data_extractor_schema.json",
+                      "evaluate_documents/type_data_extractor.py", "evaluate_documents/type_detector.py",
+                      "evaluate_documents/data_extractor.py", "evaluate_documents/doc_profiles.py",
+                      "evaluate_documents/rule_extractors.py", "evaluate_documents/merge_utils.py")
 """Файлы, от которых зависит результат извлечения: правка любого из них — новая версия кэша."""
 
 SQL_FIND_BY_SHA = """

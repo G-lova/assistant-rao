@@ -1263,3 +1263,28 @@ class FindingsCleanup1106Test(unittest.TestCase):
             self.assertFalse(m.rejected_by_rules(risk(
                 "DOC-007", "Цена контракта 497 301,00 руб., в т. ч. НДС 22% 80 000 руб.",
                 "Сумма НДС 22% рассчитана неверно: 497 301 × 22/122 = 89 677,23 руб.")))
+
+
+class SoftenTest(unittest.TestCase):
+    """Понижение до low (09.11.2026): AI-001 без производителя, DOC-002 / AI-001 — возможное законное исключение."""
+
+    def test_soften(self):
+        """Одиночная характеристика и сопровождение ПО — low с пометкой; названная модель и товарный знак — нет."""
+        from tests.stubs import stubbed_import
+
+        with stubbed_import("risk_monitoring.document_risk_analyzer") as m:
+            spindle = {"code": "AI-001", "severity": "high",
+                       "evidence": {"fragment": "Частота вращения шпинделя не менее 24 000 об/мин"},
+                       "explanation": "Узкие характеристики могут указывать на производителя и ограничивать конкуренцию"}
+            named = {"code": "AI-001", "severity": "high",
+                     "evidence": {"fragment": "Матрица VA, 2560x1440, 165 Гц"},
+                     "explanation": "Набор соответствует только модели Gigabyte M27Q"}
+            support = {"code": "DOC-002", "severity": "high",
+                       "evidence": {"fragment": "Оказание услуг по сопровождению экземпляров Систем КонсультантПлюс"},
+                       "explanation": "Товарный знак без эквивалента"}
+            printer = {"code": "DOC-002", "severity": "high", "evidence": {"fragment": "Принтер HP LaserJet Pro M404dn"},
+                       "explanation": "Товарный знак без «или эквивалент»"}
+            self.assertEqual(m.apply_soften([spindle, named, support, printer]), 2)
+            self.assertEqual([r["severity"] for r in (spindle, named, support, printer)], ["low", "high", "low", "high"])
+            self.assertIn("по рынку", spindle["verification_needed"][0])
+            self.assertIn("ст. 33", support["verification_needed"][0])

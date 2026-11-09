@@ -80,7 +80,7 @@ class ContextOverflowTest(unittest.TestCase):
         self.assertEqual(r.split_halves("коротко"), ["коротко"])
 
     def test_extractor_splits(self):
-        """TypeDataExtractor: блок не помещается — разбирается по частям, результаты идут в объединение."""
+        """DataExtractor: блок не помещается — разбирается по частям, результаты идут в объединение."""
         import sys
         import types
 
@@ -90,14 +90,14 @@ class ContextOverflowTest(unittest.TestCase):
             except ImportError:   # в песочнице пакета нет; в тесте он не вызывается
                 sys.modules["json_repair"] = types.SimpleNamespace(repair_json=lambda s: s)
         try:
-            from evaluate_documents.type_data_extractor import TypeDataExtractor
+            from evaluate_documents.data_extractor import DataExtractor
         except ImportError as e:
             raise unittest.SkipTest(f"нет зависимостей: {e}")
         fake = Fake(limit_chars=2600)
-        ex = TypeDataExtractor(r.ResilientClient(fake, retries=1), "m")
+        ex = DataExtractor(r.ResilientClient(fake, retries=1), "m")
         ex.rate_limiter = type("L", (), {"acquire": staticmethod(lambda: asyncio.sleep(0))})()
         text = ("строка документа " * 20 + "\n\n") * 8
-        res = asyncio.run(ex.extract_data_from_chunk(content=text, document_name="UPD.zip", doc_type="docCargoTaxFiles"))
+        res = asyncio.run(ex.extract_data_from_chunk(content=text, filename="UPD.zip", profile="act"))
         self.assertIsInstance(res, list)
         self.assertGreaterEqual(len(res), 2)
 

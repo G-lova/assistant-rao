@@ -281,6 +281,66 @@ def stale_vat(r: Dict[str, Any]) -> bool:
     return bool(VAT22_CLAIM_RE.search(text)) and bool(VAT_STALE_RE.search(text))
 
 
+# AI-001 «характеристики под конкретного производителя»: модель не знает рынка и ставила 0,9 на одиночной
+# характеристике («частота шпинделя ≥ 24 000 об/мин», 06.11.2026). Без названного производителя, модели или
+# товарного знака — слабый признак (low) с пометкой проверить по рынку
+# заглавная буква после «производителя» / «модели» — без IGNORECASE (иначе «производителя и …» — тоже «название»)
+PRODUCER_RE = re.compile(r"(?i:(только|единственн\w*|исключительно)\s+[^.]{0,40}(модел|производител|издели|товар\w*\s+марк))"
+                         r"|(?i:производител\w*)\s+[«\"A-ZА-ЯЁ]|(?i:модел\w*)\s+[«\"A-Z0-9]")
+# DOC-002 в законных случаях без «или эквивалент» (п. 1 ч. 1 ст. 33 44-ФЗ: совместимость с имеющимися товарами,
+# запчасти и расходные материалы к имеющемуся оборудованию; сопровождение уже используемого ПО). Через такие
+# случаи часто и ограничивают конкуренцию, поэтому риск не снимается, а понижается с пометкой проверить обоснование
+DOC002_EXCEPTION_RE = re.compile(
+    r"сопровождени\w*|обновлени\w*\s+[^.]{0,40}(программ|систем|ПО\b|экземпляр)|установленн\w*\s+(у\s+заказчика\s+)?"
+    r"(программ|систем|ПО\b)|запасн\w*\s+част|запчаст|расходн\w*\s+материал|совместим|взаимодейств\w*\s+с\s+"
+    r"(имеющ|используем|установленн)|имеющ\w*\s+у\s+заказчика|используем\w*\s+заказчик", re.I)
+EXCEPTION_NORM = "п. 1 ч. 1 ст. 33 44-ФЗ"
+
+
+def soften(r: Dict[str, Any]) -> Optional[str]:
+    """Понижение уровня риска модели до low: AI-001 без названного производителя или модели; DOC-002 и AI-001 в
+    случае, похожем на законное исключение (совместимость с имеющимся, запчасти, сопровождение ПО). Риск остаётся — с пометкой, что проверить.
+
+    Args:
+        r: Риск (формат модели или компактный: ``code`` / ``rule_id``, ``fragment`` / ``evidence``,
+            ``explanation`` / ``description``).
+
+    Returns:
+        Optional[str]: Что проверить (для ``verification_needed``) или ``None`` — уровень не меняется.
+    """
+    code = r.get("code") or r.get("rule_id")
+    ev = r.get("evidence")
+    if isinstance(ev, list):
+        frag = " ".join(str((e or {}).get("fragment") or "") for e in ev if isinstance(e, dict))
+    else:
+        frag = (ev or {}).get("fragment") if isinstance(ev, dict) else None
+    frag = frag or r.get("fragment") or ""
+    claim = f"{r.get('title') or ''} {r.get('explanation') or r.get('description') or ''}"
+    if code == "AI-001" and not brand_like(frag) and not PRODUCER_RE.search(f"{frag} {claim}"):
+        return "Проверить по рынку: соответствует ли набор характеристик товарам нескольких производителей"
+    if code in ("DOC-002", "AI-001") and DOC002_EXCEPTION_RE.search(f"{frag} {claim}"):
+        return (f"Проверить обоснование закупки без «или эквивалент» ({EXCEPTION_NORM}): совместимость, запчасти, "
+                f"сопровождение уже используемого ПО")
+    return None
+
+
+def apply_soften(risks: List[Dict[str, Any]]) -> int:
+    """:func:`soften` для списка рисков модели (формат модели или компактный): severity → low, пометка в
+    ``verification_needed``. Возвращает, сколько рисков понижено."""
+    n = 0
+    for r in risks or []:
+        note = soften(r)
+        if not note:
+            continue
+        if r.get("severity") != "low":
+            n += 1
+        r["severity"] = "low"
+        notes = list(r.get("verification_needed") or [])
+        if note not in notes:
+            r["verification_needed"] = notes + [note]
+    return n
+
+
 def rejected_by_rules(r: Dict[str, Any]) -> bool:
     """Риск модели отбрасывается правилами: требование закона, «или эквивалент» у DOC-002, самоопровержение,
     типовая норма, строка итогов, обеспечение в пределах закона, DOC-002 без признаков товарного знака,

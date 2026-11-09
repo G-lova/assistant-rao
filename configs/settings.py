@@ -507,3 +507,5 @@ CUSTOMER_CHECK_VIOLATIONS_MIN = 1   # проверок заказчика с н�
 # ── Оформление заключений ИИ (risk_monitoring/text_format.py): "plain" — абзацы и списки «— » без символов разметки
 # (читается и как простой текст, и как markdown); "markdown" — для интерфейса, который рендерит markdown
 AI_TEXT_FORMAT = "plain"
+# Определение типа документа (TypeDetector.detect): сколько символов начала документа отдаётся модели
+TYPE_DETECT_HEAD_CHARS = 8000
