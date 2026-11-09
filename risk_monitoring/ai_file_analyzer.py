@@ -843,6 +843,12 @@ class AIFileAnalyzer:
                                       and r.get("code") not in covered]}
             if len(risk["risks"]) < before:
                 progress.note(f"правила отбора сняли рисков: {before - len(risk['risks'])}")
+            from risk_monitoring.document_risk_analyzer import apply_soften
+
+            risk = {**risk, "risks": [dict(r) for r in risk["risks"]]}
+            softened = apply_soften(risk["risks"])
+            if softened:
+                progress.note(f"понижено до low (AI-001 без производителя, DOC-002 — возможное исключение): {softened}")
         async with progress.step("фильтр типовых формулировок") as st:
             risk, typical = await self._drop_typical(risk, document_id, row)
             st["detail"] = f"снято {len(typical)}" if typical else "типовых не найдено"
