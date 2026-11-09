@@ -213,3 +213,61 @@ def json_size(obj: Any) -> int:
         return len(json.dumps(obj, ensure_ascii=False, default=str))
     except (TypeError, ValueError):
         return -1
+
+
+def format_raw_data_for_log(raw: Dict[str, Any], limit: int = 15) -> str:
+    """Извлечённые значения в читаемом виде для журнала (по строке на поле).
+
+    Пример::
+
+        номер договора: ЗА-8/487/25
+        суммы (2): contract_price 33728698.15 «Цена договора»; nmck 33898189.1 «НМЦК»
+        даты (1): work_end 2025-12-01 «Окончание работ»
+        стороны (2): заказчик ТУСУР ИНН 7021000043; подрядчик ООО «Горизонт» ИНН 7017464476
+
+    Args:
+        raw: ``raw_data``.
+        limit: Сколько записей каждого поля показывать.
+
+    Returns:
+        str: Многострочный текст (с переводом строки в начале) или «ничего не извлечено».
+    """
+    if not isinstance(raw, dict):
+        return " нет данных"
+    lines = []
+    dn = raw.get("document_name")
+    if isinstance(dn, dict) and dn.get("value"):
+        lines.append(f"название: {dn['value']}")
+    cn = raw.get("contract_number")
+    if isinstance(cn, dict) and cn.get("value"):
+        lines.append(f"номер договора: {cn['value']}")
+
+    def listed(label, items, fmt):
+        """Строка «label (N): a; b; …» для непустого списка."""
+        items = [it for it in items or [] if isinstance(it, dict)]
+        if items:
+            shown = "; ".join(fmt(it) for it in items[:limit])
+            more = f"; … ещё {len(items) - limit}" if len(items) > limit else ""
+            lines.append(f"{label} ({len(items)}): {shown}{more}")
+
+    listed("суммы", raw.get("finances"),
+           lambda f: f"{f.get('kind') or '?'} {f.get('value')}" + (f" «{f['context']}»" if f.get("context") else ""))
+    listed("даты", raw.get("dates"),
+           lambda d: f"{d.get('kind') or '?'} {d.get('value')}" + (f" «{d['context']}»" if d.get("context") else ""))
+    listed("стороны", raw.get("organizations"),
+           lambda o: " ".join(str(x) for x in (o.get("role"), o.get("name"),
+                                                f"ИНН {o['inn']}" if o.get("inn") else None) if x))
+    nm = raw.get("nmck_method")
+    if isinstance(nm, dict) and nm.get("method"):
+        lines.append(f"метод НМЦК: {nm['method']}")
+    pt = raw.get("planned_timeline")
+    if isinstance(pt, dict) and (pt.get("start_date") or pt.get("end_date")):
+        lines.append(f"сроки: {pt.get('start_date') or '?'} — {pt.get('end_date') or '?'}")
+    listed("отчётные документы", raw.get("reporting_documentation"),
+           lambda r: str(r.get("document_name")) + (f" (срок {r['deadline']})" if r.get("deadline") else ""))
+    listed("позиции", raw.get("items"), lambda i: str(i.get("name"))[:80])
+    listed("нормы", raw.get("law_references"), lambda law: str(law.get("value"))[:80])
+    listed("прочее", raw.get("other_data"), lambda o: str(o.get("value"))[:120])
+    if raw.get("summary"):
+        lines.append(f"описание: {str(raw['summary'])[:300]}")
+    return ("\n    " + "\n    ".join(lines)) if lines else " ничего не извлечено"

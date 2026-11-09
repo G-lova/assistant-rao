@@ -40,6 +40,16 @@ async def _ready(value):
     return value
 
 
+
+def _status(result: dict, key: str) -> str:
+    """«allow: описание…» для строки журнала по одному показателю проверки полноты."""
+    ind = (result or {}).get(key) if isinstance(result, dict) else None
+    if not isinstance(ind, dict):
+        return "—"
+    description = str(ind.get("description") or ind.get("issues") or "")[:200]
+    return f"{ind.get('status')}" + (f" ({description})" if description else "")
+
+
 class TasksPipeline:
     """
     Класс для обработки документов экспертизы, включая чтение файлов, определение типа документа, оценку полноты и согласованности, а также отправку данных во внешний API.
@@ -115,11 +125,11 @@ class TasksPipeline:
             files = parse_result.get("files", [parse_result])
             logger.info(f"Ссылка {link.doc_code} {link.media_links}: {parse_result.get('status')}, файлов {len(files)}"
                         + (f", ошибка: {parse_result.get('error')}" if parse_result.get("error") else ""))
-            logger.debug(f"Результат разбора ссылки {link.media_links}: {parse_result}")
+            logger.info(f"Результат разбора ссылки {link.media_links}: {parse_result}")
 
             tasks = []
             for file_info in parse_result.get("files", [parse_result]):
-                logger.debug(f"Файл ссылки: {file_info}")
+                logger.info(f"Файл ссылки {link.doc_code}: {file_info}")
                 if parse_result.get("status") == "success":
                     file_path = file_info.get("file_path")
                     filename = file_info.get("filename", f"doc_from_link_{file_info.get('original_url')}")
@@ -265,6 +275,8 @@ class TasksPipeline:
             force=self.force)
 
         chunks = split_large_text(extracted_text, max_chunk_size=LLM_CHUNK_SIZE)
+        logger.info(f"Текст '{filename}' ({len(extracted_text)} символов) разбит на {len(chunks)} блок(ов) "
+                    f"по ≤{LLM_CHUNK_SIZE} токенов")
         if not chunks:
             fallback = {
                 "type_compliance": {"status": "deny", "detected_type": "unknown", "issues": ["Пустой документ"]},
@@ -479,6 +491,11 @@ class TasksPipeline:
                     continue
                 if isinstance(completeness, str):
                     completeness = json.loads(completeness)
+                logger.info(
+                    f"Полнота {row.doc_code} «{DOCUMENT_TYPE_MAPPING.get(row.doc_code, row.doc_code)}» "
+                    f"({'обязательный' if row.required_docs == 1 else 'необязательный'}, файлов "
+                    f"{len(row.documents_results)}): тип {_status(completeness, 'type_compliance')}, читаемость "
+                    f"{_status(completeness, 'readability')}, полнота {_status(completeness, 'completeness')}")
                 data_for_final_evaluation["documents"].append({
                     "doc_code": row.doc_code,
                     "doc_type": 'Ссылка на ЕИС' if row.doc_code == "linkDocs" else DOCUMENT_TYPE_MAPPING.get(row.doc_code, "Неизвестный документ"),
@@ -488,6 +505,8 @@ class TasksPipeline:
                 })
 
             self._timings["полнота"] = time.monotonic() - stage_started
+            missed = data_for_final_evaluation["missed_documents"]
+            logger.info(f"Отсутствуют обязательные документы ({len(missed)}): {'; '.join(missed) or '—'}")
             # сортировка документов внутри data_for_final_evaluation["documents"] по приоритету (обязательные документы и ссылка на ЕИС в приоритете)
             data_for_final_evaluation["documents"].sort(key=lambda x: (x["required"] != "Обязательный", x["doc_code"] != "linkDocs"))
 
@@ -499,6 +518,8 @@ class TasksPipeline:
             stage_started = time.monotonic()
             final_evaluation_result = await self.consistency_checker.check_consistency(data_for_final_evaluation)
             self._timings["итоговая проверка"] = time.monotonic() - stage_started
+            logger.info(f"Итоговое заключение: {final_evaluation_result.get('overall_status')} — "
+                        f"{final_evaluation_result.get('overall_summary')}")
 
             # Атомарная запись результата в raw_document_data (колонки по типам документов + summary_report) с ключом
             # (окружение, экспертиза). Прежний результат заранее не удаляется: если прогон упал, он остаётся.

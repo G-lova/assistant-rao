@@ -109,7 +109,7 @@ class TypeDetector:
         await self.rate_limiter.acquire()
         
         try:
-            logger.debug(f"Определение типа документа '{filename}': {len(content or '')} символов")
+            logger.info(f"Определение типа документа '{filename}': {len(content or '')} символов начала документа")
 
             # Загружаем промпт и схему
             prompt = Template(self.type_detector_prompt).safe_substitute(
@@ -142,7 +142,7 @@ class TypeDetector:
                 logger.warning(f"Пустой ответ модели (определение типа) для '{filename}': "
                                f"finish_reason={getattr(response.choices[0], 'finish_reason', None)}")
                 return None
-            logger.debug(f"Тип '{filename}': ответ {len(raw_response)} символов")
+            logger.info(f"Тип '{filename}': ответ модели {len(raw_response)} символов: {raw_response[:1000]}")
             logger.debug(raw_response)  # полный ответ — только в отладке: журнал рос до 4,7 МБ за прогон (30.10.2026)
 
             # Парсим JSON
@@ -208,8 +208,10 @@ class TypeDetector:
                 by_words = self.detect_document_type_by_name(head[:3000])
             result.update(detected_type=by_words, source="keywords", confidence=result.get("confidence") or 0.3)
         result.setdefault("issues", [])
-        logger.info(f"Тип '{filename}': {result['detected_type']} ({result['source']}, "
-                    f"уверенность {result.get('confidence')}) за {time.monotonic() - started:.1f} с")
+        logger.info(f"Тип '{filename}': {result['detected_type']} "
+                    f"«{DOCUMENT_TYPE_MAPPING.get(result['detected_type'], '')}» (источник: {result['source']}, "
+                    f"уверенность {result.get('confidence')}, признаки: {result.get('key_indicators') or '—'}, "
+                    f"замечания: {result.get('issues') or '—'}) за {time.monotonic() - started:.1f} с")
         return result
 
 

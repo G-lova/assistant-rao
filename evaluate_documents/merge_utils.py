@@ -124,3 +124,28 @@ def dedupe_raw_data(raw: Dict[str, Any]) -> int:
             kept.append(org)
         raw["organizations"] = kept
     return removed
+
+
+def chunk_counts(raw: Dict[str, Any], keys: tuple) -> str:
+    """Что пришло из блока по полям — для журнала объединения: «finances: 3; dates: 2» / «contract_number: ЗА-8».
+
+    Args:
+        raw: ``raw_data`` одного блока.
+        keys: Поля.
+
+    Returns:
+        str: Краткая сводка; «нет» для пустых полей.
+    """
+    parts = []
+    for key in keys:
+        value = (raw or {}).get(key)
+        if isinstance(value, list):
+            parts.append(f"{key}: {len(value)}")
+        elif isinstance(value, dict):
+            shown = value.get("value") or value.get("method") or value.get("description") or value.get("address")
+            parts.append(f"{key}: {str(shown)[:80] if shown else 'нет'}")
+        elif value:
+            parts.append(f"{key}: {str(value)[:80]}")
+        else:
+            parts.append(f"{key}: нет")
+    return "; ".join(parts)

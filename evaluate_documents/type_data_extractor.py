@@ -25,10 +25,11 @@ from configs.logger import get_logger
 from evaluate_documents import rule_extractors
 from evaluate_documents.data_extractor import DataExtractor
 from evaluate_documents.doc_profiles import (
-    PAYMENT_RE, annotate_pages, describe_raw_data, profile_for, profile_hint,
+    PAYMENT_RE, PROFILE_TITLES, annotate_pages, describe_raw_data, format_raw_data_for_log, profile_fields,
+    profile_for, profile_hint,
 )
 from evaluate_documents.evidence_check import drop_nulls, verify_raw_data
-from evaluate_documents.merge_utils import as_evidence, as_text, dedupe_raw_data
+from evaluate_documents.merge_utils import as_evidence, as_text, chunk_counts, dedupe_raw_data
 from evaluate_documents.type_detector import (  # noqa: F401 — реэкспорт: импортируются из этого модуля
     ALLOWED_DOC_TYPES, DOCUMENT_TYPE_KEYWORDS, DOCUMENT_TYPE_MAPPING, TypeDetector,
 )
@@ -104,11 +105,20 @@ class TypeDataExtractor:
         payment = None
         if PAYMENT_RE.search(document_name or "") or PAYMENT_RE.search(text[:1500]):
             payment = rule_extractors.parse_payment_order(text, document_name)
+            if payment:
+                logger.info(f"Документ '{document_name}': платёжное поручение разобрано кодом "
+                            f"({'полностью' if payment['complete'] else 'частично — дополнит модель'}):"
+                            f"{format_raw_data_for_log(payment['raw_data'])}")
+            else:
+                logger.info(f"Документ '{document_name}': похоже на платёжку, но форма не распознана — разбор моделью")
 
         async with self.semaphore:   # запрос к модели — под общим лимитом пайплайна
             detection = await self.type_detector.detect(chunks, document_name)
         detected_type = detection.get("detected_type")
         profile = "payment" if payment else profile_for(detected_type, document_name, text[:3000])
+        logger.info(f"Документ '{document_name}': поле экспертизы {doc_type}, тип {detected_type}, профиль {profile} "
+                    f"({PROFILE_TITLES.get(profile, '')}): поля {', '.join(profile_fields(profile))}; "
+                    f"блоков {len(chunks)}, текст {len(text)} символов")
 
         if payment and payment["complete"]:
             source = "код"
@@ -144,14 +154,18 @@ class TypeDataExtractor:
             source += " + код (платёжка)"
         xml = rule_extractors.parse_flat_xml(text) if rule_extractors.looks_like_flat_xml(text) else None
         if xml:
+            logger.info(f"Документ '{document_name}': XML площадки, значения тегов:{format_raw_data_for_log(xml)}")
             rule_extractors.overlay(raw, xml)
             source += " + XML"
         removed = dedupe_raw_data(raw)
+        if removed:
+            logger.info(f"Документ '{document_name}': удалено дублей после объединения блоков: {removed}")
 
         # значения, которых нет в тексте документа, отбрасываются (суммы, даты, номер, ИНН/КПП/ОГРН, метод НМЦК)
         merged["raw_data"], dropped = verify_raw_data(raw, text)
         if dropped:
-            logger.info(f"Документ '{document_name}': нет в тексте, отброшено {len(dropped)}: {dropped[:10]}")
+            logger.warning(f"Документ '{document_name}': нет в тексте документа, отброшено {len(dropped)}:\n    "
+                           + "\n    ".join(dropped))
 
         tc = merged.get("type_compliance", {})
         logger.info(
@@ -160,7 +174,9 @@ class TypeDataExtractor:
             f"читаемость {merged.get('readability', {}).get('readability_score')}; "
             f"{describe_raw_data(merged['raw_data'])}; дублей {removed}, отброшено {len(dropped)}; "
             f"{time.monotonic() - started:.1f} с")
-        logger.debug(f"Документ '{document_name}': результат {merged}")
+        logger.info(f"Документ '{document_name}': извлечённые значения:{format_raw_data_for_log(merged['raw_data'])}")
+        logger.info(f"Документ '{document_name}': соответствие типу {tc}; читаемость {merged.get('readability')}")
+        logger.info(f"Документ '{document_name}': результат {json.dumps(merged, ensure_ascii=False, default=str)}")
         return merged
 
     async def _extract_chunks(self, chunks: List[str], document_name: str, profile: str,
@@ -307,9 +323,11 @@ class TypeDataExtractor:
 
 
         # ---- МЕРДЖ ЧАНКОВ ----
-        for chunk in chunk_results:
+        for chunk_no, chunk in enumerate(chunk_results, 1):
             if not isinstance(chunk, dict):
                 continue
+            chunk_label = f"'{document_name}', блок {chunk_no}/{len(chunk_results)}"
+            chunk_raw = chunk.get("raw_data") if isinstance(chunk.get("raw_data"), dict) else {}
 
             # --- RADABILITY ---
             readability = _as_obj(chunk.get("readability"), "status")
@@ -346,25 +364,25 @@ class TypeDataExtractor:
 
 
             # summary
-            logger.debug(f"Объединение summary")
+            logger.info(f"Объединение summary ({chunk_label}): {chunk_counts(chunk_raw, ('summary',))}")
             if raw_data.get("summary", ""):
                 summary.append(as_text(raw_data.get("summary", "")))
 
 
             # document_name, contract number, nmck_method": если найден в chunk — сохраняем первый
-            logger.debug(f"Объединение document_name")
+            logger.info(f"Объединение document_name ({chunk_label}): {chunk_counts(chunk_raw, ('document_name',))}")
             dn = _as_obj(raw_data.get("document_name"), "value")
             if dn.get("value", "") and not merged["raw_data"]["document_name"]["value"]:
                 merged["raw_data"]["document_name"]["value"] = dn["value"]
                 merged["raw_data"]["document_name"]["confidence"] = dn.get("confidence", None)
                     
-            logger.debug(f"Объединение contract_number")
+            logger.info(f"Объединение contract_number ({chunk_label}): {chunk_counts(chunk_raw, ('contract_number',))}")
             cn = _as_obj(raw_data.get("contract_number"), "value")
             if cn.get("value", "") and not merged["raw_data"]["contract_number"]["value"]:
                 merged["raw_data"]["contract_number"]["value"] = cn["value"]
                 merged["raw_data"]["contract_number"]["evidence"] = cn.get("evidence", None)
 
-            logger.debug(f"Объединение nmck")
+            logger.info(f"Объединение nmck ({chunk_label}): {chunk_counts(chunk_raw, ('nmck_method',))}")
             nmck = _as_obj(raw_data.get("nmck_method"), "method")
             if nmck and nmck.get("method", ""):
                 if not merged["raw_data"]["nmck_method"]["method"]:
@@ -376,13 +394,13 @@ class TypeDataExtractor:
                 )
 
             # даты, суммы, нормативные акты, отчетные документы, прочие данные
-            logger.debug(f"Объединение dates, reporting_documentation, other_data")
+            logger.info(f"Объединение dates, reporting_documentation, other_data ({chunk_label}): {chunk_counts(chunk_raw, ('dates', 'reporting_documentation', 'other_data'))}")
             for key in ["dates", "reporting_documentation", "other_data"]:
                 raw_list = raw_data.get(key, [])
                 if isinstance(raw_list, list):
                     merged["raw_data"][key].extend(raw_list)
             
-            logger.debug(f"Объединение finances")
+            logger.info(f"Объединение finances ({chunk_label}): {chunk_counts(chunk_raw, ('finances',))}")
             am = raw_data.get("finances", [])
             if isinstance(am, list):
                 for item in am:
@@ -394,7 +412,7 @@ class TypeDataExtractor:
                         merged["raw_data"]["finances"].append(item)
 
             # law_references
-            logger.debug(f"Объединение law_references")
+            logger.info(f"Объединение law_references ({chunk_label}): {chunk_counts(chunk_raw, ('law_references',))}")
             raw_laws = raw_data.get("law_references", [])
             if isinstance(raw_laws, list):
                 for law_item in raw_laws:
@@ -443,7 +461,7 @@ class TypeDataExtractor:
                         merged["raw_data"]["law_references"].append(law_item)
 
             # организации
-            logger.debug(f"Объединение organizations")
+            logger.info(f"Объединение organizations ({chunk_label}): {chunk_counts(chunk_raw, ('organizations',))}")
             organizations = raw_data.get("organizations", [])
             if isinstance(organizations, list):
                 for item in organizations:
@@ -487,13 +505,13 @@ class TypeDataExtractor:
 
 
             # предмет закупки
-            logger.debug(f"Объединение procurement_subject")
+            logger.info(f"Объединение procurement_subject ({chunk_label}): {chunk_counts(chunk_raw, ('procurement_subject',))}")
             ps = raw_data.get("procurement_subject", {})
             if isinstance(ps, dict) and ps.get("description", "") and ps.get("evidence", "") and not merged["raw_data"]["procurement_subject"]["description"]:
                     merged["raw_data"]["procurement_subject"]["description"] = ps["description"]
                     merged["raw_data"]["procurement_subject"]["evidence"] = ps.get("evidence")
 
-            logger.debug(f"Объединение items")
+            logger.info(f"Объединение items ({chunk_label}): {chunk_counts(chunk_raw, ('items',))}")
             chunk_items = raw_data.get("items", [])
             if isinstance(chunk_items, list):
                 for new_item in chunk_items:
@@ -527,7 +545,7 @@ class TypeDataExtractor:
 
 
             # execution_location
-            logger.debug(f"Объединение execution_location")
+            logger.info(f"Объединение execution_location ({chunk_label}): {chunk_counts(chunk_raw, ('execution_location',))}")
             el = _as_obj(raw_data.get("execution_location"), "address")
             if el:
                 for k in ["address", "special_conditions"]:
@@ -636,7 +654,7 @@ class TypeDataExtractor:
                 )
 
                 raw_response = response.choices[0].message.content.strip()
-                logger.debug(f"Объединение summary для '{document_name}'")
+                logger.info(f"Объединение summary для '{document_name}'")
                 logger.debug(raw_response)  # полный ответ — только в отладке: журнал рос до 4,7 МБ за прогон (30.10.2026)
 
                 merged["raw_data"]["summary"] = raw_response

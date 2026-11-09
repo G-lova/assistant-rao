@@ -17,8 +17,8 @@ from configs.llm_resilience import ContextOverflow, split_halves
 from configs.utils import extract_json_objects
 
 
-from evaluate_documents.merge_utils import as_evidence, as_obj, as_text
-from evaluate_documents.doc_profiles import describe_raw_data, schema_for_profile
+from evaluate_documents.merge_utils import as_evidence, as_obj, as_text, chunk_counts
+from evaluate_documents.doc_profiles import describe_raw_data, format_raw_data_for_log, schema_for_profile
 
 logger = get_logger(__name__)
 
@@ -118,7 +118,8 @@ class DataExtractor:
             final_result = verify_extraction(final_result, "\n".join(chunks), filename)
             logger.info(f"'{filename}': извлечено за {time.monotonic() - started:.1f} с "
                         f"(блоков {len(chunks)}, с ошибкой {failed}): {describe_raw_data(final_result.get('raw_data'))}")
-            logger.debug(f"'{filename}': результат извлечения: {final_result}")
+            logger.info(f"'{filename}': извлечённые значения:{format_raw_data_for_log(final_result.get('raw_data'))}")
+            logger.info(f"'{filename}': результат извлечения: {json.dumps(final_result, ensure_ascii=False, default=str)}")
             return final_result
         except Exception as e:
             logger.error(f"'{filename}': ошибка объединения данных блоков: {type(e).__name__}: {e}", exc_info=True)
@@ -156,7 +157,7 @@ class DataExtractor:
         
         try:
             started = time.monotonic()
-            logger.debug(f"Анализ блока {filename}: {len(content)} символов, профиль {profile or 'full'}")
+            logger.info(f"Анализ блока {filename}: {len(content)} символов, профиль {profile or 'full'}")
 
             img_result = ''
             content_splitted = content.split('"')
@@ -208,6 +209,7 @@ class DataExtractor:
             # Парсим JSON
             try:
                 result = json.loads(raw_response)
+                logger.info(f"Блок {filename}: JSON разобран")
                 if isinstance(result, list):
                     result = self.merge_json_objects(result)
                 result, removed = dedupe_repeats(result)
@@ -348,9 +350,11 @@ class DataExtractor:
         summary = []
 
         # ---- МЕРДЖ ЧАНКОВ ----
-        for chunk in chunk_results:
+        for chunk_no, chunk in enumerate(chunk_results, 1):
             if not isinstance(chunk, dict):
                 continue
+            chunk_label = f"'{filename}', блок {chunk_no}/{len(chunk_results)}"
+            chunk_raw = chunk.get("raw_data") if isinstance(chunk.get("raw_data"), dict) else {}
 
             # --- RADABILITY ---
             readability = as_obj(chunk.get("readability"), "status")
@@ -387,25 +391,25 @@ class DataExtractor:
 
 
             # summary
-            logger.debug(f"Объединение summary")
+            logger.info(f"Объединение summary ({chunk_label}): {chunk_counts(chunk_raw, ('summary',))}")
             if raw_data.get("summary", ""):
                 summary.append(as_text(raw_data.get("summary", "")))
 
 
             # document_name, contract number, nmck_method": если найден в chunk — сохраняем первый
-            logger.debug(f"Объединение document_name")
+            logger.info(f"Объединение document_name ({chunk_label}): {chunk_counts(chunk_raw, ('document_name',))}")
             dn = as_obj(raw_data.get("document_name"), "value")
             if dn.get("value", "") and not merged["raw_data"]["document_name"]["value"]:
                 merged["raw_data"]["document_name"]["value"] = dn["value"]
                 merged["raw_data"]["document_name"]["confidence"] = dn.get("confidence", None)
                     
-            logger.debug(f"Объединение contract_number")
+            logger.info(f"Объединение contract_number ({chunk_label}): {chunk_counts(chunk_raw, ('contract_number',))}")
             cn = as_obj(raw_data.get("contract_number"), "value")
             if cn.get("value", "") and not merged["raw_data"]["contract_number"]["value"]:
                 merged["raw_data"]["contract_number"]["value"] = cn["value"]
                 merged["raw_data"]["contract_number"]["evidence"] = cn.get("evidence", None)
 
-            logger.debug(f"Объединение nmck")
+            logger.info(f"Объединение nmck ({chunk_label}): {chunk_counts(chunk_raw, ('nmck_method',))}")
             nmck = as_obj(raw_data.get("nmck_method"), "method")
             if nmck and nmck.get("method", ""):
                 if not merged["raw_data"]["nmck_method"]["method"]:
@@ -417,13 +421,13 @@ class DataExtractor:
                 )
 
             # даты, суммы, нормативные акты, отчетные документы, прочие данные
-            logger.debug(f"Объединение dates, reporting_documentation, other_data")
+            logger.info(f"Объединение dates, reporting_documentation, other_data ({chunk_label}): {chunk_counts(chunk_raw, ('dates', 'reporting_documentation', 'other_data'))}")
             for key in ["dates", "reporting_documentation", "other_data"]:
                 raw_list = raw_data.get(key, [])
                 if isinstance(raw_list, list):
                     merged["raw_data"][key].extend(raw_list)
             
-            logger.debug(f"Объединение finances")
+            logger.info(f"Объединение finances ({chunk_label}): {chunk_counts(chunk_raw, ('finances',))}")
             am = raw_data.get("finances", [])
             if isinstance(am, list):
                 for item in am:
@@ -435,7 +439,7 @@ class DataExtractor:
                         merged["raw_data"]["finances"].append(item)
 
             # law_references
-            logger.debug(f"Объединение law_references")
+            logger.info(f"Объединение law_references ({chunk_label}): {chunk_counts(chunk_raw, ('law_references',))}")
             raw_laws = raw_data.get("law_references", [])
             if isinstance(raw_laws, list):
                 for law_item in raw_laws:
@@ -484,7 +488,7 @@ class DataExtractor:
                         merged["raw_data"]["law_references"].append(law_item)
 
             # организации
-            logger.debug(f"Объединение organizations")
+            logger.info(f"Объединение organizations ({chunk_label}): {chunk_counts(chunk_raw, ('organizations',))}")
             organizations = raw_data.get("organizations", [])
             if isinstance(organizations, list):
                 for item in organizations:
@@ -528,13 +532,13 @@ class DataExtractor:
 
 
             # предмет закупки
-            logger.debug(f"Объединение procurement_subject")
+            logger.info(f"Объединение procurement_subject ({chunk_label}): {chunk_counts(chunk_raw, ('procurement_subject',))}")
             ps = raw_data.get("procurement_subject", {})
             if isinstance(ps, dict) and ps.get("description", "") and ps.get("evidence", "") and not merged["raw_data"]["procurement_subject"]["description"]:
                     merged["raw_data"]["procurement_subject"]["description"] = ps["description"]
                     merged["raw_data"]["procurement_subject"]["evidence"] = ps.get("evidence")
 
-            logger.debug(f"Объединение items")
+            logger.info(f"Объединение items ({chunk_label}): {chunk_counts(chunk_raw, ('items',))}")
             chunk_items = raw_data.get("items", [])
             if isinstance(chunk_items, list):
                 for new_item in chunk_items:
@@ -568,7 +572,7 @@ class DataExtractor:
 
 
             # execution_location
-            logger.debug(f"Объединение execution_location")
+            logger.info(f"Объединение execution_location ({chunk_label}): {chunk_counts(chunk_raw, ('execution_location',))}")
             el = as_obj(raw_data.get("execution_location"), "address")
             if el:
                 for k in ["address", "special_conditions"]:
