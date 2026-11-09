@@ -61,6 +61,52 @@ EVENT_RISK_CODES: List[str] = [
 
 SEVERITY_LEVEL = {"low": 0.3, "medium": 0.6, "high": 0.9}
 
+LEVELS_PATH = Path(__file__).resolve().parent / "config" / "risk_levels.json"
+
+
+def _load_levels() -> Dict[str, Any]:
+    """Базовые уровни рисков документов по коду (``config/risk_levels.json``)."""
+    try:
+        with open(LEVELS_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {"version": None, "levels": {}, "high_criteria": [], "low_factor": 0.5, "high_level": 0.9}
+
+
+LEVELS: Dict[str, Any] = _load_levels()
+
+
+def model_level(code: Optional[str], severity: Optional[str], fallback: Optional[float] = None) -> float:
+    """Уровень риска, найденного моделью: базовый уровень кода из каталога уровней, оценка модели его только
+    сдвигает (09.11.2026).
+
+    - ``low`` — базовый × ``low_factor`` (0,5): доказательство слабое;
+    - ``medium`` — базовый;
+    - ``high`` — ``high_level`` (0,9) только для кодов ``high_criteria`` (критерии высокого уровня — в промпте),
+      у остальных — базовый: без критериев модель ставила high почти на всё (DOC-002 — 1 457 из 1 725).
+
+    Код без базового уровня (риски событий ЕИС, сравнение редакций) — прежняя шкала 0,3 / 0,6 / 0,9 или
+    ``fallback``.
+
+    Args:
+        code: Код риска.
+        severity: Оценка модели (``low`` / ``medium`` / ``high``).
+        fallback: Уровень, если оценки модели нет.
+
+    Returns:
+        float: Уровень риска.
+    """
+    base = (LEVELS.get("levels") or {}).get(code or "")
+    if base is None:
+        return SEVERITY_LEVEL.get(severity, fallback if fallback is not None else 0.3)
+    if severity == "low":
+        return round(base * float(LEVELS.get("low_factor", 0.5)), 3)
+    if severity == "high" and code in (LEVELS.get("high_criteria") or []):
+        return float(LEVELS.get("high_level", 0.9))
+    if severity in ("medium", "high"):
+        return float(base)
+    return float(fallback) if fallback is not None else float(base)
+
 
 def normalize_fz(fz: Any) -> Optional[int]:
     """Закон закупки: 44, 223 или ``None``.

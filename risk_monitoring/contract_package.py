@@ -408,11 +408,18 @@ def file_risks(files: Sequence[Dict[str, Any]], statuses: Dict[Tuple[int, str], 
             if st == CONFIRMED_STATUS:
                 confirmed.add(code)
             item = dict(_ev_src(r, f"file:{f['id']}", file_name=f.get("file_name")), source="ai_file")
+            # уровень — из базового уровня кода и оценки модели (risk_levels.json), в том числе у рисков,
+            # сохранённых по прежней шкале 0,3 / 0,6 / 0,9 (09.11.2026)
+            if item.get("severity") and st != CONFIRMED_STATUS:
+                severity = item["severity"]
+                if severity == "high" and item.get("level_scale") != risk_catalog.LEVELS.get("version"):
+                    severity = "medium"   # high без критериев в промпте (результат до 09.11.2026)
+                item["level"] = risk_catalog.model_level(code, severity, item.get("level"))
             # AI-001 без производителя, DOC-002 — возможное законное исключение: уровень не выше low, в том числе у
             # рисков, сохранённых до правила (09.11.2026); подтверждённый аналитиком — без изменений
             note = soften(item) if st != CONFIRMED_STATUS else None
             if note:
-                item["level"] = min(float(item.get("level") or 0.3), risk_catalog.SEVERITY_LEVEL["low"])
+                item["level"] = min(float(item.get("level") or 0.3), risk_catalog.model_level(code, "low"))
                 item["verification_needed"] = list(dict.fromkeys(list(item.get("verification_needed") or []) + [note]))
             out.append(item)
     return out, confirmed
