@@ -177,6 +177,23 @@ def data_checks(values: Optional[Dict[str, Any]], passport: Optional[Dict[str, A
     passport = passport or {}
     code, name = str(passport.get("method_code") or "").strip(), str(passport.get("method") or "").strip()
     out: Dict[str, Dict[str, Any]] = {}
+    # pz_n3 (FIN-007, «нарушение требований к обеспечению исполнения»): при снижении цены на 25 % и более
+    # обеспечение законно увеличено в полтора раза (ч. 1 ст. 37 44-ФЗ) — 45 % цены не превышение (контракт 501)
+    if _fired((values or {}).get("pz_n3")):
+        from risk_monitoring.contract_package import security_within_law
+
+        sec = security_within_law(passport)
+        if sec and sec["within"]:
+            pct = sec["pct_price"] if sec["pct_price"] is not None else sec["pct_nmck"]
+            out["pz_n3"] = {
+                "status": "excluded", "version": cfg.get("version"),
+                "reason": (f"Обеспечение исполнения {pct} % в пределах закона"
+                           + (f": цена снижена на {sec['reduction_pct']} % от НМЦК, применены антидемпинговые меры"
+                              if sec["antidumping"] else "") + "."),
+                "exclusion_id": "security_antidumping_37" if sec["antidumping"] else "security_within_96",
+                "exclusion": "Обеспечение в пределах закона" + (" с учётом антидемпинговых мер" if sec["antidumping"] else ""),
+                "norm": "ч. 6 ст. 96" + (", ч. 1 ст. 37" if sec["antidumping"] else "") + " 44-ФЗ",
+                "evidence": {"src": "eis", "field": "security.contract", "fragment": f"{pct} %"}}
     for key, rules in (cfg.get("data_exclusions") or {}).items():
         if not _fired((values or {}).get(key)):
             continue
