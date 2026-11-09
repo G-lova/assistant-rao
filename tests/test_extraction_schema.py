@@ -13,7 +13,8 @@ from evaluate_documents.evidence_check import (
 )
 from tests.stubs import stubbed_import
 
-SCHEMAS = ("schemas/type_data_extractor_schema.json", "schemas/data_extractor_schema.json")
+# Единая схема извлечения (определение типа — отдельно, schemas/type_detector_schema.json)
+SCHEMAS = ("schemas/data_extractor_schema.json",)
 
 # Набор полей raw_data до изменения схемы — формат ответа должен остаться прежним
 RAW_DATA_FIELDS = {
@@ -33,6 +34,8 @@ RAW_DATA_FIELDS = {
     '.reporting_documentation[].deadline', '.reporting_documentation[].document_name',
     '.reporting_documentation[].evidence', '.reporting_documentation[].format',
     '.reporting_documentation[].frequency', '.summary',
+    # вид суммы / даты (09.11.2026): новое внутреннее поле, в ответ эндпоинта raw_data не попадает
+    '.finances[].kind', '.dates[].kind',
 }
 
 
@@ -67,8 +70,7 @@ class SchemaTest(unittest.TestCase):
             schema = json.load(open(path, encoding="utf-8"))
             top = {x for x in _paths(schema["properties"]["raw_data"]) if x.count(".") <= 2}
             self.assertEqual(top, RAW_DATA_FIELDS, path)
-        self.assertEqual(list(json.load(open(SCHEMAS[0]))["properties"]), ["type_compliance", "readability", "raw_data"])
-        self.assertEqual(list(json.load(open(SCHEMAS[1]))["properties"]), ["readability", "raw_data"])
+        self.assertEqual(list(json.load(open(SCHEMAS[0]))["properties"]), ["readability", "raw_data"])
 
     def test_evidence_first_and_fragment_first(self):
         """В каждом факте evidence — первое поле, в evidence первая и единственная обязательная — fragment."""
@@ -89,6 +91,8 @@ class SchemaTest(unittest.TestCase):
                 for field, node in obj["properties"].items():
                     if field == "evidence" or node.get("type") in ("array", "object"):
                         continue
+                    if field == "kind":
+                        self.assertIn(None, node["enum"], f"{path}: {key}.kind")
                     self.assertIn("null", node["type"], f"{path}: {key}.{field}")
             self.assertEqual(raw["properties"]["summary"]["type"], "string")
             self.assertNotEqual(raw["properties"]["contract_number"]["properties"]["value"].get("default"), "")
@@ -186,3 +190,15 @@ class MergeShapeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KindTest(unittest.TestCase):
+    """Вид суммы и даты в схеме: сразу после цитаты, до значения."""
+
+    def test_kind_after_evidence(self):
+        """finances/dates: evidence → kind → value."""
+        raw = json.load(open(SCHEMAS[0], encoding="utf-8"))["properties"]["raw_data"]["properties"]
+        for key in ("finances", "dates"):
+            self.assertEqual(list(raw[key]["items"]["properties"])[:3], ["evidence", "kind", "value"], key)
+        self.assertIn("contract_price", raw["finances"]["items"]["properties"]["kind"]["enum"])
+        self.assertIn("work_end", raw["dates"]["items"]["properties"]["kind"]["enum"])

@@ -152,12 +152,22 @@ def _most_common(values: List[float]) -> Optional[float]:
     return Counter(values).most_common(1)[0][0]
 
 
-def _amounts(raw: Dict[str, Any], pattern: re.Pattern, exclude: Optional[re.Pattern] = None) -> List[float]:
-    """Суммы файла, у которых контекст подходит под ``pattern`` (и не подходит под ``exclude``)."""
+def _matches(item: Dict[str, Any], kinds: Optional[tuple], pattern: re.Pattern,
+             exclude: Optional[re.Pattern]) -> bool:
+    """Подходит ли запись: по виду значения (``kind``), если модель или код его указали, иначе — по контексту."""
+    kind = item.get("kind")
+    if kind and kinds is not None:
+        return kind in kinds
+    ctx = str(item.get("context") or "")
+    return bool(pattern.search(ctx)) and not (exclude and exclude.search(ctx))
+
+
+def _amounts(raw: Dict[str, Any], pattern: re.Pattern, exclude: Optional[re.Pattern] = None,
+             kinds: Optional[tuple] = None) -> List[float]:
+    """Суммы файла нужного вида: по ``kind`` (если указан) или по контексту (``pattern`` и не ``exclude``)."""
     out = []
     for f in raw.get("finances") or []:
-        ctx = str(f.get("context") or "") if isinstance(f, dict) else ""
-        if isinstance(f, dict) and pattern.search(ctx) and not (exclude and exclude.search(ctx)):
+        if isinstance(f, dict) and _matches(f, kinds, pattern, exclude):
             try:
                 out.append(round(float(f.get("value")), 2))
             except (TypeError, ValueError):
@@ -165,14 +175,12 @@ def _amounts(raw: Dict[str, Any], pattern: re.Pattern, exclude: Optional[re.Patt
     return out
 
 
-def _dates(raw: Dict[str, Any], pattern: re.Pattern, exclude: Optional[re.Pattern] = None) -> List[date]:
-    """Даты файла, у которых контекст подходит под ``pattern`` (и не подходит под ``exclude``)."""
+def _dates(raw: Dict[str, Any], pattern: re.Pattern, exclude: Optional[re.Pattern] = None,
+           kinds: Optional[tuple] = None) -> List[date]:
+    """Даты файла нужного вида: по ``kind`` (если указан) или по контексту (``pattern`` и не ``exclude``)."""
     out = []
     for d in raw.get("dates") or []:
-        if not isinstance(d, dict):
-            continue
-        ctx = str(d.get("context") or "")
-        if pattern.search(ctx) and not (exclude and exclude.search(ctx)):
+        if isinstance(d, dict) and _matches(d, kinds, pattern, exclude):
             dt = parse_date(d.get("value"))
             if dt:
                 out.append(dt)
@@ -220,11 +228,11 @@ def package_facts(data: Dict[str, Any], today: Optional[date] = None) -> Dict[st
             facts["номер договора"] = same
 
     # Цена договора и НМЦК
-    price_values = [v for code, raw in files if code in CONTRACT_CODES for v in _amounts(raw, PRICE_RE, NMCK_RE)]
+    price_values = [v for code, raw in files if code in CONTRACT_CODES for v in _amounts(raw, PRICE_RE, NMCK_RE, ("contract_price",))]
     if not price_values:   # договора в комплекте нет — цена из других документов (направление договора и т. п.)
-        price_values = [v for _, raw in files for v in _amounts(raw, PRICE_RE, NMCK_RE)]
+        price_values = [v for _, raw in files for v in _amounts(raw, PRICE_RE, NMCK_RE, ("contract_price",))]
     price = _most_common(price_values)
-    nmck_values = [v for _, raw in files for v in _amounts(raw, NMCK_RE)]
+    nmck_values = [v for _, raw in files for v in _amounts(raw, NMCK_RE, kinds=("nmck",))]
     nmck = _most_common(nmck_values)
     if price is not None:
         facts["цена договора"] = _money(price)
@@ -238,15 +246,15 @@ def package_facts(data: Dict[str, Any], today: Optional[date] = None) -> Dict[st
         facts["цена и НМЦК"] = "НМЦК в документах не найдена — сравнение не выполнялось"
 
     # Сроки: договор и дополнительные соглашения
-    contract_end = max((d for code, raw in files if code in CONTRACT_CODES for d in _dates(raw, END_RE)), default=None)
-    ds_end = max((d for code, raw in files if code in DS_CODES for d in _dates(raw, END_RE)), default=None)
+    contract_end = max((d for code, raw in files if code in CONTRACT_CODES for d in _dates(raw, END_RE, kinds=("work_end",))), default=None)
+    ds_end = max((d for code, raw in files if code in DS_CODES for d in _dates(raw, END_RE, kinds=("work_end",))), default=None)
     deadline = max([d for d in (contract_end, ds_end) if d], default=None)
     if contract_end:
         facts["срок окончания работ по договору"] = contract_end.isoformat()
     if ds_end and (not contract_end or ds_end != contract_end):
         facts["срок окончания работ по допсоглашению"] = ds_end.isoformat()
     act_dates = [d for code, raw in files if code in ACT_CODES
-                 for d in _dates(raw, ACT_DATE_RE, NOT_ACT_DATE_RE) if d <= today]
+                 for d in _dates(raw, ACT_DATE_RE, NOT_ACT_DATE_RE, ("act", "report_period_end")) if d <= today]
     if act_dates:
         last = max(act_dates)
         facts["последний акт/справка о выполненных работах"] = last.isoformat()
@@ -260,7 +268,8 @@ def package_facts(data: Dict[str, Any], today: Optional[date] = None) -> Dict[st
     payments, no_amount = [], []
     for _, raw in files:
         if _is_payment(raw):
-            vals = _amounts(raw, re.compile(r"платеж|платёж|сумм", re.I)) or _amounts(raw, re.compile(r"", re.S))
+            vals = (_amounts(raw, re.compile(r"платеж|платёж|сумм", re.I), kinds=("payment",))
+                    or _amounts(raw, re.compile(r"", re.S)))
             if vals:
                 payments.append(vals[0])
             else:

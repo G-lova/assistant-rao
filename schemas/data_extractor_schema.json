@@ -124,7 +124,7 @@
                                         "integer",
                                         "null"
                                     ],
-                                    "description": "Номер страницы."
+                                    "description": "Номер страницы из меток «Страница N» / «[Продолжение страницы N]» в тексте; нет меток — null."
                                 },
                                 "confidence": {
                                     "type": [
@@ -172,7 +172,7 @@
                                             "integer",
                                             "null"
                                         ],
-                                        "description": "Номер страницы."
+                                        "description": "Номер страницы из меток «Страница N» / «[Продолжение страницы N]» в тексте; нет меток — null."
                                     },
                                     "confidence": {
                                         "type": [
@@ -183,6 +183,28 @@
                                         "maximum": 1
                                     }
                                 }
+                            },
+                            "kind": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "enum": [
+                                    "signing",
+                                    "contract_start",
+                                    "work_end",
+                                    "contract_end",
+                                    "act",
+                                    "report_period_start",
+                                    "report_period_end",
+                                    "payment",
+                                    "protocol",
+                                    "publication",
+                                    "deadline",
+                                    "other",
+                                    null
+                                ],
+                                "description": "Вид даты: signing — заключение/подписание договора или документа; contract_start — начало работ/поставки; work_end — срок окончания работ/поставки/услуг; contract_end — окончание срока действия договора; act — дата составления акта/справки о приёмке; report_period_start / report_period_end — начало/конец отчётного периода; payment — дата платежа; protocol — дата протокола; publication — размещение/публикация; deadline — иной срок исполнения обязанности; other — прочее."
                             },
                             "value": {
                                 "type": [
@@ -234,7 +256,7 @@
                                             "integer",
                                             "null"
                                         ],
-                                        "description": "Номер страницы."
+                                        "description": "Номер страницы из меток «Страница N» / «[Продолжение страницы N]» в тексте; нет меток — null."
                                     },
                                     "confidence": {
                                         "type": [
@@ -245,6 +267,27 @@
                                         "maximum": 1
                                     }
                                 }
+                            },
+                            "kind": {
+                                "type": [
+                                    "string",
+                                    "null"
+                                ],
+                                "enum": [
+                                    "contract_price",
+                                    "nmck",
+                                    "offer_price",
+                                    "payment",
+                                    "act_amount",
+                                    "act_total",
+                                    "advance",
+                                    "security",
+                                    "penalty",
+                                    "vat",
+                                    "other",
+                                    null
+                                ],
+                                "description": "Вид суммы: contract_price — цена договора (контракта), в т.ч. изменённая допсоглашением; nmck — начальная (максимальная) цена; offer_price — ценовое предложение участника; payment — сумма платёжного поручения; act_amount — стоимость по акту/справке за отчётный период; act_total — с начала выполнения работ; advance — аванс; security — обеспечение заявки/исполнения/гарантии; penalty — неустойка, пени, штраф; vat — НДС; other — прочее."
                             },
                             "value": {
                                 "type": [
@@ -302,7 +345,7 @@
                                         "integer",
                                         "null"
                                     ],
-                                    "description": "Номер страницы."
+                                    "description": "Номер страницы из меток «Страница N» / «[Продолжение страницы N]» в тексте; нет меток — null."
                                 },
                                 "confidence": {
                                     "type": [
@@ -362,7 +405,7 @@
                                             "integer",
                                             "null"
                                         ],
-                                        "description": "Номер страницы."
+                                        "description": "Номер страницы из меток «Страница N» / «[Продолжение страницы N]» в тексте; нет меток — null."
                                     },
                                     "confidence": {
                                         "type": [
@@ -458,7 +501,7 @@
                                                 "integer",
                                                 "null"
                                             ],
-                                            "description": "Номер страницы."
+                                            "description": "Номер страницы из меток «Страница N» / «[Продолжение страницы N]» в тексте; нет меток — null."
                                         },
                                         "confidence": {
                                             "type": [
@@ -512,7 +555,7 @@
                                         "integer",
                                         "null"
                                     ],
-                                    "description": "Номер страницы."
+                                    "description": "Номер страницы из меток «Страница N» / «[Продолжение страницы N]» в тексте; нет меток — null."
                                 },
                                 "confidence": {
                                     "type": [
@@ -565,7 +608,7 @@
                                             "integer",
                                             "null"
                                         ],
-                                        "description": "Номер страницы."
+                                        "description": "Номер страницы из меток «Страница N» / «[Продолжение страницы N]» в тексте; нет меток — null."
                                     },
                                     "confidence": {
                                         "type": [
@@ -634,7 +677,7 @@
                                         "integer",
                                         "null"
                                     ],
-                                    "description": "Номер страницы."
+                                    "description": "Номер страницы из меток «Страница N» / «[Продолжение страницы N]» в тексте; нет меток — null."
                                 },
                                 "confidence": {
                                     "type": [
@@ -731,7 +774,7 @@
                                             "integer",
                                             "null"
                                         ],
-                                        "description": "Номер страницы."
+                                        "description": "Номер страницы из меток «Страница N» / «[Продолжение страницы N]» в тексте; нет меток — null."
                                     },
                                     "confidence": {
                                         "type": [
@@ -804,7 +847,7 @@
                                         "integer",
                                         "null"
                                     ],
-                                    "description": "Номер страницы."
+                                    "description": "Номер страницы из меток «Страница N» / «[Продолжение страницы N]» в тексте; нет меток — null."
                                 },
                                 "confidence": {
                                     "type": [
@@ -867,7 +910,7 @@
                                             "integer",
                                             "null"
                                         ],
-                                        "description": "Номер страницы."
+                                        "description": "Номер страницы из меток «Страница N» / «[Продолжение страницы N]» в тексте; нет меток — null."
                                     },
                                     "confidence": {
                                         "type": [

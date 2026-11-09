@@ -44,9 +44,17 @@ def _sha256_text(text: str) -> str:
 
 
 def _prompt_version() -> str:
-    """Версия промпта = хэш файла. Изменили промпт -> кэш анализа инвалидируется сам."""
-    with open("prompts/type_data_extractor_prompt.txt", "rb") as f:
-        return hashlib.sha256(f.read()).hexdigest()[:12]
+    """Версия извлечения = хэш промптов и схем разбора документа. Изменили их -> кэш анализа инвалидируется сам.
+
+    Разбор идёт в два шага (``TypeDetector`` → ``DataExtractor`` по профилю типа), поэтому в версию входят оба промпта
+    и обе схемы.
+    """
+    digest = hashlib.sha256()
+    for path in ("prompts/type_detector_prompt.txt", "schemas/type_detector_schema.json",
+                 "prompts/data_extractor_prompt.txt", "schemas/data_extractor_schema.json"):
+        with open(path, "rb") as f:
+            digest.update(f.read())
+    return digest.hexdigest()[:12]
 
 
 class AIFileAnalyzer:

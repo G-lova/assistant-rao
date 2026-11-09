@@ -1,9 +1,10 @@
 import asyncio
 import json
 import re
+import time
 from json_repair import repair_json
 from string import Template
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from configs.logger import get_logger
 from configs.rate_limiter import TokenBucket
@@ -74,10 +75,18 @@ DOCUMENT_TYPE_KEYWORDS = {
 
 
 class TypeDetector:
-    """
+    """Определяет тип документа (код из ``DOCUMENT_TYPE_MAPPING``) по началу текста и имени файла.
+
+    Первый шаг разбора документа: от типа зависит профиль полей, которые потом извлекает
+    :class:`evaluate_documents.data_extractor.DataExtractor`. Если модель не ответила или вернула неизвестный тип,
+    тип определяется по ключевым словам в имени файла и начале текста.
     """
     def __init__(self, llm_client, model):
-        """
+        """Создаёт определитель типа.
+
+        Args:
+            llm_client: Клиент LLM (OpenAI-совместимый).
+            model: Название модели.
         """
         self.client = llm_client
         self.model = model
@@ -100,7 +109,7 @@ class TypeDetector:
         await self.rate_limiter.acquire()
         
         try:
-            logger.info(f"Определение типа документа '{filename}'")
+            logger.debug(f"Определение типа документа '{filename}': {len(content or '')} символов")
 
             # Загружаем промпт и схему
             prompt = Template(self.type_detector_prompt).safe_substitute(
@@ -116,14 +125,12 @@ class TypeDetector:
                     messages=[
                         {"role": "system",
                             "content": prompt},
-                        {"role": "user", "content": f"""
-                            Определи тип этого документа:\n\n{content}
-                        """}
+                        {"role": "user", "content": f"Имя файла: {filename}\nОпредели тип этого документа:\n\n{content}"}
                     ],
                     extra_body={
                         "guided_json": json.loads(schema)},
                     max_tokens=3000,
-                    temperature=0.1
+                    temperature=0
                 )
             except asyncio.TimeoutError:
                 logger.error(f"Таймаут при анализе '{filename}'")
@@ -135,13 +142,12 @@ class TypeDetector:
                 logger.warning(f"Пустой ответ модели (определение типа) для '{filename}': "
                                f"finish_reason={getattr(response.choices[0], 'finish_reason', None)}")
                 return None
-            logger.info(f"Получен ответ длиной {len(raw_response)} символов для чанка '{filename}'")
+            logger.debug(f"Тип '{filename}': ответ {len(raw_response)} символов")
             logger.debug(raw_response)  # полный ответ — только в отладке: журнал рос до 4,7 МБ за прогон (30.10.2026)
 
             # Парсим JSON
             try:
                 result = json.loads(raw_response)
-                logger.info("Удалось распарсить JSON.")
                 return result
             
             except json.JSONDecodeError as e:
@@ -165,6 +171,46 @@ class TypeDetector:
         except Exception as e:
             logger.error(f"Ошибка при определении типа документа '{filename}': {str(e)}")
             return None
+
+
+    async def detect(self, chunks: List[str], filename: str) -> Dict[str, Any]:
+        """Тип документа по его началу (не по каждому блоку) и имени файла.
+
+        Модели отдаётся начало документа (``settings.TYPE_DETECT_HEAD_CHARS`` символов первого блока). Если модель не
+        ответила или вернула тип не из списка / ``unknown`` — тип по ключевым словам имени файла и начала текста.
+
+        Args:
+            chunks: Блоки текста документа.
+            filename: Имя файла.
+
+        Returns:
+            dict: ``detected_type``, ``confidence``, ``key_indicators``, ``issues`` и ``source``
+            (``model`` / ``keywords``).
+        """
+        from configs import settings
+
+        started = time.monotonic()
+        head = (chunks[0] if chunks else "")[: settings.TYPE_DETECT_HEAD_CHARS]
+        if len(chunks) > 1 or (chunks and len(chunks[0]) > len(head)):
+            head += f"\n\n[… начало документа; всего блоков текста: {len(chunks)}]"
+        result = None
+        try:
+            result = await self.detect_document_type(content=head, filename=filename)
+        except Exception as e:  # noqa: BLE001 — ретраи исчерпаны; тип по ключевым словам
+            logger.warning(f"Тип '{filename}': модель не ответила ({type(e).__name__}: {e}) — по ключевым словам")
+        result = dict(result) if isinstance(result, dict) else {}
+        detected = result.get("detected_type")
+        if detected in ALLOWED_DOC_TYPES and detected != "unknown":
+            result["source"] = "model"
+        else:
+            by_words = self.detect_document_type_by_name(filename)
+            if by_words == "docDopMaterialsFiles":
+                by_words = self.detect_document_type_by_name(head[:3000])
+            result.update(detected_type=by_words, source="keywords", confidence=result.get("confidence") or 0.3)
+        result.setdefault("issues", [])
+        logger.info(f"Тип '{filename}': {result['detected_type']} ({result['source']}, "
+                    f"уверенность {result.get('confidence')}) за {time.monotonic() - started:.1f} с")
+        return result
 
 
     async def get_type_compliance(self, type_results: Dict[str, Any], doc_type: str, expertise_object: int, document_name: str) -> Dict[str, Any]:
