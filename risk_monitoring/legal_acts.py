@@ -43,6 +43,8 @@ LAW_HEAD_RE = re.compile(r"(\d{1,2})\s+(" + "|".join(MONTHS) + r")\s+(\d{4})\s+(
 # шапка в веб-версиях (ГАРАНТ, печать страницы из браузера): «Федеральный закон от 28 ноября 2025 г. № 426-ФЗ "О …"»
 LAW_INLINE_RE = re.compile(r"Федеральный\s+закон\s+от\s+(\d{1,2})\s+(" + "|".join(MONTHS) +
                            r")\s+(\d{4})\s*г\.?\s*(?:№|N)\s*([\d\-]+-ФЗ)(?:\s*\"([^\"\n]{5,300})\")?", re.I)
+# то же с датой цифрами (government.ru): «Федеральный закон от 28.11.2025 г. № 426-ФЗ»
+LAW_INLINE_NUM_RE = re.compile(r"Федеральный\s+закон\s+от\s+(\d{2})\.(\d{2})\.(\d{4})\s*г?\.?\s*(?:№|N)\s*([\d\-]+-ФЗ)", re.I)
 # служебные строки печати веб-страницы: «10.11.2026, 15:47», адрес страницы, «1/39»
 PRINT_NOISE_RE = re.compile(r"^(\d{2}\.\d{2}\.\d{4},\s*\d{1,2}:\d{2}|https?://\S+|\d{1,4}/\d{1,4}|Узнать больше|Реклама)$"
                             r"|\|\s*Документы\b")
@@ -120,10 +122,11 @@ def identify(text: str, file_name: Optional[str] = None, edition_date: Optional[
     """
     head = text[:6000]
     info: Dict[str, Any] = {}
-    m = LAW_HEAD_RE.search(head) or LAW_INLINE_RE.search(head)
+    m = LAW_HEAD_RE.search(head) or LAW_INLINE_RE.search(head) or LAW_INLINE_NUM_RE.search(head)
     if m:
         number = m.group(4).upper()
-        act_date = _ru_date(*m.group(1, 2, 3))
+        act_date = (f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m.re is LAW_INLINE_NUM_RE
+                    else _ru_date(*m.group(1, 2, 3)))
         key, kind = KNOWN.get((number, act_date), (f"{number} от {act_date}", "law"))
         if CODE_TITLE_RE.search(head):     # «НАЛОГОВЫЙ КОДЕКС» прописными в заголовке, не «…кодексом» в тексте
             kind = "code"
@@ -140,6 +143,11 @@ def identify(text: str, file_name: Optional[str] = None, edition_date: Optional[
         info["title"] = re.sub(r"\s+", " ", title_m.group(2)).strip().capitalize()[:500]
     if m and m.re is LAW_INLINE_RE and m.group(5):
         info["title"] = m.group(5).strip()
+    if not info.get("title"):
+        # «ФЕДЕРАЛЬНЫЙ ЗАКОН\nО федеральном бюджете …» строчными (government.ru)
+        t_m = re.search(r"ФЕДЕРАЛЬНЫЙ ЗАКОН\s*\n\s*(О\s[^\n]{5,300})", head)
+        if t_m:
+            info["title"] = t_m.group(1).strip()
     code_m = CODE_TITLE_RE.search(head) if info["kind"] == "code" else None
     if code_m and (not info.get("title") or info["title"].lower().startswith("часть")):
         # «НАЛОГОВЫЙ КОДЕКС РОССИЙСКОЙ ФЕДЕРАЦИИ» + «ЧАСТЬ ВТОРАЯ»
@@ -175,6 +183,12 @@ def clean_lines(text: str) -> List[str]:
     Примечание КонсультантПлюс («КонсультантПлюс: примечание.» и 1–4 строки текста) заканчивается строкой с точкой
     в конце или началом структурной единицы; пометка «(в ред. …» на нескольких строках — строкой с «)» в конце. Пустые строки в выгрузке PDF — разрывы страниц, а не конец абзаца.
     """
+    # колонтитул печати страницы: строка сразу после времени печати («10.11.2026, 16:11» → «Документы - Правительство
+    # России») повторяется на каждой странице
+    raw_lines = [x.strip() for x in text.replace("\f", "\n").splitlines()]
+    nonblank = [x for x in raw_lines if x]
+    print_headers = {nonblank[i + 1] for i, x in enumerate(nonblank[:-1])
+                     if re.match(r"^\d{2}\.\d{2}\.\d{4},\s*\d{1,2}:\d{2}$", x)}
     out: List[str] = []
     note = 0                     # > 0 — идёт примечание (сколько строк уже пропущено)
     editorial = 0                # > 0 — продолжение пометки «(в ред. …» на следующих строках
@@ -196,7 +210,8 @@ def clean_lines(text: str) -> List[str]:
                 note = 0 if (s.endswith(".") or note >= 4) else note + 1
                 continue
             note = 0
-        if PAGE_RE.match(s) or s in SITE_NOISE or EDITORIAL_RE.match(s) or PRINT_NOISE_RE.search(s):
+        if (PAGE_RE.match(s) or s in SITE_NOISE or EDITORIAL_RE.match(s) or PRINT_NOISE_RE.search(s)
+                or s in print_headers or re.match(r"^[\w.\-]+\.ru(/\S*)?$", s)):
             continue
         if RTF_NOTE_RE.match(s):
             continue
@@ -272,8 +287,9 @@ def parse_act(text: str, file_name: Optional[str] = None, edition_date: Optional
     # печать страницы сайта (ГАРАНТ и т. п.): между строками закона — реклама, она попадает в текст норм и даже
     # разрывает числа («не превышающего Kia4,0 процента»); такой источник лучше заменить PDF сводной редакции
     if sum(1 for s in text.splitlines() if PRINT_NOISE_RE.search(s.strip())) >= WEB_PRINT_MIN:
-        info["warnings"] = ["Источник — печать веб-страницы: в текст норм могла попасть реклама сайта; "
-                            "лучше загрузить PDF сводной редакции"]
+        info["warnings"] = ["Источник — печать веб-страницы: проверьте, что текст напечатан полностью (браузер "
+                            "печатает только видимую часть) и без вставок сайта (реклама); надёжнее RTF / PDF "
+                            "сводной редакции"]
     info["text_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return info
 
