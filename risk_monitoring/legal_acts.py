@@ -594,19 +594,31 @@ def read_source(path: str, file_name: Optional[str] = None) -> str:
     ext = os.path.splitext(file_name or path)[1].lower()
     with open(path, "rb") as fh:
         raw = fh.read()
-    if ext in (".html", ".htm") or raw[:200].lstrip().lower().startswith((b"<!doctype html", b"<html")):
+    # формат — по содержимому, расширение только подсказка: в имени могут ошибиться (RTF с name=nk1.pdf)
+    head = raw[:200].lstrip().lower()
+    if raw[:5] == b"%PDF-":
+        fmt = "pdf"
+    elif raw[:5] == b"{\\rtf":
+        fmt = "rtf"
+    elif head.startswith((b"<!doctype html", b"<html")) or b"<html" in raw[:2000].lower():
+        fmt = "html"
+    else:
+        fmt = {".pdf": "pdf", ".rtf": "rtf", ".html": "html", ".htm": "html", ".txt": "txt", "": "txt"}.get(ext)
+    if fmt == "html":
         text = html_to_text(raw)
-    elif ext == ".pdf" or raw[:5] == b"%PDF-":
+    elif fmt == "pdf":
         if shutil.which("pdftotext"):
-            text = subprocess.run(["pdftotext", "-enc", "UTF-8", path, "-"], capture_output=True, timeout=180,
-                                  check=True).stdout.decode("utf-8", "replace")
+            res = subprocess.run(["pdftotext", "-enc", "UTF-8", path, "-"], capture_output=True, timeout=180)
+            if res.returncode != 0:
+                raise ValueError(f"PDF не прочитан: {res.stderr.decode('utf-8', 'replace')[:300]}")
+            text = res.stdout.decode("utf-8", "replace")
         else:
             from PyPDF2 import PdfReader
 
             text = "\n".join((p.extract_text() or "") for p in PdfReader(path).pages)
-    elif ext == ".rtf" or raw[:5] == b"{\\rtf":
+    elif fmt == "rtf":
         text = rtf_to_text(raw)
-    elif ext in (".txt", ""):
+    elif fmt == "txt":
         text = raw.decode("utf-8", "replace")
     else:
         raise ValueError(f"Формат {ext} не поддерживается: нужен PDF, HTML, RTF или TXT сводной редакции")
