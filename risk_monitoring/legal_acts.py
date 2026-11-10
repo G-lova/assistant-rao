@@ -44,14 +44,16 @@ LAW_HEAD_RE = re.compile(r"(\d{1,2})\s+(" + "|".join(MONTHS) + r")\s+(\d{4})\s+(
 LAW_INLINE_RE = re.compile(r"Федеральный\s+закон\s+от\s+(\d{1,2})\s+(" + "|".join(MONTHS) +
                            r")\s+(\d{4})\s*г\.?\s*(?:№|N)\s*([\d\-]+-ФЗ)(?:\s*\"([^\"\n]{5,300})\")?", re.I)
 # то же с датой цифрами (government.ru): «Федеральный закон от 28.11.2025 г. № 426-ФЗ»
-LAW_INLINE_NUM_RE = re.compile(r"Федеральный\s+закон\s+от\s+(\d{2})\.(\d{2})\.(\d{4})\s*г?\.?\s*(?:№|N)\s*([\d\-]+-ФЗ)", re.I)
+LAW_INLINE_NUM_RE = re.compile(r"Федеральный\s+закон\s+от\s+(\d{2})\.(\d{2})\.(\d{4})\s*г?\.?\s*(?:№|N)\s*([\d\-]+-ФЗ)"
+                               r"(?:\s*\"([^\"\n]{5,300})\")?", re.I)
 # служебные строки печати веб-страницы: «10.11.2026, 15:47», адрес страницы, «1/39»
 PRINT_NOISE_RE = re.compile(r"^(\d{2}\.\d{2}\.\d{4},\s*\d{1,2}:\d{2}|https?://\S+|\d{1,4}/\d{1,4}|Узнать больше|Реклама)$"
                             r"|\|\s*Документы\b")
 WEB_PRINT_MIN = 3   # столько служебных строк печати — источник «печать веб-страницы» (в тексте может быть реклама)
 DECREE_HEAD_RE = re.compile(r"ПОСТАНОВЛЕНИЕ\s*\n\s*от\s+(\d{1,2})\s+(" + "|".join(MONTHS) + r")\s+(\d{4})\s+г\.\s+N\s*(\d+)",
                             re.I)
-EDITION_RE = re.compile(r"ред\.?\s*от\s*(\d{2})[.\-_](\d{2})[.\-_](\d{4})", re.I)
+EDITION_RE = re.compile(r"ред\.?\s*от\s*(\d{2})[.\-_](\d{2})[.\-_](\d{4})"
+                        r"|(?:действующая\s+)?редакци[яи]\s*\(с\s*(\d{2})\.(\d{2})\.(\d{4})\)", re.I)
 AMEND_DATE_RE = re.compile(r"от\s+(\d{2})\.(\d{2})\.(\d{4})\s+N")
 
 # известные акты: (номер, дата принятия) → ключ и вид. Номер федерального закона уникален только в пределах года:
@@ -141,7 +143,7 @@ def identify(text: str, file_name: Optional[str] = None, edition_date: Optional[
                         head)
     if title_m:
         info["title"] = re.sub(r"\s+", " ", title_m.group(2)).strip().capitalize()[:500]
-    if m and m.re is LAW_INLINE_RE and m.group(5):
+    if m and m.re in (LAW_INLINE_RE, LAW_INLINE_NUM_RE) and m.group(5):
         info["title"] = m.group(5).strip()
     if not info.get("title"):
         # «ФЕДЕРАЛЬНЫЙ ЗАКОН\nО федеральном бюджете …» строчными (government.ru)
@@ -161,7 +163,8 @@ def identify(text: str, file_name: Optional[str] = None, edition_date: Optional[
     if edition_date:
         info["edition_date"], info["edition_source"] = date.fromisoformat(edition_date).isoformat(), "given"
     elif ed:
-        info["edition_date"], info["edition_source"] = f"{ed.group(3)}-{ed.group(2)}-{ed.group(1)}", "stated"
+        d, mo, y = (ed.group(1), ed.group(2), ed.group(3)) if ed.group(1) else (ed.group(4), ed.group(5), ed.group(6))
+        info["edition_date"], info["edition_source"] = f"{y}-{mo}-{d}", "stated"
     else:
         block = head.split("Список изменяющих документов", 1)
         dates = [f"{y}-{mo}-{d}" for d, mo, y in AMEND_DATE_RE.findall(block[1][:4000])] if len(block) > 1 else []
@@ -221,6 +224,32 @@ def clean_lines(text: str) -> List[str]:
     return out
 
 
+APPENDIX_START_RE = re.compile(r"^Приложение\s+(?:N\s*|№\s*)?\d+(?:\.|\s*$|\s+к\s|\s+[А-ЯЁ])")
+
+
+def _drop_toc(lines: List[str]) -> List[str]:
+    """Убирает оглавление веб-версии: подряд идущие (3 и больше) заголовки «Статья N. …», каждый из которых ещё раз
+    встречается дальше в тексте (подряд идущие утратившие силу статьи — не оглавление: они не повторяются)."""
+    out: List[str] = []
+    i = 0
+    while i < len(lines):
+        j = i
+        while j < len(lines) and ARTICLE_RE.match(lines[j]):
+            j += 1
+        if j - i >= 3:
+            rest = set(lines[j:])
+            if all(lines[k] in rest for k in range(i, j)):
+                i = j
+                continue
+        out.append(lines[i])
+        i += 1
+    return out
+
+
+# подпись в конце закона: «Президент Российской Федерации В.ПУТИН» (одной строкой или «Президент» отдельно)
+SIGNATURE_RE = re.compile(r"^(Президент(\s+Российской\s+Федерации)?|Председатель\s+Правительства)(\s+[А-ЯЁ]\.\s*[А-ЯЁ]+)?$")
+
+
 def _segments(lines: List[str], kind: str) -> List[Tuple[Optional[str], List[str]]]:
     """Основной текст и утверждённые документы / приложения (для постановлений)."""
     if kind != "decree":
@@ -276,8 +305,12 @@ def parse_act(text: str, file_name: Optional[str] = None, edition_date: Optional
     lines = clean_lines(text)
     # текст до первой статьи (шапка, преамбула) у законов не нормы
     if kind in ("law", "code"):
+        lines = _drop_toc(lines)
         first = next((i for i, s in enumerate(lines) if ARTICLE_RE.match(s)), len(lines))
         lines = lines[first:]
+        # приложения закона (таблицы закона о бюджете) — не нормы: разбор до первого «Приложение N …» после статей
+        end = next((i for i, s in enumerate(lines) if APPENDIX_START_RE.match(s) or SIGNATURE_RE.match(s)), len(lines))
+        lines = lines[:end]
     norms: List[Dict[str, Any]] = []
     for segment, seg_lines in _segments(lines, kind):
         if segment and segment.lower().startswith(SKIP_SEGMENTS):
@@ -429,14 +462,26 @@ def chunks_for_embedding(norms: List[Dict[str, Any]], max_chars: int = 2500) -> 
 
 # --- чтение файла ----------------------------------------------------------------------------------------------
 
+HTML_BLOCK_TAGS = ["p", "div", "li", "tr", "td", "th", "h1", "h2", "h3", "h4", "h5", "h6", "table", "section",
+                   "article", "pre", "blockquote", "dd", "dt"]
+
+
 def html_to_text(raw: bytes) -> str:
-    """Текст HTML-страницы акта (docs.cntd.ru, consultant.ru): без скриптов, меню и стилей, абзацы — строками."""
+    """Текст HTML-страницы акта (docs.cntd.ru, consultant.ru, tks.ru): без скриптов, меню и стилей, абзацы — строками.
+
+    Строки разделяются только на блочных элементах и ``<br>``: ссылки внутри абзаца («в пунктах <a>1</a> и <a>2</a>»)
+    остаются в одной строке.
+    """
     from bs4 import BeautifulSoup
 
     soup = BeautifulSoup(raw, "html.parser")
     for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "aside", "form"]):
         tag.decompose()
-    lines = [re.sub(r"\s+", " ", s).strip() for s in soup.get_text("\n").splitlines()]
+    for br in soup.find_all("br"):
+        br.replace_with("\n")
+    for tag in soup.find_all(HTML_BLOCK_TAGS):
+        tag.append("\n")
+    lines = [re.sub(r"\s+", " ", s).strip() for s in soup.get_text("").splitlines()]
     return "\n".join(s for s in lines if s)
 
 
