@@ -37,10 +37,12 @@ WITH experts AS (
 			ELSE NULL
 		END) * 100, 1) AS criterion5
 	FROM users u 
-	LEFT JOIN expertise_experts ee 
+	LEFT JOIN (
+		expertise_experts ee
+		INNER JOIN expertises e
+		ON e.id = ee.expertise_id AND e.deleted_at IS NULL
+	)
 	ON u.id = ee.expert_id 
-	LEFT JOIN expertises e 
-	ON e.id = ee.expertise_id 
 	WHERE u.`role` = 'expert' 
 	GROUP BY u.id
 ), experts_rating AS ( 
