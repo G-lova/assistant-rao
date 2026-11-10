@@ -38,6 +38,13 @@ MONTHS = {"января": 1, "февраля": 2, "марта": 3, "апреля
           "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12}
 
 LAW_HEAD_RE = re.compile(r"(\d{1,2})\s+(" + "|".join(MONTHS) + r")\s+(\d{4})\s+года\s*\n\s*N\s*([\d\-]+-ФЗ)", re.I)
+# шапка в веб-версиях (ГАРАНТ, печать страницы из браузера): «Федеральный закон от 28 ноября 2025 г. № 426-ФЗ "О …"»
+LAW_INLINE_RE = re.compile(r"Федеральный\s+закон\s+от\s+(\d{1,2})\s+(" + "|".join(MONTHS) +
+                           r")\s+(\d{4})\s*г\.?\s*(?:№|N)\s*([\d\-]+-ФЗ)(?:\s*\"([^\"\n]{5,300})\")?", re.I)
+# служебные строки печати веб-страницы: «10.11.2026, 15:47», адрес страницы, «1/39»
+PRINT_NOISE_RE = re.compile(r"^(\d{2}\.\d{2}\.\d{4},\s*\d{1,2}:\d{2}|https?://\S+|\d{1,4}/\d{1,4}|Узнать больше|Реклама)$"
+                            r"|\|\s*Документы\b")
+WEB_PRINT_MIN = 3   # столько служебных строк печати — источник «печать веб-страницы» (в тексте может быть реклама)
 DECREE_HEAD_RE = re.compile(r"ПОСТАНОВЛЕНИЕ\s*\n\s*от\s+(\d{1,2})\s+(" + "|".join(MONTHS) + r")\s+(\d{4})\s+г\.\s+N\s*(\d+)",
                             re.I)
 EDITION_RE = re.compile(r"ред\.?\s*от\s*(\d{2})[.\-_](\d{2})[.\-_](\d{4})", re.I)
@@ -52,6 +59,7 @@ KNOWN = {
     ("117-ФЗ", "2000-08-05"): ("НК", "code"),       # часть вторая (ст. 164 — ставки НДС)
     ("146-ФЗ", "1998-07-31"): ("НК-1", "code"),     # часть первая
     ("145-ФЗ", "1998-07-31"): ("БК", "code"),
+    ("426-ФЗ", "2025-11-28"): ("ФБ-2026", "law"),   # о федеральном бюджете на 2026 год и плановый период 2027–2028
 }
 CODE_TITLE_RE = re.compile(r"^\s*([А-ЯЁ]+\s+)?КОДЕКС\b", re.M)
 
@@ -101,7 +109,7 @@ def identify(text: str, file_name: Optional[str] = None, edition_date: Optional[
     """
     head = text[:6000]
     info: Dict[str, Any] = {}
-    m = LAW_HEAD_RE.search(head)
+    m = LAW_HEAD_RE.search(head) or LAW_INLINE_RE.search(head)
     if m:
         number = m.group(4).upper()
         act_date = _ru_date(*m.group(1, 2, 3))
@@ -119,6 +127,14 @@ def identify(text: str, file_name: Optional[str] = None, edition_date: Optional[
                         head)
     if title_m:
         info["title"] = re.sub(r"\s+", " ", title_m.group(2)).strip().capitalize()[:500]
+    if m and m.re is LAW_INLINE_RE and m.group(5):
+        info["title"] = m.group(5).strip()
+    code_m = CODE_TITLE_RE.search(head) if info["kind"] == "code" else None
+    if code_m and (not info.get("title") or info["title"].lower().startswith("часть")):
+        # «НАЛОГОВЫЙ КОДЕКС РОССИЙСКОЙ ФЕДЕРАЦИИ» + «ЧАСТЬ ВТОРАЯ»
+        line = head[code_m.start():].lstrip().split("\n", 2)
+        part = line[1].strip() if len(line) > 1 and line[1].strip().upper().startswith("ЧАСТЬ") else ""
+        info["title"] = (line[0].strip() + (". " + part if part else "")).capitalize()[:500]
     ed = EDITION_RE.search(file_name or "") or EDITION_RE.search(head)
     if edition_date:
         info["edition_date"], info["edition_source"] = date.fromisoformat(edition_date).isoformat(), "given"
@@ -159,7 +175,7 @@ def clean_lines(text: str) -> List[str]:
                 note = 0 if (s.endswith(".") or note >= 4) else note + 1
                 continue
             note = 0
-        if PAGE_RE.match(s) or s in SITE_NOISE or EDITORIAL_RE.match(s):
+        if PAGE_RE.match(s) or s in SITE_NOISE or EDITORIAL_RE.match(s) or PRINT_NOISE_RE.search(s):
             continue
         out.append(s)
     return out
@@ -228,6 +244,11 @@ def parse_act(text: str, file_name: Optional[str] = None, edition_date: Optional
             continue
         norms.extend(_parse_segment(seg_lines, kind, segment, info["act_key"]))
     info["norms"] = norms
+    # печать страницы сайта (ГАРАНТ и т. п.): между строками закона — реклама, она попадает в текст норм и даже
+    # разрывает числа («не превышающего Kia4,0 процента»); такой источник лучше заменить PDF сводной редакции
+    if sum(1 for s in text.splitlines() if PRINT_NOISE_RE.search(s.strip())) >= WEB_PRINT_MIN:
+        info["warnings"] = ["Источник — печать веб-страницы: в текст норм могла попасть реклама сайта; "
+                            "лучше загрузить PDF сводной редакции"]
     info["text_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return info
 
@@ -548,6 +569,8 @@ class LegalActsLoader:
             out["warning"] = ("Дата редакции не указана — взята " +
                               ("дата последнего изменяющего документа" if act["edition_source"] == "amendments"
                                else "дата принятия акта") + "; передайте edition_date")
+        if act.get("warnings"):
+            out["warnings"] = act["warnings"]
         same = await self.acts.same_edition(act["act_key"], act["edition_date"], act["text_sha256"])
         if same:
             return {**out, "act_id": same, "status": "unchanged", "chunks": 0}

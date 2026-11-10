@@ -142,6 +142,31 @@ class LawParseTest(unittest.TestCase):
         self.assertEqual(legal_acts.identify(other)["act_key"], "223-ФЗ от 2015-07-13")
 
 
+class SourcesTest(unittest.TestCase):
+    """Кодекс (название с частью) и печать веб-страницы ГАРАНТ (шапка в строку, реклама — предупреждение)."""
+
+    def test_code_title(self):
+        """«НАЛОГОВЫЙ КОДЕКС … ЧАСТЬ ВТОРАЯ» → ключ НК, название с частью."""
+        text = ("5 августа 2000 года\n\nN 117-ФЗ\n\nНАЛОГОВЫЙ КОДЕКС РОССИЙСКОЙ ФЕДЕРАЦИИ\nЧАСТЬ ВТОРАЯ\nПринят\n"
+                "Статья 164. Налоговые ставки\n3. Налогообложение производится по налоговой ставке 20 процентов.\n")
+        act = legal_acts.parse_act(text, "НК ч.2 (ред. от 28.11.2025).pdf")
+        self.assertEqual((act["act_key"], act["kind"], act["edition_date"]), ("НК", "code", "2025-11-28"))
+        self.assertEqual(act["title"], "Налоговый кодекс российской федерации. часть вторая")
+        self.assertIn("п. 3 ст. 164 НК", [n["address"] for n in act["norms"]])
+
+    def test_web_print(self):
+        """Шапка «Федеральный закон от … г. № 426-ФЗ "…"», служебные строки печати убраны, предупреждение."""
+        head = 'Федеральный закон от 28 ноября 2025 г. № 426-ФЗ "О федеральном бюджете на 2026 год" | Документы …'
+        text = (f"10.11.2026, 15:47\n{head}\nСтатья 1. Основные характеристики\n1. Утвердить характеристики:\n"
+                f"https://www.garant.ru/products/ipo/prime/doc/1/\nУзнать больше\n1/39\n10.11.2026, 15:47\n{head}\n"
+                "1) объем доходов;\n")
+        act = legal_acts.parse_act(text)
+        self.assertEqual((act["act_key"], act["title"]), ("ФБ-2026", "О федеральном бюджете на 2026 год"))
+        self.assertEqual(" ".join(n["text"] for n in act["norms"]),
+                         "Статья 1. Основные характеристики 1. Утвердить характеристики: 1) объем доходов;")
+        self.assertTrue(act.get("warnings"))
+
+
 class DecreeParseTest(unittest.TestCase):
     """Постановление: пункт 3 Правил отделён от пункта самого постановления."""
 

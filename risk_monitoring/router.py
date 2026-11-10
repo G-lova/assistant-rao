@@ -372,6 +372,8 @@ async def upload_legal_act(request: Request, name: Optional[str] = None, edition
            "edition_date": act["edition_date"], "edition_source": act["edition_source"], "norms": len(act["norms"])}
     if act["edition_source"] in ("amendments", "act_date"):
         out["warning"] = "Дата редакции не указана и не найдена в имени файла — передайте edition_date"
+    if act.get("warnings"):
+        out["warnings"] = act["warnings"]
     return out
 
 
