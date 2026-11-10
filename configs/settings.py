@@ -330,7 +330,7 @@ CUSTOMER_BEHAVIOUR_WEIGHT = 0.0
 # ---------------------------------------------------------------- ежедневный прогон и сводка (S0–S4)
 # Прогон за дату выгрузки запускает Laravel (POST /risk-monitoring/daily); если до DAILY_WATCHDOG_HOUR вызова не было,
 # Celery beat запускает его сам для последней даты выгрузки окружения DAILY_ENVIRONMENT
-DAILY_WATCHDOG_ENABLED = False
+DAILY_WATCHDOG_ENABLED = True
 DAILY_WATCHDOG_HOUR = 6
 DAILY_ENVIRONMENT = ENVIRONMENT         # окружение текущей установки (APP_ENV)
 DAILY_PUSH = True                      # записывать результаты этапов во внешнюю БД

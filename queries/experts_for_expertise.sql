@@ -472,7 +472,7 @@ blocked_experts AS (
 		(
             SELECT COUNT(*)
             FROM expertises e1
-            WHERE u.id MEMBER OF(e1.experts)
+            WHERE u.id MEMBER OF(e1.experts) AND e1.deleted_at IS NULL
         )
         +
         (
@@ -481,7 +481,7 @@ blocked_experts AS (
             JOIN expertises e1
             ON e1.id = ee1.expertise_id
             WHERE ee1.expert_id = u.id
-            AND e1.status = 2 AND ee1.group_formed_at IS NULL AND ee1.deleted_at IS NULL
+            AND e1.status = 2 AND ee1.group_formed_at IS NULL AND ee1.deleted_at IS NULL AND e1.deleted_at IS NULL
         ) AS expert_requests,
 		ROUND(AVG(CASE 
 			WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
@@ -503,10 +503,12 @@ blocked_experts AS (
 		END), 3) AS criterion5,
         SUM(CASE WHEN e.status IN (3) OR ee.group_formed_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) THEN 1 ELSE 0 END) AS currentWeekWorkload 
 	FROM users u 
-	LEFT JOIN expertise_experts ee 
+	LEFT JOIN (
+		expertise_experts ee
+		INNER JOIN expertises e
+		ON e.id = ee.expertise_id AND e.deleted_at IS NULL
+	)
 	ON u.id = ee.expert_id 
-	LEFT JOIN expertises e 
-	ON e.id = ee.expertise_id 
 	LEFT JOIN training t
 	ON u.training_id = t.id
 	LEFT JOIN enlarged_training et 
