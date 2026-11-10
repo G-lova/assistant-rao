@@ -296,7 +296,6 @@ WITH expertise_info AS (
         )
     ) AS jt
     WHERE e.declineExperts IS NOT NULL 
-      AND e.deleted_at IS NULL
       AND JSON_LENGTH(e.declineExperts) > 0
       AND STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(e.declineExperts, CONCAT('$."', jt.expert_id, '"'))), '%Y-%m-%d %H:%i:%s') >= DATE_SUB(NOW(), INTERVAL 7 DAY)
 ),
