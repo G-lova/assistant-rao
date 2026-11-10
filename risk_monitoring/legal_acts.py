@@ -37,7 +37,9 @@ logger = get_logger(__name__)
 MONTHS = {"января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6, "июля": 7, "августа": 8,
           "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12}
 
-LAW_HEAD_RE = re.compile(r"(\d{1,2})\s+(" + "|".join(MONTHS) + r")\s+(\d{4})\s+года\s*\n\s*N\s*([\d\-]+-ФЗ)", re.I)
+# «5 апреля 2013 года\nN 44-ФЗ» (PDF КонсультантПлюс) и «5 августа 2000 г. N 117-ФЗ» (RTF КонсультантПлюс)
+LAW_HEAD_RE = re.compile(r"(\d{1,2})\s+(" + "|".join(MONTHS) + r")\s+(\d{4})\s+(?:года|г\.)\s*\n?\s*N\s*([\d\-]+-ФЗ)",
+                         re.I)
 # шапка в веб-версиях (ГАРАНТ, печать страницы из браузера): «Федеральный закон от 28 ноября 2025 г. № 426-ФЗ "О …"»
 LAW_INLINE_RE = re.compile(r"Федеральный\s+закон\s+от\s+(\d{1,2})\s+(" + "|".join(MONTHS) +
                            r")\s+(\d{4})\s*г\.?\s*(?:№|N)\s*([\d\-]+-ФЗ)(?:\s*\"([^\"\n]{5,300})\")?", re.I)
@@ -73,6 +75,15 @@ LVL3_RE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){0,2})\)\s+(?=\S)")
 LVL4_RE = re.compile(r"^([а-я](?:\(\d+\))?)\)\s+(?=\S)")
 APPROVED_RE = re.compile(r"^(Утвержден[аоы]?|УТВЕРЖДЕН[АОЫ]?)\s*$")
 APPENDIX_RE = re.compile(r"^Приложение\s+(N\s*\d+|№\s*\d+)?\s*$|^Приложение\s+N\s*\d+\b")
+# примечание КонсультантПлюс в RTF — отдельный абзац без заголовка «КонсультантПлюс: примечание.»:
+# «Положения пункта 3 статьи 164 (в редакции Федерального закона от …) применяются …»
+RTF_NOTE_RE = re.compile(r"^(Положени[ея]|Действие|Норм[аы]|Пункт|Подпункт|Абзац|Стать[яи]|Часть|Требовани[ея])\b"
+                         r"(?=[^\n]{0,250}?\bстать[ией]\s+\d)(?=[^\n]*Федеральн\w+\s+закон)[^\n]{0,250}?"
+                         r"\b(применя\w*|распространя\w*|вступа\w*|не\s+применя\w*)\b", re.I)
+# пометка в конце строки или внутри неё (RTF): «… 22 процента … (в ред. Федеральных законов от …, от …)»
+INLINE_EDITORIAL_RE = re.compile(
+    r"\s*\((?:в ред\.|в редакции|введен[аоы]?\s|абзац введен|пп?\.\s*[\d.]+\s+(?:в ред\.|введен))"
+    r"[^()]*(?:\([^()]*\)[^()]*)*\)")
 EDITORIAL_RE = re.compile(
     r"^\((в ред\.|п\.|пп\.|часть|ч\.|абзац|статья|подп\.|введен|утратил|наименование|в редакции|ред\.)", re.I)
 NOTE_RE = re.compile(r"^КонсультантПлюс: примечание\.?$")
@@ -132,10 +143,13 @@ def identify(text: str, file_name: Optional[str] = None, edition_date: Optional[
     code_m = CODE_TITLE_RE.search(head) if info["kind"] == "code" else None
     if code_m and (not info.get("title") or info["title"].lower().startswith("часть")):
         # «НАЛОГОВЫЙ КОДЕКС РОССИЙСКОЙ ФЕДЕРАЦИИ» + «ЧАСТЬ ВТОРАЯ»
-        line = head[code_m.start():].lstrip().split("\n", 2)
-        part = line[1].strip() if len(line) > 1 and line[1].strip().upper().startswith("ЧАСТЬ") else ""
+        line = [x.strip() for x in head[code_m.start():].split("\n")[:6] if x.strip()]
+        part = line[1] if len(line) > 1 and line[1].upper().startswith("ЧАСТЬ") else ""
         info["title"] = (line[0].strip() + (". " + part if part else "")).capitalize()[:500]
-    ed = EDITION_RE.search(file_name or "") or EDITION_RE.search(head)
+    # «ред. от …» в тексте — только в шапке до перечня изменяющих законов: внутри перечня бывает «N 179-ФЗ (ред. от
+    # 31.12.2002)» — это редакция изменяющего закона, а не акта
+    cut = min([i for i in (head.find("(в ред."), head.find("Список изменяющих")) if i >= 0] or [len(head)])
+    ed = EDITION_RE.search(file_name or "") or EDITION_RE.search(head[:cut])
     if edition_date:
         info["edition_date"], info["edition_source"] = date.fromisoformat(edition_date).isoformat(), "given"
     elif ed:
@@ -143,6 +157,13 @@ def identify(text: str, file_name: Optional[str] = None, edition_date: Optional[
     else:
         block = head.split("Список изменяющих документов", 1)
         dates = [f"{y}-{mo}-{d}" for d, mo, y in AMEND_DATE_RE.findall(block[1][:4000])] if len(block) > 1 else []
+        if not dates:
+            # RTF: перечень изменяющих законов — абзац «(в ред. Федеральных законов от … )» под заголовком (у НК
+            # ч. 2 — 18 тыс. символов)
+            first_article = text.find("Статья ")
+            m_ed = re.search(r"\(в ред\.[^()]*(?:\([^()]*\)[^()]*)*\)", text[:60000])
+            if m_ed and m_ed.start() < 3000 and (first_article == -1 or m_ed.start() < first_article):
+                dates = [f"{y}-{mo}-{d}" for d, mo, y in AMEND_DATE_RE.findall(m_ed.group(0))]
         info["edition_date"] = max(dates) if dates else info["act_date"]
         info["edition_source"] = "amendments" if dates else "act_date"
     return info
@@ -177,7 +198,11 @@ def clean_lines(text: str) -> List[str]:
             note = 0
         if PAGE_RE.match(s) or s in SITE_NOISE or EDITORIAL_RE.match(s) or PRINT_NOISE_RE.search(s):
             continue
-        out.append(s)
+        if RTF_NOTE_RE.match(s):
+            continue
+        s = INLINE_EDITORIAL_RE.sub("", s).strip()
+        if s:
+            out.append(s)
     return out
 
 
@@ -399,8 +424,89 @@ def html_to_text(raw: bytes) -> str:
     return "\n".join(s for s in lines if s)
 
 
+RTF_TOKEN_RE = re.compile(r"\\([a-z]{1,32})(-?\d{1,10})? ?|\\'([0-9a-fA-F]{2})|\\(.)|([{}])|([^\\{}\r\n]+)|[\r\n]+",
+                          re.S)
+RTF_SKIP_DEST = {"fonttbl", "colortbl", "stylesheet", "info", "pict", "fldinst", "header", "footer", "object",
+                 "themedata", "datastore", "xmlnstbl", "listtable", "listoverridetable", "rsidtbl", "generator"}
+
+
+def rtf_to_text(raw: bytes) -> str:
+    """Текст RTF (выгрузка КонсультантПлюс «Сохранить в RTF»): ``\\uN`` и ``\\'hh`` (cp1251), абзацы ``\\par``.
+
+    Служебные группы (таблица шрифтов, стили, ``\\fldinst`` гиперссылок, ``{\\* …}``) пропускаются; текст ссылок
+    (``\\fldrslt``) остаётся.
+    """
+    data = raw.decode("latin-1")
+    out: List[str] = []
+    stack: List[Tuple[bool, int]] = []      # (пропускать группу, uc) для каждой открытой группы
+    skip, uc, pending_skip = False, 1, 0
+    byte_buf = bytearray()
+
+    def flush():
+        """Накопленные байты \\'hh → текст cp1251."""
+        if byte_buf:
+            if not skip:
+                out.append(byte_buf.decode("cp1251", "replace"))
+            byte_buf.clear()
+
+    first_in_group = False
+    for m in RTF_TOKEN_RE.finditer(data):
+        word, arg, hexb, sym, brace, plain = m.groups()
+        if hexb is None:
+            flush()
+        if brace == "{":
+            stack.append((skip, uc))
+            first_in_group = True
+            continue
+        if brace == "}":
+            skip, uc = stack.pop() if stack else (False, 1)
+            first_in_group = False
+            continue
+        if word is not None:
+            if first_in_group and word in RTF_SKIP_DEST:
+                skip = True
+            elif word == "u" and arg is not None:
+                n = int(arg)
+                if not skip:
+                    out.append(chr(n + 65536 if n < 0 else n))
+                pending_skip = uc            # символы-замены после \uN
+            elif word == "uc" and arg is not None:
+                uc = int(arg)
+            elif word in ("par", "line", "sect", "page", "row") and not skip:
+                out.append("\n")
+            elif word in ("tab", "cell") and not skip:
+                out.append("\t")
+            first_in_group = False
+            continue
+        if sym is not None:
+            if sym == "*" and first_in_group:
+                skip = True
+            elif sym in "\\{}" and not skip:
+                out.append(sym)
+            elif sym == "~" and not skip:
+                out.append(" ")
+            first_in_group = False
+            continue
+        if hexb is not None:
+            if pending_skip:
+                pending_skip -= 1
+            else:
+                byte_buf.append(int(hexb, 16))
+            continue
+        if plain is not None:
+            if pending_skip:
+                cut = min(pending_skip, len(plain))
+                plain, pending_skip = plain[cut:], pending_skip - cut
+            if plain and not skip:
+                out.append(plain)
+            first_in_group = False
+    flush()
+    return re.sub(r"[ \t]+\n", "\n", "".join(out))
+
+
 def read_source(path: str, file_name: Optional[str] = None) -> str:
-    """Текст акта из файла: HTML — :func:`html_to_text`, PDF — ``pdftotext`` (если нет — ``PyPDF2``), TXT — как есть.
+    """Текст акта из файла: HTML — :func:`html_to_text`, PDF — ``pdftotext`` (если нет — ``PyPDF2``), RTF —
+    :func:`rtf_to_text`, TXT — как есть.
 
     Args:
         path: Путь к файлу.
@@ -429,12 +535,15 @@ def read_source(path: str, file_name: Optional[str] = None) -> str:
             from PyPDF2 import PdfReader
 
             text = "\n".join((p.extract_text() or "") for p in PdfReader(path).pages)
+    elif ext == ".rtf" or raw[:5] == b"{\\rtf":
+        text = rtf_to_text(raw)
     elif ext in (".txt", ""):
         text = raw.decode("utf-8", "replace")
     else:
-        raise ValueError(f"Формат {ext} не поддерживается: нужен PDF, HTML или TXT сводной редакции")
+        raise ValueError(f"Формат {ext} не поддерживается: нужен PDF, HTML, RTF или TXT сводной редакции")
     if not text.strip():
-        raise ValueError("Текст не извлечён (скан без текстового слоя?)")
+        raise ValueError("Текст не извлечён: скан без текстового слоя (например, официальная публикация "
+                         "pravo.gov.ru) — нужна текстовая сводная редакция")
     return text
 
 
@@ -468,10 +577,16 @@ class LegalActsRepo:
         self.pool = pool
 
     async def same_edition(self, act_key: str, edition_date: str, text_sha256: str) -> Optional[int]:
-        """``id`` уже загруженной редакции с тем же текстом (повторная загрузка не пересчитывает эмбеддинги)."""
+        """``id`` уже загруженной редакции с тем же текстом и посчитанными эмбеддингами.
+
+        Редакция, сохранённая без эмбеддингов (сервис был недоступен), не считается загруженной: повторная загрузка
+        того же файла досчитает их.
+        """
         return await self.pool.fetchval(
-            "SELECT id FROM rm_legal_acts WHERE act_key = $1 AND edition_date = $2 AND text_sha256 = $3",
-            act_key, date.fromisoformat(edition_date), text_sha256)
+            "SELECT a.id FROM rm_legal_acts a WHERE a.act_key = $1 AND a.edition_date = $2 AND a.text_sha256 = $3 "
+            "AND EXISTS (SELECT 1 FROM ai_document_chunks c WHERE c.document_id = a.document_id AND c.chunker = $4 "
+            "AND c.embedding IS NOT NULL)",
+            act_key, date.fromisoformat(edition_date), text_sha256, CHUNKER)
 
     async def save_act(self, act: Dict[str, Any], document_id: Optional[int], source_name: Optional[str]) -> int:
         """Сохраняет редакцию акта и её нормы (нормы редакции перезаписываются).
