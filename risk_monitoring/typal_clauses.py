@@ -18,6 +18,19 @@
 
 Загрузка: ``getDocsByOrgRegionRequest`` (подсистема ``settings.TYPAL_SUBSYSTEM``, тип документа
 ``settings.TYPAL_DOCUMENT_TYPE``, регион — код ФНС) за дату; или XML вручную (``load_xml``).
+
+**Положения конкретных заказчиков** (решение 10.11.2026) — документ ``orderClause`` подсистемы ``POZ223``
+(:func:`parse_order_clause_xml`), хранятся в тех же таблицах с ``clause_type = 'customer'`` (миграция 015):
+
+* собственное положение — ``approveDate``, ``effectiveDate`` (с какой даты действует), ``purchaseMethod[]``,
+  файл «Положение …» и приказ;
+* присоединение к положению другой организации — ``headAgency`` (чьё положение), ``headRegistrationNumber``,
+  решение о присоединении (``numberDecision``, ``dateDecision``, ``textDecision``); файлы — положение головной
+  организации с приложениями.
+
+Заказчик — ``customer/mainInfo``. Положение заказчика на дату (:meth:`TypalRepo.customer_clause`) — версия
+с самой поздней датой применения не позже даты среди его собственных положений и типовых, в которых он указан;
+при равных датах собственное важнее типового.
 """
 import hashlib
 import re
@@ -88,6 +101,117 @@ def customer_agency(main: Dict[str, Any]) -> Dict[str, Optional[str]]:
         return {"agency_kind": "autonomous", "agency_level": main.get("autonomousAgencyType")}
     return {"agency_kind": agency_from_name(str(main.get("okopfName") or "") + " " + str(main.get("fullName") or "")),
             "agency_level": None}
+
+
+ORDER_KIND_NAME_RE = [
+    ("appendix", re.compile(r"^\s*приложени", re.I)),
+    ("order", re.compile(r"^\s*(изменени|приказ|решени|распоряжени|протокол|постановлени)", re.I)),
+    ("position", re.compile(r"положени", re.I)),
+]
+
+
+def order_file_kind(name: str, description: str = "") -> str:
+    """Вид файла положения заказчика по имени (затем описанию).
+
+    «Приложение 1 к Положению о закупках» — ``appendix`` (читается, но по пунктам не режется), «Изменения
+    в Положение…», «Приказ…», «Решение…» — ``order``, «Положение редакция на 10.11.2026» — ``position``.
+    """
+    for text in (name, description):
+        for kind, rx in ORDER_KIND_NAME_RE:
+            if rx.search(text or ""):
+                return kind
+    return "other"
+
+
+def parse_order_clause_xml(raw: bytes) -> List[Dict[str, Any]]:
+    """Разбирает XML ``orderClause`` — положение о закупке заказчика (собственное или присоединение).
+
+    Args:
+        raw: Байты XML.
+
+    Returns:
+        List[Dict[str, Any]]: Версии в формате :func:`parse_typal_xml` с ``clause_type = 'customer'``,
+        ``head_registration_number`` и решением о присоединении в ``data``.
+
+    Raises:
+        ValueError: Это не ``orderClause`` или в нём нет данных.
+    """
+    from risk_monitoring.xml_events import parse_xml
+
+    tag, _, body = parse_xml(raw)
+    if tag != "orderClause":
+        raise ValueError(f"ожидался orderClause, получен {tag}")
+    sha = hashlib.sha256(raw).hexdigest()
+    out = []
+    for item in _list((body.get("body") or {}).get("item")):
+        d = (item or {}).get("orderClauseData") or {}
+        if not d:
+            continue
+        cust = ((d.get("customer") or {}).get("mainInfo")) or {}
+        placer = ((d.get("placer") or {}).get("mainInfo")) or cust
+        head = ((d.get("headAgency") or {}).get("mainInfo")) or {}
+        customers = []
+        if cust.get("inn"):
+            customers.append({"inn": str(cust["inn"]).strip(), "kpp": str(cust.get("kpp") or "").strip(),
+                              "ogrn": cust.get("ogrn"), "name": cust.get("fullName"),
+                              "short_name": cust.get("shortName"), "region": cust.get("region"),
+                              **customer_agency(cust)})
+        files = []
+        for doc in _list((d.get("attachments") or {}).get("document")):
+            name = str(doc.get("fileName") or "")
+            descr = str(doc.get("description") or "")
+            files.append({"file_name": name, "description": descr, "url": doc.get("url"),
+                          "content_uid": doc.get("contentUid"), "kind": order_file_kind(name, descr),
+                          "agency_kind": None})
+        methods = [{"code": m.get("purchaseMethodCode"), "name": m.get("purchaseMethodName"),
+                    "electronic": str(m.get("digitalPurchase")).lower() == "true",
+                    "conditions": m.get("conditionsOfUse"),
+                    "application_days": m.get("submissionApplicationDate"),
+                    "work_days": str(m.get("workDays")).lower() == "true"} for m in _list(d.get("purchaseMethod"))]
+        try:
+            version = int(d.get("version"))
+        except (TypeError, ValueError):
+            version = 0
+        joined = bool(d.get("headRegistrationNumber") or head)
+        # с какой даты применяется: дата вступления в силу; для присоединения — дата решения; иначе — публикация
+        base = _date(d.get("effectiveDate")) or _date(d.get("dateDecision")) or _date(d.get("publicationDateTime"))
+        out.append({
+            "clause_type": "customer",
+            "guid": d.get("guid"), "registration_number": str(d.get("registrationNumber") or "").strip(),
+            "version": version, "name": (d.get("name") or "").strip(), "url_eis": d.get("urlEIS"),
+            "approve_date": _date(d.get("approveDate")) or _date(d.get("dateDecision")),
+            "use_for_base_date": base,
+            "place_date": d.get("publicationDateTime"),
+            "modification_reason": (d.get("modificationDescription") or "").strip() or None,
+            "creator": {"inn": placer.get("inn"), "kpp": placer.get("kpp"), "name": placer.get("fullName"),
+                        "short_name": placer.get("shortName")},
+            "region": cust.get("region"), "purchase_methods": methods, "customers": customers, "files": files,
+            "head_registration_number": str(d.get("headRegistrationNumber") or "").strip() or None,
+            "data": {
+                "joined": joined, "status": d.get("status"),
+                "head": {"inn": head.get("inn"), "kpp": head.get("kpp"), "name": head.get("fullName")} if head else None,
+                "decision": {"number": d.get("numberDecision"), "date": _date(d.get("dateDecision")),
+                             "text": d.get("textDecision")} if joined else None,
+                **{k: d.get(k) for k in ("approverName", "orderOfPurchase", "contractSignProcedure", "planChangeDate",
+                                         "competitiveIsElectronic", "applicationSupplyNeeded", "paymentPeriod")},
+            },
+            "xml_sha256": sha,
+        })
+    if not out:
+        raise ValueError("в orderClause нет данных положения")
+    return out
+
+
+def parse_clause_xml(raw: bytes) -> List[Dict[str, Any]]:
+    """``typalOrderClause`` или ``orderClause`` — по корневому тегу."""
+    from risk_monitoring.xml_events import parse_xml
+
+    tag = parse_xml(raw)[0]
+    if tag == "orderClause":
+        return parse_order_clause_xml(raw)
+    if tag == "typalOrderClause":
+        return parse_typal_xml(raw)
+    raise ValueError(f"ожидался typalOrderClause или orderClause, получен {tag}")
 
 
 def parse_typal_xml(raw: bytes) -> List[Dict[str, Any]]:
@@ -234,25 +358,28 @@ def split_points(text: str, limit: int = CHUNK_CHARS) -> List[Dict[str, Any]]:
 SQL_UPSERT_CLAUSE = """
 INSERT INTO rm_typal_clauses (registration_number, version, guid, name, url_eis, approve_date, use_for_base_date,
                               place_date, modification_reason, creator_inn, creator_name, region,
-                              purchase_methods, data, xml_sha256)
-VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $8::timestamptz, $9, $10, $11, $12, $13::jsonb, $14::jsonb, $15)
+                              purchase_methods, data, xml_sha256, clause_type, head_registration_number)
+VALUES ($1, $2, $3, $4, $5, $6::date, $7::date, $8::timestamptz, $9, $10, $11, $12, $13::jsonb, $14::jsonb, $15,
+        $16, $17)
 ON CONFLICT (registration_number, version) DO UPDATE SET
     guid = EXCLUDED.guid, name = EXCLUDED.name, url_eis = EXCLUDED.url_eis, approve_date = EXCLUDED.approve_date,
     use_for_base_date = EXCLUDED.use_for_base_date, place_date = EXCLUDED.place_date,
     modification_reason = EXCLUDED.modification_reason, creator_inn = EXCLUDED.creator_inn,
     creator_name = EXCLUDED.creator_name, region = EXCLUDED.region, purchase_methods = EXCLUDED.purchase_methods,
-    data = EXCLUDED.data, xml_sha256 = EXCLUDED.xml_sha256, loaded_at = NOW()
+    data = EXCLUDED.data, xml_sha256 = EXCLUDED.xml_sha256, clause_type = EXCLUDED.clause_type,
+    head_registration_number = EXCLUDED.head_registration_number, loaded_at = NOW()
 RETURNING id
 """
 
 SQL_CUSTOMER_CLAUSE = """
 SELECT c.id, c.registration_number, c.version, c.name, c.approve_date, c.use_for_base_date, c.creator_name,
-       c.modification_reason, c.url_eis, cu.agency_kind, cu.agency_level, cu.name AS customer_name
+       c.modification_reason, c.url_eis, c.clause_type, c.head_registration_number, c.data -> 'head' AS head,
+       cu.agency_kind, cu.agency_level, cu.name AS customer_name
 FROM rm_typal_clause_customers cu
 JOIN rm_typal_clauses c ON c.id = cu.clause_id
 WHERE cu.inn = $1 AND ($2::text IS NULL OR cu.kpp = $2 OR cu.kpp = '')
   AND (c.use_for_base_date IS NULL OR c.use_for_base_date <= $3::date)
-ORDER BY c.use_for_base_date DESC NULLS LAST, c.version DESC
+ORDER BY c.use_for_base_date DESC NULLS LAST, (c.clause_type = 'customer') DESC, c.version DESC
 LIMIT 1
 """
 
@@ -311,7 +438,8 @@ class TypalRepo:
                     pg_timestamp(clause.get("place_date")), clause.get("modification_reason"), clause["creator"].get("inn"),
                     clause["creator"].get("name"), clause.get("region"),
                     json.dumps(clause.get("purchase_methods") or [], ensure_ascii=False),
-                    json.dumps(clause.get("data") or {}, ensure_ascii=False), clause.get("xml_sha256"))
+                    json.dumps(clause.get("data") or {}, ensure_ascii=False), clause.get("xml_sha256"),
+                    clause.get("clause_type") or "typal", clause.get("head_registration_number"))
                 await conn.execute("DELETE FROM rm_typal_clause_customers WHERE clause_id = $1", cid)
                 await conn.executemany(
                     "INSERT INTO rm_typal_clause_customers (clause_id, inn, kpp, ogrn, name, agency_kind, agency_level, region) "
@@ -368,7 +496,7 @@ class TypalRepo:
                      for i, (c, e) in enumerate(zip(chunks, embeddings))])
 
     async def customer_clause(self, inn: str, kpp: Optional[str] = None, on: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Действующая на дату версия типового положения заказчика и его файл-положение.
+        """Действующее на дату положение заказчика (собственное ``orderClause`` или типовое) и его файл-положение.
 
         Args:
             inn: ИНН заказчика.
@@ -388,6 +516,10 @@ class TypalRepo:
                 "SELECT id, file_name, url, kind, agency_kind, document_id, status FROM rm_typal_clause_files "
                 "WHERE clause_id = $1 ORDER BY id", row["id"])]
         out = {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in dict(row).items()}
+        if isinstance(out.get("head"), str):
+            import json
+
+            out["head"] = json.loads(out["head"])
         out["files"] = files
         out["position"] = position_for(files, row["agency_kind"])
         return out

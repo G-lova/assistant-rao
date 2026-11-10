@@ -10,6 +10,11 @@
 
 Регион — код ФНС (две цифры: «34» — Волгоградская область). Если ``settings.TYPAL_REGIONS`` пуст, регионы берутся
 из закупок заказчиков на мониторинге (``dataset.owner.region``) окружения задачи.
+
+Положения заказчиков (``orderClause``, подсистема ``settings.ORDER_CLAUSE_SUBSYSTEM``) загружаются тем же запросом
+по региону и дате (``load_region(..., kind="customer")``). Их в регионе за день много, поэтому при
+``settings.ORDER_CLAUSE_ONLY_MONITORED`` сохраняются и читаются только положения заказчиков на мониторинге (ИНН —
+``queries/rm/monitored_customer_inns.sql``); остальные пропускаются (``stats.skipped_not_monitored``).
 """
 import hashlib
 import asyncio
@@ -62,7 +67,9 @@ class TypalLoader:
         emb = Config().get_embedding_config()
         self.embedding_model = emb.model
         self._emb_cfg = emb
-        self.stats: Dict[str, int] = {"xml": 0, "versions": 0, "files_read": 0, "files_failed": 0, "chunks": 0}
+        self.stats: Dict[str, int] = {"xml": 0, "versions": 0, "files_read": 0, "files_failed": 0, "chunks": 0,
+                                      "skipped_not_monitored": 0}
+        self.only_inns: Optional[set] = None   # фильтр положений заказчиков (monitored_inns)
 
     def _file_reader(self):
         """``FileReader`` с устойчивым клиентом модели (OCR сканов) — создаётся при первом файле."""
@@ -95,6 +102,23 @@ class TypalLoader:
             return []
         return sorted({str(r).strip().zfill(2) for r in df.get("region", []) if str(r or "").strip().isdigit()})
 
+    async def monitored_inns(self) -> set:
+        """ИНН заказчиков на мониторинге окружения (фильтр положений заказчиков); пусто — фильтр не применяется."""
+        if not self.environment:
+            return set()
+        from configs.config import Config
+        from configs.data_fetcher import DataFetcher
+        from risk_monitoring import rm_sql
+
+        db = Config().get_database_config(self.environment)
+        sql, b = rm_sql.render("monitored_customer_inns.sql")
+        try:
+            df = await DataFetcher(db.url, db.headers, self.http_manager).fetch_async_expertise_data(sql, bindings=b)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"ИНН заказчиков на мониторинге не получены: {type(e).__name__}: {e}")
+            return set()
+        return {str(v).strip() for v in df.get("inn", []) if str(v or "").strip()}
+
     async def _eis_pause(self) -> None:
         """Не чаще одного запроса к ЕИС в ``TYPAL_EIS_MIN_INTERVAL_SEC`` секунд (лимит ЕИС — 90 запросов в минуту
         на всех, кто ходит с этого адреса)."""
@@ -107,36 +131,40 @@ class TypalLoader:
                 await asyncio.sleep(wait)
         self._eis_last = time.monotonic()
 
-    async def load_region(self, region: str, exact_date: str) -> List[Dict[str, Any]]:
-        """Типовые положения региона, опубликованные или изменённые за дату.
+    async def load_region(self, region: str, exact_date: str, kind: str = "typal") -> List[Dict[str, Any]]:
+        """Типовые положения (или положения заказчиков) региона, опубликованные или изменённые за дату.
 
         Args:
             region: Код региона ФНС.
             exact_date: Дата ``ГГГГ-ММ-ДД``.
+            kind: ``typal`` — ``typalOrderClause``; ``customer`` — ``orderClause``.
 
         Returns:
             List[Dict[str, Any]]: Результаты по версиям (:meth:`load_xml`).
         """
-        progress.subject(f"Типовые положения, регион {region}, {exact_date}")
+        subsystem, doc_type, label = ((settings.ORDER_CLAUSE_SUBSYSTEM, settings.ORDER_CLAUSE_DOCUMENT_TYPE,
+                                       "Положения заказчиков") if kind == "customer" else
+                                      (settings.TYPAL_SUBSYSTEM, settings.TYPAL_DOCUMENT_TYPE, "Типовые положения"))
+        progress.subject(f"{label}, регион {region}, {exact_date}")
         for attempt in range(settings.TYPAL_EIS_LIMIT_RETRIES + 1):
             await self._eis_pause()
-            async with progress.step(f"запрос в ЕИС (getDocsByOrgRegionRequest, {settings.TYPAL_SUBSYSTEM})") as st:
-                res = await self.eis._parse_eis_soap_ip("getDocsByOrgRegionRequest", subsystem_type=settings.TYPAL_SUBSYSTEM,
+            async with progress.step(f"запрос в ЕИС (getDocsByOrgRegionRequest, {subsystem})") as st:
+                res = await self.eis._parse_eis_soap_ip("getDocsByOrgRegionRequest", subsystem_type=subsystem,
                                                         org_region=str(region), fz=223,
-                                                        document_type=settings.TYPAL_DOCUMENT_TYPE, exact_date=exact_date)
+                                                        document_type=doc_type, exact_date=exact_date)
                 st["detail"] = f"{res.get('status')}, файлов {len(res.get('files') or [])}"
             err = str(res.get("error") or "")
             if res.get("status") == "success" or not EIS_LIMIT_RE.search(err) or attempt == settings.TYPAL_EIS_LIMIT_RETRIES:
                 break
             # «Код 13: превышено количество допустимых запросов … 90 за 60 сек» — лимит ЕИС общий для всех запросов
             # с адреса (в т. ч. ночной загрузки внешней системы): ждём окно и повторяем (22.10.2026: 15 из 54 запросов)
-            logger.info(f"Типовые положения {region} за {exact_date}: лимит запросов ЕИС — пауза "
+            logger.info(f"{label} {region} за {exact_date}: лимит запросов ЕИС — пауза "
                         f"{settings.TYPAL_EIS_LIMIT_WAIT_SEC} с, повтор")
             await asyncio.sleep(settings.TYPAL_EIS_LIMIT_WAIT_SEC)
         if res.get("status") != "success":
             # «нет данных за дату» — обычный ответ ЕИС, а не сбой
             level = logger.info if NO_DATA_RE.search(err) else logger.warning
-            level(f"Типовые положения {region} за {exact_date}: {err[:300]}")
+            level(f"{label} {region} за {exact_date}: {err[:300]}")
             return []
         out = []
         for f in res.get("files") or []:
@@ -148,7 +176,7 @@ class TypalLoader:
                     raw = fh.read()
                 out += await self.load_xml(raw, source=f.get("filename"))
             except ValueError as e:
-                logger.info(f"{f.get('filename')}: не типовое положение ({e})")
+                logger.info(f"{f.get('filename')}: не положение о закупке ({e})")
             finally:
                 if os.path.exists(path):
                     os.unlink(path)
@@ -159,28 +187,35 @@ class TypalLoader:
         """Сохраняет версии положения из XML и читает его файлы.
 
         Args:
-            raw: Байты XML ``typalOrderClause``.
+            raw: Байты XML ``typalOrderClause`` или ``orderClause``.
             source: Имя файла (для журнала).
 
         Returns:
-            List[Dict[str, Any]]: ``registration_number``, ``version``, ``clause_id``, ``customers``, ``files``.
+            List[Dict[str, Any]]: ``registration_number``, ``version``, ``clause_type``, ``clause_id``, ``customers``,
+            ``files``.
 
         Raises:
-            ValueError: Это не ``typalOrderClause``.
+            ValueError: Это не ``typalOrderClause`` / ``orderClause``.
         """
-        clauses = typal_clauses.parse_typal_xml(raw)
+        clauses = typal_clauses.parse_clause_xml(raw)
         self.stats["xml"] += 1
         out = []
         for c in clauses:
-            progress.subject(f"Типовое положение {c['registration_number']} v{c['version']}")
+            ctype = c.get("clause_type") or "typal"
+            if ctype == "customer" and self.only_inns and not any(cu["inn"] in self.only_inns for cu in c["customers"]):
+                self.stats["skipped_not_monitored"] += 1
+                continue
+            label = "Положение заказчика" if ctype == "customer" else "Типовое положение"
+            progress.subject(f"{label} {c['registration_number']} v{c['version']}")
             async with progress.step("сохранение версии, заказчиков и списка файлов") as st:
                 cid = await self.typal.save_clause(c)
                 st["detail"] = f"заказчиков {len(c['customers'])}, файлов {len(c['files'])}"
             self.stats["versions"] += 1
             files = await self._read_files(cid) if self.read_files else []
-            logger.info(f"Типовое положение {c['registration_number']} v{c['version']} ({source}): заказчиков "
+            logger.info(f"{label} {c['registration_number']} v{c['version']} ({source}): заказчиков "
                         f"{len(c['customers'])}, файлов {len(c['files'])}, прочитано {sum(1 for f in files if f['status'] == 'done')}")
-            out.append({"registration_number": c["registration_number"], "version": c["version"], "clause_id": cid,
+            out.append({"registration_number": c["registration_number"], "version": c["version"], "clause_type": ctype,
+                        "head_registration_number": c.get("head_registration_number"), "clause_id": cid,
                         "name": c.get("name"), "use_for_base_date": c.get("use_for_base_date"),
                         "customers": len(c["customers"]), "files": files})
         return out

@@ -856,6 +856,7 @@ class AIFileAnalyzer:
         if not print_kind:
             risk_compact = _with_service_doc001(risk_compact, text, type_info.get("detected_type"),
                                                 "DOC-001" in (allowed or []))
+        await self._check_law(risk_compact, fz)
 
         prev_codes = await self._previous_codes(previous, prev_ctx, allowed) if previous else None
         pages = len({m.group(1) for m in PAGE_MARKER_RE.finditer(text)}) or None
@@ -881,6 +882,28 @@ class AIFileAnalyzer:
         self._add_lookup(ai, file_id)
         progress.note(f"анализ готов: режим {mode}, тип {type_info.get('detected_type')}, рисков {len(ai.get('risks') or [])}")
         return await self._finalize(file_id, document_id, ai)
+
+    async def _check_law(self, risk_compact: Dict[str, Any], fz: Any) -> None:
+        """Проверка норм рисков по текстам загруженных актов (``legal_refs``): ``law_check`` у риска.
+
+        Сбой проверки (нет таблиц до миграции 014, нет связи) не мешает анализу файла; после сбоя проверка до конца
+        прогона не повторяется.
+        """
+        if (not settings.LEGAL_REFS_CHECK_ENABLED or not risk_compact.get("risks")
+                or getattr(self, "_law_disabled", False)):
+            return
+        try:
+            from risk_monitoring.legal_refs import LawChecker
+
+            if getattr(self, "_law_checker", None) is None:
+                self._law_checker = LawChecker(self.repo.pool)
+            counts = await self._law_checker.annotate(risk_compact["risks"], fz)
+            if counts.get("not_found") or counts.get("lost_force"):
+                progress.note(f"нормы модели не найдены в тексте закона: {counts.get('not_found', 0)}, "
+                              f"утратили силу: {counts.get('lost_force', 0)}")
+        except Exception as e:  # noqa: BLE001
+            logger.info(f"Проверка норм не выполнена (до конца прогона отключена): {type(e).__name__}: {e}")
+            self._law_disabled = True
 
     async def _drop_typical(self, risk: Optional[Dict[str, Any]], document_id: int,
                             row: Dict[str, Any]) -> tuple:

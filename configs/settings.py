@@ -190,6 +190,10 @@ BOILERPLATE_MIN_SOURCES = 3
 # ставятся: решает правило по данным ЕИС (в закупке — drop_rule_covered)
 FILE_DROP_RULE_COVERED = True   # снимать только при 44-ФЗ и посчитанном нулевом значении правила (rule_decision)
 
+# Проверка норм, на которые ссылается модель (поле law), по загруженным редакциям актов (legal_refs, миграция 014):
+# к риску добавляется law_check (found / lost_force / not_found); балл не меняется. Без загруженных актов — пропуск
+LEGAL_REFS_CHECK_ENABLED = True
+
 # Анализировать ли файл прошлой редакции, если уже известна новая (superseded_by); в режиме отладки (force) —
 # анализируется всегда
 ANALYZE_SUPERSEDED = False
@@ -392,6 +396,13 @@ TYPAL_LOOKBACK_DAYS = 3                # ежедневная загрузка �
 TYPAL_EIS_MIN_INTERVAL_SEC = 1.5
 TYPAL_EIS_LIMIT_WAIT_SEC = 61
 TYPAL_EIS_LIMIT_RETRIES = 2
+
+# Положения о закупке конкретных заказчиков (orderClause, POZ223): тот же запрос по региону и дате, что и типовые
+ORDER_CLAUSE_LOAD_ENABLED = True
+ORDER_CLAUSE_SUBSYSTEM = "POZ223"
+ORDER_CLAUSE_DOCUMENT_TYPE = "orderClause"
+# сохранять только положения заказчиков на мониторинге (иначе — все положения региона за день с чтением файлов)
+ORDER_CLAUSE_ONLY_MONITORED = True
 
 # Журнал воркеров Celery в файл (logs/celery_rm.log, logs/celery.log, logs/celery_beat.log) с ротацией: переживает
 # пересоздание контейнера (вывод `docker logs` — нет)
