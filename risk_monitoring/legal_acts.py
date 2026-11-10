@@ -54,7 +54,9 @@ DECREE_HEAD_RE = re.compile(r"ПОСТАНОВЛЕНИЕ\s*\n\s*от\s+(\d{1,2})
                             re.I)
 EDITION_RE = re.compile(r"ред\.?\s*от\s*(\d{2})[.\-_](\d{2})[.\-_](\d{4})"
                         r"|(?:действующая\s+)?редакци[яи]\s*\(с\s*(\d{2})\.(\d{2})\.(\d{4})\)", re.I)
-AMEND_DATE_RE = re.compile(r"от\s+(\d{2})\.(\d{2})\.(\d{4})\s+N")
+# дата изменяющего акта в перечне «(в ред. …)»: федеральный закон или постановление («от 04.08.2026 N 293-ФЗ»,
+# «от 29.09.2026 N 1255»); постановления Конституционного Суда («N 2-П», «N 257-О») редакцию не меняют
+AMEND_DATE_RE = re.compile(r"от\s+(\d{2})\.(\d{2})\.(\d{4})\s+N\s*\d+(?:-ФЗ)?(?![\d\-]*-[ПО]\b)")
 
 # известные акты: (номер, дата принятия) → ключ и вид. Номер федерального закона уникален только в пределах года:
 # «223-ФЗ» от 18.07.2011 — закупки, от 13.07.2015 — СРО финансового рынка.
@@ -167,7 +169,12 @@ def identify(text: str, file_name: Optional[str] = None, edition_date: Optional[
         info["edition_date"], info["edition_source"] = f"{y}-{mo}-{d}", "stated"
     else:
         block = head.split("Список изменяющих документов", 1)
-        dates = [f"{y}-{mo}-{d}" for d, mo, y in AMEND_DATE_RE.findall(block[1][:4000])] if len(block) > 1 else []
+        # перечень — до первой статьи / раздела / главы (у НК ч. 1 — больше 5 тыс. символов)
+        amend = re.split(r"\n\s*(?:Статья\s+\d|Раздел\s+[IVXLC\d]|Глава\s+\d)", block[1], maxsplit=1)[0] if len(block) > 1 else ""
+        if len(block) > 1 and len(amend) == len(block[1]):
+            amend = (text.split("Список изменяющих документов", 1)[1])[:30000]
+            amend = re.split(r"\n\s*(?:Статья\s+\d|Раздел\s+[IVXLC\d]|Глава\s+\d)", amend, maxsplit=1)[0]
+        dates = [f"{y}-{mo}-{d}" for d, mo, y in AMEND_DATE_RE.findall(amend)]
         if not dates:
             # RTF: перечень изменяющих законов — абзац «(в ред. Федеральных законов от … )» под заголовком (у НК
             # ч. 2 — 18 тыс. символов)
