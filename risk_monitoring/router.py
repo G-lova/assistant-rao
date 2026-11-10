@@ -26,6 +26,9 @@ from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field, validator
 
 from configs.config import Config
+from configs.logger import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/risk-monitoring", tags=["risk-monitoring"])
 
@@ -364,6 +367,9 @@ async def upload_legal_act(request: Request, name: Optional[str] = None, edition
         act = legal_acts.parse_act(text, name, edition_date)
     except (ValueError, OSError) as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001 — иначе APIKeyMiddleware отвечает «Internal server error during authentication»
+        logger.exception(f"Разбор нормативного акта {name} не выполнен")
+        raise HTTPException(status_code=422, detail=f"Разбор не выполнен: {type(e).__name__}: {str(e)[:300]}")
     finally:
         os.unlink(path)
     task = rm_legal_act_task.apply_async(kwargs={"text": text, "source_name": name, "edition_date": edition_date},
