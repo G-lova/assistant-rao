@@ -234,13 +234,42 @@ def _model_only(r: Dict[str, Any]) -> bool:
     return bool(srcs) and srcs <= AI_ONLY_SOURCES | {"version_diff"}
 
 
+def apply_findings(risk: Dict[str, Any], findings: Sequence[Dict[str, Any]]) -> None:
+    """Несколько находок одного кода: ``findings`` (номер, описание, норма), описание — нумерованным списком,
+    нормы — без повторов. Одна находка — риск как раньше (``findings`` из одной записи, у доказательств ``finding_no = 1``).
+
+    Описание с несколькими находками — строки «1. …», «2. …» через перевод строки (показывать с сохранением
+    переводов строк); доказательство относится к находке по ``evidence[].finding_no``.
+    """
+    clean = [{k: v for k, v in f.items() if not k.startswith("_")} for f in findings]
+    if not clean:
+        return
+    risk["findings"] = clean
+    if len(clean) > 1:
+        # доказательства по очереди из каждой находки — чтобы обрезка до MAX_EVIDENCE_PER_RISK не оставила находку
+        # без цитаты
+        groups: Dict[Any, List[Any]] = {}
+        for ev in risk.get("evidence") or []:
+            groups.setdefault(ev.get("finding_no") if isinstance(ev, dict) else None, []).append(ev)
+        ordered: List[Any] = []
+        while any(groups.values()):
+            for g in groups.values():
+                if g:
+                    ordered.append(g.pop(0))
+        risk["evidence"] = ordered
+        risk["description"] = f"Находок: {len(clean)}.\n" + "\n".join(f"{f['no']}. {f['description']}" for f in clean)
+        laws = list(dict.fromkeys(str(f["law"]).strip() for f in clean if f.get("law")))
+        if laws:
+            risk["law"] = "; ".join(laws)
+
+
 def merge_risks(*lists: Iterable[Dict[str, Any]], fz: Any = None) -> List[Dict[str, Any]]:
     """Объединяет списки рисков по ``rule_id`` и дополняет их сведениями каталога.
 
     Уровень — максимум по рискам правил (реестр, правило, комплект, аналитика), если такие есть: ИИ работает поверх
     правил и не повышает их уровень (событие «цена контракта изменена на 3 %» — правило 0,5, модель ставила 0,9;
     03.11.2026). Если правил по коду нет — максимум по рискам модели. Уверенность — максимум;
-    описания — первое непустое (остальные не теряются в evidence);
+    разные описания — находки (:func:`apply_findings`): ``findings``, нумерованное описание, ``evidence[].finding_no``;
     цитаты и действия эксперта — объединение без повторов; ``sources`` — все источники риска, ``source`` — главный
     из них (:func:`primary_source`).
     Риски, неприменимые к закону закупки (ст. 111 44-ФЗ для 223-ФЗ), отбрасываются.
@@ -254,11 +283,31 @@ def merge_risks(*lists: Iterable[Dict[str, Any]], fz: Any = None) -> List[Dict[s
     """
     merged: Dict[str, Dict[str, Any]] = {}
     rule_levels: Dict[str, float] = {}
+    findings: Dict[str, List[Dict[str, Any]]] = {}
     for lst in lists:
         for r in lst or []:
             code = r.get("rule_id")
             if not code:
                 continue
+            # находка: описание и норма этого риска; доказательства помечаются номером своей находки — иначе при
+            # объединении нескольких находок одного кода описание оставалось только у первой (11.11.2026, DOC-007:
+            # 5 цитат про наименование, сроки и цену при описании только про наименование)
+            r = dict(r)
+            desc = str(r.get("description") or "").strip()
+            if desc:
+                fl = findings.setdefault(code, [])
+                key = " ".join(desc.lower().split())
+                no = next((f["no"] for f in fl if f["_key"] == key), None)
+                if no is None:
+                    no = len(fl) + 1
+                    fl.append({"no": no, "description": desc, "law": r.get("law"), "verification_needed": [],
+                               "_key": key})
+                f = fl[no - 1]
+                for v in as_text_list(r.get("verification_needed")):
+                    if v not in f["verification_needed"]:
+                        f["verification_needed"].append(v)
+                r["evidence"] = [({**ev, "finding_no": no} if isinstance(ev, dict) and "finding_no" not in ev else ev)
+                                 for ev in (r.get("evidence") or [])]
             if not _model_only(r) and (r.get("level") or 0) > 0:
                 rule_levels[code] = max(rule_levels.get(code, 0.0), float(r.get("level") or 0))
             cur = merged.get(code)
@@ -295,6 +344,7 @@ def merge_risks(*lists: Iterable[Dict[str, Any]], fz: Any = None) -> List[Dict[s
     for r in out:
         if r["rule_id"] in rule_levels:
             r["level"] = rule_levels[r["rule_id"]]
+        apply_findings(r, findings.get(r["rule_id"]) or [])
         r["evidence"] = r["evidence"][:MAX_EVIDENCE_PER_RISK]
         r["source"] = primary_source(r["sources"])   # колонка source в risk_monitoring_document_risks
         apply_catalog(r, fz)

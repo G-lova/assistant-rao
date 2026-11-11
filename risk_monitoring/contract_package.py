@@ -161,30 +161,31 @@ def _g(d: Dict[str, Any], *path: str) -> Any:
 
 
 # ------------------------------------------------------------------ паспорт
-def stage(dataset: Dict[str, Any]) -> str:
-    """Стадия закупки по ``dataset``: ``notice`` / ``contract`` / ``execution`` / ``completed`` / ``terminated``."""
-    if _g(dataset, "procedure", "term_code") or _g(dataset, "procedure", "term_date"):
-        return "terminated"
-    if _g(dataset, "ispolnenie", "d_contr_fact") or flag(_g(dataset, "procedure", "final_stage")):
-        return "completed"
-    if _g(dataset, "procedure", "stage_start") or _g(dataset, "procedure", "paid_sum") or _g(dataset, "procedure", "acc_doc_num"):
-        return "execution"
-    if _g(dataset, "contract_details", "num_contr"):
-        return "contract"
-    return "notice"
+def stage(dataset: Dict[str, Any], xmls: Sequence[Dict[str, Any]] = ()) -> str:
+    """Стадия закупки (``purchase_status.stage``): ``notice`` / ``cancelled`` / ``failed`` / ``contract`` /
+    ``execution`` / ``completed`` / ``terminated`` / ``annulled``."""
+    from risk_monitoring import purchase_status
+
+    return purchase_status.stage(dataset, xmls)["stage"]
 
 
-def build_passport(card: Dict[str, Any], dataset: Dict[str, Any], files: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+def build_passport(card: Dict[str, Any], dataset: Dict[str, Any], files: Sequence[Dict[str, Any]],
+                   xmls: Sequence[Dict[str, Any]] = ()) -> Dict[str, Any]:
     """Паспорт закупки/контракта — основа будущей экспертизы.
 
     Args:
         card: Строка ``risk_monitoring_contracts`` (``id``, ``number``, ``fz_type``, ``organisation_id``).
         dataset: ``dataset`` карточки.
         files: Файлы закупки (``id``, ``file_name``, ``detected_type``).
+        xmls: XML закупки с событиями — стадия (отмена, неудача, расторжение) и наложенные состояния
+            (приостановка по жалобе), ``purchase_status``.
 
     Returns:
         Dict[str, Any]: Паспорт.
     """
+    from risk_monitoring import purchase_status
+
+    st = purchase_status.stage(dataset, xmls)
     nmck, price = num(_g(dataset, "izvejenie", "nmck")), num(_g(dataset, "ispolnenie", "contr_zena"))
     return {
         "card_id": card.get("id"),
@@ -193,7 +194,9 @@ def build_passport(card: Dict[str, Any], dataset: Dict[str, Any], files: Sequenc
         "ikz": _g(dataset, "izvejenie", "ikz"),
         "law": f"{card.get('fz_type') or 44}-ФЗ",
         "fz": risk_catalog.normalize_fz(card.get("fz_type")),
-        "stage": stage(dataset),
+        "stage": st["stage"],
+        "stage_basis": st["basis"],
+        "flags": purchase_status.flags(xmls, st["stage"]),
         "method_code": _g(dataset, "izvejenie", "vidz_code"),
         "method": _g(dataset, "izvejenie", "vidz"),
         "subject": _g(dataset, "contract_details", "predmet"),
@@ -936,10 +939,13 @@ def input_hash(*parts: Any) -> str:
 def default_resume(p: Dict[str, Any], prof: Dict[str, Any], risks: Sequence[Dict[str, Any]],
                    events: Sequence[Dict[str, Any]]) -> str:
     """Резюме закупки шаблоном (без модели)."""
-    stage_names = {"notice": "определение поставщика", "contract": "контракт заключён", "execution": "исполнение",
-                   "completed": "исполнен", "terminated": "расторгнут"}
+    from risk_monitoring.purchase_status import STAGE_NAMES as stage_names
+
     parts = [f"Закупка № {p.get('purchase_number')} ({p.get('law')}), «{(p.get('subject') or '')[:150]}»; "
              f"стадия: {stage_names.get(p.get('stage'), p.get('stage'))}."]
+    for key, fl in (p.get("flags") or {}).items():
+        since = fl.get("since") or fl.get("last")
+        parts.append(f"{fl.get('title') or key}" + (f" (с {since})" if since else "") + ".")
     if p.get("nmck"):
         parts.append(f"НМЦК {money(p['nmck'])} руб"
                      + (f", цена контракта {money(p['contract_price'])} руб" if p.get("contract_price") else "")
@@ -1047,12 +1053,16 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
     if settings is None:
         from configs import settings
     dataset = as_json(card.get("dataset")) or {}
-    p = build_passport(card, dataset, files)
+    p = build_passport(card, dataset, files, xmls)
     fz = p["fz"]
     comp = completeness(p, files)
     cons = consistency(p, files, settings.CONSISTENCY_TOLERANCE)
     matches = registry_matches(black, p["supplier"], as_date(p["dates"]["contract"]))
     rnp_found = rnp_matches(rnp, p["supplier"], as_date(p["dates"]["contract"]))
+    # наложенные состояния — с проверками контрольных органов и РНП (их нет при сборке паспорта)
+    from risk_monitoring import purchase_status
+
+    p["flags"] = purchase_status.flags(xmls, p["stage"], checks, p.get("purchase_number"), rnp_found)
     dropped: List[Dict[str, Any]] = []
     f_risks, confirmed = file_risks(files, statuses, dropped)
     f_risks = drop_security_within_law(f_risks, p, confirmed, dropped)
