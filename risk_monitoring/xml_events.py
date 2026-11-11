@@ -818,7 +818,7 @@ def classify(tag: str, version: Optional[int], has_previous: bool, changes: Sequ
         "eis_version": version,
         # для статуса закупки (purchase_status): приостановка / возобновление и итог жалобы — в событии, т. к.
         # анализ закупки читает из XML только $.event
-        **{k: facts[k] for k in ("suspension_action", "complaint_result") if facts.get(k)},
+        **{k: facts[k] for k in ("suspension_action", "complaint_result", "complaint_number") if facts.get(k)},
     }
 
 

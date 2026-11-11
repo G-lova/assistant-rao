@@ -196,7 +196,7 @@ def build_passport(card: Dict[str, Any], dataset: Dict[str, Any], files: Sequenc
         "fz": risk_catalog.normalize_fz(card.get("fz_type")),
         "stage": st["stage"],
         "stage_basis": st["basis"],
-        "flags": purchase_status.flags(xmls),
+        "flags": purchase_status.flags(xmls, st["stage"]),
         "method_code": _g(dataset, "izvejenie", "vidz_code"),
         "method": _g(dataset, "izvejenie", "vidz"),
         "subject": _g(dataset, "contract_details", "predmet"),
@@ -943,9 +943,9 @@ def default_resume(p: Dict[str, Any], prof: Dict[str, Any], risks: Sequence[Dict
 
     parts = [f"Закупка № {p.get('purchase_number')} ({p.get('law')}), «{(p.get('subject') or '')[:150]}»; "
              f"стадия: {stage_names.get(p.get('stage'), p.get('stage'))}."]
-    susp = (p.get("flags") or {}).get("suspended")
-    if susp:
-        parts.append(f"Закупка приостановлена по жалобе с {susp.get('since') or 'даты, не указанной в ЕИС'}.")
+    for key, fl in (p.get("flags") or {}).items():
+        since = fl.get("since") or fl.get("last")
+        parts.append(f"{fl.get('title') or key}" + (f" (с {since})" if since else "") + ".")
     if p.get("nmck"):
         parts.append(f"НМЦК {money(p['nmck'])} руб"
                      + (f", цена контракта {money(p['contract_price'])} руб" if p.get("contract_price") else "")
@@ -1059,6 +1059,10 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
     cons = consistency(p, files, settings.CONSISTENCY_TOLERANCE)
     matches = registry_matches(black, p["supplier"], as_date(p["dates"]["contract"]))
     rnp_found = rnp_matches(rnp, p["supplier"], as_date(p["dates"]["contract"]))
+    # наложенные состояния — с проверками контрольных органов и РНП (их нет при сборке паспорта)
+    from risk_monitoring import purchase_status
+
+    p["flags"] = purchase_status.flags(xmls, p["stage"], checks, p.get("purchase_number"), rnp_found)
     dropped: List[Dict[str, Any]] = []
     f_risks, confirmed = file_risks(files, statuses, dropped)
     f_risks = drop_security_within_law(f_risks, p, confirmed, dropped)
