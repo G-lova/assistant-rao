@@ -70,6 +70,9 @@ class TypalLoader:
         self.stats: Dict[str, int] = {"xml": 0, "versions": 0, "files_read": 0, "files_failed": 0, "chunks": 0,
                                       "skipped_not_monitored": 0}
         self.only_inns: Optional[set] = None   # фильтр положений заказчиков (monitored_inns)
+        # дозагрузка за период: положения заказчиков вне only_inns сохраняются без файлов (реквизиты дешёвые и
+        # пригодятся — новые организации, сверка), а не пропускаются
+        self.keep_others_metadata = False
 
     def _file_reader(self):
         """``FileReader`` с устойчивым клиентом модели (OCR сканов) — создаётся при первом файле."""
@@ -161,6 +164,9 @@ class TypalLoader:
             logger.info(f"{label} {region} за {exact_date}: лимит запросов ЕИС — пауза "
                         f"{settings.TYPAL_EIS_LIMIT_WAIT_SEC} с, повтор")
             await asyncio.sleep(settings.TYPAL_EIS_LIMIT_WAIT_SEC)
+        # итог запроса — для журнала дозагрузки (clause_backfill): «нет данных» не повторяется, сбой — повторяется
+        self.last_eis = {"status": "success" if res.get("status") == "success" else
+                         ("no_data" if NO_DATA_RE.search(err) else "error"), "error": err[:300] or None}
         if res.get("status") != "success":
             # «нет данных за дату» — обычный ответ ЕИС, а не сбой
             level = logger.info if NO_DATA_RE.search(err) else logger.warning
@@ -202,7 +208,9 @@ class TypalLoader:
         out = []
         for c in clauses:
             ctype = c.get("clause_type") or "typal"
-            if ctype == "customer" and self.only_inns and not any(cu["inn"] in self.only_inns for cu in c["customers"]):
+            ours = not (ctype == "customer" and self.only_inns
+                        and not any(cu["inn"] in self.only_inns for cu in c["customers"]))
+            if not ours and not self.keep_others_metadata:
                 self.stats["skipped_not_monitored"] += 1
                 continue
             label = "Положение заказчика" if ctype == "customer" else "Типовое положение"
@@ -211,7 +219,9 @@ class TypalLoader:
                 cid = await self.typal.save_clause(c)
                 st["detail"] = f"заказчиков {len(c['customers'])}, файлов {len(c['files'])}"
             self.stats["versions"] += 1
-            files = await self._read_files(cid) if self.read_files else []
+            files = await self._read_files(cid) if self.read_files and ours else []
+            if not ours:
+                self.stats["saved_metadata_only"] = self.stats.get("saved_metadata_only", 0) + 1
             logger.info(f"{label} {c['registration_number']} v{c['version']} ({source}): заказчиков "
                         f"{len(c['customers'])}, файлов {len(c['files'])}, прочитано {sum(1 for f in files if f['status'] == 'done')}")
             out.append({"registration_number": c["registration_number"], "version": c["version"], "clause_type": ctype,
@@ -219,6 +229,28 @@ class TypalLoader:
                         "name": c.get("name"), "use_for_base_date": c.get("use_for_base_date"),
                         "customers": len(c["customers"]), "files": files})
         return out
+
+    async def read_latest_files(self, inns: Optional[set] = None) -> Dict[str, int]:
+        """Читает файлы только последних версий положений (после дозагрузки без файлов).
+
+        Args:
+            inns: Положения заказчиков — только с этими ИНН; типовые — все.
+
+        Returns:
+            Dict[str, int]: ``clauses`` — версий обработано, ``files`` — файлов прочитано.
+        """
+        rows = await self.repo.pool.fetch(
+            """
+            SELECT DISTINCT ON (c.registration_number) c.id, c.clause_type
+            FROM rm_typal_clauses c
+            WHERE c.clause_type = 'typal' OR $1::text[] IS NULL OR EXISTS (
+                SELECT 1 FROM rm_typal_clause_customers cu WHERE cu.clause_id = c.id AND cu.inn = ANY($1::text[]))
+            ORDER BY c.registration_number, c.version DESC
+            """, sorted(inns) if inns else None)
+        n_files = 0
+        for r in rows:
+            n_files += sum(1 for f in await self._read_files(int(r["id"])) if f["status"] == "done")
+        return {"clauses": len(rows), "files": n_files}
 
     async def _read_files(self, clause_id: int) -> List[Dict[str, Any]]:
         """Скачивает и читает файлы версии без текста; положения режет по пунктам."""
