@@ -209,8 +209,10 @@ def _suspended(events: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
                  for e in later)
     # XML без action (разобраны до 11.11.2026): открытой считаем, только если после неё ничего не было
     if not closed and (s["action"] or later == []):
-        return {"since": s["at"][:10] or None, "xml_id": s["xml_id"], "action": s["action"],
-                "title": "Закупка приостановлена по жалобе"}
+        # action — фраза для человека (подсказка дашборда), код ЕИС — action_code
+        return {"since": s["at"][:10] or None, "xml_id": s["xml_id"],
+                "action": "приостановлено определение поставщика" if s["action"] else None,
+                "action_code": s["action"], "title": "Закупка приостановлена по жалобе"}
     return None
 
 
