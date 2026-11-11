@@ -552,6 +552,9 @@ def complaint_facts(tag: str, body: Dict[str, Any]) -> Dict[str, Any]:
         or _first(body, ["registrationNumber"], path_re=r"complaint", pred=lambda v: COMPLAINT_NUMBER_RE.fullmatch(v)),
         "complaint_target": next(iter(indicted), None) if indicted else None,
         "complaint_subject": _first(body, ["shortName"], path_re=r"appealActionInfo"),
+        # tenderSuspension: action — SUSPEND (приостановка закупки) / REOPENING (возобновление), 11.11.2026
+        "suspension_action": (str(body.get("action")).upper() if tag == "tenderSuspension" and body.get("action")
+                              else None),
     }
     if not f["complaint_target"]:
         subj = next((v for p, k, v in walk(body) if k == "subjectComplaint" and isinstance(v, dict)), None)
@@ -813,6 +816,9 @@ def classify(tag: str, version: Optional[int], has_previous: bool, changes: Sequ
         "previous_missing": bool(not first and not has_previous),
         "xml_tag": tag,
         "eis_version": version,
+        # для статуса закупки (purchase_status): приостановка / возобновление и итог жалобы — в событии, т. к.
+        # анализ закупки читает из XML только $.event
+        **{k: facts[k] for k in ("suspension_action", "complaint_result") if facts.get(k)},
     }
 
 
