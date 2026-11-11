@@ -888,7 +888,8 @@ class DailyRun:
                             from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
 
                             fa = AIFileAnalyzer(self.http_manager, self.environment, self.repo,
-                                                push_results=self.push, run_cache=cache)
+                                                push_results=self.push, run_cache=cache,
+                                                concurrency=settings.RM_FILE_CONCURRENCY)
                         res = await bounded(fa.analyze_ids(ids))
                         _add_counts(st_files, self._counts(res))
                         file_results.update({int(r["file_id"]): slim_file(r["ai_analysis"]) for r in res
@@ -971,7 +972,7 @@ class DailyRun:
         from risk_monitoring.xml_event_analyzer import XmlEventAnalyzer
 
         xa = XmlEventAnalyzer(self.http_manager, self.environment, push_results=self.push, use_llm=self.use_llm,
-                              results_repo=self.repo, run_cache=cache)
+                              results_repo=self.repo, run_cache=cache, concurrency=settings.RM_EVENT_CONCURRENCY)
         if settings.DAILY_EVENT_LLM_OWN_ONLY:
             xa.llm_filter = await self._own_filter(cache)
 

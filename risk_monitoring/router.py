@@ -6,7 +6,10 @@
 * ``POST /risk-monitoring/organisations/analysis`` — аналитика организации как заказчика и поставщика
   (принимается и написание ``/organizations/analysis``);
 * ``POST /risk-monitoring/typal-clauses/load`` и ``/typal-clauses/xml`` — загрузка типовых положений (223-ФЗ);
-* ``GET /risk-monitoring/typal-clauses/customer/{inn}`` — типовое положение заказчика;
+* ``GET /risk-monitoring/typal-clauses/customer/{inn}`` — положение заказчика (собственное или типовое);
+* ``POST /risk-monitoring/legal-acts`` — загрузка редакции нормативного акта (PDF / HTML / TXT);
+  ``GET /risk-monitoring/legal-acts`` — загруженные редакции; ``GET /risk-monitoring/legal-acts/check`` — проверка
+  ссылки на норму;
 * ``POST /risk-monitoring/daily`` — ежедневный прогон за дату выгрузки и сводка; ``GET /risk-monitoring/daily/{date}`` —
   готовая сводка;
 * ``POST /risk-monitoring/summary/{week|month}`` — сводка за неделю / месяц из ежедневных сводок;
@@ -23,6 +26,9 @@ from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field, validator
 
 from configs.config import Config
+from configs.logger import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/risk-monitoring", tags=["risk-monitoring"])
 
@@ -201,11 +207,21 @@ class TypalLoadRequest(BaseModel):
             на мониторинге.
         dates: Даты выгрузки ``ГГГГ-ММ-ДД``; пусто — последние ``settings.TYPAL_LOOKBACK_DAYS`` дней.
         read_files: Скачивать и читать файлы положений.
+        kinds: ``typal`` (типовые, ``typalOrderClause``) и / или ``customer`` (положения заказчиков на мониторинге,
+            ``orderClause``); пусто — оба (``customer`` — при ``ORDER_CLAUSE_LOAD_ENABLED``).
     """
 
     regions: List[str] = Field(default_factory=list)
     dates: List[str] = Field(default_factory=list, max_items=93)
     read_files: bool = True
+    kinds: List[str] = Field(default_factory=list)
+
+    @validator("kinds", each_item=True)
+    def _check_kind(cls, v: str) -> str:
+        """Вид положения — typal или customer."""
+        if v not in ("typal", "customer"):
+            raise ValueError("kinds: typal или customer")
+        return v
 
     @validator("regions", each_item=True)
     def _check_region(cls, v: str) -> str:
@@ -238,13 +254,14 @@ async def load_typal_clauses(req: TypalLoadRequest, x_api_database: str = Header
 
     task = rm_typal_clauses_task.apply_async(
         kwargs={"environment": x_api_database, "regions": req.regions or None, "dates": req.dates or None,
-                "read_files": req.read_files}, queue="risk_monitoring")
+                "read_files": req.read_files, "kinds": req.kinds or None}, queue="risk_monitoring")
     return {"task_id": task.id, "status": "queued"}
 
 
 @router.post("/typal-clauses/xml", status_code=status.HTTP_202_ACCEPTED)
 async def upload_typal_clause(request: Request, read_files: bool = True):
-    """Ставит в очередь загрузку типового положения из XML ``typalOrderClause`` (тело запроса — сам XML).
+    """Ставит в очередь загрузку положения из XML ``typalOrderClause`` или ``orderClause`` (положение заказчика;
+    тело запроса — сам XML).
 
     Args:
         request: Запрос; тело — XML (до 30 МБ).
@@ -254,7 +271,7 @@ async def upload_typal_clause(request: Request, read_files: bool = True):
         dict: ``task_id``, реестровый номер и версия.
 
     Raises:
-        HTTPException: 400 — не ``typalOrderClause``; 413 — больше 30 МБ.
+        HTTPException: 400 — не ``typalOrderClause`` / ``orderClause``; 413 — больше 30 МБ.
     """
     import base64
 
@@ -265,19 +282,22 @@ async def upload_typal_clause(request: Request, read_files: bool = True):
     if len(raw) > 30 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="XML больше 30 МБ")
     try:
-        clauses = typal_clauses.parse_typal_xml(raw)
+        clauses = typal_clauses.parse_clause_xml(raw)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     task = rm_typal_clauses_task.apply_async(
         kwargs={"xml_base64": base64.b64encode(raw).decode("ascii"), "read_files": read_files}, queue="risk_monitoring")
     return {"task_id": task.id, "status": "queued",
             "versions": [{"registration_number": c["registration_number"], "version": c["version"],
+                          "clause_type": c.get("clause_type") or "typal",
+                          "head_registration_number": c.get("head_registration_number"),
                           "customers": len(c["customers"]), "files": len(c["files"])} for c in clauses]}
 
 
 @router.get("/typal-clauses/customer/{inn}")
 async def customer_typal_clause(inn: str, kpp: Optional[str] = None, on: Optional[str] = None):
-    """Типовое положение, обязательное для заказчика: действующая на дату редакция и файл-положение по типу учреждения.
+    """Положение о закупке заказчика на дату: собственное (``orderClause``, в т. ч. присоединение к положению другой
+    организации) или типовое, в котором он указан, — с самой поздней датой применения; файл-положение.
 
     Args:
         inn: ИНН заказчика.
@@ -285,10 +305,11 @@ async def customer_typal_clause(inn: str, kpp: Optional[str] = None, on: Optiona
         on: Дата ``ГГГГ-ММ-ДД`` (по умолчанию сегодня).
 
     Returns:
-        dict: Реквизиты редакции, ``agency_kind`` заказчика, ``files``, ``position``.
+        dict: Реквизиты редакции, ``clause_type`` (``typal`` / ``customer``), ``head`` (чьё положение при
+        присоединении), ``agency_kind`` заказчика, ``files``, ``position``.
 
     Raises:
-        HTTPException: 404 — заказчика нет ни в одном загруженном типовом положении.
+        HTTPException: 404 — заказчика нет ни в одном загруженном положении.
     """
     from configs.ai_repo import AIRepo
     from risk_monitoring.typal_clauses import TypalRepo
@@ -298,8 +319,97 @@ async def customer_typal_clause(inn: str, kpp: Optional[str] = None, on: Optiona
     async with AIRepo() as repo:
         found = await TypalRepo(repo.pool).customer_clause(inn, kpp, on)
     if not found:
-        raise HTTPException(status_code=404, detail="Заказчик не найден в загруженных типовых положениях")
+        raise HTTPException(status_code=404, detail="Заказчик не найден в загруженных положениях о закупке")
     return found
+
+
+@router.post("/legal-acts", status_code=status.HTTP_202_ACCEPTED)
+async def upload_legal_act(request: Request, name: Optional[str] = None, edition_date: Optional[str] = None):
+    """Ставит в очередь загрузку редакции нормативного акта (тело запроса — файл сводной редакции).
+
+    Акт (44-ФЗ, 223-ФЗ, НК РФ, постановление Правительства) распознаётся по тексту; текст разбирается по статьям,
+    частям, пунктам и подпунктам и сохраняется как редакция на ``edition_date``. Повторная загрузка того же текста
+    ничего не пересчитывает.
+
+    Args:
+        request: Запрос; тело — PDF, HTML или TXT (до 50 МБ).
+        name: Имя файла (расширение; «ред. от 04.08.2026» в имени — дата редакции).
+        edition_date: Дата редакции ``YYYY-MM-DD`` — обязательна, если её нет в имени файла: в выгрузках
+            КонсультантПлюс без шапки даты редакции в тексте нет.
+
+    Returns:
+        dict: ``task_id``, акт, дата редакции, число норм.
+
+    Raises:
+        HTTPException: 400 — акт не распознан, текст не извлечён, неверная дата; 413 — больше 50 МБ.
+    """
+    import os
+    import tempfile
+    from datetime import date as _date
+
+    from risk_monitoring import legal_acts
+    from risk_monitoring.tasks import rm_legal_act_task
+
+    raw = await request.body()
+    if len(raw) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Файл больше 50 МБ")
+    if edition_date:
+        try:
+            _date.fromisoformat(edition_date)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="edition_date — дата YYYY-MM-DD")
+    suffix = os.path.splitext(name or "")[1] or ".bin"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as fh:
+        fh.write(raw)
+        path = fh.name
+    try:
+        text = legal_acts.read_source(path, name)
+        act = legal_acts.parse_act(text, name, edition_date)
+    except (ValueError, OSError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001 — иначе APIKeyMiddleware отвечает «Internal server error during authentication»
+        logger.exception(f"Разбор нормативного акта {name} не выполнен")
+        raise HTTPException(status_code=422, detail=f"Разбор не выполнен: {type(e).__name__}: {str(e)[:300]}")
+    finally:
+        os.unlink(path)
+    task = rm_legal_act_task.apply_async(kwargs={"text": text, "source_name": name, "edition_date": edition_date},
+                                         queue="risk_monitoring")
+    out = {"task_id": task.id, "status": "queued", "act_key": act["act_key"], "title": act.get("title"),
+           "edition_date": act["edition_date"], "edition_source": act["edition_source"], "norms": len(act["norms"])}
+    if act["edition_source"] in ("amendments", "act_date"):
+        out["warning"] = "Дата редакции не указана и не найдена в имени файла — передайте edition_date"
+    if act.get("warnings"):
+        out["warnings"] = act["warnings"]
+    return out
+
+
+@router.get("/legal-acts")
+async def list_legal_acts():
+    """Загруженные редакции нормативных актов."""
+    from configs.ai_repo import AIRepo
+    from risk_monitoring.legal_acts import LegalActsRepo
+
+    async with AIRepo() as repo:
+        return {"editions": await LegalActsRepo(repo.pool).editions()}
+
+
+@router.get("/legal-acts/check")
+async def check_legal_ref(law: str, fz: Optional[int] = None, on: Optional[str] = None):
+    """Проверка ссылки на норму по тексту редакции, действующей на дату.
+
+    Args:
+        law: Ссылка, как её пишет модель («ч. 6 ст. 96 44-ФЗ; пп. "а" п. 3 Правил ПП № 1042»).
+        fz: Закон закупки (44 / 223) — акт для ссылок без названия закона.
+        on: Дата ``YYYY-MM-DD`` (по умолчанию сегодня).
+
+    Returns:
+        dict: ``status`` и ``refs`` (адрес и начало нормы для найденных).
+    """
+    from configs.ai_repo import AIRepo
+    from risk_monitoring.legal_refs import LawChecker
+
+    async with AIRepo() as repo:
+        return await LawChecker(repo.pool).check(law, f"{fz}-ФЗ" if fz in (44, 223) else None, on)
 
 
 class DailyRequest(BaseModel):

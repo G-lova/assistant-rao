@@ -121,6 +121,7 @@ celery_app.conf.update(
         'rm_analyze_contracts_task': {'queue': 'risk_monitoring'},
         'rm_analyze_orgs_task': {'queue': 'risk_monitoring'},
         'rm_typal_clauses_task': {'queue': 'risk_monitoring'},
+        'rm_legal_act_task': {'queue': 'risk_monitoring'},
         # публикации экспертов: скачивание, OCR и модель — та же очередь, что у документов экспертиз
         'expert_publications_task': {'queue': 'evaluation'},
         'org_aliases_task': {'queue': 'evaluation'},

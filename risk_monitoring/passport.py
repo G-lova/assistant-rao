@@ -159,6 +159,9 @@ def to_external_risks(compact_risks: Iterable[Dict[str, Any]], source: str = "ai
             "level_scale": r.get("level_scale") or risk_catalog.LEVELS.get("version"),
             "source": source,
         })
+        if r.get("law_check"):
+            # проверка нормы модели по тексту закона (legal_refs); при замене нормы каталожной относится к law_model
+            items[-1]["law_check"] = r["law_check"]
     return merge_risks(items, fz=fz)
 
 

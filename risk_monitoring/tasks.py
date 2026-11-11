@@ -283,19 +283,22 @@ def rm_analyze_orgs_task(self, org_ids: List[int], environment: str, roles: List
 
 @celery_app.task(bind=True, name="rm_typal_clauses_task", soft_time_limit=7000, time_limit=7200)
 def rm_typal_clauses_task(self, environment: str = None, regions: List[str] = None, dates: List[str] = None,
-                          xml_base64: str = None, read_files: bool = True) -> Dict[str, Any]:
-    """Загрузка типовых положений о закупке (223-ФЗ) из ЕИС или из переданного XML.
+                          xml_base64: str = None, read_files: bool = True, kinds: List[str] = None) -> Dict[str, Any]:
+    """Загрузка положений о закупке (223-ФЗ): типовых и заказчиков — из ЕИС или из переданного XML.
 
     Без параметров (ежедневный запуск по расписанию): регионы — ``settings.TYPAL_REGIONS`` или регионы заказчиков
     на мониторинге окружения ``settings.TYPAL_REGIONS_ENVIRONMENT``; даты — последние
-    ``settings.TYPAL_LOOKBACK_DAYS`` дней. Уже сохранённые версии перезаписываются без повторного чтения файлов.
+    ``settings.TYPAL_LOOKBACK_DAYS`` дней; виды — типовые и (при ``ORDER_CLAUSE_LOAD_ENABLED``) положения заказчиков.
+    Уже сохранённые версии перезаписываются без повторного чтения файлов.
 
     Args:
-        environment: Окружение (для поиска регионов).
+        environment: Окружение (регионы и ИНН заказчиков на мониторинге).
         regions: Коды регионов ФНС.
         dates: Даты ``ГГГГ-ММ-ДД``.
-        xml_base64: XML ``typalOrderClause`` в base64 (ручная загрузка) — тогда ЕИС не запрашивается.
+        xml_base64: XML ``typalOrderClause`` / ``orderClause`` в base64 (ручная загрузка) — ЕИС не запрашивается,
+            фильтр по заказчикам на мониторинге не применяется.
         read_files: Скачивать и читать файлы положений.
+        kinds: ``typal`` и / или ``customer``.
 
     Returns:
         Dict[str, Any]: ``loaded`` (версии), ``stats``, ``regions``, ``dates``.
@@ -326,20 +329,57 @@ def rm_typal_clauses_task(self, environment: str = None, regions: List[str] = No
                     return
                 regs = regions or await loader.regions()
                 days = dates or lookback_dates(settings.TYPAL_LOOKBACK_DAYS)
-                out.update(regions=regs, dates=days)
-                for reg in regs:
-                    for d in days:
-                        try:
-                            out["loaded"] += await loader.load_region(reg, d)
-                        except Exception as e:  # noqa: BLE001 — регион/дата не останавливают остальные
-                            logger.warning(f"Типовые положения {reg} за {d}: {type(e).__name__}: {e}")
-                            out["errors"].append({"region": reg, "date": d, "error": f"{type(e).__name__}: {e}"[:300]})
+                todo = kinds or (["typal", "customer"] if settings.ORDER_CLAUSE_LOAD_ENABLED else ["typal"])
+                out.update(regions=regs, dates=days, kinds=todo)
+                if "customer" in todo and settings.ORDER_CLAUSE_ONLY_MONITORED:
+                    loader.only_inns = await loader.monitored_inns()
+                    if not loader.only_inns:
+                        # без списка заказчиков загрузились бы все положения региона — пропускаем
+                        todo = [k for k in todo if k != "customer"]
+                        out["errors"].append({"kind": "customer", "error": "нет ИНН заказчиков на мониторинге"})
+                for kind in todo:
+                    for reg in regs:
+                        for d in days:
+                            try:
+                                out["loaded"] += await loader.load_region(reg, d, kind=kind)
+                            except Exception as e:  # noqa: BLE001 — регион/дата не останавливают остальные
+                                logger.warning(f"Положения ({kind}) {reg} за {d}: {type(e).__name__}: {e}")
+                                out["errors"].append({"kind": kind, "region": reg, "date": d,
+                                                      "error": f"{type(e).__name__}: {e}"[:300]})
             finally:
                 out["stats"] = loader.stats
 
     asyncio.run(_pulsed(run(), self.name, self.request.id))
     logger.info(f"Типовые положения: {out.get('stats')}, версий {len(out['loaded'])}")
     return out
+
+
+@celery_app.task(bind=True, name="rm_legal_act_task", soft_time_limit=3500, time_limit=3600)
+def rm_legal_act_task(self, text: str, source_name: str = None, edition_date: str = None) -> Dict[str, Any]:
+    """Загрузка редакции нормативного акта: разбор по статьям / частям / пунктам, нормы, чанки с эмбеддингами.
+
+    Args:
+        text: Текст сводной редакции (извлечён эндпоинтом из PDF / HTML).
+        source_name: Имя файла.
+        edition_date: Дата редакции ``YYYY-MM-DD``.
+
+    Returns:
+        Dict[str, Any]: Результат ``LegalActsLoader.load_text``.
+    """
+    from celery_app import already_succeeded
+
+    if already_succeeded(self):
+        return self.AsyncResult(self.request.id).result
+    from configs.ai_repo import AIRepo
+    from configs.http_client_manager import HTTPClientManager
+    from risk_monitoring.legal_acts import LegalActsLoader
+
+    async def run() -> Dict[str, Any]:
+        """HTTP-менеджер (эмбеддинги) и пул Postgres внутри event loop задачи."""
+        async with HTTPClientManager(timeout=180.0) as mgr, AIRepo() as repo:
+            return await LegalActsLoader(repo, mgr).load_text(text, source_name, edition_date)
+
+    return asyncio.run(_pulsed(run(), self.name, self.request.id))
 
 
 @celery_app.task(bind=True, name="rm_decay_task", soft_time_limit=3500, time_limit=3600)
