@@ -3,7 +3,7 @@
 Долгая (часы) и возобновляемая: выполненные пары «вид × регион × день» записаны в ``rm_eis_backfill_log``
 (миграция 016) и при повторном запуске пропускаются. Запускать в фоне в контейнере сервиса::
 
-    docker exec -d rao_api sh -c "python -m scripts.backfill_clauses --env prod > /tmp/backfill.log 2>&1"
+    docker exec -d rao_api sh -c "PYTHONUNBUFFERED=1 python -m scripts.backfill_clauses --env prod > /tmp/backfill.log 2>&1"
     docker exec rao_api tail -f /tmp/backfill.log                       # ход
     docker exec rao_api python -m scripts.backfill_clauses --env prod --status   # сводка журнала
 
@@ -67,16 +67,24 @@ async def main(a):
         orgs = await org_rows(a.env, mgr)
         bf = ClauseBackfill(loader, [o.get("inn") for o in orgs])
         if a.status:
-            print(json.dumps(await bf.progress(), ensure_ascii=False, default=str, indent=1))
+            from configs import settings
+
+            plan = await bf.plan(date.fromisoformat(a.date_from), date.fromisoformat(a.date_to), a.kinds.split(","),
+                                 float(settings.TYPAL_EIS_MIN_INTERVAL_SEC))
+            print(json.dumps({"plan": plan, "log": await bf.progress()}, ensure_ascii=False, default=str, indent=1),
+                  flush=True)
             return
         log.info(f"Дозагрузка положений: организаций {len(bf.inns)}, период {a.date_from} — {a.date_to}, "
                  f"виды {a.kinds}")
         res = await bf.run(date.fromisoformat(a.date_from), date.fromisoformat(a.date_to), kinds=a.kinds.split(","),
                            regions=a.regions.split(",") if a.regions else None, max_requests=a.max_requests)
-        print(json.dumps({k: v for k, v in res.items() if k != "regions"}, ensure_ascii=False, default=str))
+        print(json.dumps({"finished": not res["left"], **{k: v for k, v in res.items() if k != "regions"}},
+                         ensure_ascii=False, default=str), flush=True)
         if not a.no_files and not res["left"]:
             loader.read_files = True
-            print(json.dumps({"read_latest_files": await loader.read_latest_files(bf.inns)}, ensure_ascii=False))
+            print(json.dumps({"read_latest_files": await loader.read_latest_files(bf.inns)}, ensure_ascii=False),
+                  flush=True)
+        print("ГОТОВО", flush=True)
 
 
 if __name__ == "__main__":

@@ -160,6 +160,32 @@ class ClauseBackfill:
         out["stats"] = dict(self.loader.stats)
         return out
 
+    async def plan(self, date_from: date, date_to: date, kinds: Sequence[str] = ("typal", "customer"),
+                   interval: float = 1.5) -> List[Dict[str, Any]]:
+        """Сколько сделано из плана и сколько осталось по времени.
+
+        Returns:
+            List[Dict[str, Any]]: по виду — ``regions``, ``total`` (регионы × дни), ``done``, ``errors``, ``left``,
+            ``percent``, ``eta_hours`` (оставшиеся запросы × интервал). План положений заказчиков известен только после
+            типовых (регионы организаций без типового положения).
+        """
+        n_days = (date_to - date_from).days + 1
+        out = []
+        for kind in kinds:
+            regs = region_order(await self.scope(kind), FIRST_REGIONS if kind == "typal" else ())
+            rows = await self.pool.fetch(
+                "SELECT status, COUNT(*) AS n FROM rm_eis_backfill_log WHERE kind = $1 AND region = ANY($2::text[]) "
+                "AND day BETWEEN $3 AND $4 GROUP BY status", kind, regs, date_from, date_to)
+            by = {r["status"]: int(r["n"]) for r in rows}
+            total = len(regs) * n_days
+            done = by.get("done", 0) + by.get("no_data", 0)
+            left = max(0, total - done)
+            out.append({"kind": kind, "regions": len(regs), "total": total, "done": done,
+                        "with_versions": by.get("done", 0), "errors": by.get("error", 0), "left": left,
+                        "percent": round(100 * done / total, 1) if total else 100.0,
+                        "eta_hours": round(left * interval / 3600, 1)})
+        return out
+
     async def progress(self) -> List[Dict[str, Any]]:
         """Сводка журнала по видам и статусам."""
         rows = await self.pool.fetch(
