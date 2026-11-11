@@ -409,6 +409,27 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip().lower()
 
 
+# текстовые блоки контекста — отдельными разделами запроса, а не в JSON контекста (иначе обрезаются на 2500 символах)
+TEXT_BLOCKS = ("norms", "law_texts", "clause")
+
+
+def context_blocks(context: Optional[Dict[str, Any]]) -> str:
+    """Разделы запроса из контекста: выжимка норм-«не рисков», тексты норм действующей редакции (``law_context``),
+    положение о закупке заказчика (223-ФЗ)."""
+    c = context or {}
+    out = ""
+    if c.get("norms"):
+        out += (f"Нормы, установленные законом для документа этого типа, — это НЕ риски; риск — только то, что "
+                f"идёт сверх них или отступает от них:\n{c['norms']}\n\n")
+    if c.get("law_texts"):
+        out += (f"Тексты норм в редакции, действовавшей на дату закупки (ссылайся в `law` на них; ставки, сроки, "
+                f"проценты бери отсюда, а не по памяти):\n{c['law_texts']}\n\n")
+    if c.get("clause"):
+        out += (f"Положение о закупке заказчика (по 223-ФЗ обеспечение, аванс, сроки и способы закупки задаёт оно; "
+                f"сверяй документ с ним):\n{c['clause']}\n\n")
+    return out
+
+
 class DocumentRiskAnalyzer:
     """
     Поиск признаков риска в тексте документа.
@@ -427,8 +448,12 @@ class DocumentRiskAnalyzer:
         """
         self.client = llm_client
         self.model = model
-        self.llm = LLMJson(llm_client, model, rate=1.5, concurrency=3)
-        self.semaphore = asyncio.Semaphore(3)
+        from configs import settings as _settings
+
+        # частота и параллельность запросов к модели — settings.RM_RISK_LLM_* (по умолчанию прежние 1,5 / 3)
+        conc = int(getattr(_settings, "RM_RISK_LLM_CONCURRENCY", 3))
+        self.llm = LLMJson(llm_client, model, rate=float(getattr(_settings, "RM_RISK_LLM_RATE", 1.5)), concurrency=conc)
+        self.semaphore = asyncio.Semaphore(conc)
 
         self.codes = list(risk_catalog.DOCUMENT_RISK_CODES)
         with open(PROMPT_PATH, "rb") as f:
@@ -605,14 +630,12 @@ class DocumentRiskAnalyzer:
         Returns:
             Dict[str, Any]: ``summary``, ``risks`` (только подтверждённые), ``dropped``, ``rejected``.
         """
-        ctx = {k: v for k, v in (context or {}).items() if k != "norms"}
+        ctx = {k: v for k, v in (context or {}).items() if k not in TEXT_BLOCKS}
         hint = json.dumps(ctx, ensure_ascii=False, default=str)[:2500] if ctx else "нет"
-        norms_block = (f"Нормы, установленные законом для документа этого типа, — это НЕ риски; риск — только то, что "
-                       f"идёт сверх них или отступает от них:\n{context['norms']}\n\n") if (context or {}).get("norms") else ""
         user = (
             f"Документ: {file_name} (часть {n} из {total}).\n"
             f"Контекст (тип документа, краткое содержание, закупка, закон): {hint}\n"
-            f"{norms_block}"
+            f"{context_blocks(context)}"
             f"Для этого документа ищи ТОЛЬКО риски с кодами: {', '.join(allowed)}. Другие коды не используй.\n\n"
             f"Текст:\n\n{chunk}"
         )

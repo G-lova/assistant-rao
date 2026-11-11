@@ -374,6 +374,7 @@ RETURNING id
 SQL_CUSTOMER_CLAUSE = """
 SELECT c.id, c.registration_number, c.version, c.name, c.approve_date, c.use_for_base_date, c.creator_name,
        c.modification_reason, c.url_eis, c.clause_type, c.head_registration_number, c.data -> 'head' AS head,
+       c.purchase_methods,
        cu.agency_kind, cu.agency_level, cu.name AS customer_name
 FROM rm_typal_clause_customers cu
 JOIN rm_typal_clauses c ON c.id = cu.clause_id
@@ -516,10 +517,11 @@ class TypalRepo:
                 "SELECT id, file_name, url, kind, agency_kind, document_id, status FROM rm_typal_clause_files "
                 "WHERE clause_id = $1 ORDER BY id", row["id"])]
         out = {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in dict(row).items()}
-        if isinstance(out.get("head"), str):
-            import json
+        import json
 
-            out["head"] = json.loads(out["head"])
+        for k in ("head", "purchase_methods"):
+            if isinstance(out.get(k), str):
+                out[k] = json.loads(out[k])
         out["files"] = files
         out["position"] = position_for(files, row["agency_kind"])
         return out

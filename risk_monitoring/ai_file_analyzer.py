@@ -726,6 +726,11 @@ class AIFileAnalyzer:
 
         fz = risk_catalog.normalize_fz(row.get("fz_type"))
         law = f"{fz}-ФЗ" if fz else "закон не определён"
+        # редакция норм и положения заказчика — на дату закупки (извещения), без даты — на сегодня
+        from risk_monitoring import law_context
+
+        on = law_context.as_date(row.get("purchase_date"))
+        blocks: Dict[str, Any] = {"context": {}, "version": "", "meta": None}
 
         # Прошлая редакция: текст и diff нужны до анализа — от них зависит режим
         prev_ctx = None
@@ -747,13 +752,16 @@ class AIFileAnalyzer:
             risk = None
             if candidates and allowed:
                 brand_text = "\n".join(candidates)
+                blocks = await self._law_blocks(document_id, fz, on, "docOpusObjectZacupFiles", row, embeddings_ok)
                 ctx = {"detected_type": type_info["detected_type"], "type_decode": type_decode, "summary": summary,
                        "purchase": purchase, "law": law, "norms": norms.digest("docOpusObjectZacupFiles", fz),
-                       "note": "Переданы только строки описания объекта закупки с признаками товарного знака"}
+                       "note": "Переданы только строки описания объекта закупки с признаками товарного знака",
+                       **blocks["context"]}
                 risk = await self._cached(document_id, "risk_analysis_print_form",
                                           lambda: self.risk_analyzer.analyze(brand_text, file_name, ctx, codes=allowed),
                                           compact=self.risk_analyzer.to_compact, keep=lambda r: not r.get("partial"),
-                                          version=f"{self.versions['risk_analysis']}:{_hash_version(allowed, candidates)}",
+                                          version=(f"{self.versions['risk_analysis']}:{_hash_version(allowed, candidates)}"
+                                                   f"{blocks['version']}"),
                                           model=self.model)
             if risk is None:
                 risk = self.risk_analyzer.merge_results([], None, allowed)
@@ -789,14 +797,16 @@ class AIFileAnalyzer:
             profile = await self._cached(document_id, "document_profile",
                                          lambda: self.profiler.profile(text, file_name, type_decode, summary, purchase),
                                          model=self.model, fallback_doc=reuse_doc)
+            blocks = (await self._law_blocks(document_id, fz, on, type_info.get("detected_type"), row, embeddings_ok)
+                      if allowed else {"context": {}, "version": "", "meta": None})
             risk_context = {"detected_type": type_info.get("detected_type"), "type_decode": type_decode,
                             "summary": summary, "purchase": purchase, "law": law,
-                            "norms": norms.digest(type_info.get("detected_type"), fz)}
+                            "norms": norms.digest(type_info.get("detected_type"), fz), **blocks["context"]}
             # DOC-001 «нет раздела» модель не ищет: она видит документ частями; раздел проверяет сервис по
             # оглавлению всего текста (doc_sections)
             model_codes = [c for c in allowed if c != "DOC-001"]
             risk_version = (f"{self.versions['risk_analysis']}:{_hash_version(model_codes)}:"
-                            f"{norms.version(type_info.get('detected_type'), fz)}")
+                            f"{norms.version(type_info.get('detected_type'), fz)}{blocks['version']}")
             self._risk_version = risk_version
             prev_risk = (await self._get_cached(reuse_doc, "risk_analysis", risk_version, self.model)) if reuse_doc else None
             if prev_risk is not None:
@@ -856,7 +866,7 @@ class AIFileAnalyzer:
         if not print_kind:
             risk_compact = _with_service_doc001(risk_compact, text, type_info.get("detected_type"),
                                                 "DOC-001" in (allowed or []))
-        await self._check_law(risk_compact, fz)
+        await self._check_law(risk_compact, fz, on.isoformat() if on else None)
 
         prev_codes = await self._previous_codes(previous, prev_ctx, allowed) if previous else None
         pages = len({m.group(1) for m in PAGE_MARKER_RE.finditer(text)}) or None
@@ -865,6 +875,8 @@ class AIFileAnalyzer:
                                            result="ocr_suspect" if quality["status"] == "suspect" else None)
         pipeline["models"] = {"extraction": self.extraction_model, "reasoning": self.model}
         pipeline["mode"] = mode
+        if blocks.get("meta"):
+            pipeline["law_context"] = blocks["meta"]
         if getattr(self, "stats", None) is not None:
             self.stats["modes"][mode] = self.stats["modes"].get(mode, 0) + 1
         if mode == "incremental":
@@ -883,7 +895,51 @@ class AIFileAnalyzer:
         progress.note(f"анализ готов: режим {mode}, тип {type_info.get('detected_type')}, рисков {len(ai.get('risks') or [])}")
         return await self._finalize(file_id, document_id, ai)
 
-    async def _check_law(self, risk_compact: Dict[str, Any], fz: Any) -> None:
+    async def _law_blocks(self, document_id: int, fz: Any, on: Any, detected_type: Optional[str],
+                          row: Dict[str, Any], embeddings_ok: bool) -> Dict[str, Any]:
+        """Тексты норм на дату закупки и (223-ФЗ) положение заказчика для запроса риск-анализа (``law_context``).
+
+        Без эмбеддингов документа, загруженных актов или при сбое — пустой блок: анализ идёт как раньше.
+
+        Returns:
+            Dict[str, Any]: ``context`` (``law_texts``, ``clause``), ``version`` (добавка к версии кэша),
+            ``meta`` (для ``pipeline.law_context``).
+        """
+        out: Dict[str, Any] = {"context": {}, "version": "", "meta": None}
+        if not embeddings_ok or getattr(self, "_rag_disabled", False):
+            return out
+        from risk_monitoring.law_context import LawContext
+
+        try:
+            if getattr(self, "_law_ctx", None) is None:
+                self._law_ctx = LawContext(self.repo.pool, self.embedding_model)
+            meta: Dict[str, Any] = {"on": on.isoformat() if on else None}
+            if settings.LEGAL_RAG_ENABLED:
+                law = await self._law_ctx.for_document(document_id, fz, on, detected_type)
+                if law:
+                    out["context"]["law_texts"] = law["text"]
+                    out["version"] += f":law-{law['version']}"
+                    meta.update(norms=law["refs"], editions=law["editions"])
+            if settings.CLAUSE_RAG_ENABLED and str(fz) == "223":
+                clause = await self._law_ctx.for_clause(document_id, row.get("customer_inn"), row.get("customer_kpp"),
+                                                        on, row.get("purchase_method"))
+                if clause:
+                    out["context"]["clause"] = clause["text"]
+                    out["version"] += f":clause-{clause['hash']}"
+                    meta["clause"] = {k: clause[k] for k in ("registration_number", "version", "clause_type", "points")}
+            if out["context"]:
+                out["meta"] = meta
+                progress.note("в запрос добавлены " + ", ".join(
+                    x for x in (f"нормы ({len(meta.get('norms') or [])})" if meta.get("norms") else "",
+                                f"положение заказчика № {meta['clause']['registration_number']}" if meta.get("clause")
+                                else "") if x))
+        except Exception as e:  # noqa: BLE001 — нет таблиц (миграции 014/015), нет связи: анализ без норм
+            logger.info(f"Тексты норм для запроса не подобраны (до конца прогона отключено): {type(e).__name__}: {e}")
+            self._rag_disabled = True
+            return {"context": {}, "version": "", "meta": None}
+        return out
+
+    async def _check_law(self, risk_compact: Dict[str, Any], fz: Any, on: Optional[str] = None) -> None:
         """Проверка норм рисков по текстам загруженных актов (``legal_refs``): ``law_check`` у риска.
 
         Сбой проверки (нет таблиц до миграции 014, нет связи) не мешает анализу файла; после сбоя проверка до конца
@@ -897,7 +953,7 @@ class AIFileAnalyzer:
 
             if getattr(self, "_law_checker", None) is None:
                 self._law_checker = LawChecker(self.repo.pool)
-            counts = await self._law_checker.annotate(risk_compact["risks"], fz)
+            counts = await self._law_checker.annotate(risk_compact["risks"], fz, on)
             if counts.get("not_found") or counts.get("lost_force"):
                 progress.note(f"нормы модели не найдены в тексте закона: {counts.get('not_found', 0)}, "
                               f"утратили силу: {counts.get('lost_force', 0)}")
