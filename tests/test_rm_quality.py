@@ -1288,3 +1288,36 @@ class SoftenTest(unittest.TestCase):
             self.assertEqual([r["severity"] for r in (spindle, named, support, printer)], ["low", "high", "low", "high"])
             self.assertIn("по рынку", spindle["verification_needed"][0])
             self.assertIn("ст. 33", support["verification_needed"][0])
+
+
+class MergeFindingsTest(unittest.TestCase):
+    """Несколько находок одного кода: описание у каждой, доказательства привязаны к своей находке (11.11.2026)."""
+
+    def test_findings(self):
+        """DOC-007 из трёх рисков модели: нумерованное описание, findings, finding_no у цитат, нормы без повторов."""
+        from risk_monitoring import passport
+
+        def r(desc, frag, law="ст. 33 44-ФЗ"):
+            """Риск DOC-007 модели во внешнем формате."""
+            return {"rule_id": "DOC-007", "description": desc, "law": law, "level": 0.6, "confidence": 0.9,
+                    "source": "file", "evidence": [{"fragment": frag}]}
+        out = passport.merge_risks([r("Наименование ВГУ / ВоГУ", "АПС.СОУЭ ВоГУ"),
+                                    r("Срок действия контракта 2025 при работах до 2026", "по 30 декабря 2025",
+                                      "ст. 42 44-ФЗ"),
+                                    r("Наименование ВГУ / ВоГУ", "КСРВнг ВоГУ")], fz=44)
+        d = next(x for x in out if x["rule_id"] == "DOC-007")
+        self.assertEqual([f["no"] for f in d["findings"]], [1, 2])
+        self.assertTrue(d["description"].startswith("Находок: 2.\n1. Наименование ВГУ / ВоГУ\n2. Срок"))
+        self.assertEqual(sorted((e["fragment"], e["finding_no"]) for e in d["evidence"]),
+                         [("АПС.СОУЭ ВоГУ", 1), ("КСРВнг ВоГУ", 1), ("по 30 декабря 2025", 2)])
+        # по очереди из находок: вторая находка — во второй цитате
+        self.assertEqual([e["finding_no"] for e in d["evidence"]], [1, 2, 1])
+
+    def test_single_finding(self):
+        """Одна находка — описание как было, findings из одной записи."""
+        from risk_monitoring import passport
+
+        out = passport.merge_risks([{"rule_id": "DOC-007", "description": "A", "level": 0.6, "confidence": 0.9,
+                                     "source": "file", "evidence": [{"fragment": "x"}]}], fz=44)
+        d = next(x for x in out if x["rule_id"] == "DOC-007")
+        self.assertEqual((d["description"], len(d["findings"]), d["evidence"][0]["finding_no"]), ("A", 1, 1))
