@@ -356,6 +356,10 @@ async def run_period(repo: Any, environment: str, kind: str, period: str, use_ll
         except Exception as e:  # noqa: BLE001 — текст не обязателен
             logger.warning(f"Сводка за {period} шаблоном: {type(e).__name__}: {e}")
     s["resume"] = text_format.normalize(resume)
+    from risk_monitoring import resume_entities
+
+    # организации ежедневных сводок, упомянутые в тексте, — для ссылок (дашборды, 12.11.2026)
+    s["resume_entities"] = resume_entities.for_period(dailies.values(), s["resume"])
     s["facts"] = period_facts(s)
     incomplete = s["days"]["missing"] or s["days"]["partial"] or s["days"]["future"]
     s["pipeline"] = {"schema_version": SCHEMA_VERSION, "stage": "S5", "status": "partial" if incomplete else "completed",

@@ -402,7 +402,11 @@ class ContractAnalyzer:
         pipeline.update(schema_version=cp.SCHEMA_VERSION, input_hash=h, decisions_hash=built.pop("decisions_hash", None),
                         inputs={"files": len(item["files"]), "xml": len(item["xmls"]),
                                 "rules": bool(item["values"]), "black_list": len(black_by_inn.get(inn, []))})
-        ai = {**built, "resume": resume, "pipeline": pipeline, "analyzed_at": passport.now_iso()}
+        from risk_monitoring import resume_entities
+
+        ai = {**built, "resume": resume, "pipeline": pipeline, "analyzed_at": passport.now_iso(),
+              # заказчик и поставщик — для ссылок на организации в тексте модели (дашборды, 12.11.2026)
+              "resume_entities": resume_entities.for_purchase(built.get("passport"))}
         result = {"card_id": cid, "status": "done", "pushed": False, "score": built["profile"]["score"],
                   "zone": built["profile"]["zone"], "risks": len(built["risks"]), "ai_analysis": ai}
         if self.push_results:

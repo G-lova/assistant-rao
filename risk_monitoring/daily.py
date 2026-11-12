@@ -143,6 +143,8 @@ def contract_item(card: Dict[str, Any], ai: Dict[str, Any], changed: bool) -> Di
         "contract_number": pas.get("contract_number"),
         "customer": card.get("customer_name") or (pas.get("customer") or {}).get("name"),
         "organisation_id": card.get("organisation_id"),
+        "customer_inn": (pas.get("customer") or {}).get("inn"),
+        "customer_kpp": (pas.get("customer") or {}).get("kpp"),
         "monitoring": monitored(card),
         "subject": subject[:200],
         "score": _num(prof.get("score")),
@@ -368,7 +370,7 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
         for c in i["composite"]:
             comp[c] = comp.get(c, 0) + 1
     priorities = sorted((i for i in items if i.get("priority") is not None), key=lambda i: -(i["priority"] or 0))
-    return {
+    out = {
         "date": export_date,
         "environment": environment,
         "scope": {**scope, "contracts_in_scope": len(items), "events_in_scope": len(ev_items),
@@ -399,6 +401,11 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
         "priorities": [{k: i.get(k) for k in ("card_id", "purchase_number", "customer", "score", "zone", "priority",
                                               "priority_reasons", "confidence", "monitoring")} for i in priorities[:top]],
     }
+    from risk_monitoring import resume_entities
+
+    # организации из пунктов, которые получает модель, — для ссылок в тексте сводки (дашборды, 12.11.2026)
+    out["resume_entities"] = resume_entities.for_daily(out, items, top)
+    return out
 
 
 def summary_facts(s: Dict[str, Any]) -> List[str]:
