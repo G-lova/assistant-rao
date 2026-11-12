@@ -1321,3 +1321,46 @@ class MergeFindingsTest(unittest.TestCase):
                                      "source": "file", "evidence": [{"fragment": "x"}]}], fz=44)
         d = next(x for x in out if x["rule_id"] == "DOC-007")
         self.assertEqual((d["description"], len(d["findings"]), d["evidence"][0]["finding_no"]), ("A", 1, 1))
+
+
+class MergeFindingsTwiceTest(unittest.TestCase):
+    """Повторное объединение (паспорт файла → закупка): находки не склеиваются, номера цитат пересчитываются."""
+
+    def test_remerge(self):
+        """Объединённый риск файла + риск другого файла: три находки с верными номерами цитат."""
+        from risk_monitoring import passport
+
+        def r(desc, frag):
+            """Риск DOC-007 модели."""
+            return {"rule_id": "DOC-007", "description": desc, "level": 0.6, "confidence": 0.9, "source": "file",
+                    "evidence": [{"fragment": frag}], "verification_needed": [f"проверить {frag}"]}
+        file1 = passport.merge_risks([r("A", "a1"), r("B", "b1")], fz=44)
+        again = passport.merge_risks(file1, [], fz=44)                       # паспорт файла: второе объединение
+        d = next(x for x in again if x["rule_id"] == "DOC-007")
+        self.assertEqual([f["description"] for f in d["findings"]], ["A", "B"])
+        out = passport.merge_risks(again, [r("C", "c1")], fz=44)            # закупка: с риском другого файла
+        d = next(x for x in out if x["rule_id"] == "DOC-007")
+        self.assertEqual([f["description"] for f in d["findings"]], ["A", "B", "C"])
+        self.assertEqual({e["fragment"]: e["finding_no"] for e in d["evidence"]}, {"a1": 1, "b1": 2, "c1": 3})
+        self.assertEqual(d["findings"][1]["verification_needed"], ["проверить b1"])
+
+    def test_legacy_combined(self):
+        """Старый результат: одна находка «Находок: 2.\\n1. …\\n2. …» с цитатами 1 и 2 — находки восстанавливаются."""
+        from risk_monitoring import passport
+
+        old = {"rule_id": "DOC-007", "description": "Находок: 2.\n1. Численность 54 + 12\n2. Школьное здание",
+               "level": 0.6, "confidence": 0.9, "source": "file",
+               "findings": [{"no": 1, "description": "Находок: 2.\n1. Численность 54 + 12\n2. Школьное здание"}],
+               "evidence": [{"fragment": "x", "finding_no": 1}, {"fragment": "y", "finding_no": 2}]}
+        d = next(x for x in passport.merge_risks([old], fz=44) if x["rule_id"] == "DOC-007")
+        self.assertEqual([f["description"] for f in d["findings"]], ["Численность 54 + 12", "Школьное здание"])
+        self.assertEqual([e["finding_no"] for e in d["evidence"]], [1, 2])
+
+    def test_many_findings_quotes(self):
+        """16 находок по цитате — цитаты не обрезаются до 5."""
+        from risk_monitoring import passport
+
+        risks = [{"rule_id": "DOC-007", "description": f"находка {i}", "level": 0.6, "confidence": 0.9,
+                  "source": "file", "evidence": [{"fragment": f"q{i}"}]} for i in range(16)]
+        d = next(x for x in passport.merge_risks(risks, fz=44) if x["rule_id"] == "DOC-007")
+        self.assertEqual(len(d["evidence"]), 16)
