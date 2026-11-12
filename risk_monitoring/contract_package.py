@@ -27,6 +27,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from risk_monitoring import passport, risk_catalog
 
 SCHEMA_VERSION = "rm-contract-1"
+# формат рисков закупки (находки, 12.11.2026): входит в input_hash — при смене закупки пересчитываются один раз
+RESULT_FORMAT = "findings-2"
 
 # Показатель внешней системы → код каталога (FIN-003 ↔ pz_p5 …)
 INDICATOR_TO_CODE: Dict[str, str] = {
@@ -1115,5 +1117,5 @@ def build_contract_analysis(*, card: Dict[str, Any], files: Sequence[Dict[str, A
         "confirmed_codes": sorted(confirmed),
         "rejected_codes": sorted(rejected),
         "input_hash": input_hash(p, [(r["rule_id"], r.get("level"), r.get("confidence")) for r in risks],
-                                 [e.get("xml_id") for e in events], sorted(confirmed)),
+                                 [e.get("xml_id") for e in events], sorted(confirmed), RESULT_FORMAT),
     }
