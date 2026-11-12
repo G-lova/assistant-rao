@@ -42,7 +42,9 @@ def region_order(inns: Iterable[str], first: Sequence[str] = FIRST_REGIONS) -> L
     Код региона в ИНН — регион налоговой инспекции, где организация поставлена на учёт; почти всегда совпадает с
     регионом размещения в ЕИС.
     """
-    cnt = Counter(str(i).strip()[:2] for i in inns if str(i or "").strip()[:2].isdigit())
+    # «00» — не код региона: ИНН с нулями в начале в справочнике ошибочные (ЕИС на запрос региона 00 отвечает 404)
+    cnt = Counter(str(i).strip()[:2] for i in inns
+                  if str(i or "").strip()[:2].isdigit() and str(i).strip()[:2] != "00")
     rest = [r for r, _ in sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0])) if r not in first]
     return list(first) + rest
 

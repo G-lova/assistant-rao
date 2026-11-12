@@ -136,6 +136,7 @@ class BackfillTest(unittest.TestCase):
         """Москва первой, затем по числу организаций."""
         self.assertEqual(cb.region_order(["5001", "5002", "3401", "7701"]), ["77", "50", "34"])
         self.assertEqual(cb.region_order(["3401"])[0], "77")
+        self.assertNotIn("00", cb.region_order(["0012345678", "3401"]))
 
     def test_run(self):
         """Дни назад; выполненная пара пропущена; ошибка в журнале; положения заказчиков не читаются, но хранятся."""
