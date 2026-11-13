@@ -22,7 +22,9 @@
 import asyncio
 import datetime
 import os
+import threading
 import zipfile
+from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from configs import settings
@@ -95,8 +97,13 @@ class ArchiveCache:
         self.paths: Dict[str, str] = {}
         self.locks: Dict[str, asyncio.Lock] = {}
         # открытый ZIP и указатель «имя → запись» на архив: в выгрузке за день — до десятков тысяч XML в одном
-        # архиве, и открывать его заново (с разбором оглавления) на каждый XML — квадратичная работа
-        self.zips: Dict[str, Tuple[zipfile.ZipFile, Dict[str, str], Any]] = {}
+        # архиве, и открывать его заново (с разбором оглавления) на каждый XML — квадратичная работа.
+        # Открытыми держатся не больше RM_MAX_OPEN_ARCHIVES последних архивов (LRU): за день архивов сотни (типы
+        # документов × подсистемы × регионы + архивы предыдущих версий), и при открытых всех прогон падал на
+        # «Too many open files» (прод, 11.11.2026)
+        self.zips: "OrderedDict[str, Tuple[zipfile.ZipFile, Dict[str, str], Any]]" = OrderedDict()
+        self.max_open = max(1, int(getattr(settings, "RM_MAX_OPEN_ARCHIVES", 64)))
+        self._zips_lock = threading.Lock()
 
     async def read(self, url: str, entry_name: str) -> bytes:
         """Байты XML из архива.
@@ -122,26 +129,58 @@ class ArchiveCache:
         path = self.paths[url]
         return await asyncio.to_thread(self._read_cached, path, entry_name)
 
-    def _read_cached(self, path: str, entry_name: str) -> bytes:
-        """Читает XML из уже открытого архива (открывается один раз; чтение под блокировкой архива)."""
-        import threading
+    def _open(self, path: str) -> Tuple[zipfile.ZipFile, Dict[str, str], Any]:
+        """Открытый архив из кэша; при превышении ``max_open`` давно не используемые архивы закрываются.
 
-        if path not in self.zips:
-            zf = zipfile.ZipFile(path)
-            index: Dict[str, str] = {}
-            for n in zf.namelist():
-                index.setdefault(n, n)
-                index.setdefault(n.rsplit("/", 1)[-1], n)
-            self.zips[path] = (zf, index, threading.Lock())
-        zf, index, lock = self.zips[path]
-        name = index.get(entry_name) or index.get(entry_name.rsplit("/", 1)[-1])
-        if name is None:
-            raise FileNotFoundError(f"в архиве нет {entry_name}")
-        with lock:
-            info = zf.getinfo(name)
-            if info.file_size > xml_events.MAX_XML_BYTES:
-                raise ValueError(f"{entry_name}: XML больше {xml_events.MAX_XML_BYTES} байт")
-            return zf.read(name)
+        Закрытие идёт под блокировкой архива, поэтому чтение, которое уже началось, дочитывается. Закрытый архив
+        при следующем обращении открывается заново (файл остаётся на диске до :meth:`close`).
+        """
+        evicted: List[Tuple[zipfile.ZipFile, Dict[str, str], Any]] = []
+        with self._zips_lock:
+            entry = self.zips.get(path)
+            if entry is not None:
+                self.zips.move_to_end(path)
+            else:
+                zf = zipfile.ZipFile(path)
+                index: Dict[str, str] = {}
+                for n in zf.namelist():
+                    index.setdefault(n, n)
+                    index.setdefault(n.rsplit("/", 1)[-1], n)
+                entry = self.zips[path] = (zf, index, threading.Lock())
+                while len(self.zips) > self.max_open:
+                    evicted.append(self.zips.popitem(last=False)[1])
+        for old_zf, _, old_lock in evicted:
+            with old_lock:
+                try:
+                    old_zf.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        return entry
+
+    def _read_cached(self, path: str, entry_name: str) -> bytes:
+        """Читает XML из открытого архива (открытым держится не больше ``max_open`` архивов; чтение под
+        блокировкой архива)."""
+        for _ in range(2):
+            zf, index, lock = self._open(path)
+            name = index.get(entry_name) or index.get(entry_name.rsplit("/", 1)[-1])
+            if name is None:
+                raise FileNotFoundError(f"в архиве нет {entry_name}")
+            with lock:
+                if zf.fp is None:      # архив закрыли между открытием и чтением (вытеснен) — открыть заново
+                    with self._zips_lock:
+                        if self.zips.get(path, (None,))[0] is zf:
+                            del self.zips[path]
+                    continue
+                return self._read_member(zf, name, entry_name)
+        raise RuntimeError(f"архив {path} закрыт во время чтения {entry_name}")
+
+    @staticmethod
+    def _read_member(zf: zipfile.ZipFile, name: str, entry_name: str) -> bytes:
+        """Байты записи архива с проверкой размера XML."""
+        info = zf.getinfo(name)
+        if info.file_size > xml_events.MAX_XML_BYTES:
+            raise ValueError(f"{entry_name}: XML больше {xml_events.MAX_XML_BYTES} байт")
+        return zf.read(name)
 
     @staticmethod
     def _read_entry(path: str, entry_name: str) -> bytes:
@@ -159,12 +198,14 @@ class ArchiveCache:
 
     def close(self) -> None:
         """Закрывает открытые архивы и удаляет скачанные."""
-        for zf, _, _ in self.zips.values():
+        with self._zips_lock:
+            entries = list(self.zips.values())
+            self.zips.clear()
+        for zf, _, _ in entries:
             try:
                 zf.close()
             except Exception:  # noqa: BLE001
                 pass
-        self.zips.clear()
         for p in self.paths.values():
             try:
                 os.unlink(p)
