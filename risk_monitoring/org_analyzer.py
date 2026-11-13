@@ -191,7 +191,8 @@ class OrgAnalyzer:
         from risk_monitoring import resume_entities
 
         # организация и её крупнейшие контрагенты — для ссылок в тексте модели (дашборды, 12.11.2026)
-        own = {"name": name, "inn": t["inn"], "kpp": t["row"].get("kpp"), "organisation_id": cid}
+        own = {"name": t["row"].get("name") or name, "short_name": t["row"].get("short_name"), "inn": t["inn"],
+               "kpp": t["row"].get("kpp"), "organisation_id": cid}
         if "customer" in self.roles:
             ids = {int(g["id"]) for g in t["customer_rows"]}
             mine = [c for c in customer_contracts if c.get("organisation_id") is not None and int(c["organisation_id"]) in ids]
@@ -206,7 +207,8 @@ class OrgAnalyzer:
                 progress.note(f"заказчик: закупок {len(mine)}, рисков {len(sec['risks'])}, балл {sec['score']}")
                 async with progress.step("резюме заказчика"):
                     sec["resume"] = await self._resume("customer", name, sec)
-                sec["resume_entities"] = resume_entities.for_organisation("customer", own, sec)
+                sec["resume_entities"] = resume_entities.finalize(
+                    resume_entities.for_organisation("customer", own, sec), sec.get("resume"))
                 ai["customer"] = sec
                 summary["customer_score"] = sec["score"]
         if "supplier" in self.roles:
@@ -221,7 +223,8 @@ class OrgAnalyzer:
                 progress.note(f"поставщик: контрактов {len(mine)}, рисков {len(sec['risks'])}, балл {sec['score']}")
                 async with progress.step("резюме поставщика"):
                     sec["resume"] = await self._resume("supplier", name, sec)
-                sec["resume_entities"] = resume_entities.for_organisation("supplier", own, sec)
+                sec["resume_entities"] = resume_entities.finalize(
+                    resume_entities.for_organisation("supplier", own, sec), sec.get("resume"))
                 ai["supplier"] = sec
                 summary["supplier_score"] = sec["score"]
         pipeline = passport.pipeline_block("S3", "completed", self.model if self.llm else None,

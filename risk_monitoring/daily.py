@@ -1072,6 +1072,10 @@ class DailyRun:
                 resume, used_llm = await self._resume(summary)
         self.stages["summary"] = {"status": "completed", "llm": used_llm}
         summary["resume"] = text_format.normalize(resume)
+        from risk_monitoring import resume_entities
+
+        # упомянутые в тексте организации — первыми, с упоминаниями как в тексте (13.11.2026)
+        summary["resume_entities"] = resume_entities.finalize(summary.get("resume_entities") or [], summary["resume"])
         summary["facts"] = summary_facts(summary)
         partial = any((v or {}).get("status") == "partial" for v in self.stages.values())
         summary["pipeline"] = {"schema_version": SCHEMA_VERSION, "stage": "S0-S4",

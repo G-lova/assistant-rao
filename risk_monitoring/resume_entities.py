@@ -6,22 +6,25 @@
 
 * закупка — её заказчик и поставщик (паспорт закупки);
 * организация — она сама и её крупнейшие контрагенты (``top_suppliers`` / ``top_customers`` профиля);
-* сводка дня — организации из пунктов, переданных модели (внимание, приоритеты, переходы в красную зону, события
-  риска, заказчики и поставщики с оценкой);
-* сводка недели и месяца — организации ежедневных сводок, названия или ИНН которых есть в тексте.
+* сводка дня — организации всех блоков сводки (внимание, приоритеты, закупки, события риска, заказчики и поставщики);
+* сводка недели и месяца — организации ежедневных сводок.
 
-Запись: ``{"role": "customer" | "supplier", "name", "inn", "kpp", "organisation_id"}`` — пустые поля не пишутся.
-Сопоставление с текстом делают дашборды (ТЗ от 12.11.2026, п. 2.3); формат API не меняется.
+Запись: ``{"role": "customer" | "supplier", "name", "short_name", "inn", "kpp", "organisation_id", "mentions"}`` —
+пустые поля не пишутся. ``mentions`` — упоминания организации **так, как они написаны в тексте** (с падежными
+окончаниями: «филиала РГСУ в г. Майкопе»), чтобы дашборды не угадывали склонения (13.11.2026). Упомянутые в тексте
+организации идут первыми; список не длиннее ``MAX_ENTITIES`` (было 50 — у сводки дня названия из текста не попадали
+в список, 13.11.2026). Сопоставление с текстом делают дашборды (ТЗ от 12.11.2026, п. 2.3); формат API не меняется.
 """
 import re
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 ROLES = ("customer", "supplier")
 # организационно-правовые формы и типовые сокращения в начале названия — для проверки упоминания в тексте
 _FORMS = re.compile(r"^(?:(?:ФГБОУ|ФГАОУ|ФГБУН|ФГБНУ|ФГБУ|ФГУП|ФГКУ|ФГАУ|ФБУН|ФКУ|ГБУ|ГАУ|МБУ|АНО|ООО|ОАО|ЗАО|ПАО|АО|ИП|"
                     r"ВО|ДПО|НКО)\s+)+", re.I)
 _QUOTES = re.compile(r"[«»\"'“”„]")
-MAX_ENTITIES = 50
+MAX_ENTITIES = 500
+_WORD = re.compile(r"[0-9A-Za-zА-Яа-яЁё]+")
 
 
 def _clean(v: Any) -> Optional[str]:
@@ -31,7 +34,7 @@ def _clean(v: Any) -> Optional[str]:
 
 
 def entity(role: str, name: Any = None, inn: Any = None, kpp: Any = None,
-           organisation_id: Any = None) -> Optional[Dict[str, Any]]:
+           organisation_id: Any = None, short_name: Any = None) -> Optional[Dict[str, Any]]:
     """Запись об организации; ``None`` — нет ни названия, ни ИНН, ни id или роль неизвестна.
 
     Args:
@@ -40,14 +43,17 @@ def entity(role: str, name: Any = None, inn: Any = None, kpp: Any = None,
         inn: ИНН.
         kpp: КПП.
         organisation_id: id строки справочника организаций внешней БД.
+        short_name: Сокращённое название (справочник организаций), если отличается от ``name``.
 
     Returns:
-        Optional[Dict[str, Any]]: ``{role, name?, inn?, kpp?, organisation_id?}``.
+        Optional[Dict[str, Any]]: ``{role, name?, short_name?, inn?, kpp?, organisation_id?}``.
     """
     if role not in ROLES:
         return None
     out: Dict[str, Any] = {"role": role}
-    for k, v in (("name", _clean(name)), ("inn", _clean(inn)), ("kpp", _clean(kpp))):
+    short = _clean(short_name)
+    for k, v in (("name", _clean(name) or short), ("short_name", short if short != (_clean(name) or short) else None),
+                 ("inn", _clean(inn)), ("kpp", _clean(kpp))):
         if v:
             out[k] = v
     try:
@@ -89,13 +95,88 @@ def core_name(name: Any) -> str:
     return _FORMS.sub("", s).strip().lower()
 
 
-def mentioned(e: Dict[str, Any], text: Any) -> bool:
-    """Упомянута ли организация в тексте: ИНН или название без формы (не короче 4 символов)."""
-    t = norm(text)
-    if e.get("inn") and e["inn"] in t:
+def _stem(word: str) -> str:
+    """Основа слова для сравнения с падежной формой: без последних букв окончания."""
+    if len(word) >= 6:
+        return word[:max(4, len(word) - 3)]
+    if len(word) >= 4:
+        return word[:len(word) - 1]
+    return word
+
+
+def _word_match(name_word: str, text_word: str) -> bool:
+    """Слово текста — то же слово названия, возможно в другом падеже; короткие слова и цифры — точно."""
+    t = text_word.lower()
+    if name_word == t:
         return True
-    core = core_name(e.get("name"))
-    return len(core) >= 4 and core in t
+    if len(name_word) < 4 or name_word.isdigit() or name_word.isupper():
+        return False
+    return t.startswith(_stem(name_word)) and abs(len(t) - len(name_word)) <= 3
+
+
+def find_mentions(e: Dict[str, Any], text: Any, limit: int = 5) -> List[str]:
+    """Упоминания организации в тексте так, как они написаны: название и сокращённое название без
+    организационно-правовой формы, с учётом падежных окончаний; ИНН — как есть.
+
+    Название из одного слова короче 6 букв не ищется (как в правилах дашбордов: «МАИ», «КГУ»).
+
+    Args:
+        e: Запись :func:`entity`.
+        text: Текст модели.
+        limit: Не больше стольких разных упоминаний.
+
+    Returns:
+        List[str]: Подстроки текста, без повторов, в порядке появления.
+    """
+    src = str(text or "")
+    tokens = list(_WORD.finditer(src))
+    found: List[Tuple[int, str]] = []
+    for variant in (e.get("name"), e.get("short_name")):
+        words = [w.group(0).lower() for w in _WORD.finditer(core_name(variant))]
+        if not words or (len(words) == 1 and len(words[0]) < 6):
+            continue
+        n = len(words)
+        for i in range(len(tokens) - n + 1):
+            if all(_word_match(words[j], tokens[i + j].group(0)) for j in range(n)):
+                start, end = tokens[i].start(), tokens[i + n - 1].end()
+                found.append((start, src[start:end]))
+    inn = e.get("inn")
+    if inn:
+        found += [(m.start(), inn) for m in re.finditer(rf"(?<!\d){re.escape(inn)}(?!\d)", src)]
+    out: List[str] = []
+    for _, span in sorted(found):
+        if span not in out:
+            out.append(span)
+    return out[:limit]
+
+
+def mentioned(e: Dict[str, Any], text: Any) -> bool:
+    """Упомянута ли организация в тексте (:func:`find_mentions`)."""
+    return bool(find_mentions(e, text, limit=1))
+
+
+def finalize(entities: Iterable[Dict[str, Any]], text: Any, limit: int = MAX_ENTITIES) -> List[Dict[str, Any]]:
+    """Список для ``ai_analysis``: упоминания из текста (``mentions``), сначала упомянутые организации, не длиннее
+    ``limit``.
+
+    Args:
+        entities: Записи :func:`entity` (без повторов).
+        text: Текст модели, к которому прилагается список.
+        limit: Наибольшая длина списка.
+
+    Returns:
+        List[Dict[str, Any]]: Записи с ``mentions`` у упомянутых.
+    """
+    with_m, without = [], []
+    for e in entities:
+        e = {k: v for k, v in e.items() if k != "mentions"}
+        m = find_mentions(e, text)
+        if m:
+            e["mentions"] = m
+            with_m.append(e)
+        else:
+            without.append(e)
+    return (with_m + without)[:limit]
 
 
 def for_purchase(passport: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -118,19 +199,21 @@ def for_organisation(role: str, org: Dict[str, Any], section: Optional[Dict[str,
         List[Dict[str, Any]]: Записи без повторов.
     """
     sec = section or {}
-    own = entity(role, org.get("name"), org.get("inn"), org.get("kpp"), org.get("organisation_id"))
+    own = entity(role, org.get("name"), org.get("inn"), org.get("kpp"), org.get("organisation_id"),
+                 org.get("short_name"))
     other = "supplier" if role == "customer" else "customer"
     top = sec.get("top_suppliers") if role == "customer" else sec.get("top_customers")
     return merge([own] + [entity(other, t.get("name"), t.get("inn")) for t in top or []])
 
 
-def for_daily(summary: Dict[str, Any], items: Sequence[Dict[str, Any]], top: int) -> List[Dict[str, Any]]:
-    """Организации из пунктов ежедневной сводки, которые передаются модели.
+def for_daily(summary: Dict[str, Any], items: Sequence[Dict[str, Any]], top: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Организации всех блоков ежедневной сводки (до текста модели; упоминания — :func:`finalize`).
 
     Args:
         summary: Результат ``daily.build_summary`` (без текста).
         items: Закупки сводки (``contract_item``): по ``card_id`` берутся заказчик и его ``organisation_id``.
-        top: Сколько заказчиков и поставщиков с оценкой передаётся модели (``DAILY_TOP``).
+        top: Не используется: раньше брались только первые ``DAILY_TOP`` заказчиков и поставщиков, и названия из
+            текста не попадали в список (13.11.2026).
 
     Returns:
         List[Dict[str, Any]]: Записи без повторов.
@@ -139,8 +222,9 @@ def for_daily(summary: Dict[str, Any], items: Sequence[Dict[str, Any]], top: int
     cards: List[Any] = []
     for key in ("attention", "priorities"):
         cards += [x.get("card_id") for x in summary.get(key) or []]
-    for key in ("became_red", "score_jump", "red"):
-        cards += [x.get("card_id") for x in (summary.get("contracts") or {}).get(key) or []]
+    for rows in (summary.get("contracts") or {}).values():
+        if isinstance(rows, list):
+            cards += [x.get("card_id") for x in rows if isinstance(x, dict)]
     for key in ("new", "closed"):
         cards += [x.get("card_id") for x in (summary.get("risk_changes") or {}).get(key) or []]
     out: List[Optional[Dict[str, Any]]] = []
@@ -150,13 +234,13 @@ def for_daily(summary: Dict[str, Any], items: Sequence[Dict[str, Any]], top: int
             out.append(entity("customer", i.get("customer"), i.get("customer_inn"), i.get("customer_kpp"),
                               i.get("organisation_id")))
     out += [entity("customer", c.get("name"), c.get("inn"), c.get("kpp"), c.get("organisation_id"))
-            for c in (summary.get("customers") or [])[:top]]
+            for c in summary.get("customers") or []]
     out += [entity("supplier", s.get("name"), s.get("inn"), s.get("kpp"), s.get("organisation_id"))
-            for s in (summary.get("suppliers") or [])[:top]]
-    return merge(out)
+            for s in summary.get("suppliers") or []]
+    return merge(out, limit=10 ** 6)
 
 
 def for_period(dailies: Iterable[Dict[str, Any]], text: Any) -> List[Dict[str, Any]]:
-    """Организации ежедневных сводок периода, упомянутые в тексте сводки недели или месяца."""
+    """Организации ежедневных сводок периода: упомянутые в тексте сводки недели или месяца — первыми, с упоминаниями."""
     pool = merge((e for d in dailies for e in (d or {}).get("resume_entities") or []), limit=10 ** 6)
-    return merge(e for e in pool if mentioned(e, text))
+    return finalize(pool, text)
