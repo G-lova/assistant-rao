@@ -28,7 +28,7 @@ from risk_monitoring import passport, risk_catalog
 
 SCHEMA_VERSION = "rm-contract-1"
 # формат рисков закупки (находки, 12.11.2026): входит в input_hash — при смене закупки пересчитываются один раз
-RESULT_FORMAT = "findings-2"
+RESULT_FORMAT = "findings-3"   # 13.11.2026: цитата на каждую находку (до 100), одна цитата — одна находка
 
 # Показатель внешней системы → код каталога (FIN-003 ↔ pz_p5 …)
 INDICATOR_TO_CODE: Dict[str, str] = {
