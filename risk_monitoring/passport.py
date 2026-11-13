@@ -22,7 +22,17 @@ SCHEMA_VERSION_FILE = "rm-file-1"
 SCHEMA_VERSION_XML = "rm-xml-1"
 
 MAX_EVIDENCE_PER_RISK = 5
-MAX_EVIDENCE_MULTI = 20       # цитат у риска с несколькими находками (по одной на находку)
+# цитат у риска с несколькими находками: по одной на каждую находку, но не больше этого числа. Было 20 — находки
+# сверх 20-й оставались без цитаты («цитат нет» в панели риска; DOC-010 закупки 0346100001325000019: 59 находок,
+# 20 цитат), 13.11.2026
+MAX_EVIDENCE_MULTI = 100
+
+
+def _quote_key(ev: Any) -> str:
+    """Цитата для сравнения находок: нижний регистр, без пунктуации и лишних пробелов; короче 15 символов — пусто."""
+    frag = ev.get("fragment") if isinstance(ev, dict) else None
+    key = " ".join(re.sub(r"[^\w]+", " ", str(frag or "").lower()).split())
+    return key if len(key) >= 15 else ""
 
 
 def now_iso() -> str:
@@ -298,6 +308,9 @@ def merge_risks(*lists: Iterable[Dict[str, Any]], fz: Any = None) -> List[Dict[s
     merged: Dict[str, Dict[str, Any]] = {}
     rule_levels: Dict[str, float] = {}
     findings: Dict[str, List[Dict[str, Any]]] = {}
+    # цитата → номер находки по коду: одна и та же цитата с разными формулировками описания — одна находка
+    # (модель перефразирует ту же ссылку в разных проходах и файлах), 13.11.2026
+    quote_no: Dict[str, Dict[str, int]] = {}
     for lst in lists:
         for r in lst or []:
             code = r.get("rule_id")
@@ -308,17 +321,24 @@ def merge_risks(*lists: Iterable[Dict[str, Any]], fz: Any = None) -> List[Dict[s
             # 5 цитат про наименование, сроки и цену при описании только про наименование)
             r = dict(r)
             fl = findings.setdefault(code, [])
+            qn = quote_no.setdefault(code, {})
 
-            def register(desc: str, law: Any, verification: Any) -> int:
-                """Номер находки в объединённом риске (новая или та же по тексту описания)."""
+            def register(desc: str, law: Any, verification: Any, evs: Sequence[Any] = ()) -> int:
+                """Номер находки в объединённом риске: та же по тексту описания, та же по цитате или новая."""
                 key = " ".join(desc.lower().split())
                 f = next((x for x in fl if x["_key"] == key), None)
+                if f is None:
+                    no = next((qn[q] for q in map(_quote_key, evs) if q and q in qn), None)
+                    f = next((x for x in fl if x["no"] == no), None) if no is not None else None
                 if f is None:
                     f = {"no": len(fl) + 1, "description": desc, "law": law, "verification_needed": [], "_key": key}
                     fl.append(f)
                 for v in as_text_list(verification):
                     if v not in f["verification_needed"]:
                         f["verification_needed"].append(v)
+                for q in map(_quote_key, evs):
+                    if q:
+                        qn.setdefault(q, f["no"])
                 return f["no"]
 
             legacy = split_numbered(r.get("description"))
@@ -332,8 +352,12 @@ def merge_risks(*lists: Iterable[Dict[str, Any]], fz: Any = None) -> List[Dict[s
                 # риск уже объединённый (to_external_risks объединяет риски файла, затем паспорт файла и закупка
                 # объединяют ещё раз): находки разворачиваются, номера цитат пересчитываются — иначе находки
                 # склеивались в одну с описанием «Находок: N…» (12.11.2026)
+                by_no: Dict[Any, List[Any]] = {}
+                for ev in r.get("evidence") or []:
+                    if isinstance(ev, dict):
+                        by_no.setdefault(ev.get("finding_no"), []).append(ev)
                 remap = {f.get("no"): register(str(f.get("description") or "").strip(), f.get("law"),
-                                               f.get("verification_needed"))
+                                               f.get("verification_needed"), by_no.get(f.get("no")) or ())
                          for f in r["findings"] if str(f.get("description") or "").strip()}
                 first = next(iter(remap.values()), None)
                 r["evidence"] = [({**ev, "finding_no": remap.get(ev.get("finding_no"), first)}
@@ -342,7 +366,8 @@ def merge_risks(*lists: Iterable[Dict[str, Any]], fz: Any = None) -> List[Dict[s
             elif str(r.get("description") or "").strip():
                 # находка: описание и норма этого риска; доказательства помечаются номером своей находки — иначе при
                 # объединении нескольких находок одного кода описание оставалось только у первой (11.11.2026, DOC-007)
-                no = register(str(r["description"]).strip(), r.get("law"), r.get("verification_needed"))
+                no = register(str(r["description"]).strip(), r.get("law"), r.get("verification_needed"),
+                              r.get("evidence") or ())
                 r["evidence"] = [({**ev, "finding_no": no} if isinstance(ev, dict) else ev)
                                  for ev in (r.get("evidence") or [])]
             if not _model_only(r) and (r.get("level") or 0) > 0:
