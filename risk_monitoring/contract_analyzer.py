@@ -406,7 +406,8 @@ class ContractAnalyzer:
 
         ai = {**built, "resume": resume, "pipeline": pipeline, "analyzed_at": passport.now_iso(),
               # заказчик и поставщик — для ссылок на организации в тексте модели (дашборды, 12.11.2026)
-              "resume_entities": resume_entities.for_purchase(built.get("passport"))}
+              "resume_entities": resume_entities.finalize(resume_entities.for_purchase(built.get("passport")),
+                                                          resume)}
         result = {"card_id": cid, "status": "done", "pushed": False, "score": built["profile"]["score"],
                   "zone": built["profile"]["zone"], "risks": len(built["risks"]), "ai_analysis": ai}
         if self.push_results:
