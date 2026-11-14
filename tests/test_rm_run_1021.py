@@ -1,4 +1,5 @@
 """Прогон 21.10.2026: OCR больше контекста, отклонённая ссылка на предыдущую версию, бюджет времени прогона."""
+import json
 import asyncio
 import os
 import tempfile
@@ -63,7 +64,8 @@ class PreviousRejectedTest(unittest.TestCase):
         sent = []
 
         async def request(method, url=None, **kw):
-            sent.append(dict(kw["json"]["ai_analysis"]["pipeline"]))
+            # тело — JSON в UTF-8 (encode_body), а не json=
+            sent.append(dict(json.loads(kw["data"].decode("utf-8"))["ai_analysis"]["pipeline"]))
             if len(sent) == 1:
                 raise api_mod.RiskAPIError("HTTP 422: Предыдущая версия допустима только для более раннего файла", 422)
             return {"status": "ok", "data": {"id": 5367}}

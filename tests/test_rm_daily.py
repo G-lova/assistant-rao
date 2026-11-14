@@ -1,4 +1,5 @@
 """Ежедневный прогон риск-мониторинга и сводка (``risk_monitoring.daily``)."""
+import json as _json
 import asyncio
 import unittest
 from datetime import datetime, timedelta
@@ -403,9 +404,9 @@ class TestEventType(unittest.TestCase):
         from tests.stubs import stubbed_import
         sent = {}
 
-        async def fake(method, json=None, **kw):
-            """Запоминает тело запроса."""
-            sent.update(json)
+        async def fake(method, data=None, **kw):
+            """Запоминает тело запроса (JSON в UTF-8 — encode_body)."""
+            sent.update(_json.loads(data.decode("utf-8")))
             return {"data": {}}
 
         with stubbed_import("risk_monitoring.risk_monitoring_api") as m:

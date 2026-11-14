@@ -69,6 +69,14 @@ LABELS: Dict[str, str] = {
     "treasury_account": "Номер единого казначейского счета",
 }
 # Продолжение метки на следующей строке (длинные подписи переносятся)
+# Предел значения одной метки. Значение метки — строки после неё до следующей метки или раздела. В печатных формах,
+# не похожих на извещение (печатная форма электронного контракта: «Наименование объекта закупки», а дальше — весь
+# текст контракта без знакомых меток и разделов), в значение уходил весь остаток документа: у файла 29759 (stage,
+# 13.11.2026) «Наименование объекта закупки» заняло 531 тыс. символов, ai_analysis вырос до 2,1 млн символов,
+# и API внешней БД отклонил запись (HTTP 413). Настоящие значения извещения — несколько строк.
+MAX_VALUE_LINES = 40
+MAX_VALUE_CHARS = 4000
+
 LABEL_CONTINUATION = re.compile(r"^(?:а также условия гарантии|в ч\. 10 ст\. 34|Закона № 44-ФЗ)$", re.I)
 
 # Заголовки разделов печатной формы
@@ -132,6 +140,7 @@ class PrintForm:
     def _parse(self) -> None:
         """Заполняет :attr:`pairs` и :attr:`sections` одним проходом по строкам."""
         current_label, section = None, "Заголовок"
+        value_lines = 0                                # строк в значении текущей метки (предел MAX_VALUE_LINES)
         i = 0
         while i < len(self.lines):
             line = self.lines[i]
@@ -152,16 +161,25 @@ class PrintForm:
                 rest = _norm(line)[len(_norm(LABELS[current_label])):].strip(" :")
                 if rest:                                   # значение в той же строке: «"БИК"000000000»
                     self.pairs[current_label].append(rest)
+                value_lines = 1 if rest else 0
                 i += label[1]
                 continue
             if current_label:
-                self.pairs[current_label].append(line)
+                if value_lines >= MAX_VALUE_LINES:
+                    # дальше — не значение метки, а остаток документа без знакомых меток (см. MAX_VALUE_LINES)
+                    current_label = None
+                else:
+                    self.pairs[current_label].append(line)
+                    value_lines += 1
             i += 1
 
     def value(self, key: str) -> Optional[str]:
-        """Значение метки без заглушек «Информация отсутствует»; ``None``, если метки нет или значение пусто."""
+        """Значение метки без заглушек «Информация отсутствует»; ``None``, если метки нет или значение пусто.
+
+        Не длиннее ``MAX_VALUE_CHARS`` символов (вторая страховка от «убежавшего» значения, см. ``MAX_VALUE_LINES``).
+        """
         lines = [ln for ln in self.pairs.get(key, []) if not NO_INFO.match(_norm(ln))]
-        return _norm(" ".join(lines)) or None
+        return _norm(" ".join(lines))[:MAX_VALUE_CHARS].strip() or None
 
     def has(self, key: str) -> bool:
         """Есть ли метка в форме (значение может быть пустым)."""

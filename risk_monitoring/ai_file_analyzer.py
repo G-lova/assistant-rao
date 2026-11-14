@@ -596,7 +596,12 @@ class AIFileAnalyzer:
                 return {"file_id": file_id, "status": "skipped", "reason": "already_analyzed"}
             stored = (getattr(self, "internal", None) or {}).get(file_id)
             if stored and stored.get("status") == "completed" and not stored.get("debug"):
-                return await self._reuse_internal(file_id, stored)
+                if printform_passport.is_runaway(stored.get("ai_analysis")):
+                    # результат печатной формы собран до пределов полей и слишком велик для API (HTTP 413) —
+                    # пересобираем (без модели), а не дозаписываем как есть
+                    progress.note("сохранённый результат печатной формы с раздутыми полями — пересборка")
+                else:
+                    return await self._reuse_internal(file_id, stored)
             if row.get("rm_status") == "failed" and attempt > MAX_ATTEMPTS:
                 progress.note(f"исчерпаны попытки ({MAX_ATTEMPTS}) — пропуск")
                 return {"file_id": file_id, "status": "skipped", "reason": "max_attempts"}
