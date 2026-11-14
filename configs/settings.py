@@ -95,6 +95,10 @@ PE_FACTS_TIMEOUT_SEC = 900
 PE_FACTS_TOP_K = 8
 PE_FACTS_RECHECK_K = 16
 
+# Пул соединений с Postgres сервиса в процессе API (configs/working_with_db.open_app_pool, lifespan FastAPI): раньше
+# пул создавался и закрывался на каждую операцию
+DB_APP_POOL_MAX_SIZE = 10
+
 # Параметры генерации основной модели (MODEL_NAME)
 MODEL_TEMPERATURE = 0.7
 MODEL_MAX_TOKENS = 4096
@@ -438,6 +442,9 @@ WORKER_LOG_ENABLED = True
 WORKER_LOG_DIR = "logs"
 WORKER_LOG_MAX_MB = 100
 WORKER_LOG_BACKUPS = 10
+# Длинные значения в журнале уровня INFO (результаты извлечения, ответы OCR, разбор ссылок) обрезаются до стольких
+# символов (configs.logger.brief); полный текст — на уровне DEBUG. 0 — писать целиком, как раньше
+LOG_VALUE_MAX_CHARS = 2000
 # Процессов воркера celery_worker (очередь evaluation, пул prefork): задачи /evaluate-documents, сводного заключения,
 # индексации и публикаций экспертов идут параллельно. У каждого процесса свои лимиты запросов к модели
 # (llm_resilience.MAX_INFLIGHT), поэтому нагрузка на модель растёт с числом процессов; 1 — задачи по одной.

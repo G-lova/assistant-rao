@@ -13,7 +13,7 @@ from configs.data_fetcher import DataFetcher
 from configs.file_reader import FileReader
 from configs.http_client_manager import HTTPClientManager
 from configs.llm_client import get_llm
-from configs.logger import get_logger, log_context
+from configs.logger import brief, get_logger, log_context
 from configs.utils import load_sql_query, split_large_text
 from configs.working_with_db import save_evaluation_result
 from evaluate_documents.completeness_checker import CompletenessChecker
@@ -157,7 +157,7 @@ class TasksPipeline:
             files = parse_result.get("files", [parse_result])
             logger.info(f"Ссылка {link.doc_code} {link.media_links}: {parse_result.get('status')}, файлов {len(files)}"
                         + (f", ошибка: {parse_result.get('error')}" if parse_result.get("error") else ""))
-            logger.info(f"Результат разбора ссылки {link.media_links}: {parse_result}")
+            logger.info(f"Результат разбора ссылки {link.media_links}: {brief(parse_result)}")
 
             tasks = []
             for file_info in parse_result.get("files", [parse_result]):

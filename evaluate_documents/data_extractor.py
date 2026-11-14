@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import time
 
 from configs import settings
@@ -9,7 +10,7 @@ from json_repair import repair_json
 from string import Template
 from typing import Any, Dict, List, Optional
 
-from configs.logger import get_logger
+from configs.logger import brief, get_logger
 from configs.rate_limiter import llm_rate_limiter
 from configs.retry_utils import LLM_RETRY_CONFIG, async_retry
 from configs.llm_repetition import LOOP_MIN, dedupe_repeats, penalized
@@ -119,7 +120,10 @@ class DataExtractor:
             logger.info(f"'{filename}': извлечено за {time.monotonic() - started:.1f} с "
                         f"(блоков {len(chunks)}, с ошибкой {failed}): {describe_raw_data(final_result.get('raw_data'))}")
             logger.info(f"'{filename}': извлечённые значения:{format_raw_data_for_log(final_result.get('raw_data'))}")
-            logger.info(f"'{filename}': результат извлечения: {json.dumps(final_result, ensure_ascii=False, default=str)}")
+            logger.info(f"'{filename}': результат извлечения: {brief(final_result)}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"'{filename}': результат извлечения целиком: "
+                             f"{json.dumps(final_result, ensure_ascii=False, default=str)}")
             return final_result
         except Exception as e:
             logger.error(f"'{filename}': ошибка объединения данных блоков: {type(e).__name__}: {e}", exc_info=True)

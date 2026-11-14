@@ -41,10 +41,20 @@ http_manager = HTTPClientManager(timeout=120.0, limit=50)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Общие ресурсы процесса API: HTTP-клиент и пул Postgres сервиса (вместо пула на каждый запрос)."""
+    from configs.working_with_db import close_app_pool, open_app_pool
+
     await http_manager.startup()
     app.state.http_manager = http_manager  # Делаем доступным через app.state
-    yield
-    await http_manager.shutdown()
+    try:
+        await open_app_pool()
+    except Exception as e:  # noqa: BLE001 — БД недоступна при старте: запросы получат временное соединение
+        logger.warning(f"Пул Postgres не создан при старте: {type(e).__name__}: {e}")
+    try:
+        yield
+    finally:
+        await close_app_pool()
+        await http_manager.shutdown()
 
 app = FastAPI(lifespan=lifespan)
 # app = FastAPI(debug=False)

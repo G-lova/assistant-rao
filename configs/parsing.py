@@ -16,10 +16,11 @@ from configs.rate_limiter import TokenBucket
 from configs.host_limiter import media_limiter, parse_retry_after
 from configs.retry_utils import EIS_RETRY_CONFIG, MEDIA_RETRY_CONFIG, EISArchiveNotReadyError, EISRateLimitError, async_retry
 from configs.utils import get_file_extension
+from configs.eis_archive import download_to_tempfile, extract_zip, remove_quietly
 import zipfile
 import io
 import xml.etree.ElementTree as ET
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 from playwright.async_api import async_playwright, Browser
 from urllib.parse import quote, unquote, urljoin, urlparse, parse_qs
 from bs4 import BeautifulSoup
@@ -306,7 +307,8 @@ class CloudStorageParser:
     def _extract_eis_archive_url(self, response_dict: Dict) -> Optional[str]:
         """Извлекает URL архива из ответа SOAP API ЕИС"""
         try:
-            logger.info(f"Попытка извлечения URL архива из ответа: {json.dumps(response_dict, indent=2, ensure_ascii=False)}")
+            if logger.isEnabledFor(logging.DEBUG):   # ответ SOAP целиком — только в отладке, не на каждый запрос
+                logger.debug(f"Попытка извлечения URL архива из ответа: {json.dumps(response_dict, indent=2, ensure_ascii=False)}")
 
             # Основная структура SOAP ответа
             envelope = response_dict.get('soap:Envelope', {})
@@ -392,11 +394,14 @@ class CloudStorageParser:
                         "error": f"Не удалось скачать архив ЕИС: статус {response.status}"
                     }
                 
-                # Успех
-                archive_content = await response.read()
-                logger.info(f"Архив скачан: {len(archive_content)} байт")
-                
-                return await self._process_eis_archive(archive_content, identifier, archive_url, procurement_id)
+                # Успех: архив пишется на диск порциями, а не читается в память целиком
+                archive_path, size = await download_to_tempfile(response)
+                logger.info(f"Архив скачан: {size} байт")
+
+            try:
+                return await self._process_eis_archive(archive_path, identifier, archive_url, procurement_id)
+            finally:
+                remove_quietly(archive_path)
                         
         except EISArchiveNotReadyError:
             # Переподнимаем, чтобы декоратор retry мог перехватить
@@ -412,48 +417,39 @@ class CloudStorageParser:
             }
 
 
-    async def _process_eis_archive(self, archive_content: bytes, identifier: str, 
+    async def _process_eis_archive(self, archive: Union[str, bytes], identifier: str,
                                  original_url: str, procurement_id: str = None) -> Dict:
-        """Обрабатывает ZIP архив из ЕИС и извлекает файлы"""
+        """Распаковывает ZIP-архив ЕИС во временные файлы (потоком, вне цикла событий).
+
+        Args:
+            archive: Путь к архиву на диске (так его передаёт ``_download_eis_archive``) или содержимое архива
+                (прежний формат вызова — содержимое сначала записывается во временный файл).
+            identifier: Реестровый номер / идентификатор запроса.
+            original_url: Ссылка на архив.
+            procurement_id: ID экспертизы.
+
+        Returns:
+            Dict: ``status``, ``files`` (``file_path`` — временный файл), ``archive_size``, ``file_count``; при
+            ошибке — ``status = "error"`` и ``error``. Файлы читаются с диска по ``file_path`` (раньше в
+            ``eis_parsing`` к каждому добавлялась base64-копия содержимого).
+        """
+        tmp_archive = None
         try:
-            files = []
-            
-            with zipfile.ZipFile(io.BytesIO(archive_content)) as zip_file:
-                for file_info in zip_file.infolist():
-                    if not file_info.is_dir():
-                        # Извлекаем файл
-                        extracted_data = zip_file.read(file_info.filename)
-                        
-                        # Определяем расширение
-                        _, file_extension = os.path.splitext(file_info.filename)
-                        if not file_extension:
-                            file_extension = get_file_extension(content=extracted_data)
-                        
-                        # Создаем временный файл
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp_file:
-                            tmp_file.write(extracted_data)
-                            tmp_path = tmp_file.name
-                        
-                        # Очищаем имя файла
-                        safe_name = re.sub(r'[<>:"/\\|?*]', '_', file_info.filename)
-                        
-                        files.append({
-                            "status": "success",
-                            "filename": safe_name,
-                            "file_path": tmp_path,
-                            "source": "eis_soap",
-                            "original_url": original_url,
-                            "procurement_id": procurement_id,
-                            "file_extension": file_extension
-                        })
-            
+            if isinstance(archive, (bytes, bytearray)):
+                fd, tmp_archive = tempfile.mkstemp(suffix=".zip")
+                with os.fdopen(fd, "wb") as f:
+                    f.write(archive)
+                archive = tmp_archive
+            archive_size = os.path.getsize(archive)
+            files = await asyncio.to_thread(extract_zip, archive, original_url, procurement_id)
+
             if not files:
                 return {
                     "status": "error",
                     "procurement_number": identifier,
                     "error": "В архиве ЕИС не найдено файлов"
                 }
-            
+
             return {
                 "status": "success",
                 "procurement_number": identifier,
@@ -461,16 +457,18 @@ class CloudStorageParser:
                 "source": "eis_soap",
                 "original_url": original_url,
                 "procurement_id": procurement_id,
-                "archive_size": len(archive_content),
+                "archive_size": archive_size,
                 "file_count": len(files)
             }
-            
+
         except Exception as e:
             logger.error(f"Ошибка обработки архива ЕИС: {str(e)}")
             return {
                 "status": "error",
                 "error": f"Ошибка обработки архива ЕИС: {str(e)}"
             }
+        finally:
+            remove_quietly(tmp_archive)
 
 
     async def _parse_eis_soap_from_web(self, url: str, procurement_id: str = None) -> Dict:
@@ -2138,6 +2136,7 @@ class CloudStorageParser:
     ):
         """Скачивает файл через ``/api/media`` портала экспертиз (ключ ``SYSTEM_API_KEY``).
 
+        Соединение — из общей сессии ``HTTPClientManager`` (не новая ``aiohttp.ClientSession`` на каждый файл).
         Запросы к одному хосту идут через общий ограничитель процесса (:func:`configs.host_limiter.media_limiter`):
         не больше ``settings.MEDIA_DOWNLOAD_CONCURRENCY`` одновременно, а после ответа 429 пауза ставится на весь
         хост — по ``Retry-After`` или ``settings.PORTAL_RATE_LIMIT_DELAY``. Повторы — ``MEDIA_RETRY_CONFIG``.
@@ -2163,7 +2162,10 @@ class CloudStorageParser:
         }
 
         limiter = media_limiter()
-        async with limiter.slot(api_url) as host, aiohttp.ClientSession() as session:
+        async with limiter.slot(api_url) as host:
+            # общая сессия HTTPClientManager: раньше на каждый файл создавалась своя aiohttp.ClientSession —
+            # новое TCP/TLS-соединение и свой пул на каждое скачивание
+            session = self.http_manager.get_session()
             async with session.get(
                 api_url,
                 headers=headers,

@@ -2,6 +2,8 @@ import json
 from configs.http_client_manager import HTTPClientManager
 import aiohttp
 import logging
+
+from configs.logger import mask_headers
 from typing import Dict, Any
 
 from configs.config import Config
@@ -34,7 +36,7 @@ class SendSubjectService:
         else:
             logger.info(f"Инициализирован UpdateAPIService для среды {environment}")
             logger.debug(f"URL: {self.url}")
-            logger.debug(f"Headers: {self.headers}")
+            logger.debug(f"Headers: {mask_headers(self.headers)}")
 
 
     
@@ -66,8 +68,9 @@ class SendSubjectService:
         
         logger.info(f" Отправка данных в исходном формате для expertise_id={expertise_id}")
         logger.debug(f" URL: {self.url}")
-        logger.debug(f" Заголовки: {self.headers}")
-        logger.debug(f" Payload: {json.dumps(payload, ensure_ascii=False, indent=2)}")
+        if logger.isEnabledFor(logging.DEBUG):   # json.dumps тела — только если запись действительно пишется
+            logger.debug(f" Заголовки: {mask_headers(self.headers)}")
+            logger.debug(f" Payload: {json.dumps(payload, ensure_ascii=False, indent=2)}")
         
         try:
             session = self.http_manager.get_session()
@@ -79,7 +82,7 @@ class SendSubjectService:
                 response_data = await response.json()
 
             logger.info(f"Ответ получен: статус {response.status}")
-            logger.debug(f"Заголовки ответа: {dict(response.headers)}")
+            logger.debug(f"Заголовки ответа: {mask_headers(response.headers)}")
 
             # Обработка HTTP-ошибок
             if response.status not in (200, 201):

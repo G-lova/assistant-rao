@@ -55,6 +55,63 @@ def get_logger(name):
     return logging.getLogger(name)
 
 
+# ---------------- компактные записи: обрезка длинных значений и маскировка ключей ----------------
+import json as _json
+import re as _re
+
+SECRET_HEADER_RE = _re.compile(r"key|token|auth|secret|password|cookie", _re.IGNORECASE)
+
+
+def log_limit() -> int:
+    """Предел длины значения в записи уровня INFO (``settings.LOG_VALUE_MAX_CHARS``; 0 — без обрезки)."""
+    try:
+        from configs import settings
+    except Exception:  # noqa: BLE001 — модуль используется и без настроек
+        return 2000
+    return int(getattr(settings, "LOG_VALUE_MAX_CHARS", 2000) or 0)
+
+
+def brief(value, limit: int = None) -> str:
+    """Значение для журнала: словарь/список — JSON в одну строку, длиннее предела — обрезано с пометкой.
+
+    Полные результаты извлечения, ответы OCR и разбора ссылок писались в журнал целиком на уровне INFO —
+    сотни КБ на документ. Полный текст остаётся на уровне DEBUG (см. вызовы) и в БД.
+
+    Args:
+        value: Значение (строка, словарь, список …).
+        limit: Предел символов (по умолчанию :func:`log_limit`; 0 — без обрезки).
+
+    Returns:
+        str: Строка не длиннее предела плюс пометка «…[+N симв.]».
+    """
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = _json.dumps(value, ensure_ascii=False, default=str)
+        except Exception:  # noqa: BLE001
+            text = str(value)
+    limit = log_limit() if limit is None else limit
+    if limit and len(text) > limit:
+        return f"{text[:limit]}…[+{len(text) - limit} симв.]"
+    return text
+
+
+def mask_headers(headers) -> dict:
+    """Заголовки для журнала: значения ключей, токенов, авторизации и cookie заменены на ``***`` (+ длина).
+
+    Args:
+        headers: Словарь заголовков (или ``None``).
+
+    Returns:
+        dict: Копия с замаскированными секретами.
+    """
+    out = {}
+    for k, v in dict(headers or {}).items():
+        out[k] = f"*** (len={len(str(v))})" if SECRET_HEADER_RE.search(str(k)) and v else v
+    return out
+
+
 # ---------------- контекст журнала: «[prod:7185] …» у всех записей задачи ----------------
 import contextvars
 from contextlib import contextmanager

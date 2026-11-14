@@ -2,10 +2,11 @@ import asyncio
 import aiofiles
 import base64
 import json
+import logging
 import re
 
 from configs.llm_client import get_llm
-from configs.logger import get_logger
+from configs.logger import brief, get_logger, log_limit
 from configs.rate_limiter import llm_rate_limiter
 from configs.retry_utils import LLM_RETRY_CONFIG, async_retry
 
@@ -115,7 +116,10 @@ class OCRProcessor:
             )
 
             raw_response = response.choices[0].message.content.strip()
-            logger.info(f'OCR response для {original_filename}/{image_name}: {raw_response}')
+            logger.info(f'OCR response для {original_filename}/{image_name} ({len(raw_response)} симв.): '
+                        f'{brief(raw_response, min(log_limit(), 500) if log_limit() else 0)}')
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f'OCR response для {original_filename}/{image_name} целиком: {raw_response}')
             return raw_response, False
         
         except asyncio.TimeoutError:

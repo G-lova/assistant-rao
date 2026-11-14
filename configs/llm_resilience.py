@@ -14,6 +14,7 @@ import asyncio
 import os
 import random
 import time
+import weakref
 from typing import Any, Dict, List, Optional, Tuple
 
 from configs.logger import get_logger
@@ -40,7 +41,10 @@ RETRIES_EXHAUSTED_ATTR = "llm_retries_exhausted"
 """Атрибут исключения: сбой сервера модели уже повторён здесь до исчерпания попыток (см. :func:`retries_exhausted`)."""
 BREAKER_FAILS = 3                    # подряд сбоев до срабатывания предохранителя
 BREAKER_PAUSE = (30.0, 300.0)        # пауза предохранителя: начальная и предельная, с
-_gates: Dict[Tuple[int, str], asyncio.Semaphore] = {}
+# Семафоры запросов: цикл событий → {сервер → семафор}. Раньше ключом был id(цикла) в обычном словаре: записи закрытых
+# циклов (Celery запускает asyncio.run на каждую задачу) не удалялись, а id мог достаться новому циклу — и тогда он
+# получал семафор, привязанный к закрытому циклу. WeakKeyDictionary удаляет записи вместе с циклом.
+_gates: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[str, asyncio.Semaphore]]" = weakref.WeakKeyDictionary()
 # счётчики запросов к модели в процессе: для сводки задачи и пульса (inflight — выполняются сейчас)
 CALLS: Dict[str, int] = {"requests": 0, "failed": 0, "inflight": 0, "deadline": 0}
 _breaker: Dict[str, Dict[str, float]] = {}
@@ -255,10 +259,10 @@ def _server_key(client: Any) -> str:
 
 def _gate(key: str) -> asyncio.Semaphore:
     """Семафор одновременных запросов к серверу в текущем цикле событий (Celery запускает новый цикл на задачу)."""
-    loop_id = id(asyncio.get_running_loop())
-    sem = _gates.get((loop_id, key))
+    per_loop = _gates.setdefault(asyncio.get_running_loop(), {})
+    sem = per_loop.get(key)
     if sem is None:
-        sem = _gates[(loop_id, key)] = asyncio.Semaphore(max(1, int(MAX_INFLIGHT)))
+        sem = per_loop[key] = asyncio.Semaphore(max(1, int(MAX_INFLIGHT)))
     return sem
 
 

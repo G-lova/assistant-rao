@@ -1,9 +1,9 @@
 """Соединения с Postgres сервиса для хранилища знаний: один пул на задачу.
 
-``configs.working_with_db.get_async_db_connection`` создаёт и закрывает пул на каждую операцию — для
-хуков ``/evaluate-documents`` это пул на каждый документ. Внутри :func:`task_pool` все вызовы
-:func:`connection` берут соединения из одного пула, который создаётся лениво (при первом обращении):
-если хранилище знаний выключено, к БД никто не подключается. Вне :func:`task_pool` поведение прежнее.
+Внутри :func:`task_pool` все вызовы :func:`connection` и ``configs.working_with_db.get_async_db_connection``
+берут соединения из одного пула, который создаётся лениво (при первом обращении): если к БД никто не
+обращается, подключения нет. Вне :func:`task_pool` — пул процесса API или одно временное соединение
+(см. ``get_async_db_connection``).
 """
 import asyncio
 from contextlib import asynccontextmanager
@@ -45,6 +45,11 @@ class _LazyPool:
 _CURRENT: ContextVar[Optional[_LazyPool]] = ContextVar("knowledge_store_pool", default=None)
 
 
+def current_holder() -> Optional[_LazyPool]:
+    """Пул текущей области :func:`task_pool` (ещё не созданный — создаётся при ``get()``); ``None`` — вне области."""
+    return _CURRENT.get()
+
+
 @asynccontextmanager
 async def task_pool(min_size: int = 1, max_size: int = 4) -> AsyncIterator[None]:
     """Область «одна задача — один пул»: внутри неё :func:`connection` переиспользует соединения.
@@ -69,7 +74,8 @@ async def task_pool(min_size: int = 1, max_size: int = 4) -> AsyncIterator[None]
 
 @asynccontextmanager
 async def connection() -> AsyncIterator[Any]:
-    """Соединение с Postgres сервиса: из пула задачи, а вне :func:`task_pool` — через временный пул.
+    """Соединение с Postgres сервиса: из пула задачи, а вне :func:`task_pool` — как ``get_async_db_connection``
+    (пул процесса API или одно временное соединение).
 
     Yields:
         asyncpg.Connection: Открытое соединение.
