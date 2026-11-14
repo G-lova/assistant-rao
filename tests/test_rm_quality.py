@@ -6,6 +6,7 @@ import asyncio
 import json
 import types
 import unittest
+from pathlib import Path
 
 from risk_monitoring import doc_kind, text_quality
 from risk_monitoring.document_profiler import find_headings, is_heading, sanitize_profile
@@ -721,7 +722,7 @@ class Run1015bTest(unittest.TestCase):
         """В схеме ответа риска обязательно поле requirement_source."""
         import json as _json
 
-        schema = _json.load(open("schemas/risk_analysis_schema.json", encoding="utf-8"))
+        schema = _json.loads(Path("schemas/risk_analysis_schema.json").read_text(encoding="utf-8"))
         item = schema["properties"]["risks"]["items"]
         self.assertIn("requirement_source", item["required"])
         self.assertEqual(item["properties"]["requirement_source"]["enum"], ["закон", "заказчик", "неясно"])

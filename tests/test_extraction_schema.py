@@ -6,6 +6,7 @@
 import asyncio
 import json
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from evaluate_documents.evidence_check import (
@@ -67,15 +68,15 @@ class SchemaTest(unittest.TestCase):
     def test_same_fields_as_before(self):
         """Набор полей raw_data не изменился (ответ эндпоинта прежний); верхний уровень тот же."""
         for path in SCHEMAS:
-            schema = json.load(open(path, encoding="utf-8"))
+            schema = json.loads(Path(path).read_text(encoding="utf-8"))
             top = {x for x in _paths(schema["properties"]["raw_data"]) if x.count(".") <= 2}
             self.assertEqual(top, RAW_DATA_FIELDS, path)
-        self.assertEqual(list(json.load(open(SCHEMAS[0]))["properties"]), ["readability", "raw_data"])
+        self.assertEqual(list(json.loads(Path(SCHEMAS[0]).read_text(encoding="utf-8"))["properties"]), ["readability", "raw_data"])
 
     def test_evidence_first_and_fragment_first(self):
         """В каждом факте evidence — первое поле, в evidence первая и единственная обязательная — fragment."""
         for path in SCHEMAS:
-            raw = json.load(open(path, encoding="utf-8"))["properties"]["raw_data"]
+            raw = json.loads(Path(path).read_text(encoding="utf-8"))["properties"]["raw_data"]
             for key, obj in _facts(raw):
                 self.assertEqual(next(iter(obj["properties"])), "evidence", f"{path}: {key}")
                 ev = obj["properties"]["evidence"]
@@ -86,7 +87,7 @@ class SchemaTest(unittest.TestCase):
     def test_values_nullable(self):
         """Все значения фактов допускают null (модель не обязана придумывать ИНН или метод НМЦК)."""
         for path in SCHEMAS:
-            raw = json.load(open(path, encoding="utf-8"))["properties"]["raw_data"]
+            raw = json.loads(Path(path).read_text(encoding="utf-8"))["properties"]["raw_data"]
             for key, obj in _facts(raw):
                 for field, node in obj["properties"].items():
                     if field == "evidence" or node.get("type") in ("array", "object"):
@@ -197,7 +198,7 @@ class KindTest(unittest.TestCase):
 
     def test_kind_after_evidence(self):
         """finances/dates: evidence → kind → value."""
-        raw = json.load(open(SCHEMAS[0], encoding="utf-8"))["properties"]["raw_data"]["properties"]
+        raw = json.loads(Path(SCHEMAS[0]).read_text(encoding="utf-8"))["properties"]["raw_data"]["properties"]
         for key in ("finances", "dates"):
             self.assertEqual(list(raw[key]["items"]["properties"])[:3], ["evidence", "kind", "value"], key)
         self.assertIn("contract_price", raw["finances"]["items"]["properties"]["kind"]["enum"])

@@ -22,7 +22,8 @@ def task_functions(path: str) -> dict:
     Returns:
         dict: ``{имя задачи: (ast.FunctionDef, [имена keyword/**kwargs декоратора])}``.
     """
-    tree = ast.parse(open(os.path.join(ROOT, path), encoding="utf-8").read())
+    with open(os.path.join(ROOT, path), encoding="utf-8") as f:
+        tree = ast.parse(f.read())
     out = {}
     for node in tree.body:
         if not isinstance(node, ast.FunctionDef):
@@ -73,7 +74,8 @@ class CeleryConfigTest(unittest.TestCase):
     def test_concurrency_from_settings(self):
         """``worker_concurrency`` = ``CELERY_EVAL_CONCURRENCY``; в команде celery_worker нет --concurrency и ${…}."""
         self.assertEqual(self.concurrency, max(1, int(self.settings_concurrency)))
-        compose = open(os.path.join(ROOT, "docker-compose.yml"), encoding="utf-8").read()
+        with open(os.path.join(ROOT, "docker-compose.yml"), encoding="utf-8") as f:
+            compose = f.read()
         line = next(x for x in compose.splitlines() if "-Q evaluation" in x and x.strip().startswith("command:"))
         self.assertIn("--pool=prefork", line)
         self.assertNotIn("--concurrency", line)

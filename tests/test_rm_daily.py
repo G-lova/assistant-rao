@@ -530,7 +530,8 @@ class ArchiveOcrShrinkTest(unittest.TestCase):
 
             async def once(image_path, name, image_name):
                 """Первый вызов — переполнение, второй — ответ."""
-                calls.append(Image.open(image_path).size)
+                with Image.open(image_path) as im:   # закрыть файл (ResourceWarning)
+                    calls.append(im.size)
                 return ("err", True) if len(calls) == 1 else ('{"raw_text": "ok"}', False)
 
             p._ocr_once = once
