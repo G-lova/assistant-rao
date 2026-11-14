@@ -489,7 +489,7 @@ class DocumentRiskAnalyzer:
         from configs.utils import split_large_text  # ленивый импорт: тянет aiofiles, magic, tiktoken
 
         allowed = [c for c in (codes if codes is not None else self.codes) if c in self.codes]
-        chunks = split_large_text(text, max_chunk_size=CHUNK_TOKENS)
+        chunks = await asyncio.to_thread(split_large_text, text, max_chunk_size=CHUNK_TOKENS)  # CPU — вне цикла событий
         if not chunks:
             return self._empty(partial=True)
         if not allowed:

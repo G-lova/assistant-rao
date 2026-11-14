@@ -7,17 +7,55 @@
   иначе исключение (нужен там, где вектор сопоставляется с конкретным чанком — ``AIFileAnalyzer``);
 * мягкий режим (по умолчанию) сохраняет прежнее поведение: упавшие пакеты пропускаются;
 * повторы с экспоненциальной задержкой, рекурсивное деление пакета при HTTP 400;
-* общий ``HTTPClientManager`` (сессия не создаётся на каждый запрос).
+* общий ``HTTPClientManager`` (сессия не создаётся на каждый запрос);
+* общий на процесс лимит одновременных запросов к одному сервису (``EMBEDDING_CONCURRENCY``): раньше свой
+  семафор (10) был у каждого экземпляра клиента, а их в сервисе около десятка — общая нагрузка на сервис
+  не ограничивалась. Семафор создаётся на каждый цикл событий (Celery-задача запускает свой ``asyncio.run``);
+* деление пакета при HTTP 400 — после освобождения места в лимите: раньше половины запрашивались, пока
+  родительский запрос держал место, и при одновременных 400 все места занимали «родители» — взаимная блокировка.
 
 Старый путь ``search_experts.embedding_client`` оставлен реэкспортом этого модуля.
 """
 import asyncio
 import logging
+import weakref
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+EMBEDDING_CONCURRENCY_DEFAULT = 8
+"""Одновременных запросов к одному сервису эмбеддингов на процесс, если нет ``settings.EMBEDDING_CONCURRENCY``."""
+
+_gates: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[str, asyncio.Semaphore]]" = weakref.WeakKeyDictionary()
+
+
+def embedding_concurrency() -> int:
+    """Лимит одновременных запросов к сервису эмбеддингов на процесс (``configs.settings.EMBEDDING_CONCURRENCY``)."""
+    try:
+        from configs import settings
+    except Exception:  # noqa: BLE001 — модуль используется и без настроек
+        return EMBEDDING_CONCURRENCY_DEFAULT
+    return max(1, int(getattr(settings, "EMBEDDING_CONCURRENCY", EMBEDDING_CONCURRENCY_DEFAULT) or 1))
+
+
+def _gate(api_url: str, limit: int) -> asyncio.Semaphore:
+    """Общий семафор запросов к сервису ``api_url`` в текущем цикле событий.
+
+    Args:
+        api_url: URL сервиса (ключ лимита).
+        limit: Размер семафора при создании.
+
+    Returns:
+        asyncio.Semaphore: Семафор (один на цикл событий и URL; семафоры закрытых циклов удаляются сами).
+    """
+    per_loop = _gates.setdefault(asyncio.get_running_loop(), {})
+    sem = per_loop.get(api_url)
+    if sem is None:
+        sem = per_loop[api_url] = asyncio.Semaphore(limit)
+    return sem
 
 
 class EmbeddingError(Exception):
@@ -34,7 +72,8 @@ class EmbeddingClient:
         batch_size: Размер пакета текстов в одном запросе.
         http_manager: Общий ``HTTPClientManager`` (метод ``get_session()``).
         max_retries: Число попыток на пакет.
-        concurrency: Максимум одновременных запросов к сервису.
+        concurrency: Максимум одновременных запросов этого клиента; общий лимит процесса на сервис —
+            ``EMBEDDING_CONCURRENCY`` (действует меньший из двух).
         timeout: Общий таймаут запроса, секунд.
     """
 
@@ -57,7 +96,7 @@ class EmbeddingClient:
         self.http_manager = http_manager
         self.max_retries = max(1, int(max_retries))
         self.timeout = timeout
-        self._semaphore = asyncio.Semaphore(concurrency)
+        self.concurrency = max(1, int(concurrency or 1))
         logger.info(f"EmbeddingClient: {self.api_url}, модель {model}, пакет {self.batch_size}")
 
     async def get_embeddings(self, texts: List[str], strict: bool = False) -> np.ndarray:
@@ -116,19 +155,25 @@ class EmbeddingClient:
             headers["X-API-Key"] = self.api_key
 
         last_error: Optional[BaseException] = None
+        gate = _gate(self.api_url, min(self.concurrency, embedding_concurrency()))
         for attempt in range(self.max_retries):
             try:
-                async with self._semaphore:
+                split = False
+                async with gate:
                     session = self.http_manager.get_session()
                     async with session.post(self.api_url, json=payload, headers=headers,
                                             timeout=ClientTimeout(total=self.timeout, connect=5)) as resp:
                         if resp.status == 400 and len(texts) > 1:
-                            logger.warning(f"Эмбеддинги: 400 на пакете из {len(texts)}, делим пополам")
-                            mid = len(texts) // 2
-                            return await self._get_batch(texts[:mid]) + await self._get_batch(texts[mid:])
-                        if resp.status >= 400:
+                            split = True
+                        elif resp.status >= 400:
                             raise EmbeddingError(f"HTTP {resp.status}: {(await resp.text())[:200]}")
-                        data = await resp.json(content_type=None)
+                        else:
+                            data = await resp.json(content_type=None)
+                if split:
+                    # половины запрашиваются уже без места в лимите (иначе при одновременных 400 — взаимная блокировка)
+                    logger.warning(f"Эмбеддинги: 400 на пакете из {len(texts)}, делим пополам")
+                    mid = len(texts) // 2
+                    return await self._get_batch(texts[:mid]) + await self._get_batch(texts[mid:])
                 vectors = self.extract_embeddings(data)
                 if vectors is None:
                     raise EmbeddingError(f"Неизвестный формат ответа: {str(data)[:200]}")

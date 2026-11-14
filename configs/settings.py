@@ -61,6 +61,12 @@ PE_RM_LINK_ENABLED = True
 EVAL_LLM_CONCURRENCY = 3
 EVAL_FILE_CONCURRENCY = 3
 EVAL_LINK_CONCURRENCY = 2
+# Чтение PDF в /evaluate-documents (configs.file_reader.FileReader.read_pdf_file): страницы с пригодным текстовым
+# слоем не отправляются в OCR. False — как раньше, OCR каждой страницы
+EVAL_PDF_TEXT_LAYER = True
+# Страницы с растровыми изображениями (скан, подпись, печать) всё равно распознаются моделью: она описывает подписи
+# и печати в visual_notes. False — брать текстовый слой и у таких страниц (быстрее, но без описания подписей/печатей)
+EVAL_PDF_OCR_IMAGE_PAGES = True
 # Запросы к порталу экспертиз с ключом SYSTEM_API_KEY (/api/media, /api/database/query): у портала ограничение
 # частоты на ключ, общее для всех запросов. После 429 пауза ставится на весь хост: по Retry-After, а без него —
 # PORTAL_RATE_LIMIT_DELAY с, растёт ×2 с каждой попыткой, не больше PORTAL_RATE_LIMIT_MAX_DELAY
@@ -94,6 +100,9 @@ MODEL_TEMPERATURE = 0.7
 MODEL_MAX_TOKENS = 4096
 # Размер пакета запроса эмбеддингов
 EMBEDDING_BATCH_SIZE = 16
+# Одновременных запросов к одному сервису эмбеддингов на процесс — общий лимит для всех клиентов (configs/embedding_client.py).
+# Раньше у каждого экземпляра EmbeddingClient был свой лимит 10, а экземпляров около десятка
+EMBEDDING_CONCURRENCY = 8
 
 # ---------------------------------------------------------------- рейтинг экспертов (POST /get-experts-rating)
 # Без флага by_period рейтинг считается с этой даты по завтрашнюю дату (текущий день целиком; дата — по часовому поясу
@@ -511,6 +520,11 @@ PERIOD_SUMMARY_PUSH_ENABLED = True
 # сервер его не выключает — один повтор с бо́льшим лимитом ответа
 LLM_DISABLE_THINKING = True
 LLM_THINKING_RETRY_MAX_TOKENS = 12000
+
+# ── Лимиты запросов к модели (configs/rate_limiter.py, configs/llm_resilience.py)
+# Частота запросов к модели на процесс — один бак на всех (раньше TokenBucket(rate=1.5) был у каждого объекта, и общая
+# частота не ограничивалась). 0 — без лимита частоты; одновременность ограничивает llm_resilience.MAX_INFLIGHT
+LLM_RATE_PER_SEC = 3.0
 
 # ── Чтение Excel (configs/file_reader.py): потоково и с ограничениями — полная загрузка книги-сметы подвешивала
 # прогон (31.10.2026)

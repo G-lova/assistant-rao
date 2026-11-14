@@ -1,5 +1,7 @@
+"""Ограничение частоты запросов: ``TokenBucket`` и общий на процесс лимитер запросов к модели."""
 import asyncio
 import time
+import weakref
 from typing import Optional
 
 class TokenBucket:
@@ -38,3 +40,47 @@ class TokenBucket:
                     await asyncio.sleep(wait_time)
                 finally:
                     await self._lock.acquire()  # возвращаем лок для следующей итерации
+
+
+LLM_RATE_DEFAULT = 3.0
+"""Запросов к модели в секунду на процесс, если в ``configs.settings`` нет ``LLM_RATE_PER_SEC``."""
+
+_llm_buckets: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, TokenBucket]" = weakref.WeakKeyDictionary()
+
+
+def llm_rate() -> float:
+    """Лимит запросов к модели в секунду на процесс (``configs.settings.LLM_RATE_PER_SEC``; 0 — без лимита)."""
+    try:
+        from configs import settings
+    except Exception:  # noqa: BLE001 — модуль используется и без настроек
+        return LLM_RATE_DEFAULT
+    return float(getattr(settings, "LLM_RATE_PER_SEC", LLM_RATE_DEFAULT) or 0)
+
+
+class SharedLLMRateLimiter:
+    """Общий на процесс лимит частоты запросов к модели (вместо ``TokenBucket(rate=1.5)`` у каждого объекта).
+
+    Раньше свой бак был у каждого объекта (``OCRProcessor``, ``TypeDetector``, ``DataExtractor``,
+    ``CompletenessChecker`` …), поэтому общая частота запросов процесса ничем не ограничивалась и росла с числом
+    объектов, а каждый бак лишь добавлял задержку. Теперь все экземпляры делят один бак на процесс
+    (``LLM_RATE_PER_SEC``); одновременность запросов ограничивает ``configs.llm_resilience.MAX_INFLIGHT``.
+
+    Бак создаётся отдельно для каждого цикла событий: ``asyncio.Lock`` привязан к циклу, а Celery-задача
+    запускает свой ``asyncio.run``. Баки закрытых циклов удаляются сами (``WeakKeyDictionary``).
+    """
+
+    async def acquire(self, tokens: float = 1.0) -> None:
+        """Ждёт разрешения на запрос (при ``LLM_RATE_PER_SEC = 0`` — сразу)."""
+        rate = llm_rate()
+        if rate <= 0:
+            return
+        loop = asyncio.get_running_loop()
+        bucket = _llm_buckets.get(loop)
+        if bucket is None or bucket.rate != rate:
+            bucket = _llm_buckets[loop] = TokenBucket(rate=rate)
+        await bucket.acquire(tokens)
+
+
+def llm_rate_limiter() -> SharedLLMRateLimiter:
+    """Лимитер частоты запросов к модели, общий для процесса (см. :class:`SharedLLMRateLimiter`)."""
+    return SharedLLMRateLimiter()

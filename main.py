@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import datetime
 import io
@@ -22,7 +23,7 @@ from configs.http_client_manager import HTTPClientManager
 from configs.llm_client import get_llm
 from configs.logger import setup_logging, get_logger
 from configs.schemas import EISParseRequest, EvaluateRequest, SummaryOpinionRequest, ExpertsScoringRequest, ExpertsRatingRequest, ExpertPublicationsSyncRequest, FileEntity, RAOConclusionRequest, ViolationsReportRequest
-from configs.utils import APIKeyMiddleware, split_large_text
+from configs.utils import APIKeyMiddleware, first_text_chunk
 from configs.working_with_db import get_async_summary_report_from_db, get_contract_info_from_db
 from evaluate_documents.send_subject_service import SendSubjectService
 from risk_monitoring.file_processor import FileProcessor
@@ -662,9 +663,9 @@ async def get_subject(
             
             return subject
 
-        content_chunks = split_large_text(text=summary_report, max_chunk_size=12000)
-        content = content_chunks[0]
-        logger.info(f"Content: {content}")
+        # Модели нужен только первый фрагмент (≤ 12 000 токенов): остальной отчёт не нарезается и не кодируется
+        content = await asyncio.to_thread(first_text_chunk, summary_report, 12000)
+        logger.info(f"Content: {len(content)} символов")
         
         result = await subject_detector.get_subject(expertise_id, content)
         logger.info(f"result: {result}")

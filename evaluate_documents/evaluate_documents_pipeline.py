@@ -274,7 +274,8 @@ class TasksPipeline:
             self.ks_scope, link.doc_code, filename, getattr(link, 'media_links', None), file_path, extracted_text,
             force=self.force)
 
-        chunks = split_large_text(extracted_text, max_chunk_size=LLM_CHUNK_SIZE)
+        # нарезка большого текста нагружает процессор — вне цикла событий
+        chunks = await asyncio.to_thread(split_large_text, extracted_text, max_chunk_size=LLM_CHUNK_SIZE)
         logger.info(f"Текст '{filename}' ({len(extracted_text)} символов) разбит на {len(chunks)} блок(ов) "
                     f"по ≤{LLM_CHUNK_SIZE} токенов")
         if not chunks:

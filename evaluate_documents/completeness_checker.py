@@ -1,7 +1,7 @@
 import asyncio
 import json
 
-from configs.rate_limiter import TokenBucket
+from configs.rate_limiter import llm_rate_limiter
 from json_repair import repair_json
 
 from configs.logger import get_logger
@@ -39,7 +39,7 @@ class CompletenessChecker:
         self.client = llm_client
         self.model = model
 
-        self.rate_limiter = TokenBucket(rate=1.5)  # 1.5 запроса в секунду
+        self.rate_limiter = llm_rate_limiter()  # общий на процесс лимит частоты запросов к модели
 
         with open("prompts/completeness_prompt.txt") as f:
             self.completeness_prompt = f.read()

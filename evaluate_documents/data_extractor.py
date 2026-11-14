@@ -10,7 +10,7 @@ from string import Template
 from typing import Any, Dict, List, Optional
 
 from configs.logger import get_logger
-from configs.rate_limiter import TokenBucket
+from configs.rate_limiter import llm_rate_limiter
 from configs.retry_utils import LLM_RETRY_CONFIG, async_retry
 from configs.llm_repetition import LOOP_MIN, dedupe_repeats, penalized
 from configs.llm_resilience import ContextOverflow, split_halves
@@ -54,7 +54,7 @@ class DataExtractor:
 
 
         self.semaphore = asyncio.Semaphore(5)
-        self.rate_limiter = TokenBucket(rate=1.5)  # 1.5 запроса в секунду
+        self.rate_limiter = llm_rate_limiter()  # общий на процесс лимит частоты запросов к модели
 
         with open("prompts/data_extractor_prompt.txt") as f:
             self.data_extractor_prompt = f.read()

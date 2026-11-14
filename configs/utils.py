@@ -9,7 +9,7 @@ import tiktoken
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, Iterator, List, Any
 from urllib.parse import urlparse, parse_qs
 
 from configs.config import Config
@@ -524,80 +524,144 @@ def create_summary_report(
     logger.info(f"Сформирован summary_report для {procurement_id}. Документов: {len(documents_results)}, Кодов: {len(all_document_codes)}")
     return summary
 
-def split_large_text(text: str, max_chunk_size: int = 10000) -> List[str]:
-        """
-        Разбивает большой текст на фрагменты заданного максимального размера с сохранением смысловой целостности.
+def _encode(text: str) -> List[int]:
+    """Токены текста; служебные токены вида ``<|endoftext|>`` в тексте документа считаются обычным текстом.
 
-        Сначала пытается разделить текст по абзацам, чтобы не разрывать логические блоки.
-        Если после разбиения по абзацам получаются слишком крупные фрагменты — переключается
-        на разбиение по предложениям. Гарантирует, что каждый фрагмент не превышает `max_chunk_size`
-        и при этом максимально сохраняет контекст для последующей обработки (например, LLM).
+    Без ``disallowed_special=()`` tiktoken падает с ``ValueError``, если такая строка встретилась в документе.
+    """
+    try:
+        return _ENCODER.encode(text, disallowed_special=())
+    except TypeError:  # энкодер без этого параметра
+        return _ENCODER.encode(text)
 
-        Args:
-            text (str): Исходный текст, который необходимо разбить на части.
-            max_chunk_size (int, optional): Максимально допустимый размер одного фрагмента в символах.
 
-        Returns:
-            List[str]: Список строк-фрагментов, каждый из которых имеет длину не более `max_chunk_size`.
-                Если исходный текст короче лимита — возвращается список из одного элемента.
-                Пустые строки не включаются в результат.
-        """
-        if not text:
-            return []
-            
-        # Быстрая проверка для коротких текстов
-        if len(_ENCODER.encode(text)) <= max_chunk_size:
-            return [text]
+def iter_text_chunks(text: str, max_chunk_size: int = 10000) -> Iterator[str]:
+    """Фрагменты текста не больше ``max_chunk_size`` токенов — по одному, по мере нарезки.
 
-        # Нормализуем переносы строк
-        text = text.replace('\r\n', '\n').replace('\r', '\n')
-        paragraphs = [p for p in re.split(r'\n{2,}', text) if p.strip()]
-        
-        chunks = []
-        current_tokens = []
+    Текст делится по абзацам (пустая строка), абзац больше лимита — по предложениям, предложение больше
+    лимита — жёстко по токенам. Абзацы внутри фрагмента разделяются пустой строкой, предложения — пробелом.
 
-        def flush():
-            """Сбрасывает накопленные токены в новый чанк"""
-            nonlocal current_tokens
-            if current_tokens:
-                chunks.append(_ENCODER.decode(current_tokens).strip())
-                current_tokens = []
+    Каждый абзац кодируется один раз и только когда до него дошла очередь: если нужен лишь первый фрагмент
+    (``next(iter_text_chunks(...))``), остаток текста не кодируется. Фрагменты собираются из исходных строк,
+    а не декодированием токенов.
 
-        for paragraph in paragraphs:
-            p_tokens = _ENCODER.encode(paragraph)
-            
-            # 1. Если абзац влезает в текущий чанк -> добавляем
-            if len(current_tokens) + len(p_tokens) <= max_chunk_size:
-                current_tokens.extend(p_tokens)
+    Args:
+        text: Исходный текст.
+        max_chunk_size: Максимальный размер фрагмента в токенах (``_ENCODER``).
+
+    Yields:
+        str: Фрагмент. Если весь текст укладывается в лимит — один фрагмент, исходный текст как есть.
+    """
+    if not text or not text.strip():
+        return
+    max_chunk_size = max(1, int(max_chunk_size))
+    normalized = text.replace('\r\n', '\n').replace('\r', '\n')
+    sep_tokens = len(_encode("\n\n"))
+
+    parts: List[str] = []      # абзацы/предложения текущего фрагмента
+    size = 0                   # их токены вместе с разделителями
+    joiner = "\n\n"
+    emitted = False            # выдан ли хоть один фрагмент (иначе весь текст влез в лимит)
+
+    def take() -> Optional[str]:
+        """Забирает накопленные части как фрагмент (``None`` — частей нет)."""
+        nonlocal parts, size
+        chunk = joiner.join(parts).strip() if parts else None
+        parts, size = [], 0
+        return chunk or None
+
+    for paragraph in re.split(r'\n{2,}', normalized):
+        if not paragraph.strip():
+            continue
+        n = len(_encode(paragraph))
+        if n <= max_chunk_size:
+            extra = sep_tokens if parts else 0
+            if parts and (size + extra + n > max_chunk_size or joiner != "\n\n"):
+                chunk = take()
+                if chunk:
+                    emitted = True
+                    yield chunk
+                extra = 0
+            joiner = "\n\n"
+            parts.append(paragraph)
+            size += extra + n
+            continue
+        # Абзац больше лимита — по предложениям
+        chunk = take()
+        if chunk:
+            yield chunk
+        emitted = True
+        joiner = " "
+        for sentence in (x.strip() for x in re.split(r'(?<=[.!?…])\s+', paragraph)):
+            if not sentence:
                 continue
-                
-            # 2. Не влезает -> закрываем текущий чанк
-            flush()
-            
-            # 3. Если абзац всё ещё больше лимита -> делим на предложения
-            if len(p_tokens) > max_chunk_size:
-                sentences = re.split(r'(?<=[.!?…])\s+', paragraph)
-                sentences = [s.strip() for s in sentences if s.strip()]
-                
-                for sentence in sentences:
-                    s_tokens = _ENCODER.encode(sentence)
-                    
-                    if len(current_tokens) + len(s_tokens) > max_chunk_size:
-                        flush()
-                        # 4. Fallback: если предложение гигантское -> рубим по токенам
-                        if len(s_tokens) > max_chunk_size:
-                            for i in range(0, len(s_tokens), max_chunk_size):
-                                chunks.append(_ENCODER.decode(s_tokens[i:i+max_chunk_size]).strip())
-                        else:
-                            current_tokens.extend(s_tokens)
-                    else:
-                        current_tokens.extend(s_tokens)
-            else:
-                # Абзац гарантированно влезет в пустой чанк
-                current_tokens.extend(p_tokens)
-                
-        flush()
-        return [c for c in chunks if c]
+            tokens = _encode(sentence)
+            if len(tokens) > max_chunk_size:
+                # Предложение больше лимита — жёстко по токенам
+                chunk = take()
+                if chunk:
+                    yield chunk
+                for i in range(0, len(tokens), max_chunk_size):
+                    piece = _ENCODER.decode(tokens[i:i + max_chunk_size]).strip()
+                    if piece:
+                        yield piece
+                continue
+            extra = sep_tokens if parts else 0
+            if parts and size + extra + len(tokens) > max_chunk_size:
+                chunk = take()
+                if chunk:
+                    yield chunk
+                extra = 0
+            parts.append(sentence)
+            size += extra + len(tokens)
+        chunk = take()
+        if chunk:
+            yield chunk
+
+    if not emitted:
+        yield text             # весь текст в лимите — как раньше, без нормализации
+        return
+    chunk = take()
+    if chunk:
+        yield chunk
+
+
+def split_large_text(text: str, max_chunk_size: int = 10000) -> List[str]:
+    """
+    Разбивает большой текст на фрагменты не больше ``max_chunk_size`` токенов с сохранением смысловой целостности.
+
+    Нарезка — :func:`iter_text_chunks` (абзацы → предложения → токены). По сравнению с прежней версией:
+
+    - каждый абзац кодируется один раз (раньше весь текст кодировался ещё и целиком);
+    - абзацы внутри фрагмента разделены пустой строкой, предложения — пробелом (раньше фрагмент собирался
+      декодированием подряд идущих токенов, разделитель терялся и абзацы слипались: «…контракта.Статья 2»);
+    - строки вида ``<|endoftext|>`` в документе не роняют кодирование.
+
+    Функция синхронная и для больших текстов заметно нагружает процессор: из асинхронного кода её лучше
+    вызывать через ``asyncio.to_thread``.
+
+    Args:
+        text (str): Исходный текст, который необходимо разбить на части.
+        max_chunk_size (int, optional): Максимальный размер одного фрагмента в токенах.
+
+    Returns:
+        List[str]: Фрагменты не длиннее ``max_chunk_size`` токенов. Если текст короче лимита — список из
+            одного элемента (исходный текст как есть). Пустые строки не включаются в результат.
+    """
+    return [c for c in iter_text_chunks(text, max_chunk_size) if c]
+
+
+def first_text_chunk(text: str, max_chunk_size: int = 10000) -> str:
+    """Первый фрагмент :func:`split_large_text` без нарезки и кодирования остального текста.
+
+    Args:
+        text: Исходный текст.
+        max_chunk_size: Максимальный размер фрагмента в токенах.
+
+    Returns:
+        str: Первый фрагмент; пустая строка — текст пуст.
+    """
+    return next(iter_text_chunks(text, max_chunk_size), "")
 
 def extract_json_objects(text: str):
     """Возвращает список всех JSON-подобных объектов с учётом вложенности."""

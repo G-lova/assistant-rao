@@ -93,6 +93,12 @@ def async_retry(config: RetryConfig):
                     return await func(*args, **kwargs)
                 except config.exceptions as e:
                     last_exception = e
+                    if getattr(e, "llm_retries_exhausted", False):
+                        # сбой сервера модели уже повторён в ResilientClient / call_llm до исчерпания попыток:
+                        # повторять ещё раз — значит перемножать повторы и нагрузку на перегруженный сервер
+                        logger.warning(f"{func.__name__}: сервер модели недоступен после повторов клиента — "
+                                       f"без повторных попыток: {e}")
+                        raise
                     if "504" in str(e) or "Gateway" in str(e):
                         logger.error(f"504 Gateway Timeout в {func.__name__} (попытка {attempt+1})")
                     elif attempt < config.max_retries and config.log_errors:
@@ -181,6 +187,12 @@ def sync_retry(config: RetryConfig):
                     
                 except config.exceptions as e:
                     last_exception = e
+                    if getattr(e, "llm_retries_exhausted", False):
+                        # сбой сервера модели уже повторён в ResilientClient / call_llm до исчерпания попыток:
+                        # повторять ещё раз — значит перемножать повторы и нагрузку на перегруженный сервер
+                        logger.warning(f"{func.__name__}: сервер модели недоступен после повторов клиента — "
+                                       f"без повторных попыток: {e}")
+                        raise
                     
                     if attempt == config.max_retries:
                         break

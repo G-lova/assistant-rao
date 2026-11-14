@@ -24,7 +24,7 @@ from pptx import Presentation
 from pdf2image import convert_from_path
 
 from configs.logger import get_logger
-from configs.rate_limiter import TokenBucket
+from configs.rate_limiter import llm_rate_limiter
 from evaluate_documents.ocr import OCRProcessor
 
 
@@ -146,6 +146,116 @@ async def run_soffice(args: list, timeout: int = SOFFICE_TIMEOUT) -> subprocess.
         shutil.rmtree(profile, ignore_errors=True)
 
 
+PDF_OCR_DPI = 140          # разрешение страниц для OCR в экспертизе (как было)
+
+
+def pdf_text_layer_enabled() -> bool:
+    """Брать ли текст PDF из текстового слоя (настройка ``EVAL_PDF_TEXT_LAYER``, по умолчанию да)."""
+    try:
+        from configs import settings as cfg
+    except Exception:  # noqa: BLE001 — модуль используется и без настроек
+        return True
+    return bool(getattr(cfg, "EVAL_PDF_TEXT_LAYER", True))
+
+
+def _ocr_image_pages() -> bool:
+    """Отправлять ли в OCR страницы с растровыми изображениями (``EVAL_PDF_OCR_IMAGE_PAGES``, по умолчанию да)."""
+    try:
+        from configs import settings as cfg
+    except Exception:  # noqa: BLE001
+        return True
+    return bool(getattr(cfg, "EVAL_PDF_OCR_IMAGE_PAGES", True))
+
+
+def _xobjects_have_image(resources, depth: int = 0) -> bool:
+    """Есть ли среди XObject ресурсов страницы растровое изображение (с заходом в формы, до 3 уровней).
+
+    Args:
+        resources: Словарь ``/Resources`` страницы или формы (PyPDF2).
+        depth: Текущая глубина вложенности форм.
+
+    Returns:
+        bool: ``True`` — есть ``/Subtype /Image``.
+    """
+    if resources is None or depth > 3:
+        return False
+    resources = resources.get_object() if hasattr(resources, "get_object") else resources
+    xobjects = resources.get("/XObject") if hasattr(resources, "get") else None
+    if xobjects is None:
+        return False
+    xobjects = xobjects.get_object() if hasattr(xobjects, "get_object") else xobjects
+    for ref in xobjects.values():
+        obj = ref.get_object() if hasattr(ref, "get_object") else ref
+        subtype = obj.get("/Subtype")
+        if subtype == "/Image":
+            return True
+        if subtype == "/Form" and _xobjects_have_image(obj.get("/Resources"), depth + 1):
+            return True
+    return False
+
+
+def pdf_image_pages(path: str) -> list:
+    """Флаги «на странице есть растровое изображение» по страницам PDF.
+
+    Сначала PyPDF2 (смотрит только словари ресурсов, изображения не декодирует — быстро), иначе pdfplumber.
+
+    Args:
+        path: Путь к PDF.
+
+    Returns:
+        list: ``[bool, …]`` по страницам; пустой список — определить не удалось.
+    """
+    try:
+        from PyPDF2 import PdfReader
+
+        return [_xobjects_have_image(page.get("/Resources")) for page in PdfReader(path).pages]
+    except Exception as e:  # noqa: BLE001 — пробуем pdfplumber
+        logger.debug(f"PDF {path}: PyPDF2 не определил изображения: {type(e).__name__}: {e}")
+    try:
+        import pdfplumber
+
+        with pdfplumber.open(path) as pdf:
+            return [bool(page.images) for page in pdf.pages]
+    except Exception as e:  # noqa: BLE001
+        logger.info(f"PDF {path}: изображения на страницах не определены: {type(e).__name__}: {e}")
+        return []
+
+
+def pdf_layer_pages(path: str) -> list:
+    """Текстовый слой PDF по страницам и пригодность каждой страницы без OCR.
+
+    Страница пригодна, если текст слоя проходит ``risk_monitoring.pdf_text.layer_page_ok`` и (при
+    ``EVAL_PDF_OCR_IMAGE_PAGES``) на ней нет растровых изображений. Если изображения определить не удалось,
+    страница считается непригодной — она уйдёт в OCR, как раньше.
+
+    Args:
+        path: Путь к PDF.
+
+    Returns:
+        list: ``[(текст, пригодна), …]``; пустой список — слой не прочитан (все страницы — в OCR).
+    """
+    from risk_monitoring.pdf_text import layer_page_ok, text_layer
+
+    texts = text_layer(path)
+    if not texts:
+        return []
+    images = pdf_image_pages(path) if _ocr_image_pages() else [False] * len(texts)
+    if len(images) != len(texts):
+        images = [True] * len(texts)
+    return [(t, layer_page_ok(t) and not img) for t, img in zip(texts, images)]
+
+
+def pdf_page_count(path: str) -> int:
+    """Число страниц PDF (``pdfinfo``); 0 — не определено."""
+    try:
+        from pdf2image import pdfinfo_from_path
+
+        return int(pdfinfo_from_path(path).get("Pages") or 0)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"PDF {path}: число страниц не определено: {type(e).__name__}: {e}")
+        return 0
+
+
 def _frames_text(excel_data: dict) -> str:
     """Текст листов, прочитанных pandas (.xls): «Лист: имя» и таблица (до 20 строк), пробелы схлопнуты."""
     result = []
@@ -167,7 +277,7 @@ class FileReader:
         self.ocr_processor = OCRProcessor(llm_client, model)
 
         self.semaphore = asyncio.Semaphore(3)
-        self.rate_limiter = TokenBucket(rate=1.5)  # 1.5 запроса в секунду
+        self.rate_limiter = llm_rate_limiter()  # общий на процесс лимит частоты запросов к модели
 
 
     async def read_txt_file(self, file_path: str) -> str:
@@ -336,60 +446,75 @@ class FileReader:
 
     async def read_pdf_file(self, file_path: str, original_filename:str) -> str:
         """
-        Извлекает текст из PDF-файла ТОЛЬКО с помощью OCR для каждой страницы.
+        Извлекает текст из PDF: текстовый слой там, где он пригоден, OCR (Qwen-VL) — для остальных страниц.
 
-        Все страницы PDF конвертируются в изображения и обрабатываются через OCR (Qwen-VL),
-        независимо от наличия встроенного текста. Это гарантирует единообразную обработку:
-        сканы, защищённые PDF, многослойные документы — всё проходит через распознавание образа.
+        Раньше в OCR шла каждая страница, даже если в PDF уже был текст (в том числе все документы Word,
+        которые читаются через конвертацию в PDF). Теперь страница берётся из текстового слоя, если:
+
+        - включена настройка ``EVAL_PDF_TEXT_LAYER``;
+        - текст слоя пригоден (``risk_monitoring.pdf_text.layer_page_ok``: достаточно букв, нет ``(cid:NN)``
+          и «кракозябр»);
+        - на странице нет растровых изображений (при ``EVAL_PDF_OCR_IMAGE_PAGES``). Изображение на странице —
+          это может быть скан, подпись или печать: модель OCR описывает их в ``visual_notes``, а проверка
+          полноты документов на это опирается, поэтому такие страницы по-прежнему распознаются моделью.
+
+        Страницы для OCR рендерятся по одной сразу в JPEG (``paths_only``), так что в памяти не держатся
+        изображения всех страниц документа.
+
+        Разметка: ``Page N:`` + ``Страница N: <текст слоя>`` или ``Page N:`` + ``Страница N (OCR): <ответ OCR>``
+        (как раньше) — оба варианта понимает ``knowledge_store.pages.PAGE_MARKER_RE``.
 
         Args:
             file_path (str): Путь к PDF-файлу.
+            original_filename (str): Имя исходного файла (для журнала и OCR).
 
         Raises:
             ValueError: Если произошла ошибка при чтении или обработке файла.
 
         Returns:
-            str: Объединённый текст всех страниц с пометкой "OCR".
+            str: Объединённый текст всех страниц.
                 Если текст не распознан, возвращает "[Нет читаемого текста]".
         """
-        async def process_page(i, image, temp_dir):
+        async def process_page(i: int, temp_dir: str) -> str:
+            """Рендерит одну страницу сразу в JPEG и распознаёт её (в памяти — только эта страница)."""
             async with self.semaphore:
-                img_path = os.path.join(temp_dir, f"page_{i}.jpg")
-
-                # Сохранение изображения в отдельном потоке
-                await asyncio.to_thread(image.save, img_path, "JPEG")
-
-                # OCR
-                ocr_text = await self.ocr_processor.ocr_image_with_qwen_vl(img_path, original_filename)
-
+                paths = await asyncio.to_thread(
+                    convert_from_path, file_path, dpi=PDF_OCR_DPI, first_page=i + 1, last_page=i + 1,
+                    output_folder=temp_dir, fmt="jpeg", paths_only=True, output_file=f"page_{i + 1}",
+                )
+                if not paths:
+                    raise ValueError("страница не отрисована")
+                ocr_text = await self.ocr_processor.ocr_image_with_qwen_vl(paths[0], original_filename)
+                try:
+                    os.remove(paths[0])          # изображение больше не нужно — не копим их во временной папке
+                except OSError:
+                    pass
                 return f"Страница {i+1} (OCR): {ocr_text}"
 
         try:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                # PDF → изображения (в отдельном потоке)
-                images = await asyncio.to_thread(
-                    convert_from_path,
-                    file_path,
-                    dpi=140,
-                    output_folder=temp_dir
-                )
+            layer = await asyncio.to_thread(pdf_layer_pages, file_path) if pdf_text_layer_enabled() else []
+            total = len(layer) or await asyncio.to_thread(pdf_page_count, file_path)
+            if not total:
+                raise ValueError("не удалось определить число страниц")
+            need_ocr = [i for i in range(total) if i >= len(layer) or not layer[i][1]]
 
-                # Создаём задачи
-                tasks = [
-                    process_page(i, image, temp_dir)
-                    for i, image in enumerate(images)
-                ]
+            ocr_texts: dict = {}
+            if need_ocr:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    res = await asyncio.gather(*(process_page(i, temp_dir) for i in need_ocr),
+                                               return_exceptions=True)
+                ocr_texts = dict(zip(need_ocr, res))
 
-                # Параллельный запуск
-                ocr_texts = await asyncio.gather(*tasks, return_exceptions=True)
-
-                # Обработка ошибок
-                results = []
-                for i, res in enumerate(ocr_texts):
-                    if isinstance(res, Exception):
-                        results.append(f"Страница {i+1} (OCR): [Ошибка: {res}]")
-                    else:
-                        results.append(f'Page {i+1}:\n{res}')
+            results = []
+            for i in range(total):
+                if i not in ocr_texts:
+                    results.append(f"Page {i+1}:\nСтраница {i+1}: {layer[i][0].strip()}")
+                elif isinstance(ocr_texts[i], Exception):
+                    results.append(f"Страница {i+1} (OCR): [Ошибка: {ocr_texts[i]}]")
+                else:
+                    results.append(f'Page {i+1}:\n{ocr_texts[i]}')
+            logger.info(f"PDF {original_filename}: страниц {total}, текстовый слой {total - len(need_ocr)}, "
+                        f"OCR {len(need_ocr)}")
 
             result = "\n\n".join(results)
             return result.strip() if result.strip() else "[Нет читаемого текста]"
