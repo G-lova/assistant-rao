@@ -1,5 +1,6 @@
 """Клиент API анализа ИИ внешней системы риск-мониторинга (чтение и запись ``ai_analysis``)."""
 import asyncio
+import json
 from typing import Any, Dict
 
 import aiohttp
@@ -35,6 +36,38 @@ class RiskAPIError(Exception):
     def __init__(self, message: str, status: int | None = None):
         super().__init__(message)
         self.status = status
+
+
+PUSH_MAX_BYTES_DEFAULT = 7_500_000
+"""Предел тела PATCH ai_analysis, байт, если нет ``settings.RM_PUSH_MAX_BYTES`` (у API ``post_max_size=8M``)."""
+
+
+def push_max_bytes() -> int:
+    """Предел тела PATCH ai_analysis в байтах (``configs.settings.RM_PUSH_MAX_BYTES``)."""
+    try:
+        from configs import settings
+    except Exception:  # noqa: BLE001 — модуль используется и без настроек
+        return PUSH_MAX_BYTES_DEFAULT
+    return int(getattr(settings, "RM_PUSH_MAX_BYTES", PUSH_MAX_BYTES_DEFAULT) or PUSH_MAX_BYTES_DEFAULT)
+
+
+def encode_body(body: Dict[str, Any]) -> bytes:
+    """Тело запроса: JSON в UTF-8 без экранирования кириллицы.
+
+    Раньше тело отправлялось через ``json=`` (``json.dumps`` с ``ensure_ascii=True``): каждая русская буква — шесть
+    байт ``\\uXXXX`` вместо двух в UTF-8, тело в ~3 раза больше. ai_analysis файла 29759 (2,1 млн символов) так
+    превысил ``post_max_size=8M`` API (HTTP 413, 13.11.2026).
+    """
+    return json.dumps(body, ensure_ascii=False).encode("utf-8")
+
+
+def largest_keys(ai_analysis: Any, top: int = 5) -> str:
+    """Самые крупные части ai_analysis для журнала: «raw_data 1064423, passport 532238, …» (символов JSON)."""
+    if not isinstance(ai_analysis, dict):
+        return "—"
+    sizes = sorted(((len(json.dumps(v, ensure_ascii=False, default=str)), k) for k, v in ai_analysis.items()),
+                   reverse=True)[:top]
+    return ", ".join(f"{k} {n}" for n, k in sizes)
 
 
 class RiskAPIRetryable(RiskAPIError):
@@ -87,9 +120,10 @@ class RiskMonitoringAPI:
         """
         await asyncio.wait_for(self.rate_limiter.acquire(), timeout=LIMITER_WAIT)
         session = self.http_manager.get_session()
+        headers = kwargs.pop("headers", None) or self.headers   # PATCH ai_analysis передаёт свой Content-Type
 
         async with session.request(
-            method, url or self.url, headers=self.headers,
+            method, url or self.url, headers=headers,
             timeout=aiohttp.ClientTimeout(total=30), **kwargs
         ) as resp:
             if resp.status in (429, 503) or resp.status >= 500:
@@ -144,10 +178,7 @@ class RiskMonitoringAPI:
             from risk_monitoring.contract_package import normalize_registry
             normalize_registry(ai_analysis)
         try:
-            data = await self._request(
-                "PATCH",
-                json={"table": table, "id": int(record_id), "ai_analysis": ai_analysis},
-            )
+            data = await self._patch_body(table, record_id, ai_analysis)
         except RiskAPIError as e:
             pipe = (ai_analysis or {}).get("pipeline") if isinstance(ai_analysis, dict) else None
             if e.status != 422 or not isinstance(pipe, dict) or pipe.get("previous_scope_id") is None \
@@ -157,11 +188,25 @@ class RiskMonitoringAPI:
                            f"запись без ссылки на предыдущую версию")
             pipe.update(previous_scope_rejected={"id": pipe["previous_scope_id"], "reason": str(e)[:300]},
                         previous_scope_id=None)
-            data = await self._request(
-                "PATCH",
-                json={"table": table, "id": int(record_id), "ai_analysis": ai_analysis},
-            )
+            data = await self._patch_body(table, record_id, ai_analysis)
         return data["data"]
+
+    async def _patch_body(self, table: str, record_id: int, ai_analysis: Dict[str, Any]) -> Dict[str, Any]:
+        """PATCH ai_analysis: тело в UTF-8 (:func:`encode_body`), с проверкой размера до отправки.
+
+        Тело больше :func:`push_max_bytes` не отправляется: API всё равно ответит 413, а так в ошибке сразу видно,
+        какие части ai_analysis крупнее всего (:func:`largest_keys`).
+
+        Raises:
+            RiskAPIError: ``status = 413`` — тело больше предела; иначе — ошибки :meth:`_request`.
+        """
+        body = encode_body({"table": table, "id": int(record_id), "ai_analysis": ai_analysis})
+        limit = push_max_bytes()
+        if len(body) > limit:
+            raise RiskAPIError(f"ai_analysis {table} {record_id}: тело запроса {len(body)} байт больше предела {limit} "
+                               f"(RM_PUSH_MAX_BYTES) — не отправлено; крупнее всего: {largest_keys(ai_analysis)}", 413)
+        headers = {**(getattr(self, "headers", None) or {}), "Content-Type": "application/json; charset=utf-8"}
+        return await self._request("PATCH", data=body, headers=headers)
 
     def _sibling(self, path: str) -> str:
         """Адрес метода API рядом с ``/ai-analysis`` (``/daily-runs``, ``/organisations``)."""

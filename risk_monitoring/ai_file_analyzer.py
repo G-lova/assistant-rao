@@ -41,7 +41,7 @@ from configs.config import Config
 from configs.logger import get_logger
 from configs.resources import read_text
 from configs import settings
-from risk_monitoring import (boilerplate, doc_kind, file_versions, norms, passport, pdf_text,
+from risk_monitoring import (boilerplate, contract_printform, doc_kind, file_versions, norms, passport, pdf_text,
                             printform_passport, risk_catalog, rm_sql, text_quality, version_diff, xml_events)
 from risk_monitoring import progress
 from risk_monitoring.llm_json import prompt_version as _hash_version
@@ -508,6 +508,46 @@ class AIFileAnalyzer:
             c = self.cache = RunCache()
         return c
 
+    async def _owner_xml_body(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Тело XML, к которому приложен файл (для паспорта печатной формы контракта).
+
+        XML ищется так же, как при поиске прошлых редакций: ``xml_id`` из ``self.lookups`` (поиск уже прочитал тело —
+        оно в кэше прогона), иначе ``xml_source_id`` файла через ``xml_meta.sql``. Сбой — ``None``: паспорт тогда
+        строится по тексту печатной формы.
+
+        Args:
+            row: Строка ``files_meta.sql``.
+
+        Returns:
+            Optional[Dict[str, Any]]: Нормализованное тело XML или ``None``.
+        """
+        fid = int(row["id"])
+        xml_id = ((getattr(self, "lookups", None) or {}).get(fid) or {}).get("xml_id") or row.get("xml_source_id")
+        if not xml_id:
+            return None
+        xml_id = int(xml_id)
+        cache = self._run_cache()
+        try:
+            parsed = cache.parsed.get(xml_id)
+            if parsed is not None and not isinstance(parsed, Exception):
+                return parsed[2]
+            if isinstance(cache.bodies.get(xml_id), dict):
+                return cache.bodies[xml_id]
+            meta = await cache.one_each(self._query, "xml_meta.sql", [xml_id], "id", head=[self.storage_path])
+            x = meta.get(xml_id)
+            if not x:
+                return None
+            own = cache.archives is None
+            archives = ArchiveCache(self.parser) if own else cache.archives
+            try:
+                return await self._xml_body(archives, x)
+            finally:
+                if own:
+                    archives.close()
+        except Exception as e:  # noqa: BLE001 — без XML паспорт строится по тексту
+            logger.warning(f"Файл {fid}: XML {xml_id} для паспорта печатной формы не прочитан: {type(e).__name__}: {e}")
+            return None
+
     async def _xml_body(self, archives: Any, x: Dict[str, Any]) -> Dict[str, Any]:
         """Тело XML с кэшем на прогон: одни и те же XML нужны нескольким файлам и анализатору событий
         (``RunCache.parsed`` — разобранный им XML, ``RunCache.bodies`` — прочитанный здесь)."""
@@ -536,12 +576,17 @@ class AIFileAnalyzer:
             rows = await self.fetch_files_meta(ids)
             st["detail"] = f"найдено {len(rows)} из {len(ids)}"
         found = {int(r["id"]): r for r in rows}
-        todo = [r for r in found.values() if self.force or r.get("rm_status") != "completed"]
+        async with progress.step("чтение результатов из внутренней БД"):
+            self.internal = await self._internal(list(found))
+        # к анализу: не завершённые во внешней БД и завершённые с устаревшим паспортом печатной формы (см. _guarded)
+        todo = [r for r in found.values() if self.force or r.get("rm_status") != "completed"
+                or self._needs_rebuild(r)]
         async with progress.step("поиск прошлых редакций файлов (XML ЕИС)") as st:
             previous = await self.fetch_previous_versions(todo) if todo else {}
             st["detail"] = f"к анализу {len(todo)}, с прошлой редакцией {len(previous)}"
-        async with progress.step("чтение результатов из внутренней БД"):
-            self.internal = await self._internal(list(found) + [int(p["id"]) for p in previous.values() if p.get("id")])
+        prev_ids = [int(p["id"]) for p in previous.values() if p.get("id") and int(p["id"]) not in self.internal]
+        if prev_ids:
+            self.internal.update(await self._internal(prev_ids))
         by_id: Dict[int, Dict[str, Any]] = {}
         for wave in self._waves([i for i in ids if i in found], previous, {r["id"] for r in todo}):
             for res in await asyncio.gather(*(self._guarded(found[i], previous.get(i)) for i in wave)):
@@ -585,17 +630,45 @@ class AIFileAnalyzer:
             waves.setdefault(depth[i], []).append(i)
         return [waves[k] for k in sorted(waves)]
 
+    def _needs_rebuild(self, row: Dict[str, Any]) -> Optional[str]:
+        """Причина пересборки сохранённого результата файла без модели (или ``None``).
+
+        * паспорт печатной формы контракта собран по тексту, а файл связан с XML — пересборка по XML;
+        * результат печатной формы с раздутыми полями (HTTP 413 при записи).
+
+        Args:
+            row: Строка ``files_meta.sql``.
+
+        Returns:
+            Optional[str]: Текст для журнала прогона или ``None``.
+        """
+        stored = (getattr(self, "internal", None) or {}).get(int(row["id"]))
+        if not stored or stored.get("status") != "completed" or stored.get("debug"):
+            return None
+        ai = stored.get("ai_analysis")
+        if contract_printform.is_stale(ai, row):
+            return "сохранённый паспорт печатной формы контракта собран по тексту — пересборка по XML"
+        if printform_passport.is_runaway(ai):
+            return "сохранённый результат печатной формы с раздутыми полями — пересборка"
+        return None
+
     async def _guarded(self, row: Dict[str, Any], previous: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """Обёртка одного файла: семафор, правило «без повторного анализа», обработка ошибок."""
         file_id = int(row["id"])
         attempt = int(row.get("rm_attempt") or 0) + 1
         progress.subject(f"Файл {file_id} «{row.get('file_name') or ''}»")
         if not self.force:
-            if row.get("rm_status") == "completed":
+            stored = (getattr(self, "internal", None) or {}).get(file_id)
+            own = bool(stored) and stored.get("status") == "completed" and not stored.get("debug")
+            # Устаревший паспорт печатной формы пересобирается, даже если во внешней БД файл уже «completed»:
+            # пересборка дешёвая (без модели), а иначе старый результат так и останется во внешней БД.
+            rebuild = self._needs_rebuild(row)
+            if rebuild:
+                progress.note(rebuild)
+            elif row.get("rm_status") == "completed":
                 progress.note("уже проанализирован во внешней БД — пропуск")
                 return {"file_id": file_id, "status": "skipped", "reason": "already_analyzed"}
-            stored = (getattr(self, "internal", None) or {}).get(file_id)
-            if stored and stored.get("status") == "completed" and not stored.get("debug"):
+            elif own:
                 return await self._reuse_internal(file_id, stored)
             if row.get("rm_status") == "failed" and attempt > MAX_ATTEMPTS:
                 progress.note(f"исчерпаны попытки ({MAX_ATTEMPTS}) — пропуск")
@@ -743,7 +816,15 @@ class AIFileAnalyzer:
 
         if print_kind:
             mode = "print_form"
-            extraction, profile, candidates = printform_passport.build(text, print_kind, row)
+            xml_body = await self._owner_xml_body(row) if print_kind.get("group") == "contract" else None
+            if contract_printform.is_contract_xml(xml_body):
+                # печатная форма контракта построена из XML контракта — данные берём из XML (полностью и
+                # без «убегания» значений, как при разборе текста правилами извещения); товарных знаков не ищем
+                extraction, profile = contract_printform.build(xml_body, print_kind, row)
+                candidates = []
+                progress.note("паспорт печатной формы контракта — из XML контракта")
+            else:
+                extraction, profile, candidates = printform_passport.build(text, print_kind, row)
             type_info = {"detected_type": print_kind["detected_type"], "confidence": 1.0, "issues": [],
                          "key_indicators": [], "type_source": "print_form", "print_form": print_kind}
             type_decode = print_kind["type_decode"]

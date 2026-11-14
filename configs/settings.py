@@ -280,6 +280,9 @@ RISK_DECISION_LOOKBACK_MIN = 15      # окно поиска изменённы�
 # Одновременных PATCH ai_analysis во внешнюю БД при массовых пересчётах (затухание, решения аналитиков;
 # risk_monitoring/batch_push.py). Частоту всё равно держит лимитер RiskMonitoringAPI (0.9 запроса/с — у API 60 в минуту)
 RM_PUSH_CONCURRENCY = 3
+# Предел тела PATCH ai_analysis во внешнюю БД, байт (risk_monitoring_api.RiskMonitoringAPI._patch_body). У API
+# post_max_size=8M: тело больше не отправляется, ошибка сразу называет самые крупные части ai_analysis
+RM_PUSH_MAX_BYTES = 7_500_000
 # Приоритет проверки (10.14): веса составляющих (сумма 1); итог × (0,5 + 0,5 × доверие)
 PRIORITY_WEIGHTS = {"risk": 0.4, "growth": 0.25, "money": 0.15, "novelty": 0.2}
 # Уровень риска от сработавшего правила внешней системы (rule_values): признак риска («нет обеспечения заявки»,

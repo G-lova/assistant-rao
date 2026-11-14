@@ -16,6 +16,11 @@ from knowledge_store.eis_printform import LABELS, PrintForm, _norm
 
 MAX_CANDIDATES = 40
 MAX_CANDIDATE_CHARS = 6000
+# Пределы полей паспорта печатной формы: название документа и объект закупки попадают в ``summary`` / ``resume`` /
+# ``procurement_subject`` (три копии в ai_analysis). Без предела «убежавшее» значение печатной формы контракта
+# раздувало ai_analysis до 2,1 млн символов — HTTP 413 при записи во внешнюю БД (файл 29759, 13.11.2026).
+TITLE_MAX_CHARS = 500
+SUBJECT_MAX_CHARS = 2000
 
 DATE_RE = re.compile(r"\b(\d{2})\.(\d{2})\.(\d{4})\b")
 MONEY_RE = re.compile(r"(\d[\d\s]*(?:[.,]\d{1,2})?)\s*(?:российский рубль|руб|₽|%)?", re.IGNORECASE)
@@ -69,6 +74,33 @@ def _money(value: Optional[str]) -> Optional[float]:
         return float(re.sub(r"\s", "", m.group(1)).replace(",", "."))
     except ValueError:
         return None
+
+
+def _cap(value: Optional[str], limit: int) -> Optional[str]:
+    """Строка не длиннее ``limit`` символов (обрезка с «…»); ``None`` — как есть."""
+    if not value or len(value) <= limit:
+        return value
+    return value[:limit - 1].rstrip() + "…"
+
+
+def is_runaway(ai_analysis: Optional[Dict[str, Any]]) -> bool:
+    """Сохранённый результат печатной формы с «убежавшими» полями — собран до пределов ``TITLE_MAX_CHARS`` /
+    ``SUBJECT_MAX_CHARS`` и его нужно пересобрать, а не дозаписывать как есть (иначе HTTP 413 при каждом прогоне).
+
+    Пересборка дешёвая: паспорт печатной формы строится без модели.
+
+    Args:
+        ai_analysis: Результат из ``ai_rm_results``.
+
+    Returns:
+        bool: ``True`` — результат печатной формы, у которого ``summary`` или объект закупки длиннее пределов.
+    """
+    raw = (ai_analysis or {}).get("raw_data") if isinstance(ai_analysis, dict) else None
+    if not isinstance(raw, dict) or raw.get("source") != "print_form":
+        return False
+    subject = (raw.get("procurement_subject") or {}).get("description") or ""
+    summary = raw.get("summary") or ""
+    return len(subject) > SUBJECT_MAX_CHARS or len(summary) > TITLE_MAX_CHARS + SUBJECT_MAX_CHARS + 1000
 
 
 def _title(form: PrintForm) -> Optional[str]:
@@ -143,7 +175,7 @@ def build(text: str, print_kind: Dict[str, Any], row: Dict[str, Any]) -> Tuple[D
         ``profile`` (формат ``DocumentProfiler``), кандидаты для проверки товарных знаков (только извещение).
     """
     form = PrintForm(text)
-    title = _title(form) or print_kind.get("type_decode")
+    title = _cap(_title(form) or print_kind.get("type_decode"), TITLE_MAX_CHARS)
     number = re.sub(r"\D", "", form.value("number") or "") or row.get("owner_number") or row.get("purchase_number")
 
     def ev(key: str, label: str) -> Dict[str, Any]:
@@ -160,7 +192,7 @@ def build(text: str, print_kind: Dict[str, Any], row: Dict[str, Any]) -> Tuple[D
     organizations = [{"role": "заказчик", "name": re.sub(r"^(Заказчик|Уполномоченный орган)\s+", "", org),
                       "inn": None, "kpp": None, "ogrn": None, "address": form.value("post_address"),
                       "evidence": ev("org" if form.value("org") else "placing", "Организация")}] if org else []
-    subject = form.value("object_name") or row.get("purchase_subject")
+    subject = _cap(form.value("object_name") or row.get("purchase_subject"), SUBJECT_MAX_CHARS)
     price = next((f["value"] for f in finances if f["context"].startswith(("Начальная", "Максимальное"))), None)
     end_dt = next((d["value"] for d in dates if d["context"].startswith("Дата и время окончания")), None)
     summary = ". ".join(x for x in [
@@ -168,7 +200,7 @@ def build(text: str, print_kind: Dict[str, Any], row: Dict[str, Any]) -> Tuple[D
         f"Объект закупки: {subject}" if subject else None,
         f"Цена: {price:,.2f} руб".replace(",", " ") if price else None,
         f"Окончание подачи заявок: {end_dt}" if end_dt else None,
-        f"Срок исполнения контракта: {form.value('term')}" if form.value("term") else None,
+        f"Срок исполнения контракта: {_cap(form.value('term'), TITLE_MAX_CHARS)}" if form.value("term") else None,
     ] if x) + "."
     raw_data = {
         "document_name": {"value": title, "confidence": 1.0},
