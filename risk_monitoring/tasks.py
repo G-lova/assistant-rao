@@ -776,8 +776,11 @@ def rm_daily_resume_task(self) -> Dict[str, Any]:
             if int(pipe.get("attempt") or 0) >= settings.DAILY_CONTINUE_MAX_ATTEMPTS:
                 skipped.append({"date": d, "reason": f"запусков {pipe.get('attempt')} — нужен ручной запуск"})
                 continue
+            # срок жизни — до следующей проверки: если воркер занят и продолжение не взято, следующая проверка
+            # поставит его снова, а не добавит второе (копились десятки одинаковых rm_daily_task)
             rm_daily_task.apply_async(kwargs={"environment": settings.DAILY_ENVIRONMENT, "export_date": d,
-                                              "push": settings.DAILY_PUSH}, queue="risk_monitoring")
+                                              "push": settings.DAILY_PUSH}, queue="risk_monitoring",
+                                      expires=settings.DAILY_RESUME_EVERY_MIN * 60)
             queued.append(d)
         if queued:
             logger.info(f"Незавершённые ежедневные прогоны поставлены на продолжение: {queued}")
