@@ -12,7 +12,12 @@
 
 import os
 
-# Окружение установки из APP_ENV (.env; не задан — stage): development → dev, staging → stage, production → prod,
+# Окружение установки, если APP_ENV не задан ни в .env, ни в окружении процесса. Единственная строка, которая
+# различается между ветками: в master (прод) — "prod", в остальных — "stage". При переносе кода в master строку
+# не перезаписывать; CI прода проверяет, что ENVIRONMENT == "prod" (.gitlab-ci.yml)
+DEFAULT_ENV = "prod"
+
+# Окружение установки из APP_ENV (.env; не задан — DEFAULT_ENV): development → dev, staging → stage, production → prod,
 # neuro_assistant_database → neuro; так же его понимает Config.get_database_config
 ENV_ALIASES = {"development": "dev", "develop": "dev", "staging": "stage", "production": "prod",
                "neuro_assistant_database": "neuro"}
@@ -28,7 +33,7 @@ def normalize_env(value: str) -> str:
         str: Короткое имя окружения в нижнем регистре.
     """
     v = (value or "").strip().lower()
-    return ENV_ALIASES.get(v, v or "prod")
+    return ENV_ALIASES.get(v, v or DEFAULT_ENV)
 
 
 try:  # APP_ENV может быть только в файле .env (вне docker), а settings импортируется раньше Config
@@ -37,7 +42,7 @@ try:  # APP_ENV может быть только в файле .env (вне dock
     load_dotenv()
 except ImportError:  # pragma: no cover
     pass
-ENVIRONMENT = normalize_env(os.getenv("APP_ENV", "prod"))
+ENVIRONMENT = normalize_env(os.getenv("APP_ENV", DEFAULT_ENV))
 
 
 # Хранилище знаний («РАО Эксперт»): запись результатов /evaluate-documents в pe_* таблицы

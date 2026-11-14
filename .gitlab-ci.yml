@@ -23,6 +23,10 @@ manual_docker_deploy:
     # Тесты в собранном образе до перезапуска: при ошибке прод остаётся на прежней версии. Запуск через unittest —
     # pytest в образ не ставится. Пропустить — переменная CI SKIP_TESTS=1 при запуске задачи
     - if [ "$SKIP_TESTS" != "1" ]; then docker compose run --rm --no-deps rao_api python -m unittest discover -s tests -t . -q; fi
+    # Окружение прода: settings.ENVIRONMENT должен быть "prod" (APP_ENV в .env или DEFAULT_ENV = "prod" в
+    # configs/settings.py ветки master). Иначе прод писал бы результаты под окружением stage — деплой прерывается
+    # до перезапуска. Не отключается SKIP_TESTS
+    - docker compose run --rm --no-deps rao_api python -c "from configs import settings as s; assert s.ENVIRONMENT == 'prod', f'ENVIRONMENT={s.ENVIRONMENT!r}, ожидается prod (APP_ENV / DEFAULT_ENV)'; print('ENVIRONMENT =', s.ENVIRONMENT)"
     # Пересоздаются только изменившиеся контейнеры (Postgres, Redis и pgAdmin не останавливаются);
     # воркеры Celery останавливаются тёпло (stop_grace_period в docker-compose.yml).
     # --remove-orphans удаляет контейнеры сервисов, которых больше нет в docker-compose.yml (сервис удалили или
