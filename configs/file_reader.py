@@ -317,13 +317,6 @@ class FileReader:
                 logger.info(f"Файл {original_filename} успешно конвертирован в PDF: {pdf_path}")
                 return await self.read_pdf_file(str(pdf_path), original_filename)
 
-        # except subprocess.CalledProcessError as e:
-        #     logger.error(
-        #         f"Ошибка конвертации {ext.upper()} → PDF для {original_filename}. "
-        #         f"Exit code: {e.returncode}. STDERR: {e.stderr}"
-        #     )
-        #     logger.info(f"Пробуем обычный способ чтения {ext.upper()} файла: {original_filename}")
-        #     return await self.read_doc_file(file_path, ext, original_filename)
             
         except subprocess.TimeoutExpired:
             # большой документ: без трассировки, текст читается напрямую
@@ -441,7 +434,6 @@ class FileReader:
                 if hasattr(shape, "text"):
                     text_content.append(shape.text)
         return "\n".join(text_content)
-
 
 
     async def read_pdf_file(self, file_path: str, original_filename:str) -> str:
@@ -1000,7 +992,6 @@ class FileReader:
                 logger.info(f"Извлечён текст из архива: {original_filename}, длина: {len(text)}")
                 return text
             elif ext in [".html"]:
-                # text = await html_to_pdf(file_path, original_filename)
                 text = await self.read_html(file_path)
                 logger.info(f"Извлечён текст из HTML: {original_filename}, длина: {len(text)}")
                 return text
@@ -1010,8 +1001,6 @@ class FileReader:
                 return text
             elif ext in [".sig"]:
                 return "Документ заверен электронной подписью."
-            # elif ext in [".sig", ".xml"]:
-            #     return []
             elif ext in [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff"]:
                 # Обработка изображений через OCR
                 try:

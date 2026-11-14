@@ -4,16 +4,14 @@ import datetime
 import io
 import os
 import re
-import tempfile
-import logging
 import json
 import zipfile
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body, Header, status, Depends
+from fastapi import FastAPI, HTTPException, Body, Header, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from typing import List, Optional, Dict
+from typing import Optional, Dict
 from celery.result import AsyncResult
 
 from configs.config import Config
@@ -57,7 +55,6 @@ async def lifespan(app: FastAPI):
         await http_manager.shutdown()
 
 app = FastAPI(lifespan=lifespan)
-# app = FastAPI(debug=False)
 
 # Функция зависимости для FastAPI-эндпоинтов
 def get_http_manager() -> HTTPClientManager:
@@ -76,8 +73,6 @@ app.add_middleware(APIKeyMiddleware)
 # Риск-мониторинг: новые эндпоинты /risk-monitoring/* (существующие эндпоинты не меняются)
 app.include_router(risk_monitoring_router)
 
-# logging.basicConfig(level=logging.INFO)
-# logger = logging.getLogger(__name__)
 setup_logging()
 logger = get_logger(__name__)
 
@@ -86,9 +81,6 @@ logger = get_logger(__name__)
 from configs import settings as _settings
 _settings.warn_env_leftovers(logger)
 
-
-# Глобальный словарь для хранения результатов анализа документов
-document_analysis_cache = {}
 
 
 @app.post("/evaluate-documents")
@@ -566,14 +558,10 @@ async def parse_eis(request: EISParseRequest):
                     with open(file_info["file_path"], 'rb') as f:
                         content = f.read()
                     # 🧹 Опционально: удаляем временный файл
-                    # os.unlink(file_info["file_path"])
             
             if content is not None:
-                # zip_file.writestr(file_info["filename"], content)
-                # logger.info(f"Добавлен файл в архив: {file_info['filename']}")
                 if file_info["status"] == "success":
                     unique_name = cloud_parser._make_unique_filename(file_info["filename"], existing_names)
-                    # zip_file.write(file_info["file_path"], arcname=unique_name)
                     zip_file.writestr(unique_name, content)
                     logger.info(f"Добавлен файл в архив: {unique_name}")
                     # Не забудьте удалить временный файл:

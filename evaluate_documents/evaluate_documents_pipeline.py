@@ -34,11 +34,9 @@ logger = get_logger(__name__)
 LLM_CHUNK_SIZE = 10000  # размер блока текста для TypeDataExtractor (входит в ключ кэша извлечения)
 
 
-
 async def _ready(value):
     """Корутина, сразу возвращающая ``value`` (готовый результат в общем списке задач ``asyncio.gather``)."""
     return value
-
 
 
 def _status(result: dict, key: str) -> str:
@@ -218,7 +216,6 @@ class TasksPipeline:
         except Exception as e:
 
             if link.doc_code == 'linkDocs':  
-            # if "zakupki.gov.ru" in link.media_links:
                 logger.error(f"Ошибка обработки ЕИС-ссылки {link.media_links}: {e}")
                 eis_data = {
                     "document_name": {"value": "Ссылка на ЕИС", "confidence": 1.0},
@@ -481,15 +478,10 @@ class TasksPipeline:
                         detected_type = res.get('type_compliance') if isinstance(res.get('type_compliance'), str) else res.get('type_compliance', {}).get("detected_type", "unknown")
                         self._stats[f"type:{detected_type}"] += 1
                         # заполнение столбца данными о предоставленных документах 
-                        # if link.doc_code == 'linkDocs':
-                        #     self.df.loc[self.df['doc_code'] == 'linkDocs', 'provided_docs'] = 1
                         self.df.loc[self.df['doc_code'] == detected_type, 'provided_docs'] = 1
                         self.df.loc[self.df['doc_code'] == (detected_type if (
                             link.doc_code == 'linkDocs' and detected_type in DOCUMENT_TYPE_MAPPING.keys()
                             ) else link.doc_code), 'documents_results'].iloc[0].append(res)
-                        # self.df.loc[self.df['doc_code'] == (detected_type if (link.doc_code in {"contractFiles", "dopMaterialFiles", "dopContractFiles", "docFiles", "rao", "our"}) else link.doc_code
-                        #                                     ), 'documents_results'].iloc[0].append(res)
-                        # self.df.loc[self.df['doc_code'] == link.doc_code, 'documents_results'].iloc[0].append(res)
 
 
             # Определяем недостающие документы

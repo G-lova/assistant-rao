@@ -1,6 +1,7 @@
 # Пакеты, которые импортирует код. Удалены неиспользуемые (14.11.2026): textract (тянул pocketsphinx со сборкой
 # из исходников — из-за него в образе были компиляторы), pyod, qdrant-client, patool, pyunpack, zipfile36, tqdm,
-# PyYAML, opencv-python и opencv-python-headless (cv2 не импортируется). fuzzywuzzy → rapidfuzz, PyPDF2 → pypdf
+# PyYAML, opencv-python и opencv-python-headless (cv2 не импортируется), playwright (разбор страниц ЕИС браузером
+# был в методах, которые нигде не вызывались — удалены). fuzzywuzzy → rapidfuzz, PyPDF2 → pypdf
 aiofiles
 asyncpg
 defusedxml
@@ -41,7 +42,6 @@ kombu>=5.3.4,<5.5
 redis==5.0.1
 flower==2.0.1
 aiohttp>=3.13.0
-playwright
 beautifulsoup4
 lxml
 xmltodict

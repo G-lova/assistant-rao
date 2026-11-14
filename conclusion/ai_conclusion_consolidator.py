@@ -4,6 +4,7 @@ from json_repair import repair_json
 from typing import Any, Dict
 from configs.logger import get_logger
 from configs.utils import split_large_text
+from configs.resources import read_text
 
 
 
@@ -36,12 +37,10 @@ class ConclusionConsoladator:
 
         try:
             prompt = "prompts/rao_conclusion_prompt_6.txt" if (expertise_object in (5,6)) else "prompts/rao_conclusion_prompt_7.txt"
-            with open(prompt) as f:
-                rao_conclusion_prompt = f.read()
+            rao_conclusion_prompt = read_text(prompt)
 
             schema = "schemas/rao_conclusion6_schema.json" if (expertise_object in (5,6)) else "schemas/rao_conclusion7_schema.json"
-            with open(schema) as f:
-                RAO_CONCLUSION_SCHEMA = f.read()
+            RAO_CONCLUSION_SCHEMA = read_text(schema)
 
             logger.info(f"Content: {content}")
 

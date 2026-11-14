@@ -22,7 +22,7 @@ from evaluate_documents.consistency_checker import ConsistencyChecker
 from evaluate_documents.type_data_extractor import ALLOWED_DOC_TYPES, DOCUMENT_TYPE_MAPPING, TypeDataExtractor
 from risk_monitoring.doc_risks_detector import DocumentRisksDetector
 from risk_monitoring.send_ai_analysis_service import SendAIAnalysisService
-from search_experts.embedding_client import EmbeddingClient
+from configs.embedding_client import EmbeddingClient
 
 
 # Добавляем путь к проекту для корректного импорта
@@ -444,8 +444,6 @@ class FileProcessor:
             similarities = cosine_similarity([doc_emb], comparing_embs_matrix).flatten()
             comparing_docs["similarity"] = similarities
 
-            # comparing_docs["similarity"] = cosine_similarity(doc_emb, comparing_docs["embeddings"].to_list()).flatten()            
-            # return comparing_docs_sorted.loc[comparing_docs_sorted["similarity"] >= 0.7, "id"].to_list()
             
             comparing_docs_sorted = comparing_docs.sort_values(by="similarity", ascending=False)
             comparing_docs_filtered = comparing_docs_sorted.loc[comparing_docs_sorted["similarity"] >= 0.75]

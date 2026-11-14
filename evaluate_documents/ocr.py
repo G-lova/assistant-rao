@@ -9,6 +9,7 @@ from configs.llm_client import get_llm
 from configs.logger import brief, get_logger, log_limit
 from configs.rate_limiter import llm_rate_limiter
 from configs.retry_utils import LLM_RETRY_CONFIG, async_retry
+from configs.resources import read_text
 
 
 logger = get_logger(__name__)
@@ -43,11 +44,8 @@ class OCRProcessor:
         self.client = llm_client
         self.model = model
 
-        with open("prompts/ocr_prompt.txt") as f:
-            self.ocr_prompt = f.read()
-
-        with open("schemas/ocr_schema.json") as f:
-            self.OCR_SCHEMA = json.loads(f.read())
+        self.ocr_prompt = read_text("prompts/ocr_prompt.txt")
+        self.OCR_SCHEMA = json.loads(read_text("schemas/ocr_schema.json"))
 
         # Ждём «разрешения» от глобального лимитера ПЕРЕД запросом
         self.rate_limiter = llm_rate_limiter()  # общий на процесс лимит частоты запросов к модели

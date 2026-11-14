@@ -52,12 +52,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Браузер для резервного разбора страниц ЕИС (configs/parsing.py, configs/eis_parsing.py: Playwright). Раньше пакет
-# playwright ставился, а браузер — нет, и резервный путь в контейнере всегда падал. --with-deps ставит системные
-# библиотеки Chromium через apt. Путь к браузерам — общий, не в домашнем каталоге пользователя
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
-RUN playwright install --with-deps chromium && rm -rf /var/lib/apt/lists/*
-
 # Словарь токенизатора tiktoken — при сборке, а не при первом запуске (configs/utils.py: get_encoding скачивает его
 # из интернета, если в кэше нет)
 ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken

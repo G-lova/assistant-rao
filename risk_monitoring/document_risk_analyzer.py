@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 from configs.logger import get_logger
+from configs.resources import read_text
 from risk_monitoring import risk_catalog
 from risk_monitoring.llm_json import LLMJson
 
@@ -456,11 +457,8 @@ class DocumentRiskAnalyzer:
         self.semaphore = asyncio.Semaphore(conc)
 
         self.codes = list(risk_catalog.DOCUMENT_RISK_CODES)
-        with open(PROMPT_PATH, "rb") as f:
-            raw = f.read()
-        self.prompt = raw.decode("utf-8").replace("RISK_CATALOG", risk_catalog.catalog_text(self.codes))
-        with open(SCHEMA_PATH, encoding="utf-8") as f:
-            schema_text = f.read()
+        self.prompt = read_text(PROMPT_PATH).replace("RISK_CATALOG", risk_catalog.catalog_text(self.codes))
+        schema_text = read_text(SCHEMA_PATH)
         self.schema = json.loads(schema_text.replace('"RISK_CODES"', json.dumps(self.codes)))
 
         # Изменили промпт или схему -> кэш риск-анализа инвалидируется сам

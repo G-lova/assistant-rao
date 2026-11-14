@@ -1,4 +1,3 @@
-import aiofiles
 import magic
 import os
 import pandas as pd
@@ -14,13 +13,13 @@ from urllib.parse import urlparse, parse_qs
 
 from configs.config import Config
 from configs.logger import get_logger
+from configs.resources import read_text
 
 
 config = Config.get_model_config()
 logger = get_logger(__name__)
 
 
-document_analysis_cache = {}
 
 API_KEY_PATTERN = re.compile(r'^[A-Za-z0-9._\-]+$')
 
@@ -109,7 +108,7 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             expected_api_key = Config.API_KEY
             if not expected_api_key:
                 # Логируем внутреннюю ошибку, но не раскрываем клиенту
-                print("CRITICAL: API_KEY not set in environment")
+                logger.critical("API_KEY не задан в окружении — запросы к API отклоняются (500)")
                 return JSONResponse(
                     status_code=500,
                     content={"detail": "Service misconfigured"}
@@ -145,10 +144,7 @@ def load_sql_query(file_name: str) -> str:
     Returns:
         str: SQL-запрос в виде одной строки без лишних пробельных символов.
     """
-    sql_queries_path = Config().get_paths_config().sql_queries
-    file_path = f"{sql_queries_path}{file_name}"
-    with open(file_path, encoding="utf-8") as f:
-        sql_query = f.read()
+    sql_query = read_text(f"{Config().get_paths_config().sql_queries}{file_name}")   # от корня репозитория, кэш
     return " ".join(sql_query.split())
 
     
@@ -166,10 +162,7 @@ async def load_sql_query_async(file_name: str) -> str:
     Returns:
         str: SQL-запрос в виде одной строки без лишних пробельных символов.
     """
-    sql_queries_path = Config().get_paths_config().sql_queries
-    file_path = f"{sql_queries_path}{file_name}"
-    async with aiofiles.open(file_path, encoding="utf-8") as f:
-        sql_query = await f.read()
+    sql_query = read_text(f"{Config().get_paths_config().sql_queries}{file_name}")   # кэш: с диска — один раз
     return " ".join(sql_query.split())
 
 

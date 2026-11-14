@@ -68,7 +68,7 @@ class TypeDataExtractor:
     """Разбор документа: тип (:class:`TypeDetector`) → поля профиля (:class:`DataExtractor`) → объединение.
 
     Интерфейс прежний (``extract_data_from_document(chunks, document_name, doc_type, expertise_object)``), им
-    пользуются пайплайн ``/evaluate-documents``, ``src/ai_file_analyzer.py`` и риск-мониторинг.
+    пользуются пайплайн ``/evaluate-documents`` и риск-мониторинг.
     """
 
     def __init__(self, llm_client, model):

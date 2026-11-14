@@ -74,7 +74,6 @@ def evaluate_documents_task(self, expertise_id: int, environment: str, force: bo
                 await asyncio.sleep(delay)
 
     return run_async(run_with_retry())
-    # return asyncio.run(run_with_manager)
 
 
 @celery_app.task(bind=True, name="index_documents_task", **LONG_TASK_LIMITS)

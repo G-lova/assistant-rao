@@ -9,6 +9,7 @@ from configs.logger import get_logger
 from typing import Any, Dict
 
 from configs.utils import split_large_text
+from configs.resources import read_text
 
 
 logger = get_logger(__name__)
@@ -181,11 +182,8 @@ class DocumentRisksDetector:
 
         self.rate_limiter = llm_rate_limiter()  # общий на процесс лимит частоты запросов к модели
 
-        with open("prompts/doc_risks_detector_prompt.txt") as f:
-            self.doc_risks_detector_prompt = f.read()
-
-        with open("schemas/doc_risks_detector_schema.json") as f:
-            self.doc_risks_detector_schema = f.read()
+        self.doc_risks_detector_prompt = read_text("prompts/doc_risks_detector_prompt.txt")
+        self.doc_risks_detector_schema = read_text("schemas/doc_risks_detector_schema.json")
 
 
     async def check_doc_risks(self, content: str, filename: str) -> Dict[str, Any]:

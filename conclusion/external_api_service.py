@@ -14,7 +14,6 @@ from configs.config import Config
 logger = logging.getLogger(__name__)
 
 
-
 class ExternalAPIService:
     """Сервис для отправки данных во внешнее API (исходная версия)"""
     
@@ -41,7 +40,6 @@ class ExternalAPIService:
             logger.debug(f"Headers: {mask_headers(self.headers)}")
 
 
-    
     async def send_expertise_data(self, expertise_id: int, merged_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Отправляет данные экспертизы в исходном формате
@@ -69,7 +67,6 @@ class ExternalAPIService:
         try:
             session = self.http_manager.get_session()
             async with session.post(
-            # async with httpx.AsyncClient(timeout=300) as client:
                 # response = await client.post(
                     self.url,
                     headers=self.headers,

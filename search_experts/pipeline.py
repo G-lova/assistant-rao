@@ -11,7 +11,7 @@ from configs.config import Config
 from configs.data_fetcher import DataFetcher
 from configs.utils import load_sql_query_async
 from search_experts.text_processor import TextProcessor
-from search_experts.embedding_client import EmbeddingClient
+from configs.embedding_client import EmbeddingClient
 from search_experts.conflict_detector import ConflictDetector
 
 
@@ -531,7 +531,6 @@ class ScoringPipeline:
 
         # сортировка остальных по семантике
         df_rest = df[~df['expert_id'].isin(max_experts_per_invite)]
-        # df_rest = self.sort_experts(df_rest, "similarity_embeddings")
 
         df = pd.concat([df[df['expert_id'].isin(max_experts_per_invite)], df_rest])
     
