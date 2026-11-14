@@ -29,6 +29,14 @@ class RunSofficeTest(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, {"PATH": self.dir + os.pathsep + os.environ["PATH"]})
         self.env.start()
         self.addCleanup(self.env.stop)
+        # Свой временный каталог для профилей: в CI прода тесты идут в контейнере с общим /tmp (том /tmp:/tmp),
+        # и работающие воркеры создают там свои lo_profile_* — тест принимал чужой профиль за неудалённый свой
+        # (14.11.2026)
+        tmp = os.path.join(self.dir, "tmp")
+        os.makedirs(tmp)
+        self.tmp = mock.patch.object(tempfile, "tempdir", tmp)
+        self.tmp.start()
+        self.addCleanup(self.tmp.stop)
         with stubbed_import("configs.file_reader") as module:
             self.run = module.run_soffice
 
