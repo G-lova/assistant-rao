@@ -1425,11 +1425,13 @@ class AIFileAnalyzer:
                 progress.note(f"{title}: из кэша")
                 return cached["result"]
             if cached:
-                progress.note(f"{title}: результат в кэше негоден (зацикливание модели) — выполняю заново")
+                progress.note(f"{title}: результат в кэше негоден (зацикливание модели или не тот формат) — выполняю заново")
         result = None
         stats = getattr(self, "stats", None)
         if fallback_doc and not self.recompute:
             result = await self._get_cached(fallback_doc, analysis_type, version, model)
+            if result is not None and reuse_if is not None and not reuse_if(result):
+                result = None   # результат прошлой редакции негоден так же, как негодный кэш текущей
             if result is not None:
                 progress.note(f"{title}: взято из прошлой редакции (текст почти не изменился)")
             if result is not None and stats is not None:
@@ -1472,10 +1474,13 @@ class AIFileAnalyzer:
                     "key_indicators": [], "type_source": "print_form", "print_form": print_kind}
             return info, print_kind["type_decode"]
 
+        # в кэше бывают не-словари (список, строка, число — ответ модели до проверки as_type_result): такой
+        # результат негоден — тип определяется заново, а не роняет анализ файла при каждом повторе
         info = await self._cached(document_id, "doc_type",
                                   lambda: self.type_detector.detect_document_type(content=chunks[0], filename=file_name),
-                                  model=self.extraction_model, fallback_doc=fallback_doc)
-        info = dict(info or {})
+                                  model=self.extraction_model, fallback_doc=fallback_doc,
+                                  keep=lambda r: isinstance(r, dict), reuse_if=lambda r: isinstance(r, dict))
+        info = dict(info) if isinstance(info, dict) else {}
         name = ((extraction or {}).get("raw_data") or {}).get("document_name") or ""
         if isinstance(name, dict):
             name = name.get("value") or ""

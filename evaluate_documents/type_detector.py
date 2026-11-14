@@ -4,7 +4,7 @@ import re
 import time
 from json_repair import repair_json
 from string import Template
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from configs.logger import get_logger
 from configs.rate_limiter import llm_rate_limiter
@@ -13,6 +13,28 @@ from configs.resources import read_text
 
 
 logger = get_logger(__name__)
+
+
+def as_type_result(value: Any, filename: str = "") -> Optional[Dict[str, Any]]:
+    """Результат определения типа — только словарь (``detected_type``, ``confidence`` …).
+
+    Модель без guided_json или после ``repair_json`` может вернуть список, строку или число. Такой «результат»
+    раньше сохранялся в кэш ``ai_document_analysis`` и при каждом повторе ронял анализ файла в
+    ``dict(info)`` (stage, 14.11.2026: «dictionary update sequence element #0 has length 4»).
+
+    Args:
+        value: Разобранный ответ модели.
+        filename: Имя файла (для журнала).
+
+    Returns:
+        Optional[Dict[str, Any]]: Словарь; список со словарём первым элементом — этот словарь; иначе ``None``.
+    """
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list) and value and isinstance(value[0], dict):
+        return value[0]
+    logger.warning(f"Определение типа '{filename}': ответ модели не объект ({type(value).__name__}) — отброшен")
+    return None
 
 DOCUMENT_TYPE_MAPPING = {
     'docAcceptInafPostavFiles': 'Документация, подтверждающая невозможность (нецелесообразность) использования иных способов определения поставщика (исполнителя, подрядчика)',
@@ -145,9 +167,8 @@ class TypeDetector:
 
             # Парсим JSON
             try:
-                result = json.loads(raw_response)
-                return result
-            
+                return as_type_result(json.loads(raw_response), filename)
+
             except json.JSONDecodeError as e:
                 logger.warning(f"Первая попытка парсинга JSON не удалась: {e}")
 
@@ -160,7 +181,7 @@ class TypeDetector:
                     return None
                 
                 logger.info("Удалось распарсить JSON из извлечённого фрагмента вручную.")
-                return result
+                return as_type_result(result, filename)
             
             except json.JSONDecodeError:
                 logger.error("Не удалось распарсить ни одну JSON структуру.")
