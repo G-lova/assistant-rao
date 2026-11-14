@@ -1,6 +1,22 @@
-from pydantic import BaseModel
-from typing import Dict, Optional, List, Union, Any
-from fastapi import UploadFile
+"""Схемы запросов и ответов API (pydantic v2).
+
+Все модели наследуют :class:`ApiModel`: число в строковом поле принимается как строка (``coerce_numbers_to_str``) —
+так вёл себя pydantic v1, и внешние системы присылают, например, ``reg_number`` или ``procurement_id`` числом.
+"""
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel as _PydanticBaseModel
+from pydantic import ConfigDict
+
+
+class ApiModel(_PydanticBaseModel):
+    """Базовая модель API: поведение pydantic v1 для строковых полей (число → строка)."""
+
+    model_config = ConfigDict(coerce_numbers_to_str=True)
+
+
+BaseModel = ApiModel
+"""Имя ``BaseModel`` в этом модуле — :class:`ApiModel` (модели ниже объявлены через него)."""
 
 
 class DocumentContentResponse(BaseModel):
@@ -139,12 +155,12 @@ class EISParseRequest(BaseModel):
     nsi_code: str = "nsiAllList"
     nsi_kind: str = "all"
     exact_date: str = ""
-    procurement_id: str = None
+    procurement_id: Optional[str] = None
 
 
 class FileEntity(BaseModel):
     id: int
-    context: str = None
+    context: Optional[str] = None
     send_to_external: bool = False
 
 
