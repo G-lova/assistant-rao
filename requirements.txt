@@ -1,44 +1,39 @@
+# Пакеты, которые импортирует код. Удалены неиспользуемые (14.11.2026): textract (тянул pocketsphinx со сборкой
+# из исходников — из-за него в образе были компиляторы), pyod, qdrant-client, patool, pyunpack, zipfile36, tqdm,
+# PyYAML, opencv-python и opencv-python-headless (cv2 не импортируется). fuzzywuzzy → rapidfuzz, PyPDF2 → pypdf
 aiofiles
 asyncpg
 defusedxml
 fastapi==0.95.2
-fuzzywuzzy
 json-repair
 numpy==1.26.4
 openai
-opencv-python>=4.6.0
-opencv-python-headless
 openpyxl==3.1.5
 pandas==2.3.0
-patool==4.0.1
 pdf2image
+# pypdf — преемник PyPDF2 (тот же PdfReader); текстовый слой PDF и поиск изображений на страницах
+pypdf>=4.3,<7
 pillow
 psycopg2-binary==2.9.9
 pydantic==1.10.8
+# scipy напрямую не импортируется — зависимость scikit-learn; версия закреплена под numpy 1.26
 scipy==1.11.4
 py7zr>=0.21.0
-pyod==2.0.5
-PyPDF2==3.0.1
+# нечёткое сравнение строк (configs/fuzzy.py) вместо fuzzywuzzy + python-Levenshtein
+rapidfuzz>=3.6,<4
 python-dateutil
 python-docx==1.2.0
 python-dotenv==1.1.0
-python-Levenshtein
 python-magic==0.4.27
 python-multipart==0.0.20
 python-pptx==0.6.23
-pyunpack==0.3
-PyYAML==6.0.2
-qdrant-client==1.9.0
 rarfile==4.2
-requests==2.32.4 
+requests==2.32.4
 scikit-learn
 tiktoken
-textract==1.6.5
-tqdm>=4.66.0
 uvicorn==0.22.0
 watchfiles
 xlrd==1.2.0
-zipfile36==0.1.3
 celery==5.3.4
 # kombu ставится зависимостью celery без версии: свежий kombu требует redis-py >= 6.1, а у нас redis==5.0.1 —
 # воркеры не запускались (VersionMismatch, 03.11.2026). Ограничение возвращает версии, с которыми всё работало.

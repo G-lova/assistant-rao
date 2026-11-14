@@ -2,7 +2,7 @@ import itertools
 import re
 from difflib import SequenceMatcher
 
-from fuzzywuzzy import fuzz
+from configs import fuzzy as fuzz  # rapidfuzz (запасные — thefuzz/fuzzywuzzy, difflib)
 
 
 # Организационно-правовая форма (ОПФ) в полной записи. Слова ОПФ согласуются с «учреждение / предприятие /
@@ -297,7 +297,7 @@ class ConflictDetector:
         get = row.get if hasattr(row, "get") else (lambda k, d=None: getattr(row, k, d))
 
         def ratio(a, b):
-            # пустое поле с пустым не «совпадает» (fuzzywuzzy и так даёт 0 — защита от другой реализации ratio)
+            # пустое поле с пустым не «совпадает» (configs.fuzzy и так даёт 0 — защита на случай другой реализации)
             va, vb = get(a), get(b)
             if not isinstance(va, str) or not isinstance(vb, str) or not va.strip() or not vb.strip():
                 return 0
@@ -373,7 +373,7 @@ class ConflictDetector:
 
         Метод рассчитывает коэффициенты схожести (от 0 до 100) между различными парами полей,
         такими как имя эксперта и название организации-участника, и возвращает максимальное значение.
-        Используется библиотека `fuzzywuzzy` для расчёта расстояния Левенштейна.
+        Сходство строк — ``configs.fuzzy.ratio`` (``rapidfuzz``, шкала и округление как у ``fuzzywuzzy``).
 
         Args:
             row (dict): Строка данных (например, pandas.Series), содержащая поля:

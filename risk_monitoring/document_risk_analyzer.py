@@ -678,11 +678,9 @@ class DocumentRiskAnalyzer:
             return False
         if nf in norm_chunk:
             return True
-        try:
-            from fuzzywuzzy import fuzz  # ленивый импорт: модуль нужен только для нечёткой сверки
-        except ImportError:  # pragma: no cover - fuzzywuzzy есть в requirements
-            return False
-        return fuzz.partial_ratio(nf, norm_chunk) >= FUZZY_THRESHOLD
+        from configs import fuzzy  # rapidfuzz; без него — thefuzz/fuzzywuzzy или difflib
+
+        return fuzzy.partial_ratio(nf, norm_chunk) >= FUZZY_THRESHOLD
 
     @staticmethod
     def _weight(r: Dict[str, Any]) -> float:

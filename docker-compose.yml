@@ -10,8 +10,9 @@ services:
       - is_rao_postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     restart: unless-stopped
+    # только с самого сервера (или через SSH-туннель): снаружи Postgres не открыт
     ports:
-      - "2302:5432"
+      - "127.0.0.1:2302:5432"
     networks:
       - rao_network
     healthcheck:
@@ -26,8 +27,9 @@ services:
     image: dpage/pgadmin4:latest
     container_name: is-rao-pgadmin
     restart: unless-stopped
+    # только с самого сервера (или через SSH-туннель)
     ports:
-      - "2303:80"
+      - "127.0.0.1:2303:80"
     environment:
       PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
@@ -58,7 +60,10 @@ services:
       start_period: 60s
 
   rao_api:
+    # Образ собирается один раз (здесь) и используется всеми сервисами приложения: раньше build: . стоял у пяти
+    # сервисов, и `docker compose build` собирал пять одинаковых образов
     build: .
+    image: assistant-rao:latest
     env_file:
       - .env
     container_name: rao_api
@@ -96,7 +101,8 @@ services:
     restart: unless-stopped
 
   celery_worker:
-    build: .
+    image: assistant-rao:latest   # образ собирает сервис rao_api
+    pull_policy: never            # локальный образ, не искать в Docker Hub
     env_file:
       - .env
     container_name: rao_celery_worker
@@ -124,7 +130,8 @@ services:
     stop_grace_period: 5m
 
   celery_worker_rm:
-    build: .
+    image: assistant-rao:latest   # образ собирает сервис rao_api
+    pull_policy: never            # локальный образ, не искать в Docker Hub
     env_file:
       - .env
     container_name: rao_celery_worker_rm
@@ -149,7 +156,8 @@ services:
     stop_grace_period: 5m
 
   celery_beat:
-    build: .
+    image: assistant-rao:latest   # образ собирает сервис rao_api
+    pull_policy: never            # локальный образ, не искать в Docker Hub
     env_file:
       - .env
     container_name: rao_celery_beat
@@ -170,11 +178,13 @@ services:
     restart: unless-stopped
 
   flower:
-    build: .
+    image: assistant-rao:latest   # образ собирает сервис rao_api
+    pull_policy: never            # локальный образ, не искать в Docker Hub
     container_name: rao_flower
     command: celery -A celery_app flower --port=5555 --inspect-timeout=10000
+    # Flower без пароля — только с самого сервера (или через SSH-туннель: ssh -L 5555:127.0.0.1:5555 сервер)
     ports:
-      - "5555:5555"
+      - "127.0.0.1:5555:5555"
     environment:
       - REDIS_URL=redis://rao_redis:6379/0
       - CELERY_BROKER_URL=redis://rao_redis:6379/0  # Добавьте это

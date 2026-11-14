@@ -171,7 +171,7 @@ def _xobjects_have_image(resources, depth: int = 0) -> bool:
     """Есть ли среди XObject ресурсов страницы растровое изображение (с заходом в формы, до 3 уровней).
 
     Args:
-        resources: Словарь ``/Resources`` страницы или формы (PyPDF2).
+        resources: Словарь ``/Resources`` страницы или формы (pypdf).
         depth: Текущая глубина вложенности форм.
 
     Returns:
@@ -197,7 +197,7 @@ def _xobjects_have_image(resources, depth: int = 0) -> bool:
 def pdf_image_pages(path: str) -> list:
     """Флаги «на странице есть растровое изображение» по страницам PDF.
 
-    Сначала PyPDF2 (смотрит только словари ресурсов, изображения не декодирует — быстро), иначе pdfplumber.
+    Сначала pypdf (смотрит только словари ресурсов, изображения не декодирует — быстро), иначе pdfplumber.
 
     Args:
         path: Путь к PDF.
@@ -206,11 +206,11 @@ def pdf_image_pages(path: str) -> list:
         list: ``[bool, …]`` по страницам; пустой список — определить не удалось.
     """
     try:
-        from PyPDF2 import PdfReader
+        from pypdf import PdfReader
 
         return [_xobjects_have_image(page.get("/Resources")) for page in PdfReader(path).pages]
     except Exception as e:  # noqa: BLE001 — пробуем pdfplumber
-        logger.debug(f"PDF {path}: PyPDF2 не определил изображения: {type(e).__name__}: {e}")
+        logger.debug(f"PDF {path}: pypdf не определил изображения: {type(e).__name__}: {e}")
     try:
         import pdfplumber
 
