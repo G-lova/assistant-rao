@@ -217,15 +217,10 @@ class TypeDataExtractor:
         return out
 
     def merge_json_objects(self, json_strings) -> dict:
-        """Объединяет список JSON-строк в один словарь."""
-        result = {}
-        for js in json_strings:
-            try:
-                obj = json.loads(js) if isinstance(js, str) else js
-                result.update(obj)  # поверхностное слияние
-            except json.JSONDecodeError:
-                continue
-        return result
+        """Объединяет список JSON-строк / словарей в один словарь (не-словари пропускаются)."""
+        from evaluate_documents.merge_utils import merge_json_objects
+
+        return merge_json_objects(json_strings)
 
 
     def _merge_evidence(self, current_evidence: dict, new_evidence: dict) -> dict:
