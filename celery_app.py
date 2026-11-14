@@ -73,6 +73,23 @@ def _file_log(logger=None, format=None, **kwargs):  # noqa: A002 — имена 
         logger.warning(f"Журнал воркера в файл {path} не включён: {e}")
 
 
+def beat_expires(every_min: int) -> int:
+    """Срок жизни сообщения частой задачи beat, с: чуть меньше её периода.
+
+    Пока воркер занят или не работает, beat продолжает ставить задачи по расписанию, и они копятся в Redis. На проде
+    14.11.2026 после перезапуска воркер РМ получил разом 263 rm_decisions_task (≈ 9 ч по одной в 2 минуты) и
+    17 rm_daily_resume_task: пересчёты одновременно опрашивали портал (HTTP 429), а каждое продолжение заново ставило
+    ежедневные прогоны. Просроченное сообщение воркер отбрасывает (revoked), следующее по расписанию придёт само.
+
+    Args:
+        every_min: Период задачи в минутах.
+
+    Returns:
+        int: Секунды (не меньше 30).
+    """
+    return max(30, int(every_min) * 60 - 10)
+
+
 # Конфигурация Celery
 celery_app.conf.update(
     task_serializer='json',
@@ -153,7 +170,7 @@ celery_app.conf.update(
         'rm-daily-resume': {
             'task': 'rm_daily_resume_task',
             'schedule': crontab(minute=f"*/{settings.DAILY_RESUME_EVERY_MIN}"),
-            'options': {'queue': 'risk_monitoring'},
+            'options': {'queue': 'risk_monitoring', 'expires': beat_expires(settings.DAILY_RESUME_EVERY_MIN)},
         },
         # Сводки за прошлую неделю и прошлый месяц из ежедневных (неполная пересобирается, когда дни догонятся)
         'rm-period-summary': {
@@ -172,7 +189,7 @@ celery_app.conf.update(
         'rm-decisions-recalc': {
             'task': 'rm_decisions_task',
             'schedule': crontab(minute=f"*/{settings.RISK_DECISION_RECALC_EVERY_MIN}"),
-            'options': {'queue': 'risk_monitoring'},
+            'options': {'queue': 'risk_monitoring', 'expires': beat_expires(settings.RISK_DECISION_RECALC_EVERY_MIN)},
         },
         'typal-clauses-daily': {
             'task': 'rm_typal_clauses_task',

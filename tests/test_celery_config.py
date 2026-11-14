@@ -82,5 +82,32 @@ class CeleryConfigTest(unittest.TestCase):
         self.assertNotIn("${", line)
 
 
+
+class BeatExpiresTest(unittest.TestCase):
+    """Частые задачи beat не копятся в Redis, пока воркер занят: у сообщений есть срок жизни (prod, 14.11.2026 —
+    263 rm_decisions_task разом после перезапуска)."""
+
+    def test_frequent_beat_tasks_expire(self):
+        with open(os.path.join(ROOT, "celery_app.py"), encoding="utf-8") as f:
+            src = f.read()
+        tree = ast.parse(src)
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "beat_expires")
+        ns = {}
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), "celery_app.py", "exec"), ns)
+        self.assertEqual(ns["beat_expires"](2), 110)
+        self.assertEqual(ns["beat_expires"](30), 1790)
+        self.assertEqual(ns["beat_expires"](0), 30)
+        for entry in ("'rm-decisions-recalc'", "'rm-daily-resume'"):
+            block = src[src.index(entry):src.index("},", src.index(entry))]
+            self.assertIn("'expires': beat_expires(", block, entry)
+
+    def test_resume_continuation_expires(self):
+        with open(os.path.join(ROOT, "risk_monitoring", "tasks.py"), encoding="utf-8") as f:
+            src = f.read()
+        start = src.index("def rm_daily_resume_task")
+        body = src[start:src.index("return asyncio.run(run())", start)]
+        self.assertIn("expires=settings.DAILY_RESUME_EVERY_MIN * 60", body)
+
+
 if __name__ == "__main__":
     unittest.main()
