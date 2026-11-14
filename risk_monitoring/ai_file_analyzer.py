@@ -41,7 +41,7 @@ from configs.config import Config
 from configs.logger import get_logger
 from configs.resources import read_text
 from configs import settings
-from risk_monitoring import (boilerplate, doc_kind, file_versions, norms, passport, pdf_text,
+from risk_monitoring import (boilerplate, contract_printform, doc_kind, file_versions, norms, passport, pdf_text,
                             printform_passport, risk_catalog, rm_sql, text_quality, version_diff, xml_events)
 from risk_monitoring import progress
 from risk_monitoring.llm_json import prompt_version as _hash_version
@@ -508,6 +508,46 @@ class AIFileAnalyzer:
             c = self.cache = RunCache()
         return c
 
+    async def _owner_xml_body(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Тело XML, к которому приложен файл (для паспорта печатной формы контракта).
+
+        XML ищется так же, как при поиске прошлых редакций: ``xml_id`` из ``self.lookups`` (поиск уже прочитал тело —
+        оно в кэше прогона), иначе ``xml_source_id`` файла через ``xml_meta.sql``. Сбой — ``None``: паспорт тогда
+        строится по тексту печатной формы.
+
+        Args:
+            row: Строка ``files_meta.sql``.
+
+        Returns:
+            Optional[Dict[str, Any]]: Нормализованное тело XML или ``None``.
+        """
+        fid = int(row["id"])
+        xml_id = ((getattr(self, "lookups", None) or {}).get(fid) or {}).get("xml_id") or row.get("xml_source_id")
+        if not xml_id:
+            return None
+        xml_id = int(xml_id)
+        cache = self._run_cache()
+        try:
+            parsed = cache.parsed.get(xml_id)
+            if parsed is not None and not isinstance(parsed, Exception):
+                return parsed[2]
+            if isinstance(cache.bodies.get(xml_id), dict):
+                return cache.bodies[xml_id]
+            meta = await cache.one_each(self._query, "xml_meta.sql", [xml_id], "id", head=[self.storage_path])
+            x = meta.get(xml_id)
+            if not x:
+                return None
+            own = cache.archives is None
+            archives = ArchiveCache(self.parser) if own else cache.archives
+            try:
+                return await self._xml_body(archives, x)
+            finally:
+                if own:
+                    archives.close()
+        except Exception as e:  # noqa: BLE001 — без XML паспорт строится по тексту
+            logger.warning(f"Файл {fid}: XML {xml_id} для паспорта печатной формы не прочитан: {type(e).__name__}: {e}")
+            return None
+
     async def _xml_body(self, archives: Any, x: Dict[str, Any]) -> Dict[str, Any]:
         """Тело XML с кэшем на прогон: одни и те же XML нужны нескольким файлам и анализатору событий
         (``RunCache.parsed`` — разобранный им XML, ``RunCache.bodies`` — прочитанный здесь)."""
@@ -596,7 +636,10 @@ class AIFileAnalyzer:
                 return {"file_id": file_id, "status": "skipped", "reason": "already_analyzed"}
             stored = (getattr(self, "internal", None) or {}).get(file_id)
             if stored and stored.get("status") == "completed" and not stored.get("debug"):
-                if printform_passport.is_runaway(stored.get("ai_analysis")):
+                if contract_printform.is_stale(stored.get("ai_analysis"), row):
+                    # печатная форма контракта разобрана правилами извещения — пересобираем по XML (без модели)
+                    progress.note("сохранённый паспорт печатной формы контракта собран по тексту — пересборка по XML")
+                elif printform_passport.is_runaway(stored.get("ai_analysis")):
                     # результат печатной формы собран до пределов полей и слишком велик для API (HTTP 413) —
                     # пересобираем (без модели), а не дозаписываем как есть
                     progress.note("сохранённый результат печатной формы с раздутыми полями — пересборка")
@@ -748,7 +791,15 @@ class AIFileAnalyzer:
 
         if print_kind:
             mode = "print_form"
-            extraction, profile, candidates = printform_passport.build(text, print_kind, row)
+            xml_body = await self._owner_xml_body(row) if print_kind.get("group") == "contract" else None
+            if contract_printform.is_contract_xml(xml_body):
+                # печатная форма контракта построена из XML контракта — данные берём из XML (полностью и
+                # без «убегания» значений, как при разборе текста правилами извещения); товарных знаков не ищем
+                extraction, profile = contract_printform.build(xml_body, print_kind, row)
+                candidates = []
+                progress.note("паспорт печатной формы контракта — из XML контракта")
+            else:
+                extraction, profile, candidates = printform_passport.build(text, print_kind, row)
             type_info = {"detected_type": print_kind["detected_type"], "confidence": 1.0, "issues": [],
                          "key_indicators": [], "type_source": "print_form", "print_form": print_kind}
             type_decode = print_kind["type_decode"]
