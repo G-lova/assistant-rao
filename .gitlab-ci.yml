@@ -17,7 +17,10 @@ manual_docker_deploy:
     # pytest в образ не ставится. Пропустить — переменная CI SKIP_TESTS=1 при запуске задачи
     - if [ "$SKIP_TESTS" != "1" ]; then docker compose run --rm --no-deps rao_api python -m unittest discover -s tests -t . -q; fi
     # Пересоздаются только изменившиеся контейнеры (Postgres, Redis и pgAdmin не останавливаются);
-    # воркеры Celery останавливаются тёпло (stop_grace_period в docker-compose.yml)
+    # воркеры Celery останавливаются тёпло (stop_grace_period в docker-compose.yml).
+    # --remove-orphans удаляет контейнеры сервисов, которых больше нет в docker-compose.yml (сервис удалили или
+    # переименовали): без флага такой контейнер продолжал бы работать со старым кодом — например, второй воркер
+    # разбирал бы те же очереди
     - docker compose up -d --remove-orphans
   when: manual
   only:
