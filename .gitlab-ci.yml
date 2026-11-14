@@ -13,9 +13,9 @@ manual_docker_deploy:
     # пересобираются только при изменении requirements.txt. Полная пересборка без кэша — переменная CI
     # NO_CACHE=1 при запуске задачи (например, чтобы обновить системные пакеты и сертификаты)
     - if [ "$NO_CACHE" = "1" ]; then docker compose build --no-cache; else docker compose build; fi
-    # Тесты в собранном образе до перезапуска: при ошибке прод остаётся на прежней версии.
-    # Пропустить — переменная CI SKIP_TESTS=1 при запуске задачи
-    - if [ "$SKIP_TESTS" != "1" ]; then docker compose run --rm --no-deps rao_api python -m pytest -q -p no:cacheprovider tests; fi
+    # Тесты в собранном образе до перезапуска: при ошибке прод остаётся на прежней версии. Запуск через unittest —
+    # pytest в образ не ставится. Пропустить — переменная CI SKIP_TESTS=1 при запуске задачи
+    - if [ "$SKIP_TESTS" != "1" ]; then docker compose run --rm --no-deps rao_api python -m unittest discover -s tests -t . -q; fi
     # Пересоздаются только изменившиеся контейнеры (Postgres, Redis и pgAdmin не останавливаются);
     # воркеры Celery останавливаются тёпло (stop_grace_period в docker-compose.yml)
     - docker compose up -d --remove-orphans
