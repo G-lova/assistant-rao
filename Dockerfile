@@ -2,29 +2,20 @@
 # FROM python:3.11-slim
 FROM python:3.11-slim-bookworm
 
-# Install necessary system dependencies and build tools
+# Системные программы, которые вызывает код: antiword (.doc), libmagic (тип файла), LibreOffice (конвертация в PDF),
+# poppler-utils (pdftoppm / pdftotext / pdfinfo), wkhtmltopdf (HTML → PDF), wget/unzip (установка ниже).
+# Компиляторов (build-essential, gcc, make, *-dev) нет: их требовал textract (pocketsphinx собирался из исходников),
+# остальные пакеты ставятся готовыми wheel. Если пакет без wheel не соберётся — вернуть build-essential.
+# libgl1 / libglib2.0-0 нужны были только opencv (удалён из requirements).
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        build-essential \
-        libssl-dev \
-        libffi-dev \
-        python3-dev \
         ca-certificates \
         antiword \
         libmagic1 \
         libreoffice \
         poppler-utils \
-        zlib1g-dev \
         wget \
         unzip \
-        tar \
-        gcc \
-        make \
-        dpkg-dev \
-        libgl1 \
-        libglib2.0-0 \
-        libxml2-dev \
-        libxslt-dev \
         wkhtmltopdf && \
     update-ca-certificates && \
     rm -rf /var/lib/apt/lists/*
@@ -56,11 +47,18 @@ RUN mkdir -p /tmp/mincifry && \
 # Set the working directory in the container
 WORKDIR /app
 
-# Copy the current directory contents into the container
-COPY . .
-
-# Install any needed packages specified in requirements.txt
+# Сначала только requirements.txt: слой с пакетами пересобирается лишь при изменении списка пакетов, а не при каждой
+# правке кода (раньше COPY . . стоял до pip install, и пакеты ставились заново на каждую сборку)
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Словарь токенизатора tiktoken — при сборке, а не при первом запуске (configs/utils.py: get_encoding скачивает его
+# из интернета, если в кэше нет)
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken
+RUN python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
+
+# Код приложения (что не попадает в образ — .dockerignore)
+COPY . .
 
 # Run the application with auto-reload
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "20142", "--reload"]

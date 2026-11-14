@@ -184,8 +184,9 @@ async def clear_expertise(conn, scope: Scope) -> None:
         conn: Соединение ``asyncpg``.
         scope: Экспертиза в окружении.
     """
-    for sql in SQL_CLEAR:
-        await conn.execute(sql, scope.env, scope.expertise_id)
+    async with conn.transaction():   # все удаления разом: без транзакции сбой оставлял экспертизу частично очищенной
+        for sql in SQL_CLEAR:
+            await conn.execute(sql, scope.env, scope.expertise_id)
 
 
 def vector_literal(vec: Sequence[float]) -> str:
@@ -246,8 +247,10 @@ async def replace_chunks(conn, document_id: int, chunker: str, embedding_model: 
         raise ValueError(f"Чанков {len(chunks)}, эмбеддингов {len(vectors)}")
     rows = [(int(document_id), chunker, embedding_model, c.idx, c.page_from, c.page_to, getattr(c, "heading", None),
              c.text, vector_literal(v)) for c, v in zip(chunks, vectors)]
-    await conn.execute(SQL_DELETE_CHUNKS, int(document_id), chunker, embedding_model)
-    await conn.executemany(SQL_INSERT_CHUNK, rows)
+    async with conn.transaction():   # без транзакции сбой вставки оставлял документ без чанков
+        await conn.execute(SQL_DELETE_CHUNKS, int(document_id), chunker, embedding_model)
+        if rows:
+            await conn.executemany(SQL_INSERT_CHUNK, rows)
     return len(rows)
 
 
@@ -411,7 +414,11 @@ async def replace_facts(conn, scope: Scope, source: str, facts: Sequence[dict]) 
     """Заменяет факты экспертизы одного источника (``eis_xml`` / ``fact_extractor``).
 
     Повторный запуск идемпотентен: факты других источников не затрагиваются.
-    Цитата обрезается до 500 символов. Вызывать внутри транзакции.
+    Цитата обрезается до 500 символов.
+
+    Удаление старых и вставка новых фактов — в одной транзакции (внутри внешней транзакции — точка сохранения),
+    вставка — одним ``executemany``. Раньше каждый факт вставлялся отдельным запросом, а транзакцию никто не
+    открывал: при сбое посередине у экспертизы оставалась часть фактов источника.
 
     Args:
         conn: Соединение ``asyncpg``.
@@ -422,13 +429,14 @@ async def replace_facts(conn, scope: Scope, source: str, facts: Sequence[dict]) 
     Returns:
         int: Количество записанных фактов.
     """
-    await conn.execute(SQL_DELETE_FACTS_BY_SOURCE, scope.env, scope.expertise_id, source)
-    for fact in facts:
-        await conn.execute(
-            SQL_INSERT_FACT, scope.env, scope.expertise_id, fact["fact_key"], to_json(fact.get("value")),
-            fact.get("document_id"), fact.get("page"), (fact.get("quote") or "")[:500] or None,
-            fact.get("confidence"), source)
-    return len(facts)
+    rows = [(scope.env, scope.expertise_id, fact["fact_key"], to_json(fact.get("value")), fact.get("document_id"),
+             fact.get("page"), (fact.get("quote") or "")[:500] or None, fact.get("confidence"), source)
+            for fact in facts]
+    async with conn.transaction():
+        await conn.execute(SQL_DELETE_FACTS_BY_SOURCE, scope.env, scope.expertise_id, source)
+        if rows:
+            await conn.executemany(SQL_INSERT_FACT, rows)
+    return len(rows)
 
 
 async def get_facts(conn, scope: Scope) -> list:

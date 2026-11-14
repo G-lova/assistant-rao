@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from evaluate_documents.doc_profiles import (
@@ -67,7 +68,7 @@ class ProfilesTest(unittest.TestCase):
 
     def test_profiles_are_subsets(self):
         """Каждый профиль — подмножество полей схемы, с названием и описанием документа; НМЦК не в договоре и акте."""
-        schema = json.load(open("schemas/data_extractor_schema.json", encoding="utf-8"))
+        schema = json.loads(Path("schemas/data_extractor_schema.json").read_text(encoding="utf-8"))
         all_fields = set(schema["properties"]["raw_data"]["properties"])
         for name, fields in PROFILES.items():
             self.assertTrue(set(fields) <= all_fields, name)
@@ -78,7 +79,7 @@ class ProfilesTest(unittest.TestCase):
 
     def test_schema_for_profile(self):
         """Схема профиля: только его поля; полная — без изменений; исходная схема не меняется."""
-        schema = json.load(open("schemas/data_extractor_schema.json", encoding="utf-8"))
+        schema = json.loads(Path("schemas/data_extractor_schema.json").read_text(encoding="utf-8"))
         act = schema_for_profile(schema, "act")
         self.assertEqual(set(act["properties"]["raw_data"]["properties"]), set(PROFILES["act"]))
         self.assertIn("readability", act["properties"])

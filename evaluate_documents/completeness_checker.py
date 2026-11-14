@@ -1,13 +1,14 @@
 import asyncio
 import json
 
-from configs.rate_limiter import TokenBucket
+from configs.rate_limiter import llm_rate_limiter
 from json_repair import repair_json
 
 from configs.logger import get_logger
 from typing import Any, Dict
 
 from configs.utils import split_large_text
+from configs.resources import read_text
 
 
 logger = get_logger(__name__)
@@ -39,13 +40,10 @@ class CompletenessChecker:
         self.client = llm_client
         self.model = model
 
-        self.rate_limiter = TokenBucket(rate=1.5)  # 1.5 запроса в секунду
+        self.rate_limiter = llm_rate_limiter()  # общий на процесс лимит частоты запросов к модели
 
-        with open("prompts/completeness_prompt.txt") as f:
-            self.completeness_prompt = f.read()
-
-        with open("schemas/completeness_schema.json") as f:
-            self.COMPLETENESS_SCHEMA = f.read()
+        self.completeness_prompt = read_text("prompts/completeness_prompt.txt")
+        self.COMPLETENESS_SCHEMA = read_text("schemas/completeness_schema.json")
 
 
     async def check_doc_completeness(self, content: str, document_code: str) -> Dict[str, Any]:

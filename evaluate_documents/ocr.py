@@ -2,12 +2,14 @@ import asyncio
 import aiofiles
 import base64
 import json
+import logging
 import re
 
 from configs.llm_client import get_llm
-from configs.logger import get_logger
-from configs.rate_limiter import TokenBucket
+from configs.logger import brief, get_logger, log_limit
+from configs.rate_limiter import llm_rate_limiter
 from configs.retry_utils import LLM_RETRY_CONFIG, async_retry
+from configs.resources import read_text
 
 
 logger = get_logger(__name__)
@@ -42,14 +44,11 @@ class OCRProcessor:
         self.client = llm_client
         self.model = model
 
-        with open("prompts/ocr_prompt.txt") as f:
-            self.ocr_prompt = f.read()
-
-        with open("schemas/ocr_schema.json") as f:
-            self.OCR_SCHEMA = json.loads(f.read())
+        self.ocr_prompt = read_text("prompts/ocr_prompt.txt")
+        self.OCR_SCHEMA = json.loads(read_text("schemas/ocr_schema.json"))
 
         # Ждём «разрешения» от глобального лимитера ПЕРЕД запросом
-        self.rate_limiter = TokenBucket(rate=1.5)  # 1.5 запроса в секунду
+        self.rate_limiter = llm_rate_limiter()  # общий на процесс лимит частоты запросов к модели
 
 
     @async_retry(LLM_RETRY_CONFIG)
@@ -115,7 +114,10 @@ class OCRProcessor:
             )
 
             raw_response = response.choices[0].message.content.strip()
-            logger.info(f'OCR response для {original_filename}/{image_name}: {raw_response}')
+            logger.info(f'OCR response для {original_filename}/{image_name} ({len(raw_response)} симв.): '
+                        f'{brief(raw_response, min(log_limit(), 500) if log_limit() else 0)}')
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f'OCR response для {original_filename}/{image_name} целиком: {raw_response}')
             return raw_response, False
         
         except asyncio.TimeoutError:

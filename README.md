@@ -215,8 +215,8 @@ assistant-rao/
 ├── schemas/                   # JSON схемы для LLM
 ├── prompts/                   # Промпты
 └── xml/                       # XML шаблоны
-└── test/                      # Тесты
-    └── load_test.py           # Нагрузочные тесты
+├── scripts/load_test.py       # Нагрузочный тест API
+└── tests/                     # Модульные тесты (python -m pytest -q tests)
 ```
 
 ## API Эндпоинты
@@ -397,7 +397,7 @@ http://localhost:5555
 
 ### Запуск нагрузочных тестов
 ```bash
-python test/load_test.py
+python scripts/load_test.py
 ```
 
 ### Покрытие тестами

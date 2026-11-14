@@ -296,7 +296,7 @@ NOTICE_TAGS = {
 }
 CONTRACT_TAGS = {"contract", "pprf615Contract", "contractCutted"}
 
-# Тег корня XML → код события (по «Верхним тегам» и маппингу из xml_processor.get_event_type)
+# Тег корня XML → код события (по «Верхним тегам» и маппингу из удалённого xml_processor.get_event_type)
 TAG_EVENTS: Dict[str, str] = {
     # закупка
     "epNotificationCancel": "PUR-008", "fcsNotificationCancel": "PUR-008", "pprf615NotificationCancel": "PUR-008",

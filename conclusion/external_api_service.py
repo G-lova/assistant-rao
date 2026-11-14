@@ -4,13 +4,14 @@ import json
 from configs.http_client_manager import HTTPClientManager
 import aiohttp
 import logging
+
+from configs.logger import mask_headers
 from typing import Dict, Any
 
 
 from configs.config import Config
 
 logger = logging.getLogger(__name__)
-
 
 
 class ExternalAPIService:
@@ -36,10 +37,9 @@ class ExternalAPIService:
         else:
             logger.info(f"Инициализирован ExternalAPIService для среды {environment}")
             logger.debug(f"URL: {self.url}")
-            logger.debug(f"Headers: {self.headers}")
+            logger.debug(f"Headers: {mask_headers(self.headers)}")
 
 
-    
     async def send_expertise_data(self, expertise_id: int, merged_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Отправляет данные экспертизы в исходном формате
@@ -60,13 +60,13 @@ class ExternalAPIService:
         
         logger.info(f" Отправка данных в исходном формате для expertise_id={expertise_id}")
         logger.debug(f" URL: {self.url}")
-        logger.debug(f" Заголовки: {self.headers}")
-        logger.debug(f" Payload: {json.dumps(payload, ensure_ascii=False, indent=2)}")
+        if logger.isEnabledFor(logging.DEBUG):   # json.dumps тела — только если запись действительно пишется
+            logger.debug(f" Заголовки: {mask_headers(self.headers)}")
+            logger.debug(f" Payload: {json.dumps(payload, ensure_ascii=False, indent=2)}")
         
         try:
             session = self.http_manager.get_session()
             async with session.post(
-            # async with httpx.AsyncClient(timeout=300) as client:
                 # response = await client.post(
                     self.url,
                     headers=self.headers,
@@ -75,7 +75,7 @@ class ExternalAPIService:
                 response_data = await response.json()
 
             logger.info(f"Ответ получен: статус {response.status}")
-            logger.debug(f"Заголовки ответа: {dict(response.headers)}")
+            logger.debug(f"Заголовки ответа: {mask_headers(response.headers)}")
 
             content_type = response.headers.get('content-type', '').lower()
 

@@ -61,6 +61,12 @@ PE_RM_LINK_ENABLED = True
 EVAL_LLM_CONCURRENCY = 3
 EVAL_FILE_CONCURRENCY = 3
 EVAL_LINK_CONCURRENCY = 2
+# Чтение PDF в /evaluate-documents (configs.file_reader.FileReader.read_pdf_file): страницы с пригодным текстовым
+# слоем не отправляются в OCR. False — как раньше, OCR каждой страницы
+EVAL_PDF_TEXT_LAYER = True
+# Страницы с растровыми изображениями (скан, подпись, печать) всё равно распознаются моделью: она описывает подписи
+# и печати в visual_notes. False — брать текстовый слой и у таких страниц (быстрее, но без описания подписей/печатей)
+EVAL_PDF_OCR_IMAGE_PAGES = True
 # Запросы к порталу экспертиз с ключом SYSTEM_API_KEY (/api/media, /api/database/query): у портала ограничение
 # частоты на ключ, общее для всех запросов. После 429 пауза ставится на весь хост: по Retry-After, а без него —
 # PORTAL_RATE_LIMIT_DELAY с, растёт ×2 с каждой попыткой, не больше PORTAL_RATE_LIMIT_MAX_DELAY
@@ -89,11 +95,18 @@ PE_FACTS_TIMEOUT_SEC = 900
 PE_FACTS_TOP_K = 8
 PE_FACTS_RECHECK_K = 16
 
+# Пул соединений с Postgres сервиса в процессе API (configs/working_with_db.open_app_pool, lifespan FastAPI): раньше
+# пул создавался и закрывался на каждую операцию
+DB_APP_POOL_MAX_SIZE = 10
+
 # Параметры генерации основной модели (MODEL_NAME)
 MODEL_TEMPERATURE = 0.7
 MODEL_MAX_TOKENS = 4096
 # Размер пакета запроса эмбеддингов
 EMBEDDING_BATCH_SIZE = 16
+# Одновременных запросов к одному сервису эмбеддингов на процесс — общий лимит для всех клиентов (configs/embedding_client.py).
+# Раньше у каждого экземпляра EmbeddingClient был свой лимит 10, а экземпляров около десятка
+EMBEDDING_CONCURRENCY = 8
 
 # ---------------------------------------------------------------- рейтинг экспертов (POST /get-experts-rating)
 # Без флага by_period рейтинг считается с этой даты по завтрашнюю дату (текущий день целиком; дата — по часовому поясу
@@ -264,6 +277,9 @@ RISK_DECAY_MIN_CHANGE = 1.0          # балл изменился меньше 
 RISK_DECISION_RECALC_ENABLED = True
 RISK_DECISION_RECALC_EVERY_MIN = 2   # период задачи rm_decisions_task, минут
 RISK_DECISION_LOOKBACK_MIN = 15      # окно поиска изменённых строк, минут (с запасом на пропущенный запуск)
+# Одновременных PATCH ai_analysis во внешнюю БД при массовых пересчётах (затухание, решения аналитиков;
+# risk_monitoring/batch_push.py). Частоту всё равно держит лимитер RiskMonitoringAPI (0.9 запроса/с — у API 60 в минуту)
+RM_PUSH_CONCURRENCY = 3
 # Приоритет проверки (10.14): веса составляющих (сумма 1); итог × (0,5 + 0,5 × доверие)
 PRIORITY_WEIGHTS = {"risk": 0.4, "growth": 0.25, "money": 0.15, "novelty": 0.2}
 # Уровень риска от сработавшего правила внешней системы (rule_values): признак риска («нет обеспечения заявки»,
@@ -426,6 +442,14 @@ WORKER_LOG_ENABLED = True
 WORKER_LOG_DIR = "logs"
 WORKER_LOG_MAX_MB = 100
 WORKER_LOG_BACKUPS = 10
+# Длинные значения в журнале уровня INFO (результаты извлечения, ответы OCR, разбор ссылок) обрезаются до стольких
+# символов (configs.logger.brief); полный текст — на уровне DEBUG. 0 — писать целиком, как раньше
+LOG_VALUE_MAX_CHARS = 2000
+# Процессов воркера celery_worker (очередь evaluation, пул prefork): задачи /evaluate-documents, сводного заключения,
+# индексации и публикаций экспертов идут параллельно. У каждого процесса свои лимиты запросов к модели
+# (llm_resilience.MAX_INFLIGHT), поэтому нагрузка на модель растёт с числом процессов; 1 — задачи по одной.
+# Воркер риск-мониторинга задаёт своё число процессов в docker-compose.yml (--concurrency=2) — оно важнее этой настройки
+CELERY_EVAL_CONCURRENCY = 2
 
 # Переменные, которые раньше задавались в .env и теперь задаются здесь (имя в .env → имя здесь, модуль).
 # Если в окружении осталось другое значение, при старте пишется предупреждение (см. warn_env_leftovers)
@@ -511,6 +535,11 @@ PERIOD_SUMMARY_PUSH_ENABLED = True
 # сервер его не выключает — один повтор с бо́льшим лимитом ответа
 LLM_DISABLE_THINKING = True
 LLM_THINKING_RETRY_MAX_TOKENS = 12000
+
+# ── Лимиты запросов к модели (configs/rate_limiter.py, configs/llm_resilience.py)
+# Частота запросов к модели на процесс — один бак на всех (раньше TokenBucket(rate=1.5) был у каждого объекта, и общая
+# частота не ограничивалась). 0 — без лимита частоты; одновременность ограничивает llm_resilience.MAX_INFLIGHT
+LLM_RATE_PER_SEC = 3.0
 
 # ── Чтение Excel (configs/file_reader.py): потоково и с ограничениями — полная загрузка книги-сметы подвешивала
 # прогон (31.10.2026)

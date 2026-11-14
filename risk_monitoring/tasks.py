@@ -409,6 +409,7 @@ def rm_decay_task(self, environment: str = None, push: bool = None) -> Dict[str,
         from configs.ai_repo import AIRepo
         from configs.http_client_manager import HTTPClientManager
         from risk_monitoring import risk_dynamics as rd
+        from risk_monitoring.batch_push import push_and_save
         from risk_monitoring.contract_analyzer import EXTERNAL_TABLE
         from risk_monitoring.risk_monitoring_api import RiskMonitoringAPI
 
@@ -422,22 +423,11 @@ def rm_decay_task(self, environment: str = None, push: bool = None) -> Dict[str,
                 if not rows:
                     break
                 after = rows[-1]["external_id"]
-                for r in rows:
-                    out["checked"] += 1
-                    new = rd.recalc_decay(r["ai_analysis"] or {}, settings)
-                    if new is None:
-                        continue
-                    out["updated"] += 1
-                    pushed, err = False, None
-                    if push:
-                        try:
-                            await api.patch_ai_analysis(EXTERNAL_TABLE, r["external_id"], new)
-                            pushed = True
-                            out["pushed"] += 1
-                        except Exception as e:  # noqa: BLE001 — сохраним у себя, дозапишется позже
-                            err = str(e)
-                            out["errors"] += 1
-                    await repo.save_rm_result(env, "contract", r["external_id"], new, pushed, err)
+                out["checked"] += len(rows)
+                changed = [(r["external_id"], new) for r in rows
+                           if (new := rd.recalc_decay(r["ai_analysis"] or {}, settings)) is not None]
+                # PATCH — с ограничением одновременности (частоту держит лимитер API), сохранение — пачкой
+                await push_and_save(repo, api.patch_ai_analysis, env, "contract", EXTERNAL_TABLE, changed, push, out)
         return out
 
     out = asyncio.run(_pulsed(run(), self.name, self.request.id))
@@ -476,6 +466,7 @@ def rm_decisions_task(self, environment: str = None, push: bool = None, minutes:
         from configs.ai_repo import AIRepo
         from configs.http_client_manager import HTTPClientManager
         from risk_monitoring import risk_decisions as rdec
+        from risk_monitoring.batch_push import push_and_save
         from risk_monitoring.contract_analyzer import EXTERNAL_TABLE, ContractAnalyzer
 
         env = environment.lower()
@@ -497,21 +488,11 @@ def rm_decisions_task(self, environment: str = None, push: bool = None, minutes:
                 chunk = ids[i:i + 200]
                 by = rdec.group_rows(await ca._safe_query("risk_decisions.sql", ids=chunk))
                 stored = await repo.get_rm_results(env, "contract", chunk)
-                for cid in chunk:
-                    new = rdec.recalc((stored.get(cid) or {}).get("ai_analysis") or {}, by.get(cid), settings)
-                    if new is None:
-                        continue
-                    out["updated"] += 1
-                    pushed, err = False, None
-                    if push:
-                        try:
-                            await ca.risk_api.patch_ai_analysis(EXTERNAL_TABLE, cid, new)
-                            pushed = True
-                            out["pushed"] += 1
-                        except Exception as e:  # noqa: BLE001 — сохраним у себя, дозапишется позже
-                            err = str(e)
-                            out["errors"] += 1
-                    await repo.save_rm_result(env, "contract", cid, new, pushed, err)
+                changed = [(cid, new) for cid in chunk
+                           if (new := rdec.recalc((stored.get(cid) or {}).get("ai_analysis") or {}, by.get(cid),
+                                                  settings)) is not None]
+                await push_and_save(repo, ca.risk_api.patch_ai_analysis, env, "contract", EXTERNAL_TABLE, changed,
+                                    push, out)
         return out
 
     out = asyncio.run(_pulsed(run(), self.name, self.request.id))

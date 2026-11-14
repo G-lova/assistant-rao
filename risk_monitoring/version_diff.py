@@ -10,6 +10,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from risk_monitoring import risk_catalog
+from configs.resources import read_text
 
 PAGE_MARKER_RE = re.compile(r"^(?:Страница|Page)\s+\d+(?:\s*\(OCR\))?\s*:\s*", re.MULTILINE)
 MAX_FRAGMENTS = 40
@@ -317,10 +318,8 @@ class DocumentDiffAnalyzer:
 
         from risk_monitoring.llm_json import LLMJson, prompt_version
 
-        with open(self.PROMPT_PATH, encoding="utf-8") as f:
-            self.prompt = f.read()
-        with open(self.SCHEMA_PATH, encoding="utf-8") as f:
-            self.schema = json.load(f)
+        self.prompt = read_text(self.PROMPT_PATH)
+        self.schema = json.loads(read_text(self.SCHEMA_PATH))
         self.prompt_version = prompt_version(self.prompt, self.schema)
         self.llm = LLMJson(llm_client, model, rate=1.0, concurrency=2)
 

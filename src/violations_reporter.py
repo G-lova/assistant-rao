@@ -1,6 +1,6 @@
 import asyncio
 import json
-from configs.rate_limiter import TokenBucket
+from configs.rate_limiter import TokenBucket, llm_rate_limiter
 from configs.retry_utils import LLM_RETRY_CONFIG, async_retry
 from json_repair import repair_json
 
@@ -42,7 +42,7 @@ class ViolationsReporter:
 
 
         self.semaphore = asyncio.Semaphore(5)
-        self.rate_limiter = TokenBucket(rate=1.5)  # 1.5 запроса в секунду
+        self.rate_limiter = llm_rate_limiter()  # общий на процесс лимит частоты запросов к модели
 
         self.code_dict = {
             '"mon_affiliation"': '"Принадлежность МОН"',

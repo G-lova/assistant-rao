@@ -81,25 +81,12 @@ async def scoring(expertise_id: int, details: bool, x_api_database: str, http_ma
         logger.info(f"{pipeline.log_ctx} первые в ответе: {top_preview(top_results)}")
         logger.debug(f"{pipeline.log_ctx} ответ полностью: {top_results}")
 
-        # # Сохранение результатов
-        # output_dir = os.path.join(project_root, "data", "outputs")
-        # os.makedirs(output_dir, exist_ok=True)
-
-        # output_file = os.path.join(output_dir, f"expertise_{expertise_id}_results_{date.today()}.csv")
-        # top_results.to_csv(output_file, index=False, encoding='utf-8')
-
-        # logger.info(f"Results saved to: {output_file}")
-
         return top_results
 
     except Exception as e:
         logger.error(f"[подбор {expertise_id}/{x_api_database}] ошибка: {e}", exc_info=True)
         raise
 
-    # finally:
-    #     # закрытие клиента
-    #     if pipeline and hasattr(pipeline, "embedding_client"):
-    #         await pipeline.embedding_client.close()
 
 if __name__ == "__main__":
 

@@ -7,8 +7,9 @@ from string import Template
 from typing import Any, Dict, List
 
 from configs.logger import get_logger
-from configs.rate_limiter import TokenBucket
+from configs.rate_limiter import llm_rate_limiter
 from configs.retry_utils import LLM_RETRY_CONFIG, async_retry
+from configs.resources import read_text
 
 
 logger = get_logger(__name__)
@@ -92,13 +93,10 @@ class TypeDetector:
         self.model = model
 
 
-        self.rate_limiter = TokenBucket(rate=1.5)  # 1.5 запроса в секунду
+        self.rate_limiter = llm_rate_limiter()  # общий на процесс лимит частоты запросов к модели
 
-        with open("prompts/type_detector_prompt.txt") as f:
-            self.type_detector_prompt = f.read()
-
-        with open("schemas/type_detector_schema.json") as f:
-            self.TYPE_DETECTOR_SCHEMA = f.read()
+        self.type_detector_prompt = read_text("prompts/type_detector_prompt.txt")
+        self.TYPE_DETECTOR_SCHEMA = read_text("schemas/type_detector_schema.json")
     
 
     @async_retry(LLM_RETRY_CONFIG)

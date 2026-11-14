@@ -13,7 +13,7 @@ from configs.data_fetcher import DataFetcher
 from configs.file_reader import FileReader
 from configs.http_client_manager import HTTPClientManager
 from configs.llm_client import get_llm
-from configs.logger import get_logger, log_context
+from configs.logger import brief, get_logger, log_context
 from configs.utils import load_sql_query, split_large_text
 from configs.working_with_db import save_evaluation_result
 from evaluate_documents.completeness_checker import CompletenessChecker
@@ -34,11 +34,9 @@ logger = get_logger(__name__)
 LLM_CHUNK_SIZE = 10000  # размер блока текста для TypeDataExtractor (входит в ключ кэша извлечения)
 
 
-
 async def _ready(value):
     """Корутина, сразу возвращающая ``value`` (готовый результат в общем списке задач ``asyncio.gather``)."""
     return value
-
 
 
 def _status(result: dict, key: str) -> str:
@@ -86,24 +84,16 @@ class TasksPipeline:
         self.data_fetcher = DataFetcher(db_config.url, db_config.headers, self.http_manager)        
         self.sql_queries_path = paths_config.sql_queries
 
-        # try:
-        # Загрузка SQL запроса и получение данных
-        sql_query = load_sql_query("evaluate_docs_script.sql")        
-        self.df = self.data_fetcher.fetch_expertise_data(sql_query, bindings=[self.media_storage, self.file_storage, expertise_id])
+        # Данные экспертизы загружаются асинхронно в load_expertise() (create() / run_pipeline()): раньше здесь был
+        # синхронный requests.post с time.sleep при 429 — он блокировал цикл событий задачи
+        self.expertise_id = expertise_id
+        self.df: Optional[pd.DataFrame] = None
+        self.cloud_parser: Optional[CloudStorageParser] = None
 
-        #     return df
-        
-        # except Exception as e:
-        #     if str(e) == "Нет данных для анализа":
-        #         return []
-        #     else:
-        #         raise
-    
         self.file_reader = FileReader(client, model)
         self.type_data_extractor = TypeDataExtractor(client, model)
         self.completeness_checker = CompletenessChecker(client, model)
         self.consistency_checker = ConsistencyChecker(client, model)
-        self.cloud_parser = CloudStorageParser(self.http_manager, self.df['object'].iloc[0])
         # Ограничения параллельности действуют на каждый отдельный вызов. Раньше семафор захватывался вокруг
         # asyncio.gather целиком и ничего не ограничивал: все файлы ссылки и все проверки полноты шли к модели
         # одновременно (отсюда 504 шлюза модели на больших комплектах).
@@ -115,6 +105,46 @@ class TasksPipeline:
         self._timings = {}          # время этапов, с
 
 
+    @classmethod
+    async def create(cls, http_manager: HTTPClientManager, expertise_id: int, environment: str = None,
+                     force: bool = False) -> "TasksPipeline":
+        """Создаёт конвейер и загружает данные экспертизы (асинхронно).
+
+        Args:
+            http_manager: Менеджер HTTP-клиентов.
+            expertise_id: ID экспертизы.
+            environment: Окружение (``dev`` / ``stage`` / ``prod``).
+            force: Не брать сохранённые текст и результат извлечения из общего документа.
+
+        Returns:
+            TasksPipeline: Готовый к ``run_pipeline()`` конвейер.
+        """
+        pipeline = cls(http_manager, expertise_id, environment, force=force)
+        await pipeline.load_expertise()
+        return pipeline
+
+    async def load_expertise(self) -> pd.DataFrame:
+        """Загружает документы экспертизы из БД портала (``evaluate_docs_script.sql``) и создаёт парсер ссылок.
+
+        Запрос идёт через асинхронный ``DataFetcher.fetch_async_expertise_data``: общий ограничитель хоста
+        портала и повторы после 429 без блокировки цикла событий.
+
+        Returns:
+            pd.DataFrame: Строки документов экспертизы (``self.df``).
+
+        Raises:
+            ValueError: Нет данных по экспертизе.
+            Exception: Ошибка API портала.
+        """
+        sql_query = load_sql_query("evaluate_docs_script.sql")
+        df = await self.data_fetcher.fetch_async_expertise_data(
+            sql_query, [self.media_storage, self.file_storage, self.expertise_id])
+        if df is None or df.empty:
+            raise ValueError(f"Нет данных по экспертизе {self.expertise_id}")
+        self.df = df
+        self.cloud_parser = CloudStorageParser(self.http_manager, self.df['object'].iloc[0])
+        return df
+
     async def process_link(self, link):
         """
         Обрабатывает ссылку на облачное хранилище.
@@ -125,7 +155,7 @@ class TasksPipeline:
             files = parse_result.get("files", [parse_result])
             logger.info(f"Ссылка {link.doc_code} {link.media_links}: {parse_result.get('status')}, файлов {len(files)}"
                         + (f", ошибка: {parse_result.get('error')}" if parse_result.get("error") else ""))
-            logger.info(f"Результат разбора ссылки {link.media_links}: {parse_result}")
+            logger.info(f"Результат разбора ссылки {link.media_links}: {brief(parse_result)}")
 
             tasks = []
             for file_info in parse_result.get("files", [parse_result]):
@@ -186,7 +216,6 @@ class TasksPipeline:
         except Exception as e:
 
             if link.doc_code == 'linkDocs':  
-            # if "zakupki.gov.ru" in link.media_links:
                 logger.error(f"Ошибка обработки ЕИС-ссылки {link.media_links}: {e}")
                 eis_data = {
                     "document_name": {"value": "Ссылка на ЕИС", "confidence": 1.0},
@@ -274,7 +303,8 @@ class TasksPipeline:
             self.ks_scope, link.doc_code, filename, getattr(link, 'media_links', None), file_path, extracted_text,
             force=self.force)
 
-        chunks = split_large_text(extracted_text, max_chunk_size=LLM_CHUNK_SIZE)
+        # нарезка большого текста нагружает процессор — вне цикла событий
+        chunks = await asyncio.to_thread(split_large_text, extracted_text, max_chunk_size=LLM_CHUNK_SIZE)
         logger.info(f"Текст '{filename}' ({len(extracted_text)} символов) разбит на {len(chunks)} блок(ов) "
                     f"по ≤{LLM_CHUNK_SIZE} токенов")
         if not chunks:
@@ -318,6 +348,8 @@ class TasksPipeline:
         Returns:
             dict: Итоговое заключение (``raw_data`` в документах сокращён до имени, файла и ссылки).
         """
+        if self.df is None:          # конвейер создан конструктором, без create()
+            await self.load_expertise()
         label = f"{self.x_api_database}:{self.df['id'].iloc[0]}"
         with log_context(label):
             self._stats = Counter()
@@ -446,15 +478,10 @@ class TasksPipeline:
                         detected_type = res.get('type_compliance') if isinstance(res.get('type_compliance'), str) else res.get('type_compliance', {}).get("detected_type", "unknown")
                         self._stats[f"type:{detected_type}"] += 1
                         # заполнение столбца данными о предоставленных документах 
-                        # if link.doc_code == 'linkDocs':
-                        #     self.df.loc[self.df['doc_code'] == 'linkDocs', 'provided_docs'] = 1
                         self.df.loc[self.df['doc_code'] == detected_type, 'provided_docs'] = 1
                         self.df.loc[self.df['doc_code'] == (detected_type if (
                             link.doc_code == 'linkDocs' and detected_type in DOCUMENT_TYPE_MAPPING.keys()
                             ) else link.doc_code), 'documents_results'].iloc[0].append(res)
-                        # self.df.loc[self.df['doc_code'] == (detected_type if (link.doc_code in {"contractFiles", "dopMaterialFiles", "dopContractFiles", "docFiles", "rao", "our"}) else link.doc_code
-                        #                                     ), 'documents_results'].iloc[0].append(res)
-                        # self.df.loc[self.df['doc_code'] == link.doc_code, 'documents_results'].iloc[0].append(res)
 
 
             # Определяем недостающие документы

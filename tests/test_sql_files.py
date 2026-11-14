@@ -1,12 +1,29 @@
 """Проверка, что все SQL-файлы, на которые ссылается код, лежат в каталоге ``queries/``."""
 import re
-import subprocess
 import unittest
 from pathlib import Path
 
 from configs.config import Config
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def python_files() -> list:
+    """Файлы ``*.py`` репозитория (пути от корня), без служебных каталогов.
+
+    Раньше список брался из ``git ls-files``, но в образе приложения git нет — тест падал с ``FileNotFoundError``
+    при запуске в контейнере (``docker compose run … unittest``, CI перед деплоем).
+
+    Returns:
+        list: Пути вида ``configs/utils.py``.
+    """
+    out = []
+    for p in ROOT.rglob("*.py"):
+        rel = p.relative_to(ROOT)
+        if any(part.startswith(".") or part == "__pycache__" for part in rel.parts):
+            continue
+        out.append(rel.as_posix())
+    return sorted(out)
 
 
 class SqlFilesTests(unittest.TestCase):
@@ -18,9 +35,8 @@ class SqlFilesTests(unittest.TestCase):
 
     def test_referenced_sql_files_exist(self):
         """Каждое имя ``*.sql`` из кода (кроме миграций) существует в ``queries/`` или ``queries/rm/`` (риск-мониторинг)."""
-        files = subprocess.run(["git", "ls-files", "*.py"], cwd=ROOT, capture_output=True, text=True).stdout.split()
         names = set()
-        for f in files:
+        for f in python_files():
             if f.startswith(("tests/", "scripts/", "migrations/", "knowledge_store/")):
                 continue
             names |= set(re.findall(r"""["']([\w\-]+\.sql)["']""", (ROOT / f).read_text(encoding="utf-8")))

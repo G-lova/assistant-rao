@@ -16,12 +16,13 @@
 """
 import asyncio
 import json
+import logging
 import re
 import time
 from typing import Any, Dict, List, Optional
 
 from configs import settings
-from configs.logger import get_logger
+from configs.logger import brief, get_logger
 from evaluate_documents import rule_extractors
 from evaluate_documents.data_extractor import DataExtractor
 from evaluate_documents.doc_profiles import (
@@ -67,7 +68,7 @@ class TypeDataExtractor:
     """Разбор документа: тип (:class:`TypeDetector`) → поля профиля (:class:`DataExtractor`) → объединение.
 
     Интерфейс прежний (``extract_data_from_document(chunks, document_name, doc_type, expertise_object)``), им
-    пользуются пайплайн ``/evaluate-documents``, ``src/ai_file_analyzer.py`` и риск-мониторинг.
+    пользуются пайплайн ``/evaluate-documents`` и риск-мониторинг.
     """
 
     def __init__(self, llm_client, model):
@@ -176,7 +177,9 @@ class TypeDataExtractor:
             f"{time.monotonic() - started:.1f} с")
         logger.info(f"Документ '{document_name}': извлечённые значения:{format_raw_data_for_log(merged['raw_data'])}")
         logger.info(f"Документ '{document_name}': соответствие типу {tc}; читаемость {merged.get('readability')}")
-        logger.info(f"Документ '{document_name}': результат {json.dumps(merged, ensure_ascii=False, default=str)}")
+        logger.info(f"Документ '{document_name}': результат {brief(merged)}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Документ '{document_name}': результат целиком {json.dumps(merged, ensure_ascii=False, default=str)}")
         return merged
 
     async def _extract_chunks(self, chunks: List[str], document_name: str, profile: str,

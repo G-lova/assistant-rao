@@ -574,7 +574,7 @@ def rtf_to_text(raw: bytes) -> str:
 
 
 def read_source(path: str, file_name: Optional[str] = None) -> str:
-    """Текст акта из файла: HTML — :func:`html_to_text`, PDF — ``pdftotext`` (если нет — ``PyPDF2``), RTF —
+    """Текст акта из файла: HTML — :func:`html_to_text`, PDF — ``pdftotext`` (если нет — ``pypdf``), RTF —
     :func:`rtf_to_text`, TXT — как есть.
 
     Args:
@@ -613,7 +613,7 @@ def read_source(path: str, file_name: Optional[str] = None) -> str:
                 raise ValueError(f"PDF не прочитан: {res.stderr.decode('utf-8', 'replace')[:300]}")
             text = res.stdout.decode("utf-8", "replace")
         else:
-            from PyPDF2 import PdfReader
+            from pypdf import PdfReader
 
             text = "\n".join((p.extract_text() or "") for p in PdfReader(path).pages)
     elif fmt == "rtf":

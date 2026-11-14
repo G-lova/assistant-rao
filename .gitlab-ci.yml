@@ -7,11 +7,28 @@ manual_docker_deploy:
     - lms-chatbot_native_runner
   script:
     - cd /prod/is_rao/assistant-rao
+    # celerybeat-schedule (время последних запусков задач beat) убран из git 14.11.2026, но в старых рабочих копиях
+    # он ещё отслеживается и всегда изменён — beat перезаписывает его. git pull тогда отказывается удалять файл
+    # («Your local changes … would be overwritten»). На время pull файл переносится в сторону и возвращается:
+    # состояние beat сохраняется (beat держит файл открытым, перенос в пределах ФС его не прерывает).
+    # После первого такого деплоя файл не отслеживается и шаг ничего не делает
+    - if git ls-files --error-unmatch celerybeat-schedule >/dev/null 2>&1 && [ -f celerybeat-schedule ]; then mv celerybeat-schedule celerybeat-schedule.ci-keep; fi
     # передаем токен авторизации прямо в URL
     - git pull https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.prostoy.ru/ai/assistant-rao.git master
-    - docker compose build --no-cache
-    - docker compose down
-    - docker compose up -d
+    - if [ -f celerybeat-schedule.ci-keep ]; then mv -f celerybeat-schedule.ci-keep celerybeat-schedule; fi
+    # Один образ assistant-rao:latest на все сервисы приложения (docker-compose.yml), с кэшем слоёв: пакеты
+    # пересобираются только при изменении requirements.txt. Полная пересборка без кэша — переменная CI
+    # NO_CACHE=1 при запуске задачи (например, чтобы обновить системные пакеты и сертификаты)
+    - if [ "$NO_CACHE" = "1" ]; then docker compose build --no-cache; else docker compose build; fi
+    # Тесты в собранном образе до перезапуска: при ошибке прод остаётся на прежней версии. Запуск через unittest —
+    # pytest в образ не ставится. Пропустить — переменная CI SKIP_TESTS=1 при запуске задачи
+    - if [ "$SKIP_TESTS" != "1" ]; then docker compose run --rm --no-deps rao_api python -m unittest discover -s tests -t . -q; fi
+    # Пересоздаются только изменившиеся контейнеры (Postgres, Redis и pgAdmin не останавливаются);
+    # воркеры Celery останавливаются тёпло (stop_grace_period в docker-compose.yml).
+    # --remove-orphans удаляет контейнеры сервисов, которых больше нет в docker-compose.yml (сервис удалили или
+    # переименовали): без флага такой контейнер продолжал бы работать со старым кодом — например, второй воркер
+    # разбирал бы те же очереди
+    - docker compose up -d --remove-orphans
   when: manual
   only:
     - master

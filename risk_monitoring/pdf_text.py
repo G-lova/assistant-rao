@@ -5,7 +5,7 @@
 (обоснование НМЦК) модель зацикливается: «2,44 2,44 …» (файл 1097). Здесь, не меняя общий
 компонент экспертизы:
 
-1. Текст берётся из текстового слоя PDF (PyPDF2, иначе pdfplumber). Страница с текстовым слоем
+1. Текст берётся из текстового слоя PDF (pypdf, иначе pdfplumber). Страница с текстовым слоем
    принимается, если в ней достаточно букв, нет ``(cid:NN)`` и «кракозябр» от неверной кодировки шрифта.
 2. Страницы без пригодного слоя (сканы) рендерятся в 200 dpi и распознаются моделью с
    ``repetition_penalty`` и бо́льшим лимитом токенов; если в ответе цикл повторов (``text_quality``),
@@ -69,12 +69,12 @@ def text_layer(path: str) -> List[str]:
         List[str]: Текст по страницам (пустая строка — слоя нет); пустой список, если PDF не читается.
     """
     try:
-        from PyPDF2 import PdfReader  # есть в requirements
+        from pypdf import PdfReader  # есть в requirements (pypdf устарел и перешёл в pypdf)
 
         reader = PdfReader(path)
         return [(page.extract_text() or "") for page in reader.pages]
     except Exception as e:  # noqa: BLE001 — пробуем pdfplumber
-        logger.info(f"pdf_text: PyPDF2 не прочитал {path}: {type(e).__name__}: {e}")
+        logger.info(f"pdf_text: pypdf не прочитал {path}: {type(e).__name__}: {e}")
     try:
         import pdfplumber
 

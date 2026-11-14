@@ -1,18 +1,17 @@
+import asyncio
 import base64
 import datetime
 import io
 import os
 import re
-import tempfile
-import logging
 import json
 import zipfile
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Body, Header, status, Depends
+from fastapi import FastAPI, HTTPException, Body, Header, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from typing import List, Optional, Dict
+from typing import Optional, Dict
 from celery.result import AsyncResult
 
 from configs.config import Config
@@ -22,7 +21,7 @@ from configs.http_client_manager import HTTPClientManager
 from configs.llm_client import get_llm
 from configs.logger import setup_logging, get_logger
 from configs.schemas import EISParseRequest, EvaluateRequest, SummaryOpinionRequest, ExpertsScoringRequest, ExpertsRatingRequest, ExpertPublicationsSyncRequest, FileEntity, RAOConclusionRequest, ViolationsReportRequest
-from configs.utils import APIKeyMiddleware, split_large_text
+from configs.utils import APIKeyMiddleware, first_text_chunk
 from configs.working_with_db import get_async_summary_report_from_db, get_contract_info_from_db
 from evaluate_documents.send_subject_service import SendSubjectService
 from risk_monitoring.file_processor import FileProcessor
@@ -40,13 +39,22 @@ http_manager = HTTPClientManager(timeout=120.0, limit=50)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Общие ресурсы процесса API: HTTP-клиент и пул Postgres сервиса (вместо пула на каждый запрос)."""
+    from configs.working_with_db import close_app_pool, open_app_pool
+
     await http_manager.startup()
     app.state.http_manager = http_manager  # Делаем доступным через app.state
-    yield
-    await http_manager.shutdown()
+    try:
+        await open_app_pool()
+    except Exception as e:  # noqa: BLE001 — БД недоступна при старте: запросы получат временное соединение
+        logger.warning(f"Пул Postgres не создан при старте: {type(e).__name__}: {e}")
+    try:
+        yield
+    finally:
+        await close_app_pool()
+        await http_manager.shutdown()
 
 app = FastAPI(lifespan=lifespan)
-# app = FastAPI(debug=False)
 
 # Функция зависимости для FastAPI-эндпоинтов
 def get_http_manager() -> HTTPClientManager:
@@ -65,8 +73,6 @@ app.add_middleware(APIKeyMiddleware)
 # Риск-мониторинг: новые эндпоинты /risk-monitoring/* (существующие эндпоинты не меняются)
 app.include_router(risk_monitoring_router)
 
-# logging.basicConfig(level=logging.INFO)
-# logger = logging.getLogger(__name__)
 setup_logging()
 logger = get_logger(__name__)
 
@@ -75,9 +81,6 @@ logger = get_logger(__name__)
 from configs import settings as _settings
 _settings.warn_env_leftovers(logger)
 
-
-# Глобальный словарь для хранения результатов анализа документов
-document_analysis_cache = {}
 
 
 @app.post("/evaluate-documents")
@@ -555,14 +558,10 @@ async def parse_eis(request: EISParseRequest):
                     with open(file_info["file_path"], 'rb') as f:
                         content = f.read()
                     # 🧹 Опционально: удаляем временный файл
-                    # os.unlink(file_info["file_path"])
             
             if content is not None:
-                # zip_file.writestr(file_info["filename"], content)
-                # logger.info(f"Добавлен файл в архив: {file_info['filename']}")
                 if file_info["status"] == "success":
                     unique_name = cloud_parser._make_unique_filename(file_info["filename"], existing_names)
-                    # zip_file.write(file_info["file_path"], arcname=unique_name)
                     zip_file.writestr(unique_name, content)
                     logger.info(f"Добавлен файл в архив: {unique_name}")
                     # Не забудьте удалить временный файл:
@@ -662,9 +661,9 @@ async def get_subject(
             
             return subject
 
-        content_chunks = split_large_text(text=summary_report, max_chunk_size=12000)
-        content = content_chunks[0]
-        logger.info(f"Content: {content}")
+        # Модели нужен только первый фрагмент (≤ 12 000 токенов): остальной отчёт не нарезается и не кодируется
+        content = await asyncio.to_thread(first_text_chunk, summary_report, 12000)
+        logger.info(f"Content: {len(content)} символов")
         
         result = await subject_detector.get_subject(expertise_id, content)
         logger.info(f"result: {result}")

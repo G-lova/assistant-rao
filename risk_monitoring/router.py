@@ -23,7 +23,9 @@
 from typing import List, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
-from pydantic import BaseModel, Field, validator
+from pydantic import Field, field_validator
+
+from configs.schemas import ApiModel as BaseModel  # pydantic v2, число в строковом поле — строка (как в v1)
 
 from configs.config import Config
 from configs.logger import get_logger
@@ -48,14 +50,15 @@ class AnalysisRequest(BaseModel):
             указанные в XML (вложения, печатная форма) или привязанные к нему.
     """
 
-    ids: List[int] = Field(..., min_items=1)
+    ids: List[int] = Field(..., min_length=1)
     force: bool = False
     recompute: bool = False
     push: bool = True
     include_analysis: bool = False
     analyze_files: bool = False
 
-    @validator("ids")
+    @field_validator("ids")
+    @classmethod
     def _check_ids(cls, v: List[int]) -> List[int]:
         """Не больше ``MAX_IDS``, только положительные, без повторов."""
         v = list(dict.fromkeys(int(i) for i in v))
@@ -137,7 +140,8 @@ class PackageRequest(AnalysisRequest):
     roles: List[str] = Field(default_factory=lambda: ["customer", "supplier"])
     period_months: Optional[int] = Field(default=None, ge=1, le=60)
 
-    @validator("roles")
+    @field_validator("roles")
+    @classmethod
     def _check_roles(cls, v: List[str]) -> List[str]:
         """Допустимые роли: ``customer``, ``supplier``."""
         bad = [r for r in v if r not in ("customer", "supplier")]
@@ -212,31 +216,40 @@ class TypalLoadRequest(BaseModel):
     """
 
     regions: List[str] = Field(default_factory=list)
-    dates: List[str] = Field(default_factory=list, max_items=93)
+    dates: List[str] = Field(default_factory=list, max_length=93)
     read_files: bool = True
     kinds: List[str] = Field(default_factory=list)
 
-    @validator("kinds", each_item=True)
-    def _check_kind(cls, v: str) -> str:
-        """Вид положения — typal или customer."""
-        if v not in ("typal", "customer"):
-            raise ValueError("kinds: typal или customer")
+    @field_validator("kinds")
+    @classmethod
+    def _check_kinds(cls, v: List[str]) -> List[str]:
+        """Вид положения — typal или customer (каждый элемент)."""
+        for x in v:
+            if x not in ("typal", "customer"):
+                raise ValueError("kinds: typal или customer")
         return v
 
-    @validator("regions", each_item=True)
-    def _check_region(cls, v: str) -> str:
-        """Код региона — 1–2 цифры (ФНС)."""
-        v = str(v).strip()
-        if not v.isdigit() or len(v) > 2:
-            raise ValueError("код региона ФНС — две цифры, например 34")
-        return v.zfill(2)
+    @field_validator("regions", mode="before")
+    @classmethod
+    def _check_regions(cls, v):
+        """Код региона — 1–2 цифры (ФНС), каждый элемент; число тоже принимается (``34`` → ``"34"``)."""
+        if not isinstance(v, (list, tuple)):
+            return v
+        out = []
+        for x in v:
+            x = str(x).strip()
+            if not x.isdigit() or len(x) > 2:
+                raise ValueError("код региона ФНС — две цифры, например 34")
+            out.append(x.zfill(2))
+        return out
 
-    @validator("dates", each_item=True)
-    def _check_date(cls, v: str) -> str:
-        """Дата ``ГГГГ-ММ-ДД``."""
+    @field_validator("dates")
+    @classmethod
+    def _check_dates(cls, v: List[str]) -> List[str]:
+        """Даты ``ГГГГ-ММ-ДД`` (каждый элемент)."""
         from datetime import date
 
-        return date.fromisoformat(str(v)).isoformat()
+        return [date.fromisoformat(str(x)).isoformat() for x in v]
 
 
 @router.post("/typal-clauses/load", status_code=status.HTTP_202_ACCEPTED)
@@ -429,20 +442,23 @@ class DailyRequest(BaseModel):
     push: Optional[bool] = None
     use_llm: bool = True
 
-    @validator("date")
+    @field_validator("date")
+    @classmethod
     def _check_date(cls, v: str) -> str:
         """Дата ``ГГГГ-ММ-ДД``."""
         from datetime import date
 
         return date.fromisoformat(str(v)[:10]).isoformat()
 
-    @validator("stages", each_item=True)
-    def _check_stage(cls, v: str) -> str:
-        """Этап из списка ``daily.STAGES``."""
+    @field_validator("stages")
+    @classmethod
+    def _check_stages(cls, v: List[str]) -> List[str]:
+        """Этапы из списка ``daily.STAGES`` (каждый элемент)."""
         from risk_monitoring.daily import STAGES
 
-        if v not in STAGES:
-            raise ValueError(f"этап — один из {', '.join(STAGES)}")
+        for x in v:
+            if x not in STAGES:
+                raise ValueError(f"этап — один из {', '.join(STAGES)}")
         return v
 
 

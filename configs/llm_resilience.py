@@ -14,6 +14,7 @@ import asyncio
 import os
 import random
 import time
+import weakref
 from typing import Any, Dict, List, Optional, Tuple
 
 from configs.logger import get_logger
@@ -24,7 +25,10 @@ logger = get_logger(__name__)
 # Переключатели — в коде, не в .env
 MAX_INFLIGHT = 4        # одновременных запросов к одному серверу модели в процессе
 STREAM = True           # потоковый ответ в call_llm (шлюз не обрывает долгую генерацию)
-PROXY_RETRIES = 2       # попыток в ResilientClient по умолчанию (у вызовов экспертизы есть свои повторы)
+# Попыток в ResilientClient по умолчанию. Это единственный слой повторов при сбоях сервера: исчерпав попытки, клиент
+# помечает исключение (RETRIES_EXHAUSTED_ATTR), и async_retry вызывающего его больше не повторяет. Раньше было 2, а
+# повторы перемножались: 5 попыток async_retry × 2 = до 10 запросов (в РМ 5 × 6 = до 30) на один вызов при перегрузке
+PROXY_RETRIES = 4
 RESILIENT = True        # оборачивать ли клиент get_llm() в ResilientClient
 # Предел одного запроса к модели целиком, с. Таймаут клиента (300 с) — это пауза между порциями ответа: поток, который
 # медленно идёт (модель зациклилась до max_tokens), им не обрывается, и задача «молчит» десятки минут (20.10.2026).
@@ -33,9 +37,14 @@ REQUEST_DEADLINE = 420
 
 
 RETRY_DELAYS = (5.0, 15.0, 45.0)    # паузы между попытками при сбое сервера, с
+RETRIES_EXHAUSTED_ATTR = "llm_retries_exhausted"
+"""Атрибут исключения: сбой сервера модели уже повторён здесь до исчерпания попыток (см. :func:`retries_exhausted`)."""
 BREAKER_FAILS = 3                    # подряд сбоев до срабатывания предохранителя
 BREAKER_PAUSE = (30.0, 300.0)        # пауза предохранителя: начальная и предельная, с
-_gates: Dict[Tuple[int, str], asyncio.Semaphore] = {}
+# Семафоры запросов: цикл событий → {сервер → семафор}. Раньше ключом был id(цикла) в обычном словаре: записи закрытых
+# циклов (Celery запускает asyncio.run на каждую задачу) не удалялись, а id мог достаться новому циклу — и тогда он
+# получал семафор, привязанный к закрытому циклу. WeakKeyDictionary удаляет записи вместе с циклом.
+_gates: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[str, asyncio.Semaphore]]" = weakref.WeakKeyDictionary()
 # счётчики запросов к модели в процессе: для сводки задачи и пульса (inflight — выполняются сейчас)
 CALLS: Dict[str, int] = {"requests": 0, "failed": 0, "inflight": 0, "deadline": 0}
 _breaker: Dict[str, Dict[str, float]] = {}
@@ -220,6 +229,29 @@ def transient(error: BaseException) -> bool:
         k in name for k in ("timeout", "connection", "remoteprotocol", "readerror"))
 
 
+def mark_exhausted(error: BaseException) -> BaseException:
+    """Помечает исключение: временный сбой сервера уже повторён до исчерпания попыток.
+
+    ``configs.retry_utils.async_retry`` такое исключение больше не повторяет — иначе повторы перемножаются.
+
+    Args:
+        error: Последняя ошибка.
+
+    Returns:
+        BaseException: То же исключение.
+    """
+    try:
+        setattr(error, RETRIES_EXHAUSTED_ATTR, True)
+    except Exception:  # noqa: BLE001 — исключение без __dict__: повторы снаружи останутся как раньше
+        pass
+    return error
+
+
+def retries_exhausted(error: BaseException) -> bool:
+    """Повторял ли уже этот слой временный сбой сервера до исчерпания попыток (см. :func:`mark_exhausted`)."""
+    return bool(getattr(error, RETRIES_EXHAUSTED_ATTR, False))
+
+
 def _server_key(client: Any) -> str:
     """Ключ сервера модели для лимита и предохранителя (базовый URL клиента)."""
     return str(getattr(client, "base_url", "") or id(client))
@@ -227,10 +259,10 @@ def _server_key(client: Any) -> str:
 
 def _gate(key: str) -> asyncio.Semaphore:
     """Семафор одновременных запросов к серверу в текущем цикле событий (Celery запускает новый цикл на задачу)."""
-    loop_id = id(asyncio.get_running_loop())
-    sem = _gates.get((loop_id, key))
+    per_loop = _gates.setdefault(asyncio.get_running_loop(), {})
+    sem = per_loop.get(key)
     if sem is None:
-        sem = _gates[(loop_id, key)] = asyncio.Semaphore(max(1, int(MAX_INFLIGHT)))
+        sem = per_loop[key] = asyncio.Semaphore(max(1, int(MAX_INFLIGHT)))
     return sem
 
 
@@ -396,7 +428,7 @@ async def call_llm(client: Any, retries: int = len(RETRY_DELAYS) + 1, **kwargs: 
                 logger.warning(f"LLM {key}: {type(e).__name__} ({getattr(e, 'status_code', '')}), "
                                f"попытка {attempt - extra + 1}/{retries}, ждём {delay:.0f} с")
                 await asyncio.sleep(delay)
-    raise last or RuntimeError("LLM: попытки исчерпаны")  # type: ignore[misc]
+    raise mark_exhausted(last) if last else RuntimeError("LLM: попытки исчерпаны")
 
 
 class _Completions:
@@ -409,8 +441,9 @@ class _Completions:
 
     async def create(self, **kwargs: Any) -> Any:
         """Как ``AsyncOpenAI.chat.completions.create``, но 504 / 5xx / таймауты повторяются с паузой (по умолчанию
-        одна повторная попытка через ~5 с, ``PROXY_RETRIES``), не больше ``MAX_INFLIGHT`` запросов
-        одновременно, при серии сбоев — общая пауза всех запросов процесса.
+        4 попытки с паузами 5 → 15 → 45 с, ``PROXY_RETRIES``), не больше ``MAX_INFLIGHT`` запросов
+        одновременно, при серии сбоев — общая пауза всех запросов процесса. Последняя ошибка помечается
+        (:func:`mark_exhausted`), и ``async_retry`` вызывающего её не повторяет.
 
         Потоковый запрос (``stream=True``) передаётся как есть (повторяет его вызывающий, например ``call_llm``).
 
@@ -421,8 +454,8 @@ class _Completions:
             return await self._raw.chat.completions.create(**kwargs)
         kwargs = dict(kwargs)
         key = _server_key(self._raw)
-        # Многие вызовы экспертизы уже обёрнуты своими повторами (async_retry): здесь по умолчанию одна
-        # повторная попытка через ~5 с, чтобы повторы не перемножались (PROXY_RETRIES)
+        # Сбои сервера повторяются только здесь (PROXY_RETRIES): исчерпав попытки, исключение помечается, и
+        # async_retry вызывающего (вызовы экспертизы) его не повторяет — повторы не перемножаются
         retries = max(1, int(self._retries if self._retries is not None else PROXY_RETRIES))
         last: Optional[BaseException] = None
         extra = 0   # повторы из-за уменьшения ответа (не считаются попытками)
@@ -459,7 +492,7 @@ class _Completions:
                     logger.warning(f"LLM {key}: {type(e).__name__} ({getattr(e, 'status_code', '')}), "
                                    f"попытка {attempt - extra + 1}/{retries}, ждём {delay:.0f} с")
                     await asyncio.sleep(delay)
-        raise last or RuntimeError("LLM: попытки исчерпаны")  # type: ignore[misc]
+        raise mark_exhausted(last) if last else RuntimeError("LLM: попытки исчерпаны")
 
 
 class ResilientClient:
@@ -469,7 +502,7 @@ class ResilientClient:
     Args:
         raw: ``AsyncOpenAI``.
         retries: Попыток на запрос при 5xx / 404 перезапуска модели / таймауте (``None`` — ``PROXY_RETRIES``,
-            по умолчанию 2). Ночной риск-мониторинг ждёт дольше (``configs.settings.LLM_PROXY_RETRIES``, 6): перезапуск
+            по умолчанию 4). Ночной риск-мониторинг ждёт дольше (``configs.settings.LLM_PROXY_RETRIES``, 6): перезапуск
             модели длится минуты, и с двумя попытками страницы OCR и блоки извлечения терялись.
     """
 

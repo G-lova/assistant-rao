@@ -14,6 +14,7 @@ import json
 from typing import Any, Dict, List
 
 from configs.logger import get_logger
+from configs.resources import read_text
 from risk_monitoring import risk_catalog
 from risk_monitoring.llm_json import LLMJson, prompt_version
 
@@ -48,10 +49,8 @@ class EventAnalyzer:
         """Загружает промпт и схему, подставляет каталог кодов, считает версию промпта."""
         self.model = model
         self.llm = LLMJson(llm_client, model, rate=1.5, concurrency=3)
-        with open(PROMPT_PATH, encoding="utf-8") as f:
-            raw_prompt = f.read()
-        with open(SCHEMA_PATH, encoding="utf-8") as f:
-            raw_schema = f.read()
+        raw_prompt = read_text(PROMPT_PATH)
+        raw_schema = read_text(SCHEMA_PATH)
         codes = list(risk_catalog.EVENT_RISK_CODES)
         self.prompt = raw_prompt.replace("EVENT_RISKS_KEYS", risk_catalog.catalog_text(codes))
         self.schema = json.loads(raw_schema.replace('"EVENT_RISKS_KEYS"', json.dumps(codes)))

@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 from configs.logger import get_logger
+from configs.resources import read_text
 from risk_monitoring import risk_catalog
 from risk_monitoring.llm_json import LLMJson
 
@@ -456,11 +457,8 @@ class DocumentRiskAnalyzer:
         self.semaphore = asyncio.Semaphore(conc)
 
         self.codes = list(risk_catalog.DOCUMENT_RISK_CODES)
-        with open(PROMPT_PATH, "rb") as f:
-            raw = f.read()
-        self.prompt = raw.decode("utf-8").replace("RISK_CATALOG", risk_catalog.catalog_text(self.codes))
-        with open(SCHEMA_PATH, encoding="utf-8") as f:
-            schema_text = f.read()
+        self.prompt = read_text(PROMPT_PATH).replace("RISK_CATALOG", risk_catalog.catalog_text(self.codes))
+        schema_text = read_text(SCHEMA_PATH)
         self.schema = json.loads(schema_text.replace('"RISK_CODES"', json.dumps(self.codes)))
 
         # Изменили промпт или схему -> кэш риск-анализа инвалидируется сам
@@ -489,7 +487,7 @@ class DocumentRiskAnalyzer:
         from configs.utils import split_large_text  # ленивый импорт: тянет aiofiles, magic, tiktoken
 
         allowed = [c for c in (codes if codes is not None else self.codes) if c in self.codes]
-        chunks = split_large_text(text, max_chunk_size=CHUNK_TOKENS)
+        chunks = await asyncio.to_thread(split_large_text, text, max_chunk_size=CHUNK_TOKENS)  # CPU — вне цикла событий
         if not chunks:
             return self._empty(partial=True)
         if not allowed:
@@ -678,11 +676,9 @@ class DocumentRiskAnalyzer:
             return False
         if nf in norm_chunk:
             return True
-        try:
-            from fuzzywuzzy import fuzz  # ленивый импорт: модуль нужен только для нечёткой сверки
-        except ImportError:  # pragma: no cover - fuzzywuzzy есть в requirements
-            return False
-        return fuzz.partial_ratio(nf, norm_chunk) >= FUZZY_THRESHOLD
+        from configs import fuzzy  # rapidfuzz; без него — thefuzz/fuzzywuzzy или difflib
+
+        return fuzzy.partial_ratio(nf, norm_chunk) >= FUZZY_THRESHOLD
 
     @staticmethod
     def _weight(r: Dict[str, Any]) -> float:

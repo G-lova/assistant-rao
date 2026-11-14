@@ -10,6 +10,7 @@ from configs.logger import get_logger
 from typing import Any, Dict
 
 from configs.utils import extract_json_objects, split_large_text
+from configs.resources import read_text
 from evaluate_documents.final_digest import compact_input, count_tokens, package_facts
 from evaluate_documents.type_data_extractor import DOCUMENT_TYPE_MAPPING
 
@@ -50,11 +51,8 @@ class ConsistencyChecker:
         self.client = llm_client
         self.model = model
 
-        with open("prompts/consistency_prompt.txt") as f:
-            self.consistency_prompt = f.read()
-
-        with open("schemas/consistency_schema.json") as f:
-            self.CONSISTENCY_SCHEMA = f.read()
+        self.consistency_prompt = read_text("prompts/consistency_prompt.txt")
+        self.CONSISTENCY_SCHEMA = read_text("schemas/consistency_schema.json")
 
 
     async def check_consistency(self, content: str) -> Dict[str, Any]:
@@ -263,7 +261,6 @@ class ConsistencyChecker:
 
         for item in content['documents']:
             
-            # if item.get('document_code') not in {"contract", "dateContract", "subjectContract"}:
 
             doc_description = {}
 

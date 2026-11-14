@@ -2,6 +2,8 @@ import json
 from configs.http_client_manager import HTTPClientManager
 import aiohttp
 import logging
+
+from configs.logger import mask_headers
 from typing import Dict, Any
 
 from configs.config import Config
@@ -51,7 +53,7 @@ class SendAIAnalysisService:
                 response_data = await response.json()
 
             logger.info(f"Ответ получен: статус {response.status}")
-            logger.debug(f"Заголовки ответа: {dict(response.headers)}")
+            logger.debug(f"Заголовки ответа: {mask_headers(response.headers)}")
 
             # Обработка HTTP-ошибок
             if response.status not in (200, 201):

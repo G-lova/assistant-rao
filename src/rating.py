@@ -115,19 +115,6 @@ async def rating(start_date, end_date, x_api_database, http_manager: HTTPClientM
         
         logger.info("Rating pipeline completed successfully")
         
-        # Вывод результатов
-        print(ratings)
-        
-        # # Сохранение результатов
-        # output_dir = os.path.join(project_root, "data", "outputs")
-        # os.makedirs(output_dir, exist_ok=True)
-
-        # output_file = os.path.join(output_dir, f"{start_date}_{end_date}_rating_results_{date.today()}.json")
-        # with open(output_file, "w", encoding="utf-8") as f:
-        #     json.dump(ratings, f, ensure_ascii=False, indent=2)
-        
-        # logger.info(f"Results saved to: {output_file}")
-        
         return ratings
         
     except Exception as e:

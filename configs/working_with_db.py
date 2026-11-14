@@ -16,47 +16,90 @@ from configs.config import Config
 logger = logging.getLogger(__name__)
 
 
-@asynccontextmanager
-async def get_async_db_connection():
-    """Создаёт временный пул для каждой операции"""
-    pool = await asyncpg.create_pool(
-        host=Config.DB_HOST,
-        port=int(Config.DB_PORT),
-        database=Config.DB_NAME,
-        user=Config.DB_USER,
-        password=Config.DB_PASSWORD,
-        min_size=1,
-        max_size=4,
-        max_inactive_connection_lifetime=300,
-    )
-    try:
-        async with pool.acquire() as conn:
-            yield conn
-    finally:
+# Пул соединений процесса API (uvicorn): создаётся в lifespan приложения (open_app_pool) и живёт, пока работает
+# процесс. Привязан к циклу событий uvicorn — в других циклах (Celery-задача со своим asyncio.run) не используется.
+_APP_POOL: Dict[str, Any] = {"pool": None, "loop": None}
+
+
+def _connect_kwargs() -> Dict[str, Any]:
+    """Параметры подключения к Postgres сервиса (``DB_*``)."""
+    return dict(host=Config.DB_HOST, port=int(Config.DB_PORT or 5432), database=Config.DB_NAME,
+                user=Config.DB_USER, password=Config.DB_PASSWORD)
+
+
+async def open_app_pool(min_size: int = 1, max_size: Optional[int] = None) -> Any:
+    """Создаёт пул соединений процесса API (вызывается из lifespan FastAPI).
+
+    Args:
+        min_size: Минимум соединений.
+        max_size: Максимум соединений (по умолчанию ``settings.DB_APP_POOL_MAX_SIZE``).
+
+    Returns:
+        asyncpg.Pool: Пул (повторный вызов возвращает уже созданный).
+    """
+    if _APP_POOL["pool"] is not None:
+        return _APP_POOL["pool"]
+    from configs import settings
+
+    size = int(max_size or getattr(settings, "DB_APP_POOL_MAX_SIZE", 10))
+    _APP_POOL["pool"] = await asyncpg.create_pool(**_connect_kwargs(), min_size=min_size, max_size=max(size, min_size),
+                                                  max_inactive_connection_lifetime=300)
+    _APP_POOL["loop"] = asyncio.get_running_loop()
+    logger.info(f"Пул Postgres процесса API: до {size} соединений")
+    return _APP_POOL["pool"]
+
+
+async def close_app_pool() -> None:
+    """Закрывает пул процесса API (lifespan FastAPI, при остановке)."""
+    pool, _APP_POOL["pool"], _APP_POOL["loop"] = _APP_POOL["pool"], None, None
+    if pool is not None:
         await pool.close()
 
-# _db_pool = None
 
-# async def get_db_pool():
-#     global _db_pool
-#     if _db_pool is None:
-#         _db_pool = await asyncpg.create_pool(
-#             host=Config.DB_HOST,
-#             port=int(Config.DB_PORT),
-#             database=Config.DB_NAME,
-#             user=Config.DB_USER,
-#             password=Config.DB_PASSWORD,
-#             min_size=2,
-#             max_size=10,
-#             max_inactive_connection_lifetime=300,
-#         )
-#     return _db_pool
+def _app_pool() -> Optional[Any]:
+    """Пул процесса API, если он создан в текущем цикле событий; иначе ``None``."""
+    pool = _APP_POOL["pool"]
+    if pool is None:
+        return None
+    try:
+        return pool if _APP_POOL["loop"] is asyncio.get_running_loop() else None
+    except RuntimeError:
+        return None
 
-# @asynccontextmanager
-# async def get_async_db_connection():
-#     pool = await get_db_pool()
-#     async with pool.acquire() as conn:
-#         yield conn
+
+@asynccontextmanager
+async def get_async_db_connection():
+    """Соединение с Postgres сервиса.
+
+    Раньше на каждую операцию создавался и закрывался пул (до 4 соединений) — на каждый запрос к API и на каждый
+    документ в хуках хранилища знаний. Теперь соединение берётся, в порядке приоритета:
+
+    1. из пула задачи :func:`knowledge_store.db.task_pool`, если вызов идёт внутри него (Celery-задачи);
+    2. из пула процесса API (:func:`open_app_pool` в lifespan FastAPI), если вызов в цикле событий uvicorn;
+    3. иначе — одно временное соединение (``asyncpg.connect``), без пула.
+
+    Yields:
+        asyncpg.Connection: Открытое соединение.
+    """
+    from knowledge_store import db as ks_db
+
+    holder = ks_db.current_holder()
+    if holder is not None:
+        pool = await holder.get()
+        async with pool.acquire() as conn:
+            yield conn
+        return
+    pool = _app_pool()
+    if pool is not None:
+        async with pool.acquire() as conn:
+            yield conn
+        return
+    conn = await asyncpg.connect(**_connect_kwargs())
+    try:
+        yield conn
+    finally:
+        await conn.close()
+
 
 DOCUMENT_CODE_TO_COLUMN = {
         "docAcceptInafPostavFiles": "impossible_alternative_doc",

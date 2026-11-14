@@ -24,7 +24,7 @@ def build_embedder(http_manager):
     Returns:
         EmbeddingClient: Клиент сервиса эмбеддингов.
     """
-    from search_experts.embedding_client import EmbeddingClient
+    from configs.embedding_client import EmbeddingClient
     cfg = Config.get_embedding_config()
     return EmbeddingClient(cfg.api_url, cfg.api_key, cfg.model, batch_size=cfg.batch_size, http_manager=http_manager)
 

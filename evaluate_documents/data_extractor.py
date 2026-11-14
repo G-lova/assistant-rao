@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import time
 
 from configs import settings
@@ -9,12 +10,13 @@ from json_repair import repair_json
 from string import Template
 from typing import Any, Dict, List, Optional
 
-from configs.logger import get_logger
-from configs.rate_limiter import TokenBucket
+from configs.logger import brief, get_logger
+from configs.rate_limiter import llm_rate_limiter
 from configs.retry_utils import LLM_RETRY_CONFIG, async_retry
 from configs.llm_repetition import LOOP_MIN, dedupe_repeats, penalized
 from configs.llm_resilience import ContextOverflow, split_halves
 from configs.utils import extract_json_objects
+from configs.resources import read_text
 
 
 from evaluate_documents.merge_utils import as_evidence, as_obj, as_text, chunk_counts
@@ -54,13 +56,10 @@ class DataExtractor:
 
 
         self.semaphore = asyncio.Semaphore(5)
-        self.rate_limiter = TokenBucket(rate=1.5)  # 1.5 запроса в секунду
+        self.rate_limiter = llm_rate_limiter()  # общий на процесс лимит частоты запросов к модели
 
-        with open("prompts/data_extractor_prompt.txt") as f:
-            self.data_extractor_prompt = f.read()
-
-        with open("schemas/data_extractor_schema.json") as f:
-            self.DATA_EXTRACTOR_SCHEMA = f.read()
+        self.data_extractor_prompt = read_text("prompts/data_extractor_prompt.txt")
+        self.DATA_EXTRACTOR_SCHEMA = read_text("schemas/data_extractor_schema.json")
             
 
     async def extract_data_from_document(self, chunks: List[str], filename: str, profile: Optional[str] = None,
@@ -119,7 +118,10 @@ class DataExtractor:
             logger.info(f"'{filename}': извлечено за {time.monotonic() - started:.1f} с "
                         f"(блоков {len(chunks)}, с ошибкой {failed}): {describe_raw_data(final_result.get('raw_data'))}")
             logger.info(f"'{filename}': извлечённые значения:{format_raw_data_for_log(final_result.get('raw_data'))}")
-            logger.info(f"'{filename}': результат извлечения: {json.dumps(final_result, ensure_ascii=False, default=str)}")
+            logger.info(f"'{filename}': результат извлечения: {brief(final_result)}")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"'{filename}': результат извлечения целиком: "
+                             f"{json.dumps(final_result, ensure_ascii=False, default=str)}")
             return final_result
         except Exception as e:
             logger.error(f"'{filename}': ошибка объединения данных блоков: {type(e).__name__}: {e}", exc_info=True)
@@ -169,10 +171,6 @@ class DataExtractor:
             schema = schema_for_profile(json.loads(self.DATA_EXTRACTOR_SCHEMA.replace(
                 '"img_description"', json.dumps(img_result, ensure_ascii=False))), profile)
 
-            # # Ограничиваем размер контента для предотвращения ошибок
-            # if len(content) > 15000:
-            #     content = content[:15000] + "... [контент обрезан]"
-            #     logger.info(f"Контент обрезан до {len(content)} символов")
 
             # Вызов модели с guided_json и таймаутом
             try:
@@ -622,9 +620,6 @@ class DataExtractor:
             merged["readability"]["language_confidence"] = round(sum(language_conf_values) / len(language_conf_values), 2)
 
 
-        # # коррекция названия для проекта контракта
-        # if merged["type_compliance"]["detected_type"] == "docProjContractFiles":
-        #     merged["raw_data"]["document_name"]["value"] = "Проект контракта"
 
         # Объединение summary с помощью LLM
         summary_string = "\n".join(summary)

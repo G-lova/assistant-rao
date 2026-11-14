@@ -39,6 +39,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tup
 
 from configs.config import Config
 from configs.logger import get_logger
+from configs.resources import read_text
 from configs import settings
 from risk_monitoring import (boilerplate, doc_kind, file_versions, norms, passport, pdf_text,
                             printform_passport, risk_catalog, rm_sql, text_quality, version_diff, xml_events)
@@ -172,8 +173,7 @@ def _file_version(*paths: str) -> str:
     parts = []
     for p in paths:
         try:
-            with open(p, encoding="utf-8") as f:
-                parts.append(f.read())
+            parts.append(read_text(p))
         except OSError:
             parts.append(p)
     return _hash_version(*parts)
