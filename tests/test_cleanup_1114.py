@@ -77,5 +77,26 @@ class EisMixinTest(unittest.TestCase):
             self.assertTrue(mixin._sanitize_filename("???").startswith(("file_", "_")))
 
 
+class ConstraintIdsTest(unittest.TestCase):
+    """``search_experts.pipeline.constraint_ids``: раньше список из 2+ id ронял подбор (``pd.isna``)."""
+
+    def test_formats(self):
+        import numpy as np
+        from tests.stubs import stubbed_import
+
+        with stubbed_import("search_experts.pipeline") as p:
+            f = p.constraint_ids
+            self.assertEqual(f([1, 2]), [1, 2])
+            self.assertEqual(f("[3, 4]"), [3, 4])
+            self.assertEqual(f(np.array([5, 6])), [5, 6])
+            self.assertEqual(f(None), [])
+            self.assertEqual(f(float("nan")), [])
+            self.assertEqual(f("[]"), [])
+            self.assertEqual(f(""), [])
+            self.assertEqual(f("не json"), [])
+            self.assertEqual(f([7, None, "x", float("nan"), "8"]), [7, 8])
+            self.assertEqual(f(9), [9])
+
+
 if __name__ == "__main__":
     unittest.main()

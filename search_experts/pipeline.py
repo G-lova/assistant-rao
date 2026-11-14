@@ -1,5 +1,7 @@
+import json
 import asyncio
 import time
+from typing import List
 
 import aiofiles
 import pandas as pd
@@ -33,6 +35,42 @@ def brief(ids, limit: int = 15) -> str:
     more = f" (+{len(items) - limit})" if len(items) > limit else ""
     return f"{len(items)}: [{head}]{more}"
 
+
+
+def constraint_ids(value) -> List[int]:
+    """id экспертов из ``constraint_experts`` (пары экспертов, которых нельзя ставить вместе).
+
+    Значение приходит из портала по-разному: JSON-строка ``"[1, 2]"``, список, массив numpy, ``None`` / NaN.
+    Раньше проверка ``pd.isna(value)`` для списка из двух и более id возвращала массив, и ``not`` от него падал
+    с ``ValueError: The truth value of an array … is ambiguous`` — подбор экспертов прерывался.
+
+    Args:
+        value: Значение поля ``constraint_experts``.
+
+    Returns:
+        List[int]: id экспертов; нечисловые элементы и непонятные значения пропускаются.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value) if value.strip() else []
+        except ValueError:
+            return []
+    elif hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        value = [] if value != value else [value]      # NaN — пусто, одно число — один id
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    out = []
+    for v in value:
+        try:
+            if v is not None and v == v:               # не None и не NaN
+                out.append(int(v))
+        except (TypeError, ValueError):
+            continue
+    return out
 
 class ScoringPipeline:
     """
@@ -550,23 +588,8 @@ class ScoringPipeline:
             filtered_indices.append(idx)
             
             # Получаем constraint_experts и добавляем их в список исключённых
-            constraint_experts = row.get('constraint_experts', None)
-            if constraint_experts is not None and not pd.isna(constraint_experts):
-                # Обрабатываем разные форматы: JSON-строка, список, numpy array
-                if isinstance(constraint_experts, str):
-                    import json
-                    try:
-                        constraint_list = json.loads(constraint_experts)
-                    except:
-                        constraint_list = []
-                elif hasattr(constraint_experts, 'tolist'):
-                    constraint_list = constraint_experts.tolist()
-                else:
-                    constraint_list = list(constraint_experts)
-                
-                # Добавляем все constraint_experts в множество исключённых
-                for constraint_id in constraint_list:
-                    excluded_experts.add(int(constraint_id))
+            # Пары экспертов, которых нельзя ставить вместе (JSON-строка, список или массив) — в исключённые
+            excluded_experts.update(constraint_ids(row.get('constraint_experts', None)))
 
         # Применяем фильтрацию к датафрейму
         before = df["expert_id"].nunique()
