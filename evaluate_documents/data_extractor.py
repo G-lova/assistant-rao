@@ -19,7 +19,7 @@ from configs.utils import extract_json_objects
 from configs.resources import read_text
 
 
-from evaluate_documents.merge_utils import as_evidence, as_obj, as_text, chunk_counts
+from evaluate_documents.merge_utils import as_evidence, as_json_object, as_obj, as_text, chunk_counts
 from evaluate_documents.doc_profiles import describe_raw_data, format_raw_data_for_log, schema_for_profile
 
 logger = get_logger(__name__)
@@ -206,10 +206,11 @@ class DataExtractor:
 
             # Парсим JSON
             try:
-                result = json.loads(raw_response)
+                result = as_json_object(json.loads(raw_response))
+                if result is None:
+                    logger.error(f"Блок {filename}: в ответе нет JSON-объекта")
+                    return None
                 logger.info(f"Блок {filename}: JSON разобран")
-                if isinstance(result, list):
-                    result = self.merge_json_objects(result)
                 result, removed = dedupe_repeats(result)
                 if removed:
                     logger.info(f"'{filename}': убрано повторов записей: {removed}")
@@ -220,15 +221,14 @@ class DataExtractor:
 
             # Поиск JSON структур вручную
             try:
-                result = json.loads(repair_json(raw_response))
+                # обрезанный ответ после repair_json бывает списком строк / чисел — берутся только объекты
+                result = as_json_object(json.loads(repair_json(raw_response)))
 
                 if not result:
-                    logger.error(f"Блок {filename}: в ответе нет JSON")
+                    logger.error(f"Блок {filename}: в ответе нет JSON-объекта")
                     return None
-                
+
                 logger.info(f"Блок {filename}: JSON восстановлен (ответ, вероятно, обрезан)")
-                if isinstance(result, list):
-                    result = self.merge_json_objects(result)
                 result, removed = dedupe_repeats(result)
                 if removed:
                     logger.info(f"'{filename}': убрано повторов записей: {removed}")
@@ -265,15 +265,10 @@ class DataExtractor:
             return None
 
     def merge_json_objects(self, json_strings) -> dict:
-        """Объединяет список JSON-строк в один словарь."""
-        result = {}
-        for js in json_strings:
-            try:
-                obj = json.loads(js) if isinstance(js, str) else js
-                result.update(obj)  # поверхностное слияние
-            except json.JSONDecodeError:
-                continue
-        return result
+        """Объединяет список JSON-строк / словарей в один словарь (не-словари пропускаются)."""
+        from evaluate_documents.merge_utils import merge_json_objects
+
+        return merge_json_objects(json_strings)
 
 
     def _merge_evidence(self, current_evidence: dict, new_evidence: dict) -> dict:

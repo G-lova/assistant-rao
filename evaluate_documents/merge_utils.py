@@ -149,3 +149,49 @@ def chunk_counts(raw: Dict[str, Any], keys: tuple) -> str:
         else:
             parts.append(f"{key}: нет")
     return "; ".join(parts)
+
+
+def merge_json_objects(items: Any) -> Dict[str, Any]:
+    """Объединяет разобранные из ответа модели объекты в один словарь (поверхностно, поздние ключи побеждают).
+
+    Элементы — словари, JSON-строки со словарями или вложенные списки таких элементов. Прочее (строки-не JSON,
+    числа, списки строк) пропускается: ``repair_json`` обрезанного ответа даёт и такое, и ``dict.update`` падал
+    («dictionary update sequence element #0 has length 4», prod, 14.11.2026).
+
+    Args:
+        items: Список элементов (или один элемент).
+
+    Returns:
+        Dict[str, Any]: Объединённый словарь (пустой, если словарей не было).
+    """
+    import json
+
+    result: Dict[str, Any] = {}
+    for item in items if isinstance(items, list) else [items]:
+        if isinstance(item, str):
+            try:
+                item = json.loads(item)
+            except (json.JSONDecodeError, ValueError):
+                continue
+        if isinstance(item, list):
+            item = merge_json_objects(item)
+        if isinstance(item, dict):
+            result.update(item)
+    return result
+
+
+def as_json_object(value: Any) -> Optional[Dict[str, Any]]:
+    """Ответ модели как словарь: словарь — как есть, список — объединение его словарей, прочее — ``None``.
+
+    Args:
+        value: Результат ``json.loads`` ответа модели.
+
+    Returns:
+        Optional[Dict[str, Any]]: Словарь или ``None`` (в ответе нет объекта).
+    """
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        return merge_json_objects(value) or None
+    return None
+
