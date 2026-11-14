@@ -222,6 +222,10 @@ celery_app.conf.result_backend_transport_options = {"visibility_timeout": VISIBI
 # Воркер берёт из очереди только задачу, которую выполняет: при остановке «зависает» не больше одной
 # задачи на процесс (по умолчанию резервировалось 4 × concurrency).
 celery_app.conf.worker_prefetch_multiplier = 1
+# Процессов воркера по умолчанию — из configs/settings.py (CELERY_EVAL_CONCURRENCY), а не из .env и не из
+# docker-compose.yml: действует для celery_worker (очередь evaluation), у которого --concurrency в команде не задан.
+# Воркер риск-мониторинга передаёт --concurrency в команде — аргумент командной строки важнее этой настройки
+celery_app.conf.worker_concurrency = max(1, int(getattr(settings, "CELERY_EVAL_CONCURRENCY", 2)))
 # Результаты задач хранятся 7 дней (по умолчанию 1 день): после истечения GET /task/{id} отвечает pending,
 # и внешняя система опрашивает такую задачу бесконечно.
 celery_app.conf.result_expires = 7 * 24 * 3600

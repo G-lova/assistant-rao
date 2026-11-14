@@ -3,7 +3,8 @@
 * предел времени долгих задач меньше ``VISIBILITY_TIMEOUT`` (иначе брокер выдаст задачу повторно, пока она идёт);
 * задачи из ``NO_RESULT_TASKS`` не проверяют повторную доставку через ``already_succeeded`` — без сохранённого
   результата такая проверка всегда давала бы «не выполнена»;
-* задачи очереди evaluation объявлены с ``LONG_TASK_LIMITS`` (в пуле prefork общий предел 1800 с оборвал бы их).
+* задачи очереди evaluation объявлены с ``LONG_TASK_LIMITS`` (в пуле prefork общий предел 1800 с оборвал бы их);
+* число процессов воркера evaluation — из ``configs/settings.py`` (не из .env и не из docker-compose.yml).
 """
 import ast
 import os
@@ -47,6 +48,9 @@ class CeleryConfigTest(unittest.TestCase):
             cls.limits = dict(m.LONG_TASK_LIMITS)
             cls.visibility = m.VISIBILITY_TIMEOUT
             cls.no_result = tuple(m.NO_RESULT_TASKS)
+            cls.concurrency = m.celery_app.conf.worker_concurrency
+            from configs import settings
+            cls.settings_concurrency = settings.CELERY_EVAL_CONCURRENCY
         cls.tasks = {**task_functions("tasks.py"), **task_functions("risk_monitoring/tasks.py")}
 
     def test_limits_below_visibility(self):
@@ -65,6 +69,15 @@ class CeleryConfigTest(unittest.TestCase):
         """Задачи tasks.py (очередь evaluation) — с LONG_TASK_LIMITS."""
         for name, (_, extra) in task_functions("tasks.py").items():
             self.assertIn("LONG_TASK_LIMITS", extra, name)
+
+    def test_concurrency_from_settings(self):
+        """``worker_concurrency`` = ``CELERY_EVAL_CONCURRENCY``; в команде celery_worker нет --concurrency и ${…}."""
+        self.assertEqual(self.concurrency, max(1, int(self.settings_concurrency)))
+        compose = open(os.path.join(ROOT, "docker-compose.yml"), encoding="utf-8").read()
+        line = next(x for x in compose.splitlines() if "-Q evaluation" in x and x.strip().startswith("command:"))
+        self.assertIn("--pool=prefork", line)
+        self.assertNotIn("--concurrency", line)
+        self.assertNotIn("${", line)
 
 
 if __name__ == "__main__":
