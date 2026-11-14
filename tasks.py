@@ -2,7 +2,7 @@ import asyncio
 from configs.http_client_manager import HTTPClientManager
 
 from celery import current_task
-from celery_app import celery_app
+from celery_app import LONG_TASK_LIMITS, celery_app
 
 from configs.logger import get_logger
 from evaluate_documents.evaluate_documents_pipeline import TasksPipeline
@@ -17,7 +17,7 @@ def run_async(coro):
     return asyncio.run(coro)
 
 
-@celery_app.task(bind=True, name="evaluate_documents_task")
+@celery_app.task(bind=True, name="evaluate_documents_task", **LONG_TASK_LIMITS)
 def evaluate_documents_task(self, expertise_id: int, environment: str, force: bool = False):
     """Оценка комплекта документов экспертизы (``/evaluate-documents``).
 
@@ -45,7 +45,7 @@ def evaluate_documents_task(self, expertise_id: int, environment: str, force: bo
 
         # один пул Postgres на задачу для хранилища знаний (создаётся лениво, только если оно включено)
         async with HTTPClientManager(timeout=90.0) as mgr, task_pool():
-            tasks_piplene = TasksPipeline(mgr, expertise_id, environment, force=force)
+            tasks_piplene = await TasksPipeline.create(mgr, expertise_id, environment, force=force)
             task_result = await tasks_piplene.run_pipeline()
             return task_result
         
@@ -77,7 +77,7 @@ def evaluate_documents_task(self, expertise_id: int, environment: str, force: bo
     # return asyncio.run(run_with_manager)
 
 
-@celery_app.task(bind=True, name="index_documents_task")
+@celery_app.task(bind=True, name="index_documents_task", **LONG_TASK_LIMITS)
 def index_documents_task(self, expertise_id: int, environment: str = None):
     """Фоновая индексация документов экспертизы и сразу за ней построение фактов.
 
@@ -118,7 +118,7 @@ def index_documents_task(self, expertise_id: int, environment: str = None):
     return run_async(run())
 
 
-@celery_app.task(name="purge_expired_texts_task")
+@celery_app.task(name="purge_expired_texts_task", **LONG_TASK_LIMITS)
 def purge_expired_texts_task():
     """Ночная очистка текстов и чанков с истёкшим сроком хранения (``PE_TEXT_RETENTION_DAYS``) и кэша эмбеддингов
     подбора экспертов (векторы, не использованные 90 дней).
@@ -153,7 +153,7 @@ async def _purge_text_embeddings():
         return None
 
 
-@celery_app.task(bind=True, name="generate_summary_opinion_task")
+@celery_app.task(bind=True, name="generate_summary_opinion_task", **LONG_TASK_LIMITS)
 def generate_summary_opinion_task(self, expertise_id: int, environment: str, send_draft: bool = False,
                                   rebuild_facts: bool = False):
     """Генерирует сводное ЭЗ из хранилища знаний (факты → ``data`` по ключам формы, ``trace`` отдельно).
@@ -202,7 +202,7 @@ def generate_summary_opinion_task(self, expertise_id: int, environment: str, sen
     return run_async(run())
 
 
-@celery_app.task(bind=True, name="expert_publications_task")
+@celery_app.task(bind=True, name="expert_publications_task", **LONG_TASK_LIMITS)
 def expert_publications_task(self, environment: str = None, expert_ids: list = None, sync: bool = True,
                              process: bool = True):
     """Публикации и монографии экспертов: синхронизация с внешней БД и разбор очереди.
@@ -232,7 +232,7 @@ def expert_publications_task(self, environment: str = None, expert_ids: list = N
     return result
 
 
-@celery_app.task(name="org_aliases_task")
+@celery_app.task(name="org_aliases_task", **LONG_TASK_LIMITS)
 def org_aliases_task(environment: str = None):
     """Пополняет псевдонимы организаций для конфликта интересов (``search_experts.org_aliases``).
 

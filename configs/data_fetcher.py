@@ -68,11 +68,17 @@ class DataFetcher:
                 if response.status != 200:
                     raise Exception(f"Ошибка API: {response.status}, {await response.text()}")
 
-                return pd.DataFrame((await response.json())["data"])
+                data = (await response.json())["data"]
+                if not isinstance(data, list):
+                    raise ValueError("Ожидался список записей, но получен некорректный формат")
+                return pd.DataFrame(data)
 
     def fetch_expertise_data(self, sql_query, bindings=None):
         """
-        Извлекает данные экспертизы, выполняя параметризованный SQL-запрос.
+        Извлекает данные экспертизы, выполняя параметризованный SQL-запрос (синхронно, ``requests``).
+
+        Из асинхронного кода не вызывать: запрос и паузы после 429 (``time.sleep``) блокируют цикл событий —
+        там нужен :meth:`fetch_async_expertise_data`. Конвейер ``/evaluate-documents`` переведён на него.
 
         Отправляет POST-запрос на указанный URL с SQL-запросом и подставляемым значением expertise_id.
         Проверяет статус ответа, валидирует формат данных и возвращает результат в виде DataFrame.

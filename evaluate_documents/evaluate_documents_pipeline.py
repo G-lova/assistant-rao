@@ -86,24 +86,16 @@ class TasksPipeline:
         self.data_fetcher = DataFetcher(db_config.url, db_config.headers, self.http_manager)        
         self.sql_queries_path = paths_config.sql_queries
 
-        # try:
-        # Загрузка SQL запроса и получение данных
-        sql_query = load_sql_query("evaluate_docs_script.sql")        
-        self.df = self.data_fetcher.fetch_expertise_data(sql_query, bindings=[self.media_storage, self.file_storage, expertise_id])
+        # Данные экспертизы загружаются асинхронно в load_expertise() (create() / run_pipeline()): раньше здесь был
+        # синхронный requests.post с time.sleep при 429 — он блокировал цикл событий задачи
+        self.expertise_id = expertise_id
+        self.df: Optional[pd.DataFrame] = None
+        self.cloud_parser: Optional[CloudStorageParser] = None
 
-        #     return df
-        
-        # except Exception as e:
-        #     if str(e) == "Нет данных для анализа":
-        #         return []
-        #     else:
-        #         raise
-    
         self.file_reader = FileReader(client, model)
         self.type_data_extractor = TypeDataExtractor(client, model)
         self.completeness_checker = CompletenessChecker(client, model)
         self.consistency_checker = ConsistencyChecker(client, model)
-        self.cloud_parser = CloudStorageParser(self.http_manager, self.df['object'].iloc[0])
         # Ограничения параллельности действуют на каждый отдельный вызов. Раньше семафор захватывался вокруг
         # asyncio.gather целиком и ничего не ограничивал: все файлы ссылки и все проверки полноты шли к модели
         # одновременно (отсюда 504 шлюза модели на больших комплектах).
@@ -114,6 +106,46 @@ class TasksPipeline:
         self._stats = Counter()     # счётчики прогона для итоговой строки журнала
         self._timings = {}          # время этапов, с
 
+
+    @classmethod
+    async def create(cls, http_manager: HTTPClientManager, expertise_id: int, environment: str = None,
+                     force: bool = False) -> "TasksPipeline":
+        """Создаёт конвейер и загружает данные экспертизы (асинхронно).
+
+        Args:
+            http_manager: Менеджер HTTP-клиентов.
+            expertise_id: ID экспертизы.
+            environment: Окружение (``dev`` / ``stage`` / ``prod``).
+            force: Не брать сохранённые текст и результат извлечения из общего документа.
+
+        Returns:
+            TasksPipeline: Готовый к ``run_pipeline()`` конвейер.
+        """
+        pipeline = cls(http_manager, expertise_id, environment, force=force)
+        await pipeline.load_expertise()
+        return pipeline
+
+    async def load_expertise(self) -> pd.DataFrame:
+        """Загружает документы экспертизы из БД портала (``evaluate_docs_script.sql``) и создаёт парсер ссылок.
+
+        Запрос идёт через асинхронный ``DataFetcher.fetch_async_expertise_data``: общий ограничитель хоста
+        портала и повторы после 429 без блокировки цикла событий.
+
+        Returns:
+            pd.DataFrame: Строки документов экспертизы (``self.df``).
+
+        Raises:
+            ValueError: Нет данных по экспертизе.
+            Exception: Ошибка API портала.
+        """
+        sql_query = load_sql_query("evaluate_docs_script.sql")
+        df = await self.data_fetcher.fetch_async_expertise_data(
+            sql_query, [self.media_storage, self.file_storage, self.expertise_id])
+        if df is None or df.empty:
+            raise ValueError(f"Нет данных по экспертизе {self.expertise_id}")
+        self.df = df
+        self.cloud_parser = CloudStorageParser(self.http_manager, self.df['object'].iloc[0])
+        return df
 
     async def process_link(self, link):
         """
@@ -319,6 +351,8 @@ class TasksPipeline:
         Returns:
             dict: Итоговое заключение (``raw_data`` в документах сокращён до имени, файла и ссылки).
         """
+        if self.df is None:          # конвейер создан конструктором, без create()
+            await self.load_expertise()
         label = f"{self.x_api_database}:{self.df['id'].iloc[0]}"
         with log_context(label):
             self._stats = Counter()

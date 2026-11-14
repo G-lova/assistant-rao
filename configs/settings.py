@@ -273,6 +273,9 @@ RISK_DECAY_MIN_CHANGE = 1.0          # балл изменился меньше 
 RISK_DECISION_RECALC_ENABLED = True
 RISK_DECISION_RECALC_EVERY_MIN = 2   # период задачи rm_decisions_task, минут
 RISK_DECISION_LOOKBACK_MIN = 15      # окно поиска изменённых строк, минут (с запасом на пропущенный запуск)
+# Одновременных PATCH ai_analysis во внешнюю БД при массовых пересчётах (затухание, решения аналитиков;
+# risk_monitoring/batch_push.py). Частоту всё равно держит лимитер RiskMonitoringAPI (0.9 запроса/с — у API 60 в минуту)
+RM_PUSH_CONCURRENCY = 3
 # Приоритет проверки (10.14): веса составляющих (сумма 1); итог × (0,5 + 0,5 × доверие)
 PRIORITY_WEIGHTS = {"risk": 0.4, "growth": 0.25, "money": 0.15, "novelty": 0.2}
 # Уровень риска от сработавшего правила внешней системы (rule_values): признак риска («нет обеспечения заявки»,

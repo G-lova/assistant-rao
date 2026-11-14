@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 import json
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import asyncpg
 
@@ -15,6 +15,17 @@ RM_CHUNKER = "rm_tokens_800"
 RM_CHUNKER_SQL = f"chunker = '{RM_CHUNKER}'"
 
 logger = get_logger(__name__)
+
+SQL_SAVE_RM_RESULT = """
+INSERT INTO ai_rm_results (env, kind, external_id, ai_analysis, status, debug, pushed, push_error,
+                           analyzed_at, pushed_at)
+VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, NOW(), CASE WHEN $7 THEN NOW() END)
+ON CONFLICT (env, kind, external_id) DO UPDATE SET
+    ai_analysis = EXCLUDED.ai_analysis, status = EXCLUDED.status, debug = EXCLUDED.debug,
+    pushed = EXCLUDED.pushed, push_error = EXCLUDED.push_error, analyzed_at = NOW(),
+    pushed_at = EXCLUDED.pushed_at
+"""
+"""Сохранение результата риск-мониторинга (последний по объекту): :meth:`AIRepo.save_rm_result` / ``save_rm_results``."""
 
 
 def _load(v: Any) -> Any:
@@ -321,6 +332,14 @@ class AIRepo:
             _vec(embedding), embedding_model, limit,
         )
 
+    @staticmethod
+    def _rm_result_args(env: str, kind: str, external_id: int, ai_analysis: Dict[str, Any], pushed: bool,
+                        push_error: Optional[str] = None) -> tuple:
+        """Параметры запроса :data:`SQL_SAVE_RM_RESULT` для одного результата."""
+        pipeline = (ai_analysis or {}).get("pipeline") or {}
+        return (env, kind, int(external_id), json.dumps(ai_analysis, ensure_ascii=False, default=str),
+                pipeline.get("status"), bool(pipeline.get("debug")), bool(pushed), push_error)
+
     async def save_rm_result(self, env: str, kind: str, external_id: int, ai_analysis: Dict[str, Any],
                              pushed: bool, push_error: Optional[str] = None) -> None:
         """Сохраняет результат анализа риск-мониторинга (последний по файлу / XML).
@@ -333,20 +352,31 @@ class AIRepo:
             pushed: Записан ли во внешнюю БД.
             push_error: Ошибка записи.
         """
-        pipeline = (ai_analysis or {}).get("pipeline") or {}
-        await self.pool.execute(
-            """
-            INSERT INTO ai_rm_results (env, kind, external_id, ai_analysis, status, debug, pushed, push_error,
-                                       analyzed_at, pushed_at)
-            VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, NOW(), CASE WHEN $7 THEN NOW() END)
-            ON CONFLICT (env, kind, external_id) DO UPDATE SET
-                ai_analysis = EXCLUDED.ai_analysis, status = EXCLUDED.status, debug = EXCLUDED.debug,
-                pushed = EXCLUDED.pushed, push_error = EXCLUDED.push_error, analyzed_at = NOW(),
-                pushed_at = EXCLUDED.pushed_at
-            """,
-            env, kind, int(external_id), json.dumps(ai_analysis, ensure_ascii=False, default=str),
-            pipeline.get("status"), bool(pipeline.get("debug")), bool(pushed), push_error,
-        )
+        await self.pool.execute(SQL_SAVE_RM_RESULT,
+                                *self._rm_result_args(env, kind, external_id, ai_analysis, pushed, push_error))
+
+    async def save_rm_results(self, env: str, kind: str,
+                              items: List[Tuple[int, Dict[str, Any], bool, Optional[str]]]) -> int:
+        """Сохраняет пачку результатов одним ``executemany`` в одной транзакции (как :meth:`save_rm_result`).
+
+        Нужна массовым пересчётам (затухание рисков, решения аналитиков): раньше каждая закупка сохранялась
+        отдельным запросом.
+
+        Args:
+            env: Окружение.
+            kind: ``file`` / ``xml`` / ``contract`` …
+            items: ``(external_id, ai_analysis, pushed, push_error)``.
+
+        Returns:
+            int: Сохранено строк.
+        """
+        if not items:
+            return 0
+        args = [self._rm_result_args(env, kind, eid, ai, pushed, err) for eid, ai, pushed, err in items]
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.executemany(SQL_SAVE_RM_RESULT, args)
+        return len(args)
 
     async def mark_rm_pushed(self, env: str, kind: str, external_id: int) -> None:
         """Отмечает, что сохранённый результат дозаписан во внешнюю БД."""

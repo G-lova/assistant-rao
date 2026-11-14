@@ -195,6 +195,13 @@ celery_app.conf.update(
 )
 
 
+# Пределы времени долгих задач очереди evaluation (проверка документов, сводное заключение, индексация, публикации
+# экспертов). Пока воркер работал в пуле solo, task_time_limit / task_soft_time_limit не действовали вовсе (solo их не
+# поддерживает), и задачи шли сколько угодно: evaluate_documents_task 13.10.2026 — 3844 с. В пуле prefork общий
+# предел 1800 с оборвал бы такие задачи, поэтому у них свой — меньше VISIBILITY_TIMEOUT (4 ч), чтобы брокер
+# не выдал задачу повторно, пока она ещё идёт.
+LONG_TASK_LIMITS = {"soft_time_limit": 13500, "time_limit": 14100}
+
 # Глобальные настройки ретраев для всех задач
 celery_app.conf.task_default_retry_delay = 10
 celery_app.conf.task_max_retries = 3
@@ -218,6 +225,13 @@ celery_app.conf.worker_prefetch_multiplier = 1
 # Результаты задач хранятся 7 дней (по умолчанию 1 день): после истечения GET /task/{id} отвечает pending,
 # и внешняя система опрашивает такую задачу бесконечно.
 celery_app.conf.result_expires = 7 * 24 * 3600
+# Задачи по расписанию, результат которых никто не запрашивает (GET /task/{id} их не опрашивает, повторную доставку
+# они не проверяют через already_succeeded), результат в Redis не пишут: rm_decisions_task запускается каждые 2 мин —
+# это ~5000 записей за 7 дней хранения, rm_daily_resume_task — каждые 30 мин. Итог задачи остаётся в журнале
+# воркера и в событиях Flower (-E).
+NO_RESULT_TASKS = ("rm_decisions_task", "rm_decay_task", "rm_daily_resume_task", "purge_expired_texts_task",
+                   "org_aliases_task")
+celery_app.conf.task_annotations = {name: {"ignore_result": True} for name in NO_RESULT_TASKS}
 
 
 def already_succeeded(task) -> bool:
