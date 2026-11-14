@@ -191,5 +191,41 @@ class OwnerXmlTest(unittest.TestCase):
         self.assertIsNone(asyncio.run(bad._owner_xml_body({"id": 1})))
 
 
+class GuardedTest(unittest.TestCase):
+    """``AIFileAnalyzer._guarded``: устаревший паспорт контракта пересобирается и при «completed» во внешней БД."""
+
+    def run_guarded(self, stored_source):
+        from risk_monitoring.ai_file_analyzer import AIFileAnalyzer
+
+        a = AIFileAnalyzer.__new__(AIFileAnalyzer)
+        a.force = False
+        a.semaphore = asyncio.Semaphore(1)
+        a.internal = {29759: {"status": "completed", "debug": False,
+                              "ai_analysis": {"raw_data": {"source": stored_source}}}}
+        calls = []
+
+        async def analyze_file(row, previous, attempt):
+            calls.append(row["id"])
+            return {"file_id": row["id"], "status": "done"}
+
+        async def reuse(file_id, stored):
+            return {"file_id": file_id, "status": "reused"}
+
+        a.analyze_file = analyze_file
+        a._reuse_internal = reuse
+        res = asyncio.run(a._guarded({**ROW, "rm_status": "completed"}, None))
+        return res, calls
+
+    def test_stale_rebuilt(self):
+        res, calls = self.run_guarded("print_form")
+        self.assertEqual(res["status"], "done")
+        self.assertEqual(calls, [29759])
+
+    def test_xml_passport_skipped(self):
+        res, calls = self.run_guarded("print_form_xml")
+        self.assertEqual(res["reason"], "already_analyzed")
+        self.assertEqual(calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

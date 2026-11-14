@@ -576,12 +576,17 @@ class AIFileAnalyzer:
             rows = await self.fetch_files_meta(ids)
             st["detail"] = f"найдено {len(rows)} из {len(ids)}"
         found = {int(r["id"]): r for r in rows}
-        todo = [r for r in found.values() if self.force or r.get("rm_status") != "completed"]
+        async with progress.step("чтение результатов из внутренней БД"):
+            self.internal = await self._internal(list(found))
+        # к анализу: не завершённые во внешней БД и завершённые с устаревшим паспортом печатной формы (см. _guarded)
+        todo = [r for r in found.values() if self.force or r.get("rm_status") != "completed"
+                or self._needs_rebuild(r)]
         async with progress.step("поиск прошлых редакций файлов (XML ЕИС)") as st:
             previous = await self.fetch_previous_versions(todo) if todo else {}
             st["detail"] = f"к анализу {len(todo)}, с прошлой редакцией {len(previous)}"
-        async with progress.step("чтение результатов из внутренней БД"):
-            self.internal = await self._internal(list(found) + [int(p["id"]) for p in previous.values() if p.get("id")])
+        prev_ids = [int(p["id"]) for p in previous.values() if p.get("id") and int(p["id"]) not in self.internal]
+        if prev_ids:
+            self.internal.update(await self._internal(prev_ids))
         by_id: Dict[int, Dict[str, Any]] = {}
         for wave in self._waves([i for i in ids if i in found], previous, {r["id"] for r in todo}):
             for res in await asyncio.gather(*(self._guarded(found[i], previous.get(i)) for i in wave)):
@@ -625,26 +630,46 @@ class AIFileAnalyzer:
             waves.setdefault(depth[i], []).append(i)
         return [waves[k] for k in sorted(waves)]
 
+    def _needs_rebuild(self, row: Dict[str, Any]) -> Optional[str]:
+        """Причина пересборки сохранённого результата файла без модели (или ``None``).
+
+        * паспорт печатной формы контракта собран по тексту, а файл связан с XML — пересборка по XML;
+        * результат печатной формы с раздутыми полями (HTTP 413 при записи).
+
+        Args:
+            row: Строка ``files_meta.sql``.
+
+        Returns:
+            Optional[str]: Текст для журнала прогона или ``None``.
+        """
+        stored = (getattr(self, "internal", None) or {}).get(int(row["id"]))
+        if not stored or stored.get("status") != "completed" or stored.get("debug"):
+            return None
+        ai = stored.get("ai_analysis")
+        if contract_printform.is_stale(ai, row):
+            return "сохранённый паспорт печатной формы контракта собран по тексту — пересборка по XML"
+        if printform_passport.is_runaway(ai):
+            return "сохранённый результат печатной формы с раздутыми полями — пересборка"
+        return None
+
     async def _guarded(self, row: Dict[str, Any], previous: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """Обёртка одного файла: семафор, правило «без повторного анализа», обработка ошибок."""
         file_id = int(row["id"])
         attempt = int(row.get("rm_attempt") or 0) + 1
         progress.subject(f"Файл {file_id} «{row.get('file_name') or ''}»")
         if not self.force:
-            if row.get("rm_status") == "completed":
+            stored = (getattr(self, "internal", None) or {}).get(file_id)
+            own = bool(stored) and stored.get("status") == "completed" and not stored.get("debug")
+            # Устаревший паспорт печатной формы пересобирается, даже если во внешней БД файл уже «completed»:
+            # пересборка дешёвая (без модели), а иначе старый результат так и останется во внешней БД.
+            rebuild = self._needs_rebuild(row)
+            if rebuild:
+                progress.note(rebuild)
+            elif row.get("rm_status") == "completed":
                 progress.note("уже проанализирован во внешней БД — пропуск")
                 return {"file_id": file_id, "status": "skipped", "reason": "already_analyzed"}
-            stored = (getattr(self, "internal", None) or {}).get(file_id)
-            if stored and stored.get("status") == "completed" and not stored.get("debug"):
-                if contract_printform.is_stale(stored.get("ai_analysis"), row):
-                    # печатная форма контракта разобрана правилами извещения — пересобираем по XML (без модели)
-                    progress.note("сохранённый паспорт печатной формы контракта собран по тексту — пересборка по XML")
-                elif printform_passport.is_runaway(stored.get("ai_analysis")):
-                    # результат печатной формы собран до пределов полей и слишком велик для API (HTTP 413) —
-                    # пересобираем (без модели), а не дозаписываем как есть
-                    progress.note("сохранённый результат печатной формы с раздутыми полями — пересборка")
-                else:
-                    return await self._reuse_internal(file_id, stored)
+            elif own:
+                return await self._reuse_internal(file_id, stored)
             if row.get("rm_status") == "failed" and attempt > MAX_ATTEMPTS:
                 progress.note(f"исчерпаны попытки ({MAX_ATTEMPTS}) — пропуск")
                 return {"file_id": file_id, "status": "skipped", "reason": "max_attempts"}
