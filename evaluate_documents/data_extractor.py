@@ -208,7 +208,8 @@ class DataExtractor:
             try:
                 result = as_json_object(json.loads(raw_response))
                 if result is None:
-                    logger.error(f"Блок {filename}: в ответе нет JSON-объекта")
+                    logger.warning(f"Блок {filename}: в ответе нет JSON-объекта — блок пропущен; начало ответа: "
+                                   f"{brief(raw_response, 300)!r}")
                     return None
                 logger.info(f"Блок {filename}: JSON разобран")
                 result, removed = dedupe_repeats(result)
@@ -225,7 +226,8 @@ class DataExtractor:
                 result = as_json_object(json.loads(repair_json(raw_response)))
 
                 if not result:
-                    logger.error(f"Блок {filename}: в ответе нет JSON-объекта")
+                    logger.warning(f"Блок {filename}: в ответе нет JSON-объекта — блок пропущен; начало ответа: "
+                                   f"{brief(raw_response, 300)!r}")
                     return None
 
                 logger.info(f"Блок {filename}: JSON восстановлен (ответ, вероятно, обрезан)")
