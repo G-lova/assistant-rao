@@ -160,7 +160,7 @@ class DataExtractor:
     @async_retry(LLM_RETRY_CONFIG)
     async def extract_data_from_chunk(self, content: str, filename: str, penalize: bool = False,
                                       profile: Optional[str] = None, hint: str = "",
-                                      raise_unavailable: bool = False) -> Dict[str, Any]:
+                                      raise_unavailable: bool = False, guided: Optional[bool] = None) -> Dict[str, Any]:
         """
         Анализирует отдельный текстовый чанк с помощью LLM и возвращает структурированные данные.
 
@@ -177,12 +177,25 @@ class DataExtractor:
             profile (str): Профиль полей (``None`` — полная схема).
             hint (str): Подсказка о типе документа в начале сообщения.
             raise_unavailable (bool): Сбой сервера модели — :class:`ModelUnavailable` вместо ``None``.
+            guided (bool): Схема ответа через ``guided_json`` (``None`` — ``EXTRACTION_GUIDED_JSON``). Ответ со
+                схемой без JSON-объекта повторяется один раз без неё (``EXTRACTION_GUIDED_FALLBACK``).
 
         Returns:
             Optional[Dict[str, Any]]: Словарь с полями `readability` и `raw_data`,
                                       соответствующий схеме `DATA_EXTRACTOR_SCHEMA`,
                                       или `None` в случае неустранимой ошибки.
         """
+        if guided is None:
+            guided = bool(getattr(settings, "EXTRACTION_GUIDED_JSON", True))
+
+        async def unguided(reason: str):
+            """Ответ со схемой негоден — один повтор блока без guided_json (схема — в промпте)."""
+            if not guided or not getattr(settings, "EXTRACTION_GUIDED_FALLBACK", True):
+                return None
+            logger.warning(f"Блок {filename}: {reason} при guided_json — повтор без схемы в запросе")
+            return await self.extract_data_from_chunk(content=content, filename=filename, profile=profile,
+                                                      hint=hint, raise_unavailable=raise_unavailable, guided=False)
+
         # Ждём «разрешения» от глобального лимитера ПЕРЕД запросом
         await self.rate_limiter.acquire()
         
@@ -210,8 +223,8 @@ class DataExtractor:
                             "content": self.data_extractor_prompt},
                         {"role": "user", "content": f"{hint}Проанализируй текст, оцени его читаемость, извлеки данные:\n\n{content}"}
                     ],
-                    extra_body={
-                        "guided_json": schema},
+                    # без guided_json схема только в промпте (сервер портил ответ на большой схеме, 15.11.2026)
+                    extra_body={"guided_json": schema} if guided else {},
                     max_tokens=settings.EXTRACTION_MAX_TOKENS,
                     temperature=0
                 )
@@ -239,7 +252,7 @@ class DataExtractor:
                 if result is None:
                     logger.warning(f"Блок {filename}: в ответе нет JSON-объекта — блок пропущен; начало ответа: "
                                    f"{brief(raw_response, 300)!r}")
-                    return None
+                    return await unguided("нет JSON-объекта")
                 logger.info(f"Блок {filename}: JSON разобран")
                 result, removed = dedupe_repeats(result)
                 if removed:
@@ -257,7 +270,7 @@ class DataExtractor:
                 if not result:
                     logger.warning(f"Блок {filename}: в ответе нет JSON-объекта — блок пропущен; начало ответа: "
                                    f"{brief(raw_response, 300)!r}")
-                    return None
+                    return await unguided("нет JSON-объекта")
 
                 logger.info(f"Блок {filename}: JSON восстановлен (ответ, вероятно, обрезан)")
                 result, removed = dedupe_repeats(result)
@@ -269,14 +282,14 @@ class DataExtractor:
                                    f"повторяю запрос со штрафом за повторы")
                     again = await self.extract_data_from_chunk(content=content, filename=filename, penalize=True,
                                                                profile=profile, hint=hint,
-                                                               raise_unavailable=raise_unavailable)
+                                                               raise_unavailable=raise_unavailable, guided=guided)
                     if again:
                         return again
                 return result
             
             except json.JSONDecodeError:
-                logger.error(f"Блок {filename}: JSON не удалось восстановить")
-                return None
+                logger.error(f"Блок {filename}: JSON не удалось восстановить; начало ответа: {brief(raw_response, 200)!r}")
+                return await unguided("JSON не восстановлен")
 
         except ContextOverflow as e:
             # блок не помещается в контекст модели (токенизатор модели считает кириллицу и XML плотнее, чем
@@ -290,7 +303,7 @@ class DataExtractor:
             for i, part in enumerate(parts):
                 r = await self.extract_data_from_chunk(content=part, filename=f"{filename}, часть {i + 1}",
                                                        profile=profile, hint=hint,
-                                                       raise_unavailable=raise_unavailable)
+                                                       raise_unavailable=raise_unavailable, guided=guided)
                 results.extend(r if isinstance(r, list) else [r] if r else [])
             return results or None
         except Exception as e:

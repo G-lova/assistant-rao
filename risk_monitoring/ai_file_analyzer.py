@@ -688,7 +688,12 @@ class AIFileAnalyzer:
                 logger.warning(f"Файл {file_id}: модель недоступна — анализ повторится позже: {e}")
                 return await self._push_failure(file_id, attempt - 1, f"model_unavailable: {e}")
             except Exception as e:  # noqa: BLE001 — сбой одного файла не останавливает остальные
-                logger.error(f"Ошибка анализа файла {file_id}: {e}", exc_info=True)
+                if type(e).__name__ == "ExtractionFailed":
+                    # модель не дала годного ответа ни по одному блоку — причина видна выше в журнале, без трассировки
+                    logger.warning(f"Файл {file_id}: извлечение не удалось ({e}) — повтор в следующем прогоне "
+                                   f"(попытка {attempt} из {MAX_ATTEMPTS})")
+                else:
+                    logger.error(f"Ошибка анализа файла {file_id}: {e}", exc_info=True)
                 return await self._push_failure(file_id, attempt, f"{type(e).__name__}: {e}")
 
     async def _reuse_internal(self, file_id: int, stored: Dict[str, Any]) -> Dict[str, Any]:

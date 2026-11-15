@@ -60,6 +60,12 @@ DOC_EXTRACTION_CACHE_ENABLED = True
 # 3000 не хватало: ответы обрывались на ~10 тыс. символов («Unterminated string», часть данных терялась, 30.10.2026).
 # При длинном запросе ответ всё равно уменьшается до размера контекста (configs.llm_resilience.fit_output)
 EXTRACTION_MAX_TOKENS = 4000
+# Схема ответа извлечения данных через guided_json (evaluate_documents/data_extractor.py). 15.11.2026 сервер
+# prod_multimodal_llm на большой схеме извлечения (42 КБ) отвечал «{ Register Register …» — с маленькими схемами
+# (тип документа) всё в порядке. False — схема только в промпте (пример JSON в data_extractor_prompt.txt)
+EXTRACTION_GUIDED_JSON = True
+# Ответ со схемой не дал JSON-объекта (мусор, зацикливание) — блок повторяется один раз без guided_json
+EXTRACTION_GUIDED_FALLBACK = True
 # Сопоставление экспертизы с карточкой закупки риск-мониторинга после индексации (запросы к внешней БД)
 PE_RM_LINK_ENABLED = True
 # Параллельность /evaluate-documents на один вызов: запросы к LLM, файлы (чтение/OCR + извлечение), скачивание ссылок
@@ -550,6 +556,11 @@ LLM_DISABLE_THINKING = True
 # запрос, если ответ не начался за 90 с (504), а длинное извлечение (до 4000 токенов при 45 ток/с под нагрузкой)
 # генерируется дольше — проверено scripts/llm_probe.py 15.11.2026. В потоке данные идут сразу, и шлюз не ждёт
 LLM_STREAM_RESPONSES = True
+# Длинный system-промпт переносится в начало первого сообщения user (configs/llm_resilience.py). 15.11.2026
+# prod_multimodal_llm на промпте извлечения (19 КБ, ~3800 токенов) в роли system отвечал «{ Register Register …»
+# (36 ток/с), тот же текст в сообщении user — нормальный JSON (165 ток/с); половина промпта в system — норма
+# (scripts/llm_probe.py --isolate). 0 — не переносить
+LLM_SYSTEM_AS_USER_CHARS = 8000
 # Обрыв зацикливания в потоке (configs/llm_resilience.py): каждые LLM_LOOP_STEP_CHARS символов ответа последние
 # LLM_LOOP_WINDOW_CHARS сжимаются zlib; степень сжатия ≥ LLM_LOOP_RATIO два раза подряд — модель повторяет одно и
 # то же («Register Register …», одна запись списка десятки раз): генерация обрывается, запрос повторяется один раз

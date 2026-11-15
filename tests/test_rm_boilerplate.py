@@ -125,6 +125,21 @@ class TypicalFragmentsCacheTest(unittest.TestCase):
 class NormsTest(unittest.TestCase):
     """Выжимка норм под тип документа."""
 
+    @classmethod
+    def setUpClass(cls):
+        """Тесты смотрят на роли сообщений (system / user): перенос длинного system-промпта в user выключен."""
+        from unittest import mock as _mock
+
+        from configs import settings as _settings
+
+        cls._fold = _mock.patch.object(_settings, "LLM_SYSTEM_AS_USER_CHARS", 0)
+        cls._fold.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        """Возвращает настройку."""
+        cls._fold.stop()
+
     def test_digest(self):
         """Требования к заявке — ст. 31, ПП 2571, СРО; 223-ФЗ — положение о закупке; версия меняется с текстом."""
         req = norms.digest("docTrebContentRequestFiles", 44)

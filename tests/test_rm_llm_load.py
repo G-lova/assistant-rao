@@ -135,6 +135,21 @@ class EventBatchTest(unittest.TestCase):
 class FileModesTest(unittest.TestCase):
     """``AIFileAnalyzer.analyze_file``: сколько запросов к модели в режимах full / incremental / print_form."""
 
+    @classmethod
+    def setUpClass(cls):
+        """Тесты смотрят на роли сообщений (system / user): перенос длинного system-промпта в user выключен."""
+        from unittest import mock as _mock
+
+        from configs import settings as _settings
+
+        cls._fold = _mock.patch.object(_settings, "LLM_SYSTEM_AS_USER_CHARS", 0)
+        cls._fold.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        """Возвращает настройку."""
+        cls._fold.stop()
+
     BASE = "\n".join(f"Пункт {i}. Поставщик обязан выполнить обязательство номер {i} в установленный контрактом срок."
                       for i in range(1, 15))
 
