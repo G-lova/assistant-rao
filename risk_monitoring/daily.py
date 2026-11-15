@@ -45,6 +45,8 @@ SCHEMA_VERSION = "rm-daily-4"
 PROMPT_VERSION = "daily-resume-6"
 KIND = "daily"
 STAGES = ("files", "xml", "contracts", "customers", "suppliers", "summary")
+# этапы после документов, ограниченные пределом прогона (settings.DAILY_STAGES_DEADLINE_SEC)
+TIMED_STAGES = ("contracts", "customers", "suppliers")
 RED = "red"
 # «Выполняется» дольше этого — прогон считается оборванным (пересборка, падение воркера), его можно запустить заново
 # Пульс идущего прогона: отметка «выполняется» обновляется у нас каждые HEARTBEAT_SECONDS; без обновления дольше
@@ -584,6 +586,8 @@ class DailyRun:
         self.data_fetcher = DataFetcher(db.url, db.headers, http_manager)
         self.stages: Dict[str, Any] = {}
         self.llm_stats: Dict[str, Any] = {}
+        # от начала прогона: этапы после документов не дольше DAILY_STAGES_DEADLINE_SEC (см. _stage)
+        self.started_mono = time.monotonic()
 
     async def _query(self, name: str, head: List[Any] = (), **lists: List[Any]) -> List[Dict[str, Any]]:
         """Выполняет ``queries/rm/<name>``."""
@@ -597,16 +601,44 @@ class DailyRun:
             self.stages[name] = {"status": "skipped"}
             return None
         start = time.monotonic()
+        limited = name in TIMED_STAGES
+        # начало прогона (объект, созданный без __init__, — с начала этапа)
+        left = self.__dict__.get("started_mono", start) + settings.DAILY_STAGES_DEADLINE_SEC - start
+        if limited and left <= 0:
+            # время прогона вышло: этап — следующим запуском за ту же дату, а сводка записывается сейчас
+            logger.warning(f"Ежедневный прогон, этап {name}: не начат — время прогона исчерпано "
+                           f"({settings.DAILY_STAGES_DEADLINE_SEC} с), продолжение следующим запуском")
+            self.stages[name] = {"status": "partial", "seconds": 0, "interrupted": True, "reason": "deadline"}
+            return None
         try:
             async with progress.step(f"этап «{name}»"):
-                out, counts = await coro_fn()
+                if limited:
+                    out, counts = await asyncio.wait_for(coro_fn(), timeout=left)
+                else:
+                    out, counts = await coro_fn()
             self.stages[name] = {"status": "completed", "seconds": round(time.monotonic() - start), **(counts or {})}
             return out
-        except Exception as e:  # noqa: BLE001 — сбой этапа не останавливает прогон
-            logger.error(f"Ежедневный прогон, этап {name}: {type(e).__name__}: {e}", exc_info=True)
-            self.stages[name] = {"status": "failed", "seconds": round(time.monotonic() - start),
-                                 "error": f"{type(e).__name__}: {e}"[:500]}
+        except asyncio.TimeoutError as e:
+            if not limited or time.monotonic() < start + left - 1:
+                # таймаут внутри этапа (HTTP, БД), а не предел прогона — как прочие сбои этапа
+                return self._stage_failed(name, start, e)
+            # не уложился до предела: уже записанное во внешнюю БД остаётся, остальное — следующим запуском
+            # (проанализированное пропускается); иначе задачу снимал лимит Celery и сводка не записывалась
+            logger.warning(f"Ежедневный прогон, этап {name}: прерван через {time.monotonic() - start:.0f} с — "
+                           f"время прогона исчерпано ({settings.DAILY_STAGES_DEADLINE_SEC} с), продолжение "
+                           f"следующим запуском")
+            self.stages[name] = {"status": "partial", "seconds": round(time.monotonic() - start),
+                                 "interrupted": True, "reason": "deadline"}
             return None
+        except Exception as e:  # noqa: BLE001 — сбой этапа не останавливает прогон
+            return self._stage_failed(name, start, e)
+
+    def _stage_failed(self, name: str, start: float, e: BaseException) -> None:
+        """Сбой этапа: ``status = failed`` с ошибкой, прогон продолжается."""
+        logger.error(f"Ежедневный прогон, этап {name}: {type(e).__name__}: {e}", exc_info=e)
+        self.stages[name] = {"status": "failed", "seconds": round(time.monotonic() - start),
+                             "error": f"{type(e).__name__}: {e}"[:500]}
+        return None
 
     @staticmethod
     def _counts(results: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
