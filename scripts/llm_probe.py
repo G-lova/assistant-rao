@@ -19,7 +19,8 @@
 3. ``--parallel N`` таких запросов одновременно — как при прогоне (2 процесса × ``RM_FILE_CONCURRENCY``).
 
 ``--risk`` — только запрос анализа рисков (``DocumentRiskAnalyzer``: промпт с каталогом кодов, схема ``guided_json``)
-в нескольких вариантах: что даёт «{ductductduct…» при переносе system в user (15.11.2026).
+в нескольких вариантах: что даёт «{ductductduct…» при переносе system в user (15.11.2026); R9–R11 — проверка
+испорченного кэша префиксов сервера (уникальная строка в начале, ``cache_salt``).
 
 Рассуждение выключено, как в приложении (``chat_template_kwargs.enable_thinking = false``). Для каждого запроса —
 код/ошибка, время, токены запроса и ответа, ``finish_reason``, скорость генерации, длина ответа и рассуждения.
@@ -171,6 +172,16 @@ async def risk(client, model) -> None:
     await go([{"role": "user", "content": prompt[half:] + "\n\n" + user}], guided, "R7. вторая половина промпта")
     await go([{"role": "user", "content": "Найди риски в тексте контракта. Ответ — JSON по схеме.\n\n" + user}],
              guided, "R8. короткое задание, та же схема")
+    # Гипотеза: испорчен кэш префиксов сервера (vLLM prefix caching) — ломаются только уже отправлявшиеся
+    # приложением начала запросов (R1, R4), новые (R5–R8) работают. Уникальное начало обходит кэш.
+    import uuid
+
+    nonce = f"Запрос {uuid.uuid4().hex[:12]}.\n\n"
+    await go([{"role": "user", "content": nonce + prompt + "\n\n" + user}], guided,
+             "R9. как R1, уникальная строка в начале (обход кэша префиксов)")
+    await go([{"role": "user", "content": prompt + "\n\n" + user}],
+             {**guided, "cache_salt": uuid.uuid4().hex}, "R10. как R1, cache_salt vLLM (отдельный кэш)")
+    await go([{"role": "user", "content": prompt + "\n\n" + user}], guided, "R11. снова R1 (кэш не изменился?)")
 
 
 async def main(parallel: int, chars: int, timeout: float, long_tokens: int = 0, by_length: bool = False,

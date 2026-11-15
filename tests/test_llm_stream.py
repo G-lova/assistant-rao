@@ -223,3 +223,41 @@ class FoldSystemTest(unittest.TestCase):
             asyncio.run(ResilientClient(raw, retries=1).chat.completions.create(
                 model="m", messages=[{"role": "system", "content": "П" * 200}, {"role": "user", "content": "x"}]))
         self.assertEqual([m["role"] for m in seen[0]["messages"]], ["user"])
+
+
+class NoncePrefixTest(unittest.TestCase):
+    """Уникальное начало запроса (``LLM_PREFIX_NONCE``) — обход испорченного кэша префиксов сервера."""
+
+    def run_nonce(self, messages, on=True):
+        from configs import llm_resilience as r
+        from configs import settings
+
+        with mock.patch.object(settings, "LLM_PREFIX_NONCE", on):
+            return r._nonce_prefix(messages)
+
+    def test_unique_and_text_kept(self):
+        msgs = [{"role": "user", "content": "промпт\n\nдокумент"}]
+        a, b = self.run_nonce(msgs), self.run_nonce(msgs)
+        self.assertNotEqual(a[0]["content"], b[0]["content"])          # каждый запрос — своё начало
+        self.assertTrue(a[0]["content"].startswith("Запрос "))
+        self.assertTrue(a[0]["content"].endswith("промпт\n\nдокумент"))
+        self.assertEqual(msgs[0]["content"], "промпт\n\nдокумент")      # исходный список не меняется
+
+    def test_parts_and_off(self):
+        parts = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:"}}]}]
+        out = self.run_nonce(parts)
+        self.assertEqual(out[0]["content"][0]["type"], "text")
+        self.assertEqual(out[0]["content"][1]["type"], "image_url")
+        msgs = [{"role": "user", "content": "x"}]
+        self.assertIs(self.run_nonce(msgs, on=False), msgs)
+
+    def test_in_sdk_after_fold(self):
+        """В запросе: system перенесён в user, строка — в самом начале."""
+        from configs import llm_resilience as r
+        from configs import settings
+
+        with mock.patch.multiple(settings, LLM_PREFIX_NONCE=True, LLM_SYSTEM_AS_USER_CHARS=1):
+            out = r._sdk({"model": "m", "messages": [{"role": "system", "content": "S"},
+                                                     {"role": "user", "content": "U"}]})
+        self.assertEqual(len(out["messages"]), 1)
+        self.assertRegex(out["messages"][0]["content"], r"^Запрос [0-9a-f]{12}\.\n\nS\n\nU$")
