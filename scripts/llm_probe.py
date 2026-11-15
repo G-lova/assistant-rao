@@ -87,7 +87,46 @@ async def lengths(client, model) -> None:
                   None, 300, f"L. запрос {chars} симв.")
 
 
-async def main(parallel: int, chars: int, timeout: float, long_tokens: int = 0, by_length: bool = False) -> None:
+async def isolate(client, model) -> None:
+    """Что в запросе извлечения даёт мусор: роль system, промпт, температура, схема (короткий документ ``SAMPLE``).
+
+    Длина запроса сама по себе мусора не даёт (``--lengths``: обычный текст до 7300 токенов — нормальный ответ).
+    """
+    from configs.resources import read_text
+
+    prompt = read_text("prompts/data_extractor_prompt.txt")
+    task = "Проанализируй текст, оцени его читаемость, извлеки данные:\n\n" + SAMPLE
+    mt = 1500
+    await one(client, model, [{"role": "system", "content": prompt}, {"role": "user", "content": task}],
+              None, mt, "I1. как в приложении: system=промпт, user=документ")
+    await one(client, model, [{"role": "user", "content": prompt + "\n\n" + task}],
+              None, mt, "I2. промпт и документ в одном сообщении user")
+    await one(client, model, [{"role": "system", "content": "Извлеки реквизиты документа. Ответ — только JSON: "
+                                                            '{"number": ..., "date": ..., "price": ..., '
+                                                            '"customer": ..., "supplier": ...}'},
+                              {"role": "user", "content": task}],
+              None, 400, "I3. короткий system-промпт, ответ JSON")
+    await one(client, model, [{"role": "system", "content": prompt}, {"role": "user", "content": task}],
+              None, mt, "I4. как I1, рассуждение по умолчанию сервера", think=None)
+    t = time.monotonic()
+    try:
+        r = await client.chat.completions.create(
+            model=model, max_tokens=mt, temperature=0.3,
+            messages=[{"role": "system", "content": prompt}, {"role": "user", "content": task}],
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}})
+        print(f"I5. как I1, temperature=0.3: 200 за {time.monotonic() - t:.1f} с; "
+              f"начало: {(r.choices[0].message.content or '')[:120]!r}")
+    except Exception as e:  # noqa: BLE001
+        print(f"I5. как I1, temperature=0.3: ОШИБКА {type(e).__name__} {str(e)[:200]}")
+    half = len(prompt) // 2
+    await one(client, model, [{"role": "system", "content": prompt[:half]}, {"role": "user", "content": task}],
+              None, mt, "I6. system=первая половина промпта")
+    await one(client, model, [{"role": "system", "content": prompt[half:]}, {"role": "user", "content": task}],
+              None, mt, "I7. system=вторая половина промпта")
+
+
+async def main(parallel: int, chars: int, timeout: float, long_tokens: int = 0, by_length: bool = False,
+               by_parts: bool = False) -> None:
     """Три проверки по очереди."""
     from openai import AsyncOpenAI
 
@@ -104,6 +143,9 @@ async def main(parallel: int, chars: int, timeout: float, long_tokens: int = 0, 
 
     if by_length:
         await lengths(client, cfg.model)
+        return
+    if by_parts:
+        await isolate(client, cfg.model)
         return
     short = [{"role": "user", "content": "Ответь одним словом: да"}]
     await one(client, cfg.model, short, None, 5, "1. короткий")
@@ -146,5 +188,7 @@ if __name__ == "__main__":
                     help="доп. проверка: max_tokens для генерации дольше 90 с, потоком и без (например 7000)")
     ap.add_argument("--lengths", action="store_true",
                     help="только проверка по длине запроса: обычный текст 2–30 тыс. симв., короткий пересказ")
+    ap.add_argument("--isolate", action="store_true",
+                    help="только поиск причины мусора: роль system, промпт по частям, температура")
     a = ap.parse_args()
-    asyncio.run(main(a.parallel, a.chars, a.timeout, a.long_tokens, a.lengths))
+    asyncio.run(main(a.parallel, a.chars, a.timeout, a.long_tokens, a.lengths, a.isolate))
