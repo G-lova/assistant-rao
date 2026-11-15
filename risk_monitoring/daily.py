@@ -602,7 +602,8 @@ class DailyRun:
             return None
         start = time.monotonic()
         limited = name in TIMED_STAGES
-        left = self.started_mono + settings.DAILY_STAGES_DEADLINE_SEC - start
+        # начало прогона (объект, созданный без __init__, — с начала этапа)
+        left = self.__dict__.get("started_mono", start) + settings.DAILY_STAGES_DEADLINE_SEC - start
         if limited and left <= 0:
             # время прогона вышло: этап — следующим запуском за ту же дату, а сводка записывается сейчас
             logger.warning(f"Ежедневный прогон, этап {name}: не начат — время прогона исчерпано "
