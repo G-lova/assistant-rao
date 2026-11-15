@@ -64,7 +64,8 @@ async def one(client, model, messages, extra, max_tokens, label, think=False, st
         speed = f", {out_tok / sec:.0f} ток/с" if out_tok and sec > 0 else ""
         print(f"{label}: 200 за {sec:.1f} с; токены запроса {getattr(u, 'prompt_tokens', '?')}, ответа {out_tok}"
               f"{speed}; finish_reason={r.choices[0].finish_reason}; "
-              f"ответ {len(r.choices[0].message.content or '')} симв., рассуждение {len(reasoning)} симв.")
+              f"ответ {len(r.choices[0].message.content or '')} симв., рассуждение {len(reasoning)} симв.; "
+              f"начало: {(r.choices[0].message.content or reasoning or '')[:120]!r}")
     except Exception as e:  # noqa: BLE001 — нужен итог, а не трассировка
         status = getattr(e, "status_code", None)
         print(f"{label}: ОШИБКА за {time.monotonic() - t:.1f} с: {type(e).__name__} {status or ''} {str(e)[:200]}")

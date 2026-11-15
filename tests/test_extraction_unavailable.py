@@ -182,3 +182,56 @@ class NoRetryTest(unittest.TestCase):
         with self.assertRaises(ModelUnavailable):
             asyncio.run(step())
         self.assertEqual(calls, [1])
+
+
+class GuidedFallbackTest(Stubbed):
+    """Ответ со схемой (``guided_json``) без JSON-объекта — один повтор блока без схемы в запросе (15.11.2026:
+    «{ Register Register …» на большой схеме извлечения)."""
+
+    def make(self, answers):
+        ex = self.module.DataExtractor.__new__(self.module.DataExtractor)
+
+        class Limiter:
+            """Лимитер частоты."""
+
+            async def acquire(self):
+                return None
+
+        ex.rate_limiter = Limiter()
+        ex.DATA_EXTRACTOR_SCHEMA = '{"type": "object", "properties": {}}'
+        ex.model = "m"
+        ex.data_extractor_prompt = "prompt"
+        seen = []
+
+        class Completions:
+            """``client.chat.completions``: ответы по очереди."""
+
+            async def create(self, **kw):
+                seen.append(kw)
+                msg = types.SimpleNamespace(content=answers.pop(0))
+                return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg, finish_reason="stop")])
+
+        ex.client = types.SimpleNamespace(chat=types.SimpleNamespace(completions=Completions()))
+        self.module.repair_json = lambda text: text     # json_repair может быть заглушкой: мусор не «чинится»
+        return ex, seen
+
+    def test_fallback_without_schema(self):
+        ex, seen = self.make(["{ Register Register Register", '{"readability": {"status": "allow"}, "raw_data": {}}'])
+        res = asyncio.run(ex.extract_data_from_chunk("текст", "x.pdf"))
+        self.assertEqual(res["readability"]["status"], "allow")
+        self.assertIn("guided_json", seen[0]["extra_body"])
+        self.assertNotIn("guided_json", seen[1]["extra_body"])
+        self.assertEqual(len(seen), 2)
+
+    def test_no_second_fallback(self):
+        ex, seen = self.make(["{ Register", "{ Register"])
+        self.assertIsNone(asyncio.run(ex.extract_data_from_chunk("текст", "x.pdf")))
+        self.assertEqual(len(seen), 2)
+
+    def test_guided_off(self):
+        from unittest import mock
+
+        ex, seen = self.make(['{"readability": {"status": "allow"}, "raw_data": {}}'])
+        with mock.patch.object(self.module.settings, "EXTRACTION_GUIDED_JSON", False):
+            asyncio.run(ex.extract_data_from_chunk("текст", "x.pdf"))
+        self.assertNotIn("guided_json", seen[0]["extra_body"])
