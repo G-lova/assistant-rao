@@ -546,6 +546,10 @@ PERIOD_SUMMARY_PUSH_ENABLED = True
 # возвращала пустой ответ (02.11.2026). Выключаем рассуждение (chat_template_kwargs.enable_thinking = false); если
 # сервер его не выключает — один повтор с бо́льшим лимитом ответа
 LLM_DISABLE_THINKING = True
+# Ответ модели потоком (stream=True), собирается в обычный ответ (configs/llm_resilience.py): шлюз llmhub рвёт
+# запрос, если ответ не начался за 90 с (504), а длинное извлечение (до 4000 токенов при 45 ток/с под нагрузкой)
+# генерируется дольше — проверено scripts/llm_probe.py 15.11.2026. В потоке данные идут сразу, и шлюз не ждёт
+LLM_STREAM_RESPONSES = True
 LLM_THINKING_RETRY_MAX_TOKENS = 12000
 
 # ── Лимиты запросов к модели (configs/rate_limiter.py, configs/llm_resilience.py)

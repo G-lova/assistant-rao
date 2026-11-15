@@ -301,6 +301,55 @@ def _breaker_record(key: str, ok: bool) -> None:
         state["fails"] = 0
 
 
+class _Obj:
+    """Простой объект ответа: атрибуты из ключевых аргументов (как у ответа SDK — ``choices[0].message.content``)."""
+
+    def __init__(self, **kw: Any):
+        """Атрибуты объекта."""
+        self.__dict__.update(kw)
+
+    def __repr__(self) -> str:   # pragma: no cover — для отладки
+        return f"_Obj({self.__dict__!r})"
+
+
+async def _create_streamed(raw: Any, kwargs: Dict[str, Any]) -> Any:
+    """``chat.completions.create`` потоком (``stream=True``), собранный в ответ того же вида, что без потока.
+
+    Шлюз llmhub отвечает 504, если ответ не начался за 90 с; в потоке первые токены приходят сразу, и длинная
+    генерация (извлечение до 4000 токенов) не обрывается шлюзом (``LLM_STREAM_RESPONSES``).
+
+    Если клиент вернул не поток (заглушки тестов, сервер без потоков) — ответ возвращается как есть.
+
+    Returns:
+        Any: Объект с ``choices[0].message.content`` / ``reasoning_content``, ``choices[0].finish_reason``,
+        ``usage``, ``model``, ``id``.
+    """
+    stream = await raw.chat.completions.create(**{**kwargs, "stream": True})
+    if hasattr(stream, "choices") or not hasattr(stream, "__aiter__"):
+        return stream
+    content: List[str] = []
+    reasoning: List[str] = []
+    finish = None
+    usage = model = rid = None
+    async for chunk in stream:
+        usage = getattr(chunk, "usage", None) or usage
+        model = getattr(chunk, "model", None) or model
+        rid = getattr(chunk, "id", None) or rid
+        for ch in getattr(chunk, "choices", None) or []:
+            delta = getattr(ch, "delta", None)
+            if delta is not None:
+                if getattr(delta, "content", None):
+                    content.append(delta.content)
+                r = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
+                if r:
+                    reasoning.append(r)
+            finish = getattr(ch, "finish_reason", None) or finish
+    message = _Obj(role="assistant", content="".join(content), reasoning_content="".join(reasoning) or None,
+                   tool_calls=None)
+    return _Obj(id=rid, model=model, usage=usage, object="chat.completion",
+                choices=[_Obj(index=0, message=message, finish_reason=finish)])
+
+
 async def _bounded(coro: Any, what: str) -> Any:
     """Выполняет запрос к модели не дольше ``REQUEST_DEADLINE``; учитывает выполняющиеся запросы (``inflight``).
 
@@ -478,7 +527,11 @@ class _Completions:
             CALLS["requests"] += 1
             try:
                 async with _gate(key):
-                    resp = await _bounded(self._raw.chat.completions.create(**_sdk(kwargs, key)), key)
+                    request = _sdk(kwargs, key)
+                    # потоком: шлюз не обрывает длинную генерацию по таймауту начала ответа (504 через 90 с)
+                    call = (_create_streamed(self._raw, request) if _setting("LLM_STREAM_RESPONSES", False)
+                            else self._raw.chat.completions.create(**request))
+                    resp = await _bounded(call, key)
                 _breaker_record(key, True)
                 choice = (getattr(resp, "choices", None) or [None])[0]
                 text = _log_empty(kwargs, getattr(getattr(choice, "message", None), "content", None) or "", choice) \
