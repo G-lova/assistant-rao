@@ -64,8 +64,10 @@ class FakeLLM:
     async def create(self, **kw):
         """Ответ в формате ``chat.completions``."""
         self.calls.append(kw)
-        user = kw["messages"][1]["content"]
-        body = json.loads(user.split("\n\n", 1)[1])
+        # последнее сообщение и JSON после последней пустой строки: system-промпт может быть перенесён
+        # в начало сообщения user (LLM_SYSTEM_AS_USER_CHARS), и сообщение тогда одно
+        user = kw["messages"][-1]["content"]
+        body = json.loads(user.rsplit("\n\n", 1)[1])
         if "events" in body:
             events = [{"event_id": e["event_id"], "event_summary": f"соб {e['event_id']}", "significance": 0.5,
                        "confidence": 0.9, "risks": [{"rule_id": "CTR-005", "title": "", "description": "срок",
