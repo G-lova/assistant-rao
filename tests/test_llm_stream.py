@@ -148,6 +148,39 @@ class LoopCutTest(unittest.TestCase):
         self.assertEqual(resp.choices[0].message.content, text)
 
 
+class CallLlmLoopCutTest(LoopCutTest):
+    """То же в ``call_llm`` (``LLMJson.ask``: анализ рисков, профили, решения РМ) — свой поток в ``_create``.
+
+    15.11.2026 анализ рисков получал «{ductductduct…» по 12 тыс. символов: обрыв был только в
+    ``_Completions.create``, а ``call_llm`` идёт мимо него.
+    """
+
+    def run_call(self, streams):
+        from configs import llm_resilience as r
+        from configs import settings
+
+        raw, seen = self.make(streams)
+        with mock.patch.object(settings, "LLM_LOOP_CUT", True), mock.patch.object(r, "STREAM", True):
+            text = asyncio.run(r.call_llm(raw, retries=1, model="m", max_tokens=4000,
+                                          messages=[{"role": "user", "content": "x"}]))
+        return text, seen
+
+    def test_call_llm_cut_and_penalized_retry(self):
+        looping = Stream([chunk(content="duct") for _ in range(5000)])
+        good = Stream([chunk(content='{"a": 1}'), chunk(finish="stop")])
+        text, seen = self.run_call([looping, good])
+        self.assertEqual(len(seen), 2)
+        self.assertGreater(len(looping.parts), 3000)          # оборван на ~4000 символах из 20 000
+        self.assertIn("frequency_penalty", seen[1])
+        self.assertEqual(text, '{"a": 1}')
+
+    def test_call_llm_second_loop_returned(self):
+        text, seen = self.run_call([Stream([chunk(content="duct") for _ in range(5000)]),
+                                    Stream([chunk(content="duct") for _ in range(5000)])])
+        self.assertEqual(len(seen), 2)                        # не больше одного повтора
+        self.assertLess(len(text), 8000)
+
+
 class FoldSystemTest(unittest.TestCase):
     """Длинный system-промпт → в начало сообщения user (``LLM_SYSTEM_AS_USER_CHARS``)."""
 
