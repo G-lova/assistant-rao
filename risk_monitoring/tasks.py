@@ -48,7 +48,8 @@ async def _pulsed(coro: Any, name: str, task_id: str) -> Any:
             logger.info(f"{name}[{task_id}]: идёт {time.monotonic() - start:.0f} с; запросов к модели "
                         f"{CALLS['requests'] - before.get('requests', 0)}, сейчас выполняется {CALLS.get('inflight', 0)}, "
                         f"сбоев {CALLS['failed'] - before.get('failed', 0)}, прервано по времени "
-                        f"{CALLS.get('deadline', 0) - before.get('deadline', 0)}"
+                        f"{CALLS.get('deadline', 0) - before.get('deadline', 0)}, оборвано зацикливаний "
+                        f"{CALLS.get('loop_cut', 0) - before.get('loop_cut', 0)}"
                         + ("; сейчас: " + "; ".join(progress.active()) if progress.active() else ""))
 
     beat = asyncio.ensure_future(pulse())

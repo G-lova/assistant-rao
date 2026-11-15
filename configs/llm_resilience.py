@@ -46,7 +46,7 @@ BREAKER_PAUSE = (30.0, 300.0)        # пауза предохранителя: 
 # получал семафор, привязанный к закрытому циклу. WeakKeyDictionary удаляет записи вместе с циклом.
 _gates: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[str, asyncio.Semaphore]]" = weakref.WeakKeyDictionary()
 # счётчики запросов к модели в процессе: для сводки задачи и пульса (inflight — выполняются сейчас)
-CALLS: Dict[str, int] = {"requests": 0, "failed": 0, "inflight": 0, "deadline": 0}
+CALLS: Dict[str, int] = {"requests": 0, "failed": 0, "inflight": 0, "deadline": 0, "loop_cut": 0}
 _breaker: Dict[str, Dict[str, float]] = {}
 
 
@@ -312,17 +312,55 @@ class _Obj:
         return f"_Obj({self.__dict__!r})"
 
 
-async def _create_streamed(raw: Any, kwargs: Dict[str, Any]) -> Any:
+def _compress_ratio(text: str) -> float:
+    """Степень сжатия текста zlib: у повторяющегося текста — десятки, у обычного JSON — 4–6."""
+    import zlib
+
+    data = text.encode("utf-8")
+    return len(data) / max(1, len(zlib.compress(data, 6)))
+
+
+class _LoopWatch:
+    """Признак зацикливания потокового ответа: хвост ответа сжимается слишком хорошо два раза подряд."""
+
+    def __init__(self):
+        """Настройки — из ``configs.settings`` (``LLM_LOOP_*``)."""
+        self.window = int(_setting("LLM_LOOP_WINDOW_CHARS", 3000))
+        self.step = max(200, int(_setting("LLM_LOOP_STEP_CHARS", 1000)))
+        self.ratio = float(_setting("LLM_LOOP_RATIO", 12.0))
+        self.next_at = self.window
+        self.hits = 0
+        self.last_ratio = 0.0
+
+    def check(self, total: int, tail: str) -> bool:
+        """``True`` — хвост ответа повторяется. Проверка раз в ``step`` символов, начиная с ``window``.
+
+        Args:
+            total: Сколько символов ответа (и рассуждения) уже пришло.
+            tail: Последние символы ответа (не меньше ``window``).
+        """
+        if total < self.next_at:
+            return False
+        self.next_at = total + self.step
+        self.last_ratio = _compress_ratio(tail[-self.window:])
+        self.hits = self.hits + 1 if self.last_ratio >= self.ratio else 0
+        return self.hits >= 2
+
+
+async def _create_streamed(raw: Any, kwargs: Dict[str, Any], key: str = "") -> Any:
     """``chat.completions.create`` потоком (``stream=True``), собранный в ответ того же вида, что без потока.
 
     Шлюз llmhub отвечает 504, если ответ не начался за 90 с; в потоке первые токены приходят сразу, и длинная
     генерация (извлечение до 4000 токенов) не обрывается шлюзом (``LLM_STREAM_RESPONSES``).
 
+    Зацикливание (``LLM_LOOP_CUT``, :class:`_LoopWatch`) обрывает поток: ответ — то, что пришло, с
+    ``finish_reason = "length"`` и ``loop_cut = True`` (вызывающий повторяет запрос со штрафом за повторы).
+
     Если клиент вернул не поток (заглушки тестов, сервер без потоков) — ответ возвращается как есть.
 
     Returns:
         Any: Объект с ``choices[0].message.content`` / ``reasoning_content``, ``choices[0].finish_reason``,
-        ``usage``, ``model``, ``id``.
+        ``usage``, ``model``, ``id``, ``loop_cut``.
     """
     stream = await raw.chat.completions.create(**{**kwargs, "stream": True})
     if hasattr(stream, "choices") or not hasattr(stream, "__aiter__"):
@@ -331,6 +369,10 @@ async def _create_streamed(raw: Any, kwargs: Dict[str, Any]) -> Any:
     reasoning: List[str] = []
     finish = None
     usage = model = rid = None
+    watch = _LoopWatch() if _setting("LLM_LOOP_CUT", False) else None
+    tail = ""          # последние символы ответа и рассуждения — для проверки зацикливания
+    total = 0
+    loop_cut = False
     async for chunk in stream:
         usage = getattr(chunk, "usage", None) or usage
         model = getattr(chunk, "model", None) or model
@@ -338,15 +380,34 @@ async def _create_streamed(raw: Any, kwargs: Dict[str, Any]) -> Any:
         for ch in getattr(chunk, "choices", None) or []:
             delta = getattr(ch, "delta", None)
             if delta is not None:
+                piece = ""
                 if getattr(delta, "content", None):
                     content.append(delta.content)
+                    piece += delta.content
                 r = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
                 if r:
                     reasoning.append(r)
+                    piece += r
+                if piece and watch is not None:
+                    total += len(piece)
+                    tail = (tail + piece)[-watch.window * 2:]
+                    loop_cut = watch.check(total, tail)
             finish = getattr(ch, "finish_reason", None) or finish
+        if loop_cut:
+            CALLS["loop_cut"] = CALLS.get("loop_cut", 0) + 1
+            logger.warning(f"LLM {key}: модель зациклилась — поток оборван на {total} символах "
+                           f"(сжатие хвоста {watch.last_ratio:.0f}×)")
+            close = getattr(stream, "close", None)
+            if close is not None:
+                try:
+                    await close()   # закрыть соединение: сервер прекращает генерацию
+                except Exception:  # noqa: BLE001 — ответ уже собран
+                    pass
+            finish = "length"
+            break
     message = _Obj(role="assistant", content="".join(content), reasoning_content="".join(reasoning) or None,
                    tool_calls=None)
-    return _Obj(id=rid, model=model, usage=usage, object="chat.completion",
+    return _Obj(id=rid, model=model, usage=usage, object="chat.completion", loop_cut=loop_cut,
                 choices=[_Obj(index=0, message=message, finish_reason=finish)])
 
 
@@ -529,7 +590,7 @@ class _Completions:
                 async with _gate(key):
                     request = _sdk(kwargs, key)
                     # потоком: шлюз не обрывает длинную генерацию по таймауту начала ответа (504 через 90 с)
-                    call = (_create_streamed(self._raw, request) if _setting("LLM_STREAM_RESPONSES", False)
+                    call = (_create_streamed(self._raw, request, key) if _setting("LLM_STREAM_RESPONSES", False)
                             else self._raw.chat.completions.create(**request))
                     resp = await _bounded(call, key)
                 _breaker_record(key, True)
@@ -537,6 +598,14 @@ class _Completions:
                 text = _log_empty(kwargs, getattr(getattr(choice, "message", None), "content", None) or "", choice) \
                     if choice is not None else "-"
                 if getattr(text, "thinking_cut", False) and _boost_after_thinking(kwargs, key):
+                    extra += 1
+                    continue
+                if getattr(resp, "loop_cut", False) and not kwargs.get("_penalized"):
+                    # поток оборван на зацикливании — один повтор со штрафом за повторяющиеся токены
+                    from configs.llm_repetition import penalized
+
+                    kwargs = {**penalized(kwargs), "_penalized": True}
+                    logger.warning(f"LLM {key}: повтор запроса со штрафом за повторы после зацикливания")
                     extra += 1
                     continue
                 return resp

@@ -550,6 +550,14 @@ LLM_DISABLE_THINKING = True
 # запрос, если ответ не начался за 90 с (504), а длинное извлечение (до 4000 токенов при 45 ток/с под нагрузкой)
 # генерируется дольше — проверено scripts/llm_probe.py 15.11.2026. В потоке данные идут сразу, и шлюз не ждёт
 LLM_STREAM_RESPONSES = True
+# Обрыв зацикливания в потоке (configs/llm_resilience.py): каждые LLM_LOOP_STEP_CHARS символов ответа последние
+# LLM_LOOP_WINDOW_CHARS сжимаются zlib; степень сжатия ≥ LLM_LOOP_RATIO два раза подряд — модель повторяет одно и
+# то же («Register Register …», одна запись списка десятки раз): генерация обрывается, запрос повторяется один раз
+# со штрафом за повторы. Обычный JSON извлечения сжимается в 4–6 раз, повтор записи — в 12+, «Register …» — в 70
+LLM_LOOP_CUT = True
+LLM_LOOP_WINDOW_CHARS = 3000
+LLM_LOOP_STEP_CHARS = 1000
+LLM_LOOP_RATIO = 12.0
 LLM_THINKING_RETRY_MAX_TOKENS = 12000
 
 # ── Лимиты запросов к модели (configs/rate_limiter.py, configs/llm_resilience.py)

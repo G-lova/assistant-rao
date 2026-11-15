@@ -88,3 +88,61 @@ class StreamTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LoopCutTest(unittest.TestCase):
+    """Зацикливание в потоке (``LLM_LOOP_CUT``): поток обрывается, запрос повторяется со штрафом за повторы."""
+
+    def make(self, streams):
+        """Клиент: каждый вызов ``create`` отдаёт следующий поток; параметры запоминаются."""
+        seen = []
+
+        async def create(**kw):
+            seen.append(kw)
+            return streams.pop(0)
+
+        raw = types.SimpleNamespace(chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create)),
+                                    base_url="http://llm-loop-test/")
+        return raw, seen
+
+    def run_create(self, streams):
+        from configs import settings
+        from configs.llm_resilience import ResilientClient
+
+        raw, seen = self.make(streams)
+        with mock.patch.multiple(settings, LLM_STREAM_RESPONSES=True, LLM_LOOP_CUT=True):
+            resp = asyncio.run(ResilientClient(raw, retries=1).chat.completions.create(
+                model="m", messages=[{"role": "user", "content": "x"}], max_tokens=4000))
+        return resp, seen
+
+    def test_loop_cut_and_penalized_retry(self):
+        looping = Stream([chunk(content="Register ") for _ in range(5000)])
+        good = Stream([chunk(content='{"a": 1}'), chunk(finish="stop")])
+        resp, seen = self.run_create([looping, good])
+        self.assertEqual(len(seen), 2)
+        self.assertGreater(len(looping.parts), 4000)          # поток оборван задолго до конца
+        self.assertIn("frequency_penalty", seen[1])           # повтор — со штрафом за повторы
+        self.assertEqual(resp.choices[0].message.content, '{"a": 1}')
+
+    def test_second_loop_returned(self):
+        resp, seen = self.run_create([Stream([chunk(content="Register ") for _ in range(5000)]),
+                                      Stream([chunk(content="Register ") for _ in range(5000)])])
+        self.assertEqual(len(seen), 2)                        # не больше одного повтора
+        self.assertTrue(resp.loop_cut)
+        self.assertEqual(resp.choices[0].finish_reason, "length")
+
+    def test_normal_json_not_cut(self):
+        import json
+        import random
+
+        random.seed(3)
+        items = [{"value": random.randint(1000, 10 ** 7) / 100, "context": f"Пункт {i}.{random.randint(1, 9)} "
+                  f"цена {random.randint(1000, 99999)} руб., раздел {random.randint(1, 12)}",
+                  "evidence": {"fragment": f"стр. {random.randint(1, 40)} приложение {random.randint(1, 5)}",
+                               "confidence": 0.9}} for i in range(80)]
+        text = json.dumps({"finances": items}, ensure_ascii=False, indent=1)
+        parts = [chunk(content=text[i:i + 20]) for i in range(0, len(text), 20)] + [chunk(finish="stop")]
+        resp, seen = self.run_create([Stream(parts)])
+        self.assertEqual(len(seen), 1)
+        self.assertFalse(resp.loop_cut)
+        self.assertEqual(resp.choices[0].message.content, text)
