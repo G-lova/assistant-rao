@@ -12,6 +12,8 @@
 2. запрос извлечения данных: промпт ``data_extractor_prompt.txt``, схема ``guided_json``, ``max_tokens`` как у
    ``DataExtractor`` — так выглядит реальная нагрузка (504 шлюза бывает и у живой модели, если ответ генерируется
    дольше таймаута шлюза);
+   2б — без ``guided_json``, 2в — со схемой и рассуждением по умолчанию сервера, 2г — короткий запрос с маленькой
+   схемой (что именно виснет: схема или выключенное рассуждение);
 3. ``--parallel N`` таких запросов одновременно — как при прогоне (2 процесса × ``RM_FILE_CONCURRENCY``).
 
 Рассуждение выключено, как в приложении (``chat_template_kwargs.enable_thinking = false``). Для каждого запроса —
@@ -85,7 +87,14 @@ async def main(parallel: int, chars: int, timeout: float) -> None:
     messages = [{"role": "system", "content": read_text("prompts/data_extractor_prompt.txt")},
                 {"role": "user", "content": f"Проанализируй текст, оцени его читаемость, извлеки данные:\n\n{text}"}]
     extra = {"guided_json": schema}
-    await one(client, cfg.model, messages, extra, settings.EXTRACTION_MAX_TOKENS, f"2. извлечение ({chars} симв.)")
+    mt = settings.EXTRACTION_MAX_TOKENS
+    await one(client, cfg.model, messages, extra, mt, f"2. извлечение ({chars} симв.)")
+    # что именно виснет: схема (guided_json) или выключенное рассуждение
+    await one(client, cfg.model, messages, None, mt, "2б. извлечение без guided_json")
+    await one(client, cfg.model, messages, extra, mt, "2в. извлечение с guided_json, рассуждение по умолчанию",
+              think=None)
+    tiny = {"guided_json": {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}}
+    await one(client, cfg.model, short, tiny, 50, "2г. короткий с маленькой схемой")
     if parallel > 1:
         print(f"3. {parallel} запросов извлечения одновременно:")
         await asyncio.gather(*(one(client, cfg.model, messages, extra, settings.EXTRACTION_MAX_TOKENS, f"   №{i + 1}")
