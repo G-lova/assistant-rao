@@ -57,6 +57,43 @@ class DocumentLevelTest(Stubbed):
         self.assertEqual(calls, [False])
 
 
+class EmptyTest(Stubbed):
+    """Ни один блок не дал годного ответа (пустой ответ, мусор) — ``ExtractionFailed`` при ``raise_empty``."""
+
+    def test_raise_empty(self):
+        ex, _ = extractor(self.module, {"a", "b"})   # без raise_unavailable блоки возвращают None
+        orig = ex.extract_data_from_chunk
+
+        async def no_raise(content, filename, **kw):
+            kw["raise_unavailable"] = False
+            return await orig(content, filename, **kw)
+
+        ex.extract_data_from_chunk = no_raise
+        with self.assertRaises(self.module.ExtractionFailed):
+            asyncio.run(ex.extract_data_from_document(["a", "b"], "x.pdf", raise_empty=True))
+        res = asyncio.run(ex.extract_data_from_document(["a", "b"], "x.pdf"))
+        self.assertEqual(res["readability"]["status"], "deny")
+
+    def test_partial_success_kept(self):
+        ex, _ = extractor(self.module, {"b"})
+        orig = ex.extract_data_from_chunk
+
+        async def no_raise(content, filename, **kw):
+            kw["raise_unavailable"] = False
+            return await orig(content, filename, **kw)
+
+        ex.extract_data_from_chunk = no_raise
+
+        async def merge(results, filename):
+            return results[0]
+
+        ex.merge_chunk_results = merge   # объединение блоков обращается к модели — здесь не нужно
+        # один блок разобран — результат возвращается (без ExtractionFailed)
+        res = asyncio.run(ex.extract_data_from_document(["a", "b"], "x.pdf", raise_empty=True))
+        self.assertIsInstance(res, dict)
+        self.assertNotIn("Ошибка анализа документа", (res.get("readability") or {}).get("issues") or [])
+
+
 class ChunkLevelTest(Stubbed):
     """``extract_data_from_chunk``: 5xx после повторов → ``ModelUnavailable`` только с ``raise_unavailable``."""
 

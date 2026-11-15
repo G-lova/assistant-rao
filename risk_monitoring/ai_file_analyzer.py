@@ -865,8 +865,12 @@ class AIFileAnalyzer:
             chunks = split_large_text(text, max_chunk_size=LLM_CHUNK_TOKENS) or [text]
             extraction = await self._cached(document_id, "data_extraction",
                                             # модель недоступна → ModelUnavailable: файл failed, повтор позже
+                                            # ни одного годного ответа (пустые, мусор) — ExtractionFailed: файл
+                                            # failed с засчитанной попыткой; последняя попытка принимает пустой
+                                            # результат, чтобы файл не остался без паспорта
                                             lambda: self.extractor.extract_data_from_document(
-                                                chunks, file_name, raise_unavailable=True),
+                                                chunks, file_name, raise_unavailable=True,
+                                                raise_empty=attempt < MAX_ATTEMPTS),
                                             keep=lambda r: isinstance(r, dict) and bool(r.get("raw_data")),
                                             fallback_doc=reuse_doc, reuse_if=_not_looping)
             if isinstance(extraction, str):

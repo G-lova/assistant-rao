@@ -25,6 +25,10 @@ from evaluate_documents.doc_profiles import describe_raw_data, format_raw_data_f
 logger = get_logger(__name__)
 
 
+class ExtractionFailed(RuntimeError):
+    """Ни один блок документа не дал годного ответа модели (пустой ответ, мусор, нет JSON-объекта)."""
+
+
 class DataExtractor:
     """
     Извлекает структурированные данные и оценивает читаемость документов с помощью LLM.
@@ -63,7 +67,8 @@ class DataExtractor:
             
 
     async def extract_data_from_document(self, chunks: List[str], filename: str, profile: Optional[str] = None,
-                                         hint: str = "", raise_unavailable: bool = False) -> Dict[str, Any]:
+                                         hint: str = "", raise_unavailable: bool = False,
+                                         raise_empty: bool = False) -> Dict[str, Any]:
         """Извлекает данные из документа, разбитого на блоки, и объединяет результаты блоков.
 
         Блоки отправляются модели параллельно (не больше ``self.semaphore`` одновременно); блоки с ошибкой
@@ -77,6 +82,8 @@ class DataExtractor:
             raise_unavailable: Блок не разобран из-за сервера модели (5xx, таймаут после всех повторов) —
                 :class:`~configs.llm_resilience.ModelUnavailable` вместо неполного результата (анализ файлов РМ:
                 файл помечается failed и берётся повторно). По умолчанию — как раньше (экспертиза).
+            raise_empty: Ни один блок не дал годного ответа (пустой ответ, мусор, нет JSON) — :class:`ExtractionFailed`
+                вместо результата ``readability.status = deny`` с пустым ``raw_data``.
 
         Returns:
             dict: ``{"readability": {...}, "raw_data": {...}}``; при полной неудаче — ``readability.status = deny``
@@ -84,6 +91,7 @@ class DataExtractor:
 
         Raises:
             ModelUnavailable: Только при ``raise_unavailable``.
+            ExtractionFailed: Только при ``raise_empty``.
         """
         started = time.monotonic()
         logger.info(f"Извлечение данных из '{filename}': блоков {len(chunks)}, профиль {profile or 'full'}")
@@ -120,6 +128,10 @@ class DataExtractor:
 
         if not successful_results:
             logger.error(f"'{filename}': ни один блок не разобран ({len(chunks)} блоков)")
+            if raise_empty:
+                # ни одного годного ответа (пустые, мусор «Register Register …», нет JSON): обычно сбой модели,
+                # а не документа — вызывающий повторит позже (попытка засчитывается, последняя примет пустой результат)
+                raise ExtractionFailed(f"ни один блок не разобран ({len(chunks)} блоков)")
             return {
                 "readability": {"status": "deny", "issues": ["Ошибка анализа документа"]},
                 "raw_data": {}
