@@ -93,11 +93,20 @@ class ContextOverflowTest(unittest.TestCase):
             from evaluate_documents.data_extractor import DataExtractor
         except ImportError as e:
             raise unittest.SkipTest(f"нет зависимостей: {e}")
+        from unittest import mock
+
+        from configs import settings
+
         fake = Fake(limit_chars=2600)
         ex = DataExtractor(r.ResilientClient(fake, retries=1), "m")
         ex.rate_limiter = type("L", (), {"acquire": staticmethod(lambda: asyncio.sleep(0))})()
         text = ("строка документа " * 20 + "\n\n") * 8
-        res = asyncio.run(ex.extract_data_from_chunk(content=text, filename="UPD.zip", profile="act"))
+        # Fake меряет только последнее сообщение. Перенос длинного system-промпта в user
+        # (LLM_SYSTEM_AS_USER_CHARS) добавил бы к нему ~19 тыс. символов промпта извлечения,
+        # и «переполнение» не устранялось бы делением. На реальном сервере токены system
+        # учитываются в обоих случаях, поэтому в тесте перенос отключён.
+        with mock.patch.object(settings, "LLM_SYSTEM_AS_USER_CHARS", 0):
+            res = asyncio.run(ex.extract_data_from_chunk(content=text, filename="UPD.zip", profile="act"))
         self.assertIsInstance(res, list)
         self.assertGreaterEqual(len(res), 2)
 
