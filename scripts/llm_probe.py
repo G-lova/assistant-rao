@@ -12,6 +12,10 @@
 2. запрос извлечения данных: промпт ``data_extractor_prompt.txt``, схема ``guided_json``, ``max_tokens`` как у
    ``DataExtractor`` — так выглядит реальная нагрузка (504 шлюза бывает и у живой модели, если ответ генерируется
    дольше таймаута шлюза);
+   2б — без ``guided_json``, 2в — со схемой и рассуждением по умолчанию сервера, 2г — короткий запрос с маленькой
+   схемой (что именно виснет: схема или выключенное рассуждение), 2д — со схемой потоком, как приложение при
+   ``LLM_STREAM_RESPONSES``. Текст запроса — повторённый образец: модель на нём склонна зацикливаться (ответ до
+   лимита), это худший случай по длине генерации;
 3. ``--parallel N`` таких запросов одновременно — как при прогоне (2 процесса × ``RM_FILE_CONCURRENCY``).
 
 Рассуждение выключено, как в приложении (``chat_template_kwargs.enable_thinking = false``). Для каждого запроса —
@@ -31,11 +35,12 @@ SAMPLE = (
 )
 
 
-async def one(client, model, messages, extra, max_tokens, label, think=False):
+async def one(client, model, messages, extra, max_tokens, label, think=False, stream=False):
     """Один запрос без повторов: итог и замеры.
 
     ``think``: ``False`` — рассуждение выключено, как в приложении; ``True`` — включено; ``None`` — параметр не
-    передаётся (поведение сервера по умолчанию).
+    передаётся (поведение сервера по умолчанию). ``stream`` — ответ потоком, как в приложении при
+    ``LLM_STREAM_RESPONSES`` (шлюз не обрывает длинную генерацию).
     """
     t = time.monotonic()
     try:
@@ -43,8 +48,14 @@ async def one(client, model, messages, extra, max_tokens, label, think=False):
         if think is not None:
             # как в приложении (configs.llm_resilience._sdk, LLM_DISABLE_THINKING): рассуждение выключено
             body["chat_template_kwargs"] = {"enable_thinking": think}
-        r = await client.chat.completions.create(model=model, messages=messages, max_tokens=max_tokens,
-                                                 temperature=0, extra_body=body or None)
+        request = dict(model=model, messages=messages, max_tokens=max_tokens, temperature=0,
+                       extra_body=body or None)
+        if stream:
+            from configs.llm_resilience import _create_streamed
+
+            r = await _create_streamed(client, {**request, "stream_options": {"include_usage": True}})
+        else:
+            r = await client.chat.completions.create(**request)
         sec = time.monotonic() - t
         u = getattr(r, "usage", None)
         msg = r.choices[0].message
@@ -59,7 +70,7 @@ async def one(client, model, messages, extra, max_tokens, label, think=False):
         print(f"{label}: ОШИБКА за {time.monotonic() - t:.1f} с: {type(e).__name__} {status or ''} {str(e)[:200]}")
 
 
-async def main(parallel: int, chars: int, timeout: float) -> None:
+async def main(parallel: int, chars: int, timeout: float, long_tokens: int = 0) -> None:
     """Три проверки по очереди."""
     from openai import AsyncOpenAI
 
@@ -85,10 +96,24 @@ async def main(parallel: int, chars: int, timeout: float) -> None:
     messages = [{"role": "system", "content": read_text("prompts/data_extractor_prompt.txt")},
                 {"role": "user", "content": f"Проанализируй текст, оцени его читаемость, извлеки данные:\n\n{text}"}]
     extra = {"guided_json": schema}
-    await one(client, cfg.model, messages, extra, settings.EXTRACTION_MAX_TOKENS, f"2. извлечение ({chars} симв.)")
+    mt = settings.EXTRACTION_MAX_TOKENS
+    await one(client, cfg.model, messages, extra, mt, f"2. извлечение ({chars} симв.)")
+    # что именно виснет: схема (guided_json) или выключенное рассуждение
+    await one(client, cfg.model, messages, None, mt, "2б. извлечение без guided_json")
+    await one(client, cfg.model, messages, extra, mt, "2в. извлечение с guided_json, рассуждение по умолчанию",
+              think=None)
+    await one(client, cfg.model, messages, extra, mt, "2д. извлечение потоком (как приложение)", stream=True)
+    if long_tokens:
+        # генерация заведомо дольше 90 с (таймаут шлюза): 200 — поток шлюз не обрывает
+        await one(client, cfg.model, messages, extra, long_tokens, f"2е. потоком, max_tokens={long_tokens}",
+                  stream=True)
+        await one(client, cfg.model, messages, extra, long_tokens, f"2ж. без потока, max_tokens={long_tokens}")
+    tiny = {"guided_json": {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}}
+    await one(client, cfg.model, short, tiny, 50, "2г. короткий с маленькой схемой")
     if parallel > 1:
         print(f"3. {parallel} запросов извлечения одновременно:")
-        await asyncio.gather(*(one(client, cfg.model, messages, extra, settings.EXTRACTION_MAX_TOKENS, f"   №{i + 1}")
+        await asyncio.gather(*(one(client, cfg.model, messages, extra, settings.EXTRACTION_MAX_TOKENS, f"   №{i + 1}",
+                                   stream=settings.LLM_STREAM_RESPONSES)
                                for i in range(parallel)))
 
 
@@ -97,5 +122,7 @@ if __name__ == "__main__":
     ap.add_argument("--parallel", type=int, default=3, help="одновременных запросов извлечения (по умолчанию 3)")
     ap.add_argument("--chars", type=int, default=3000, help="символов текста в запросе извлечения (по умолчанию 3000)")
     ap.add_argument("--timeout", type=float, default=600, help="таймаут клиента, с (по умолчанию 600)")
+    ap.add_argument("--long", type=int, default=0, dest="long_tokens",
+                    help="доп. проверка: max_tokens для генерации дольше 90 с, потоком и без (например 7000)")
     a = ap.parse_args()
-    asyncio.run(main(a.parallel, a.chars, a.timeout))
+    asyncio.run(main(a.parallel, a.chars, a.timeout, a.long_tokens))
