@@ -229,6 +229,14 @@ def transient(error: BaseException) -> bool:
         k in name for k in ("timeout", "connection", "remoteprotocol", "readerror"))
 
 
+class ModelUnavailable(RuntimeError):
+    """Модель недоступна (5xx/таймаут после всех повторов): результат шага не получен из-за сервера, а не документа.
+
+    Поднимается там, где «пустой» результат сохранился бы как окончательный (извлечение данных файла РМ): файл
+    получает ``pipeline.status = failed`` и берётся повторно, а не записывается без данных навсегда.
+    """
+
+
 def mark_exhausted(error: BaseException) -> BaseException:
     """Помечает исключение: временный сбой сервера уже повторён до исчерпания попыток.
 

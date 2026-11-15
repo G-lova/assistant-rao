@@ -181,7 +181,7 @@ class FileModesTest(unittest.TestCase):
                        "risk_analysis": an.risk_analyzer.prompt_version, "version_diff": "d1"}
 
         class Ext:
-            async def extract_data_from_document(self, chunks, name):
+            async def extract_data_from_document(self, chunks, name, raise_unavailable=False):
                 test.calls["extract"] += 1
                 return {"raw_data": {"summary": "кратко", "dates": []}}
 

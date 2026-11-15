@@ -39,6 +39,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tup
 
 from configs.config import Config
 from configs.logger import get_logger
+from configs.llm_resilience import ModelUnavailable
 from configs.resources import read_text
 from configs import settings
 from risk_monitoring import (boilerplate, contract_printform, doc_kind, file_versions, norms, passport, pdf_text,
@@ -680,6 +681,11 @@ class AIFileAnalyzer:
             except FileUnavailable as e:
                 logger.warning(f"Файл {file_id} недоступен: {e}")
                 return await self._push_failure(file_id, attempt, f"download_failed: {e}")
+            except ModelUnavailable as e:
+                # сервер модели недоступен (5xx/таймаут после всех повторов): файл не виноват — попытка не
+                # засчитывается (иначе за пару сбоев модели файл исчерпал бы MAX_ATTEMPTS и не анализировался бы)
+                logger.warning(f"Файл {file_id}: модель недоступна — анализ повторится позже: {e}")
+                return await self._push_failure(file_id, attempt - 1, f"model_unavailable: {e}")
             except Exception as e:  # noqa: BLE001 — сбой одного файла не останавливает остальные
                 logger.error(f"Ошибка анализа файла {file_id}: {e}", exc_info=True)
                 return await self._push_failure(file_id, attempt, f"{type(e).__name__}: {e}")
@@ -858,7 +864,9 @@ class AIFileAnalyzer:
                 reuse_doc = prev_ctx["doc_id"]
             chunks = split_large_text(text, max_chunk_size=LLM_CHUNK_TOKENS) or [text]
             extraction = await self._cached(document_id, "data_extraction",
-                                            lambda: self.extractor.extract_data_from_document(chunks, file_name),
+                                            # модель недоступна → ModelUnavailable: файл failed, повтор позже
+                                            lambda: self.extractor.extract_data_from_document(
+                                                chunks, file_name, raise_unavailable=True),
                                             keep=lambda r: isinstance(r, dict) and bool(r.get("raw_data")),
                                             fallback_doc=reuse_doc, reuse_if=_not_looping)
             if isinstance(extraction, str):

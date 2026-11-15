@@ -14,7 +14,7 @@ from configs.logger import brief, get_logger
 from configs.rate_limiter import llm_rate_limiter
 from configs.retry_utils import LLM_RETRY_CONFIG, async_retry
 from configs.llm_repetition import LOOP_MIN, dedupe_repeats, penalized
-from configs.llm_resilience import ContextOverflow, split_halves
+from configs.llm_resilience import ContextOverflow, ModelUnavailable, retries_exhausted, split_halves, transient
 from configs.utils import extract_json_objects
 from configs.resources import read_text
 
@@ -63,7 +63,7 @@ class DataExtractor:
             
 
     async def extract_data_from_document(self, chunks: List[str], filename: str, profile: Optional[str] = None,
-                                         hint: str = "") -> Dict[str, Any]:
+                                         hint: str = "", raise_unavailable: bool = False) -> Dict[str, Any]:
         """Извлекает данные из документа, разбитого на блоки, и объединяет результаты блоков.
 
         Блоки отправляются модели параллельно (не больше ``self.semaphore`` одновременно); блоки с ошибкой
@@ -74,10 +74,16 @@ class DataExtractor:
             filename: Имя файла (для журнала).
             profile: Профиль полей (:mod:`evaluate_documents.doc_profiles`); ``None`` — полная схема (риск-мониторинг).
             hint: Подсказка модели о типе документа (:func:`doc_profiles.profile_hint`).
+            raise_unavailable: Блок не разобран из-за сервера модели (5xx, таймаут после всех повторов) —
+                :class:`~configs.llm_resilience.ModelUnavailable` вместо неполного результата (анализ файлов РМ:
+                файл помечается failed и берётся повторно). По умолчанию — как раньше (экспертиза).
 
         Returns:
             dict: ``{"readability": {...}, "raw_data": {...}}``; при полной неудаче — ``readability.status = deny``
             и пустой ``raw_data``.
+
+        Raises:
+            ModelUnavailable: Только при ``raise_unavailable``.
         """
         started = time.monotonic()
         logger.info(f"Извлечение данных из '{filename}': блоков {len(chunks)}, профиль {profile or 'full'}")
@@ -86,9 +92,17 @@ class DataExtractor:
             """Запрос по одному блоку, заняв место в семафоре."""
             async with self.semaphore:
                 name = f"'{filename}' (блок {i + 1}/{len(chunks)})" if len(chunks) > 1 else f"'{filename}'"
-                return await self.extract_data_from_chunk(content=chunk, filename=name, profile=profile, hint=hint)
+                return await self.extract_data_from_chunk(content=chunk, filename=name, profile=profile, hint=hint,
+                                                          raise_unavailable=raise_unavailable)
 
         results = await asyncio.gather(*(limited(i, c) for i, c in enumerate(chunks)), return_exceptions=True)
+        down = next((r for r in results if isinstance(r, ModelUnavailable)), None)
+        if down is not None:
+            # хотя бы один блок не разобран из-за сервера модели: неполный результат не отдаём — вызывающий
+            # (анализ файла РМ) пометит файл failed и повторит позже, а не сохранит без данных навсегда
+            n = sum(isinstance(r, ModelUnavailable) for r in results)
+            logger.error(f"'{filename}': модель недоступна — не разобрано блоков {n} из {len(chunks)}: {down}")
+            raise down
 
         successful_results = []
         failed = 0
@@ -132,7 +146,8 @@ class DataExtractor:
 
     @async_retry(LLM_RETRY_CONFIG)
     async def extract_data_from_chunk(self, content: str, filename: str, penalize: bool = False,
-                                      profile: Optional[str] = None, hint: str = "") -> Dict[str, Any]:
+                                      profile: Optional[str] = None, hint: str = "",
+                                      raise_unavailable: bool = False) -> Dict[str, Any]:
         """
         Анализирует отдельный текстовый чанк с помощью LLM и возвращает структурированные данные.
 
@@ -148,6 +163,7 @@ class DataExtractor:
             penalize (bool): Повтор после зацикливания модели — со штрафом за повторы.
             profile (str): Профиль полей (``None`` — полная схема).
             hint (str): Подсказка о типе документа в начале сообщения.
+            raise_unavailable (bool): Сбой сервера модели — :class:`ModelUnavailable` вместо ``None``.
 
         Returns:
             Optional[Dict[str, Any]]: Словарь с полями `readability` и `raw_data`,
@@ -239,7 +255,8 @@ class DataExtractor:
                     logger.warning(f"'{filename}': модель зациклилась (повторов {removed}, ответ обрезан) — "
                                    f"повторяю запрос со штрафом за повторы")
                     again = await self.extract_data_from_chunk(content=content, filename=filename, penalize=True,
-                                                               profile=profile, hint=hint)
+                                                               profile=profile, hint=hint,
+                                                               raise_unavailable=raise_unavailable)
                     if again:
                         return again
                 return result
@@ -259,11 +276,15 @@ class DataExtractor:
             results = []
             for i, part in enumerate(parts):
                 r = await self.extract_data_from_chunk(content=part, filename=f"{filename}, часть {i + 1}",
-                                                       profile=profile, hint=hint)
+                                                       profile=profile, hint=hint,
+                                                       raise_unavailable=raise_unavailable)
                 results.extend(r if isinstance(r, list) else [r] if r else [])
             return results or None
         except Exception as e:
             logger.error(f"Ошибка при анализе '{filename}': {str(e)}")
+            if raise_unavailable and (transient(e) or retries_exhausted(e)):
+                # сбой сервера модели (5xx, таймаут) после всех повторов — не «в блоке нет данных»
+                raise ModelUnavailable(f"{type(e).__name__}: {e}") from e
             return None
 
     def merge_json_objects(self, json_strings) -> dict:
