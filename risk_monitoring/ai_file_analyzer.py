@@ -39,6 +39,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tup
 
 from configs.config import Config
 from configs.logger import get_logger
+from configs.file_errors import BrokenFile
 from configs.llm_resilience import ModelUnavailable
 from configs.resources import read_text
 from configs import settings
@@ -1320,20 +1321,26 @@ class AIFileAnalyzer:
         """
         url, source_url = row["url"], row.get("source_url")
         card_id = row.get("risk_monitoring_contract_id")
+        alternative = not kw.get("local_path") and source_url and source_url != url
         try:
-            return await self._load_document(file_id, url, file_name, card_id=card_id, **kw)
+            # повреждённый файл без другого источника — результат «нет текста» (повтор ничего не даст)
+            return await self._load_document(file_id, url, file_name, card_id=card_id, broken_ok=not alternative, **kw)
         except FileUnavailable as e:
             first = f"{e} ({_source_label(url, source_url)})"
-            if kw.get("local_path") or not source_url or source_url == url:
+            if not alternative:
                 raise FileUnavailable(first) from None
             logger.warning(f"Файл {file_id}: {first} — скачиваем по ссылке ЕИС")
+        except BrokenFile as e:
+            # копия в хранилище бывает обрезанной («EOF marker not found») — файл из ЕИС может быть целым
+            first = f"{e} ({_source_label(url, source_url)})"
+            logger.warning(f"Файл {file_id}: файл повреждён ({first}) — скачиваем по ссылке ЕИС")
         try:
-            return await self._load_document(file_id, source_url, file_name, card_id=card_id)
+            return await self._load_document(file_id, source_url, file_name, card_id=card_id, broken_ok=True)
         except FileUnavailable as e:
             raise FileUnavailable(f"{first}; ЕИС: {e} ({_source_label(source_url, source_url)})") from None
 
     async def _load_document(self, file_id: int, url: str, file_name: str, card_id: Optional[int] = None,
-                             local_path: Optional[str] = None):
+                             local_path: Optional[str] = None, broken_ok: bool = True):
         """Скачивает файл, находит или создаёт документ по хэшу содержимого и связывает его с файлом.
 
         Args:
@@ -1343,6 +1350,8 @@ class AIFileAnalyzer:
             card_id: ``risk_monitoring_contracts.id`` — карточка закупки (срок хранения ссылки).
             local_path: Уже скачанный файл (первый том многотомного архива рядом с остальными томами) — без
                 скачивания; файл не удаляется (его папку удаляет вызывающий).
+            broken_ok: Повреждённый файл (:class:`~configs.file_reader.BrokenFile`) — документ «нет текста»
+                (``False`` — исключение: вызывающий попробует другой источник).
 
         Текст с признаками сбоя OCR (циклы повторов) сохраняется со статусом ``suspect``: при обычном
         прогоне он берётся из кэша, при отладочном (``force``) файл читается заново.
@@ -1377,15 +1386,24 @@ class AIFileAnalyzer:
                 document_id, text = doc["id"], doc["text"]
                 progress.note(f"текст взят из общего документа {document_id} (файл уже читался)")
             else:
-                async with progress.step(f"чтение текста ({ext}{', распознавание сканов' if ext == '.pdf' else ''})"):
-                    text = await self._read_text(tmp_path, file_name, ext)
+                broken = None
+                try:
+                    async with progress.step(f"чтение текста ({ext}{', распознавание сканов' if ext == '.pdf' else ''})"):
+                        text = await self._read_text(tmp_path, file_name, ext)
+                except BrokenFile as e:
+                    if not broken_ok:
+                        raise
+                    # файл повреждён (PDF без trailer / xref): не ошибка анализа с повторами и трассировкой, а
+                    # документ без текста — повторное чтение того же файла ничего не даст
+                    broken, text = str(e), None
                 if text and OCR_ERROR_RE.search(text):
                     # Модель OCR была недоступна (перезапуск, 404/5xx) — часть страниц потеряна. Такой текст
                     # не сохраняем и не анализируем: файл получит pipeline.status = failed и будет взят повторно.
                     raise RuntimeError("OCR: часть страниц не распознана — модель распознавания была недоступна")
                 if not text or not text.strip() or NO_TEXT_MARK in text:
-                    document_id = await self.repo.upsert_document(sha, None, ext, size, None, ocr_status="failed",
-                                                                  ocr_error="Не удалось извлечь текст")
+                    document_id = await self.repo.upsert_document(
+                        sha, None, ext, size, None, ocr_status="failed",
+                        ocr_error=f"Файл повреждён: {broken}"[:500] if broken else "Не удалось извлечь текст")
                     await self.repo.link_file(self.env, file_id, document_id, card_id=_card(card_id))
                     return document_id, None, sha, size
                 text_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()

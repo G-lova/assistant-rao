@@ -77,3 +77,38 @@ class RouterModelsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BodyTypesTest(unittest.TestCase):
+    """Тела запросов в ``main.py`` без строгих ``Dict[str, str]``: pydantic v2 не приводит число к строке — портал
+    получал 422 на ``/get-contract-info`` с ``procurement_id`` числом (прод, 15.11.2026)."""
+
+    def test_no_str_dict_bodies(self):
+        import ast
+        import os
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "main.py"), encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        bad = []
+        for fn in ast.walk(tree):
+            if not isinstance(fn, ast.AsyncFunctionDef | ast.FunctionDef):
+                continue
+            args = fn.args.args + fn.args.kwonlyargs
+            defaults = [None] * (len(fn.args.args) - len(fn.args.defaults)) + fn.args.defaults + fn.args.kw_defaults
+            for arg, default in zip(args, defaults):
+                is_body = isinstance(default, ast.Call) and getattr(default.func, "id", "") == "Body"
+                if is_body and arg.annotation is not None and ast.unparse(arg.annotation) == "Dict[str, str]":
+                    bad.append(fn.name)
+        self.assertEqual(bad, [])
+
+    @unittest.skipUnless(v2(), "нужен pydantic v2")
+    def test_dict_any_accepts_number(self):
+        from typing import Any, Dict
+
+        from pydantic import TypeAdapter, ValidationError
+
+        with self.assertRaises(ValidationError):
+            TypeAdapter(Dict[str, str]).validate_python({"procurement_id": 12345})   # так было: 422
+        self.assertEqual(TypeAdapter(Dict[str, Any]).validate_python({"procurement_id": 12345}),
+                         {"procurement_id": 12345})

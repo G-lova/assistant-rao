@@ -38,6 +38,11 @@ def setup_logging():
     logger.info(f"Logging initialized. Level: {config.LOG_LEVEL}, File: {config.LOG_FILE}")
 
 
+# pypdf пишет WARNING на каждый шрифт без ширин («unknown widths» — десятки строк на PDF) и на обрезанный файл
+# («EOF marker not found»): ошибки чтения и так видны в наших сообщениях — его журнал только с ERROR
+logging.getLogger("pypdf").setLevel(logging.ERROR)
+
+
 def get_logger(name):
     """
     Возвращает настроенный экземпляр логгера с указанным именем.

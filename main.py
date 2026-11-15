@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Body, Header, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from typing import Optional, Dict
+from typing import Any, Dict, Optional
 from celery.result import AsyncResult
 
 from configs.config import Config
@@ -215,7 +215,9 @@ def _check_env_header(x_api_database: Optional[str]) -> None:
 
 @app.post("/get-contract-info")
 async def api_get_contract_info(
-    request_body: Dict[str, str] = Body(...),
+    # Dict[str, Any], а не Dict[str, str]: портал присылает procurement_id числом — pydantic v1 приводил его к строке,
+    # v2 отвечает 422 (прод, 15.11.2026, после перехода на FastAPI 0.115)
+    request_body: Dict[str, Any] = Body(...),
     x_api_database: Optional[str] = Header(default=None, alias="X-API-Database")
 ):
     """
@@ -227,8 +229,8 @@ async def api_get_contract_info(
     Используется внешними сервисами для быстрого доступа к основным параметрам контракта.
 
     Args:
-        request_body (Dict[str, str], optional): Тело запроса в формате JSON с обязательным полем `procurement_id`.
-            Пример: {"procurement_id": "12345"}.
+        request_body (Dict[str, Any]): Тело запроса в формате JSON с обязательным полем `procurement_id`
+            (строка или число). Пример: {"procurement_id": "12345"} или {"procurement_id": 12345}.
 
     Raises:
         HTTPException: Если поле `procurement_id` отсутствует в запросе — возвращает ошибку 400.
@@ -242,6 +244,8 @@ async def api_get_contract_info(
     """
     _check_env_header(x_api_database)
     procurement_id = request_body.get("procurement_id")
+    if procurement_id is not None and not isinstance(procurement_id, str):
+        procurement_id = str(procurement_id)    # число → строка, как в pydantic v1
     logger.info(f"Получение данных контракта для экспертизы {procurement_id}")
 
     if not procurement_id:

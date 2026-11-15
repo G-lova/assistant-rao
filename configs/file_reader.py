@@ -26,6 +26,7 @@ from pdf2image import convert_from_path
 from configs.logger import get_logger
 from configs.rate_limiter import llm_rate_limiter
 from evaluate_documents.ocr import OCRProcessor
+from configs.file_errors import BrokenFile  # повреждённый файл (лёгкий модуль: его ловит анализ файлов РМ)
 
 
 logger = get_logger(__name__)
@@ -213,7 +214,9 @@ def pdf_image_pages(path: str) -> list:
         logger.debug(f"PDF {path}: pypdf не определил изображения: {type(e).__name__}: {e}")
     try:
         import pdfplumber
-
+    except ImportError:   # pdfplumber не входит в requirements — запасной путь только при ручной установке
+        return []
+    try:
         with pdfplumber.open(path) as pdf:
             return [bool(page.images) for page in pdf.pages]
     except Exception as e:  # noqa: BLE001
@@ -487,7 +490,9 @@ class FileReader:
             layer = await asyncio.to_thread(pdf_layer_pages, file_path) if pdf_text_layer_enabled() else []
             total = len(layer) or await asyncio.to_thread(pdf_page_count, file_path)
             if not total:
-                raise ValueError("не удалось определить число страниц")
+                # ни pypdf, ни poppler не прочитали структуру (нет trailer / xref, «EOF marker not found»):
+                # файл повреждён или обрезан — повторное чтение того же файла ничего не даст
+                raise BrokenFile("не удалось определить число страниц — PDF повреждён или обрезан")
             need_ocr = [i for i in range(total) if i >= len(layer) or not layer[i][1]]
 
             ocr_texts: dict = {}
@@ -511,6 +516,8 @@ class FileReader:
             result = "\n\n".join(results)
             return result.strip() if result.strip() else "[Нет читаемого текста]"
 
+        except BrokenFile:
+            raise
         except Exception as e:
             raise ValueError(f"Ошибка при обработке {original_filename} через OCR: {str(e)}")
 
@@ -1021,6 +1028,10 @@ class FileReader:
                 logger.warning(f"Неподдерживаемый формат файла: {original_filename}")
                 return msg
                 
+        except BrokenFile as e:
+            # повреждённый файл — без трассировки: причина в файле, а не в коде
+            logger.warning(f"Файл {original_filename} повреждён: {e}")
+            raise BrokenFile(f"Ошибка чтения файла: {e}") from e
         except Exception as e:
             logger.error(f"Ошибка чтения файла {original_filename}: {str(e)}", exc_info=True)
             raise ValueError(f"Ошибка чтения файла: {str(e)}")
