@@ -71,7 +71,23 @@ async def one(client, model, messages, extra, max_tokens, label, think=False, st
         print(f"{label}: ОШИБКА за {time.monotonic() - t:.1f} с: {type(e).__name__} {status or ''} {str(e)[:200]}")
 
 
-async def main(parallel: int, chars: int, timeout: float, long_tokens: int = 0) -> None:
+async def lengths(client, model) -> None:
+    """Зависит ли мусор («Register Register …») от длины запроса, а не от промпта извлечения и схемы.
+
+    Текст — промпт извлечения как обычный русский текст (не повторённый образец), задание — короткий пересказ;
+    длина запроса растёт: 1, 2, 3, 4, 5, 6 тыс. токенов и больше.
+    """
+    from configs.resources import read_text
+
+    material = read_text("prompts/data_extractor_prompt.txt") + "\n" + read_text("prompts/data_extractor_prompt.txt")
+    for chars in (2000, 5000, 9000, 12000, 15000, 20000, 30000):
+        text = material[:chars]
+        await one(client, model, [{"role": "user", "content": "Перескажи кратко, о чём этот текст, 2–3 "
+                                                                   "предложения:\n\n" + text}],
+                  None, 300, f"L. запрос {chars} симв.")
+
+
+async def main(parallel: int, chars: int, timeout: float, long_tokens: int = 0, by_length: bool = False) -> None:
     """Три проверки по очереди."""
     from openai import AsyncOpenAI
 
@@ -86,6 +102,9 @@ async def main(parallel: int, chars: int, timeout: float, long_tokens: int = 0) 
     print(f"Модель {cfg.model}, {cfg.api_url}; таймаут клиента {timeout:.0f} с, "
           f"EXTRACTION_MAX_TOKENS={settings.EXTRACTION_MAX_TOKENS}")
 
+    if by_length:
+        await lengths(client, cfg.model)
+        return
     short = [{"role": "user", "content": "Ответь одним словом: да"}]
     await one(client, cfg.model, short, None, 5, "1. короткий")
     # без chat_template_kwargs: рассуждающая модель тратит лимит на рассуждение и отвечает пусто (так было бы,
@@ -125,5 +144,7 @@ if __name__ == "__main__":
     ap.add_argument("--timeout", type=float, default=600, help="таймаут клиента, с (по умолчанию 600)")
     ap.add_argument("--long", type=int, default=0, dest="long_tokens",
                     help="доп. проверка: max_tokens для генерации дольше 90 с, потоком и без (например 7000)")
+    ap.add_argument("--lengths", action="store_true",
+                    help="только проверка по длине запроса: обычный текст 2–30 тыс. симв., короткий пересказ")
     a = ap.parse_args()
-    asyncio.run(main(a.parallel, a.chars, a.timeout, a.long_tokens))
+    asyncio.run(main(a.parallel, a.chars, a.timeout, a.long_tokens, a.lengths))
