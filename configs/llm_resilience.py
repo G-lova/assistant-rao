@@ -147,6 +147,7 @@ def _sdk(kwargs: Dict[str, Any], key: Optional[str] = None) -> Dict[str, Any]:
     out = {k: v for k, v in kwargs.items() if not k.startswith("_")}
     if "messages" in out:
         out["messages"] = _fold_system(out["messages"])   # длинный system-промпт → в сообщение user
+        out["messages"] = _nonce_prefix(out["messages"])  # уникальное начало — мимо кэша префиксов сервера
     if key not in _THINKING_REJECTED and _setting("LLM_DISABLE_THINKING", True):
         extra = dict(out.get("extra_body") or {})
         tpl = dict(extra.get("chat_template_kwargs") or {})
@@ -192,6 +193,38 @@ def _fold_system(messages: Any) -> Any:
             folded = True
         out.append(m)
     return out
+
+
+def _nonce_prefix(messages: Any) -> Any:
+    """Уникальная строка в начале первого сообщения (``LLM_PREFIX_NONCE``): запрос не совпадает началом с прежними.
+
+    Сервер (vLLM) переиспользует посчитанное начало запроса (prefix caching). 15.11.2026 prod_multimodal_llm
+    отвечал мусором («{ Register …», «{ductduct…») именно на началах, которые приложение уже отправляло — в любой
+    роли и с любой схемой, — а те же промпты с другим началом обрабатывал нормально: похоже на испорченный кэш.
+    Строка новая в каждом запросе, поэтому кэш не используется (сервер заново считает промпт).
+
+    Args:
+        messages: ``messages`` запроса.
+
+    Returns:
+        Any: Новый список сообщений (или исходный, если настройка выключена или сообщений нет).
+    """
+    if not _setting("LLM_PREFIX_NONCE", False) or not isinstance(messages, list) or not messages:
+        return messages
+    import uuid
+
+    first = messages[0]
+    if not isinstance(first, dict):
+        return messages
+    tag = f"Запрос {uuid.uuid4().hex[:12]}."
+    content = first.get("content")
+    if isinstance(content, list):
+        content = [{"type": "text", "text": tag}] + content
+    elif isinstance(content, str):
+        content = f"{tag}\n\n{content}"
+    else:
+        return messages
+    return [{**first, "content": content}] + list(messages[1:])
 
 
 def _thinking_rejected(e: BaseException, key: str) -> bool:
