@@ -18,6 +18,9 @@
    лимита), это худший случай по длине генерации;
 3. ``--parallel N`` таких запросов одновременно — как при прогоне (2 процесса × ``RM_FILE_CONCURRENCY``).
 
+``--risk`` — только запрос анализа рисков (``DocumentRiskAnalyzer``: промпт с каталогом кодов, схема ``guided_json``)
+в нескольких вариантах: что даёт «{ductductduct…» при переносе system в user (15.11.2026).
+
 Рассуждение выключено, как в приложении (``chat_template_kwargs.enable_thinking = false``). Для каждого запроса —
 код/ошибка, время, токены запроса и ответа, ``finish_reason``, скорость генерации, длина ответа и рассуждения.
 """
@@ -63,7 +66,8 @@ async def one(client, model, messages, extra, max_tokens, label, think=False, st
         out_tok = getattr(u, "completion_tokens", None)
         speed = f", {out_tok / sec:.0f} ток/с" if out_tok and sec > 0 else ""
         print(f"{label}: 200 за {sec:.1f} с; токены запроса {getattr(u, 'prompt_tokens', '?')}, ответа {out_tok}"
-              f"{speed}; finish_reason={r.choices[0].finish_reason}; "
+              f"{speed}; finish_reason={r.choices[0].finish_reason}"
+              f"{' (зацикливание — поток оборван)' if getattr(r, 'loop_cut', False) else ''}; "
               f"ответ {len(r.choices[0].message.content or '')} симв., рассуждение {len(reasoning)} симв.; "
               f"начало: {(r.choices[0].message.content or reasoning or '')[:120]!r}")
     except Exception as e:  # noqa: BLE001 — нужен итог, а не трассировка
@@ -125,8 +129,52 @@ async def isolate(client, model) -> None:
               None, mt, "I7. system=вторая половина промпта")
 
 
+async def risk(client, model) -> None:
+    """Запрос анализа рисков, как у ``DocumentRiskAnalyzer._analyze_chunk``, и его варианты.
+
+    15.11.2026 после переноса system в user извлечение заработало, а анализ рисков по-прежнему отвечал
+    «{ductductduct…». Варианты отделяют причину: схема (``guided_json``), роль, каталог кодов, часть промпта.
+    Ответ потоком (обрыв зацикливания на ~4000 символах — проверка не ждёт лимита).
+    """
+    from configs.resources import read_text
+    from risk_monitoring import risk_catalog
+
+    codes = list(risk_catalog.DOCUMENT_RISK_CODES)
+    template = read_text("prompts/risk_analysis_prompt.txt")
+    prompt = template.replace("RISK_CATALOG", risk_catalog.catalog_text(codes))
+    schema = json.loads(read_text("schemas/risk_analysis_schema.json").replace('"RISK_CODES"', json.dumps(codes)))
+    user = ("Документ: Проект контракта.docx (часть 1 из 1).\n"
+            'Контекст (тип документа, краткое содержание, закупка, закон): {"detected_type": "contract", "fz": "44"}\n'
+            f"Для этого документа ищи ТОЛЬКО риски с кодами: {', '.join(codes)}. Другие коды не используй.\n\n"
+            f"Текст:\n\n{SAMPLE * 4}")
+    guided = {"guided_json": schema}
+    strict = ("\n\nОтвет — строго один JSON-объект по схеме, без markdown и текста вне JSON:\n"
+              + json.dumps(schema, ensure_ascii=False))
+    print(f"Промпт {len(prompt)} симв. (каталог {len(prompt) - len(template)}), схема {len(json.dumps(schema))} симв., "
+          f"кодов {len(codes)}")
+    mt = 3000
+
+    async def go(messages, extra, label):
+        await one(client, model, messages, extra, mt, label, stream=True)
+
+    await go([{"role": "user", "content": prompt + "\n\n" + user}], guided,
+             "R1. как приложение сейчас: всё в user, guided_json")
+    await go([{"role": "user", "content": prompt + "\n\n" + user}], None, "R2. всё в user, без guided_json")
+    await go([{"role": "user", "content": prompt + strict + "\n\n" + user}], None,
+             "R3. всё в user, схема в промпте, без guided_json")
+    await go([{"role": "system", "content": prompt}, {"role": "user", "content": user}], guided,
+             "R4. system=промпт (до переноса), guided_json")
+    no_cat = template.replace("RISK_CATALOG", "")
+    await go([{"role": "user", "content": no_cat + "\n\n" + user}], guided, "R5. всё в user без каталога кодов")
+    half = len(prompt) // 2
+    await go([{"role": "user", "content": prompt[:half] + "\n\n" + user}], guided, "R6. первая половина промпта")
+    await go([{"role": "user", "content": prompt[half:] + "\n\n" + user}], guided, "R7. вторая половина промпта")
+    await go([{"role": "user", "content": "Найди риски в тексте контракта. Ответ — JSON по схеме.\n\n" + user}],
+             guided, "R8. короткое задание, та же схема")
+
+
 async def main(parallel: int, chars: int, timeout: float, long_tokens: int = 0, by_length: bool = False,
-               by_parts: bool = False) -> None:
+               by_parts: bool = False, by_risk: bool = False) -> None:
     """Три проверки по очереди."""
     from openai import AsyncOpenAI
 
@@ -146,6 +194,9 @@ async def main(parallel: int, chars: int, timeout: float, long_tokens: int = 0, 
         return
     if by_parts:
         await isolate(client, cfg.model)
+        return
+    if by_risk:
+        await risk(client, cfg.model)
         return
     short = [{"role": "user", "content": "Ответь одним словом: да"}]
     await one(client, cfg.model, short, None, 5, "1. короткий")
@@ -190,5 +241,7 @@ if __name__ == "__main__":
                     help="только проверка по длине запроса: обычный текст 2–30 тыс. симв., короткий пересказ")
     ap.add_argument("--isolate", action="store_true",
                     help="только поиск причины мусора: роль system, промпт по частям, температура")
+    ap.add_argument("--risk", action="store_true",
+                    help="только запрос анализа рисков: схема, роль, каталог кодов, части промпта")
     a = ap.parse_args()
-    asyncio.run(main(a.parallel, a.chars, a.timeout, a.long_tokens, a.lengths, a.isolate))
+    asyncio.run(main(a.parallel, a.chars, a.timeout, a.long_tokens, a.lengths, a.isolate, a.risk))
