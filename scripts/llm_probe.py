@@ -7,13 +7,15 @@
 
 Проверки:
 
-1. короткий запрос (5 токенов) — жив ли экземпляр модели;
+1. короткий запрос (5 токенов) — жив ли экземпляр модели; 1б — то же без ``chat_template_kwargs`` (рассуждает ли
+   модель по умолчанию);
 2. запрос извлечения данных: промпт ``data_extractor_prompt.txt``, схема ``guided_json``, ``max_tokens`` как у
    ``DataExtractor`` — так выглядит реальная нагрузка (504 шлюза бывает и у живой модели, если ответ генерируется
    дольше таймаута шлюза);
 3. ``--parallel N`` таких запросов одновременно — как при прогоне (2 процесса × ``RM_FILE_CONCURRENCY``).
 
-Для каждого запроса — код/ошибка, время, токены запроса и ответа, ``finish_reason`` и скорость генерации.
+Рассуждение выключено, как в приложении (``chat_template_kwargs.enable_thinking = false``). Для каждого запроса —
+код/ошибка, время, токены запроса и ответа, ``finish_reason``, скорость генерации, длина ответа и рассуждения.
 """
 import argparse
 import asyncio
@@ -29,19 +31,29 @@ SAMPLE = (
 )
 
 
-async def one(client, model, messages, extra, max_tokens, label):
-    """Один запрос без повторов: итог и замеры."""
+async def one(client, model, messages, extra, max_tokens, label, think=False):
+    """Один запрос без повторов: итог и замеры.
+
+    ``think``: ``False`` — рассуждение выключено, как в приложении; ``True`` — включено; ``None`` — параметр не
+    передаётся (поведение сервера по умолчанию).
+    """
     t = time.monotonic()
     try:
+        body = dict(extra or {})
+        if think is not None:
+            # как в приложении (configs.llm_resilience._sdk, LLM_DISABLE_THINKING): рассуждение выключено
+            body["chat_template_kwargs"] = {"enable_thinking": think}
         r = await client.chat.completions.create(model=model, messages=messages, max_tokens=max_tokens,
-                                                 temperature=0, extra_body=extra or None)
+                                                 temperature=0, extra_body=body or None)
         sec = time.monotonic() - t
         u = getattr(r, "usage", None)
+        msg = r.choices[0].message
+        reasoning = getattr(msg, "reasoning_content", None) or getattr(msg, "reasoning", None) or ""
         out_tok = getattr(u, "completion_tokens", None)
         speed = f", {out_tok / sec:.0f} ток/с" if out_tok and sec > 0 else ""
         print(f"{label}: 200 за {sec:.1f} с; токены запроса {getattr(u, 'prompt_tokens', '?')}, ответа {out_tok}"
               f"{speed}; finish_reason={r.choices[0].finish_reason}; "
-              f"ответ {len(r.choices[0].message.content or '')} симв.")
+              f"ответ {len(r.choices[0].message.content or '')} симв., рассуждение {len(reasoning)} симв.")
     except Exception as e:  # noqa: BLE001 — нужен итог, а не трассировка
         status = getattr(e, "status_code", None)
         print(f"{label}: ОШИБКА за {time.monotonic() - t:.1f} с: {type(e).__name__} {status or ''} {str(e)[:200]}")
@@ -62,7 +74,11 @@ async def main(parallel: int, chars: int, timeout: float) -> None:
     print(f"Модель {cfg.model}, {cfg.api_url}; таймаут клиента {timeout:.0f} с, "
           f"EXTRACTION_MAX_TOKENS={settings.EXTRACTION_MAX_TOKENS}")
 
-    await one(client, cfg.model, [{"role": "user", "content": "Ответь одним словом: да"}], None, 5, "1. короткий")
+    short = [{"role": "user", "content": "Ответь одним словом: да"}]
+    await one(client, cfg.model, short, None, 5, "1. короткий")
+    # без chat_template_kwargs: рассуждающая модель тратит лимит на рассуждение и отвечает пусто (так было бы,
+    # если сервер перестанет принимать параметр — тогда клиент повторяет запрос с лимитом 12 000 токенов)
+    await one(client, cfg.model, short, None, 200, "1б. короткий, рассуждение по умолчанию сервера", think=None)
 
     text = (SAMPLE * (chars // len(SAMPLE) + 1))[:chars]
     schema = schema_for_profile(json.loads(read_text("schemas/data_extractor_schema.json")), None)
