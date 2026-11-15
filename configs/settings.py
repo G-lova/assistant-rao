@@ -558,9 +558,10 @@ LLM_DISABLE_THINKING = True
 LLM_STREAM_RESPONSES = True
 # Длинный system-промпт переносится в начало первого сообщения user (configs/llm_resilience.py). 15.11.2026
 # prod_multimodal_llm на промпте извлечения (19 КБ, ~3800 токенов) в роли system отвечал «{ Register Register …»
-# (36 ток/с), тот же текст в сообщении user — нормальный JSON (165 ток/с); половина промпта в system — норма
-# (scripts/llm_probe.py --isolate). 0 — не переносить
-LLM_SYSTEM_AS_USER_CHARS = 8000
+# (36 ток/с), тот же текст в сообщении user — нормальный JSON (165 ток/с); scripts/llm_probe.py --isolate.
+# Порог 8000 не защитил: в 21:05 мусор давала уже первая половина промпта (~9 КБ), а вторая — нет, то есть
+# дело не в длине. Поэтому переносятся все system-сообщения (1 — любой длины). 0 — не переносить
+LLM_SYSTEM_AS_USER_CHARS = 1
 # Обрыв зацикливания в потоке (configs/llm_resilience.py): каждые LLM_LOOP_STEP_CHARS символов ответа последние
 # LLM_LOOP_WINDOW_CHARS сжимаются zlib; степень сжатия ≥ LLM_LOOP_RATIO два раза подряд — модель повторяет одно и
 # то же («Register Register …», одна запись списка десятки раз): генерация обрывается, запрос повторяется один раз

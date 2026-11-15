@@ -160,8 +160,9 @@ def _fold_system(messages: Any) -> Any:
     """Длинные system-сообщения (≥ ``LLM_SYSTEM_AS_USER_CHARS`` символов) — в начало первого сообщения ``user``.
 
     Сервер prod_multimodal_llm (15.11.2026) на длинном system-промпте генерирует мусор («Register Register …»),
-    а тот же текст в сообщении пользователя обрабатывает нормально и в 4–5 раз быстрее. Короткие system-сообщения
-    остаются как есть. Список частей (текст + изображения) дополняется текстовой частью в начале.
+    а тот же текст в сообщении пользователя обрабатывает нормально и в 4–5 раз быстрее. По умолчанию порог 1 —
+    переносятся все system-сообщения (мусор давал и 9-КБ фрагмент промпта). Список частей (текст + изображения)
+    дополняется текстовой частью в начале.
 
     Args:
         messages: ``messages`` запроса.
@@ -218,8 +219,10 @@ def _boost_after_thinking(kwargs: Dict[str, Any], key: str) -> bool:
 
 
 class _Text(str):
-    """Текст ответа с признаком «пусто, потому что рассуждение исчерпало лимит»."""
+    """Текст ответа с признаками «пусто, потому что рассуждение исчерпало лимит» (``thinking_cut``) и «поток оборван
+    на зацикливании» (``loop_cut``)."""
     thinking_cut = False
+    loop_cut = False
 
 
 def split_halves(text: str) -> List[str]:
@@ -480,6 +483,10 @@ async def _create(client: Any, stream: bool, kwargs: Dict[str, Any]) -> str:
     if not hasattr(resp, "__aiter__"):  # сервер или обёртка вернули обычный ответ
         return _log_empty(kwargs, resp.choices[0].message.content or "", resp.choices[0])
     finish, reasoning = None, 0
+    # Зацикливание (LLM_LOOP_CUT): без обрыва модель писала «{ductductduct…» до лимита — 12 тыс. символов
+    # за 60–75 с на каждую попытку анализа рисков (15.11.2026; раньше проверка была только в _Completions.create)
+    watch = _LoopWatch() if _setting("LLM_LOOP_CUT", False) else None
+    tail, total, loop_cut = "", 0, False
     async for chunk in resp:
         if getattr(chunk, "choices", None):
             choice = chunk.choices[0]
@@ -487,11 +494,31 @@ async def _create(client: Any, stream: bool, kwargs: Dict[str, Any]) -> str:
             delta = getattr(choice, "delta", None)
             if delta is None:
                 continue
+            piece = ""
             if getattr(delta, "content", None):
                 parts.append(delta.content)
+                piece += delta.content
             r = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
             if isinstance(r, str):
                 reasoning += len(r)
+                piece += r
+            if piece and watch is not None:
+                total += len(piece)
+                tail = (tail + piece)[-watch.window * 2:]
+                loop_cut = watch.check(total, tail)
+        if loop_cut:
+            CALLS["loop_cut"] = CALLS.get("loop_cut", 0) + 1
+            logger.warning(f"LLM {kwargs.get('model')}: модель зациклилась — поток оборван на {total} символах "
+                           f"(сжатие хвоста {watch.last_ratio:.0f}×)")
+            close = getattr(resp, "close", None)
+            if close is not None:
+                try:
+                    await close()   # закрыть соединение: сервер прекращает генерацию
+                except Exception:  # noqa: BLE001 — ответ уже собран
+                    pass
+            out = _Text("".join(parts))
+            out.loop_cut = True
+            return out
     return _log_empty(kwargs, "".join(parts), None, finish, reasoning)
 
 
@@ -566,6 +593,15 @@ async def call_llm(client: Any, retries: int = len(RETRY_DELAYS) + 1, **kwargs: 
                 text = await _bounded(_create(client, stream, _sdk(kwargs, key)), key)
             _breaker_record(key, True)
             if getattr(text, "thinking_cut", False) and _boost_after_thinking(kwargs, key):
+                extra += 1
+                continue
+            if getattr(text, "loop_cut", False) and not kwargs.get("_penalized"):
+                # поток оборван на зацикливании — один повтор со штрафом за повторяющиеся токены;
+                # повторное зацикливание возвращается как есть (разбор ответа решит, повторять ли дальше)
+                from configs.llm_repetition import penalized
+
+                kwargs = {**penalized(kwargs), "_penalized": True}
+                logger.warning(f"LLM {key}: повтор запроса со штрафом за повторы после зацикливания")
                 extra += 1
                 continue
             return str(text)
