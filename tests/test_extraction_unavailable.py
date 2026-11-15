@@ -162,3 +162,23 @@ class GuardedTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoRetryTest(unittest.TestCase):
+    """``async_retry`` не повторяет ``ModelUnavailable`` (повторы клиента уже исчерпаны)."""
+
+    def test_not_retried(self):
+        from configs.llm_resilience import ModelUnavailable, retries_exhausted
+        from configs.retry_utils import RetryConfig, async_retry
+
+        calls = []
+
+        @async_retry(RetryConfig(max_retries=4, delay=0))
+        async def step():
+            calls.append(1)
+            raise ModelUnavailable("InternalServerError: Error code: 504")
+
+        self.assertTrue(retries_exhausted(ModelUnavailable("x")))
+        with self.assertRaises(ModelUnavailable):
+            asyncio.run(step())
+        self.assertEqual(calls, [1])

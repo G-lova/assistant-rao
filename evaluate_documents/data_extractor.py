@@ -14,7 +14,8 @@ from configs.logger import brief, get_logger
 from configs.rate_limiter import llm_rate_limiter
 from configs.retry_utils import LLM_RETRY_CONFIG, async_retry
 from configs.llm_repetition import LOOP_MIN, dedupe_repeats, penalized
-from configs.llm_resilience import ContextOverflow, ModelUnavailable, retries_exhausted, split_halves, transient
+from configs.llm_resilience import (ContextOverflow, ModelUnavailable, mark_exhausted, retries_exhausted,
+                                    split_halves, transient)
 from configs.utils import extract_json_objects
 from configs.resources import read_text
 
@@ -296,7 +297,9 @@ class DataExtractor:
             logger.error(f"Ошибка при анализе '{filename}': {str(e)}")
             if raise_unavailable and (transient(e) or retries_exhausted(e)):
                 # сбой сервера модели (5xx, таймаут) после всех повторов — не «в блоке нет данных»
-                raise ModelUnavailable(f"{type(e).__name__}: {e}") from e
+                # помечено «повторы исчерпаны»: async_retry над этим методом не повторяет его ещё 4 раза
+                # (прод 15.11.2026: 6 попыток клиента × 4 повтора декоратора — файл ждал мёртвую модель > 30 мин)
+                raise mark_exhausted(ModelUnavailable(f"{type(e).__name__}: {e}")) from e
             return None
 
     def merge_json_objects(self, json_strings) -> dict:
