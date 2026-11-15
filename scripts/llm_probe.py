@@ -70,7 +70,7 @@ async def one(client, model, messages, extra, max_tokens, label, think=False, st
         print(f"{label}: ОШИБКА за {time.monotonic() - t:.1f} с: {type(e).__name__} {status or ''} {str(e)[:200]}")
 
 
-async def main(parallel: int, chars: int, timeout: float) -> None:
+async def main(parallel: int, chars: int, timeout: float, long_tokens: int = 0) -> None:
     """Три проверки по очереди."""
     from openai import AsyncOpenAI
 
@@ -103,6 +103,11 @@ async def main(parallel: int, chars: int, timeout: float) -> None:
     await one(client, cfg.model, messages, extra, mt, "2в. извлечение с guided_json, рассуждение по умолчанию",
               think=None)
     await one(client, cfg.model, messages, extra, mt, "2д. извлечение потоком (как приложение)", stream=True)
+    if long_tokens:
+        # генерация заведомо дольше 90 с (таймаут шлюза): 200 — поток шлюз не обрывает
+        await one(client, cfg.model, messages, extra, long_tokens, f"2е. потоком, max_tokens={long_tokens}",
+                  stream=True)
+        await one(client, cfg.model, messages, extra, long_tokens, f"2ж. без потока, max_tokens={long_tokens}")
     tiny = {"guided_json": {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}}
     await one(client, cfg.model, short, tiny, 50, "2г. короткий с маленькой схемой")
     if parallel > 1:
@@ -117,5 +122,7 @@ if __name__ == "__main__":
     ap.add_argument("--parallel", type=int, default=3, help="одновременных запросов извлечения (по умолчанию 3)")
     ap.add_argument("--chars", type=int, default=3000, help="символов текста в запросе извлечения (по умолчанию 3000)")
     ap.add_argument("--timeout", type=float, default=600, help="таймаут клиента, с (по умолчанию 600)")
+    ap.add_argument("--long", type=int, default=0, dest="long_tokens",
+                    help="доп. проверка: max_tokens для генерации дольше 90 с, потоком и без (например 7000)")
     a = ap.parse_args()
-    asyncio.run(main(a.parallel, a.chars, a.timeout))
+    asyncio.run(main(a.parallel, a.chars, a.timeout, a.long_tokens))
