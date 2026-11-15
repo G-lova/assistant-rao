@@ -234,7 +234,11 @@ class ModelUnavailable(RuntimeError):
 
     Поднимается там, где «пустой» результат сохранился бы как окончательный (извлечение данных файла РМ): файл
     получает ``pipeline.status = failed`` и берётся повторно, а не записывается без данных навсегда.
+
+    Поднимается после всех повторов клиента — поэтому всегда «повторы исчерпаны» (``async_retry`` его не повторяет).
     """
+
+    llm_retries_exhausted = True
 
 
 def mark_exhausted(error: BaseException) -> BaseException:
