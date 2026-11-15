@@ -146,3 +146,47 @@ class LoopCutTest(unittest.TestCase):
         self.assertEqual(len(seen), 1)
         self.assertFalse(resp.loop_cut)
         self.assertEqual(resp.choices[0].message.content, text)
+
+
+class FoldSystemTest(unittest.TestCase):
+    """Длинный system-промпт → в начало сообщения user (``LLM_SYSTEM_AS_USER_CHARS``)."""
+
+    def fold(self, messages, limit=100):
+        from configs import settings
+        from configs.llm_resilience import _fold_system
+
+        with mock.patch.object(settings, "LLM_SYSTEM_AS_USER_CHARS", limit):
+            return _fold_system(messages)
+
+    def test_long_folded(self):
+        msgs = [{"role": "system", "content": "П" * 200}, {"role": "user", "content": "документ"}]
+        out = self.fold(msgs)
+        self.assertEqual([m["role"] for m in out], ["user"])
+        self.assertTrue(out[0]["content"].startswith("П" * 200))
+        self.assertTrue(out[0]["content"].endswith("документ"))
+        self.assertEqual(msgs[0]["role"], "system")             # исходный список не меняется
+
+    def test_short_kept_and_off(self):
+        msgs = [{"role": "system", "content": "коротко"}, {"role": "user", "content": "x"}]
+        self.assertIs(self.fold(msgs), msgs)
+        long_msgs = [{"role": "system", "content": "П" * 200}, {"role": "user", "content": "x"}]
+        self.assertIs(self.fold(long_msgs, limit=0), long_msgs)
+
+    def test_multimodal_parts(self):
+        msgs = [{"role": "system", "content": "П" * 200},
+                {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:"}}]}]
+        out = self.fold(msgs)
+        self.assertEqual(out[0]["content"][0], {"type": "text", "text": "П" * 200})
+        self.assertEqual(out[0]["content"][1]["type"], "image_url")
+
+    def test_in_request(self):
+        from configs import settings
+        from configs.llm_resilience import ResilientClient
+
+        plain = types.SimpleNamespace(choices=[types.SimpleNamespace(
+            message=types.SimpleNamespace(content="ok"), finish_reason="stop")])
+        raw, seen = client(plain)
+        with mock.patch.multiple(settings, LLM_STREAM_RESPONSES=False, LLM_SYSTEM_AS_USER_CHARS=100):
+            asyncio.run(ResilientClient(raw, retries=1).chat.completions.create(
+                model="m", messages=[{"role": "system", "content": "П" * 200}, {"role": "user", "content": "x"}]))
+        self.assertEqual([m["role"] for m in seen[0]["messages"]], ["user"])

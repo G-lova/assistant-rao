@@ -137,18 +137,59 @@ def _sdk(kwargs: Dict[str, Any], key: Optional[str] = None) -> Dict[str, Any]:
     """Параметры запроса без служебных ключей (``_fits`` — счётчик уменьшений ответа, ``_boosted`` — лимит ответа
     увеличен после рассуждения).
 
+    Длинный system-промпт переносится в сообщение user (:func:`_fold_system`, ``LLM_SYSTEM_AS_USER_CHARS``).
+
     Рассуждение модели выключается (``chat_template_kwargs.enable_thinking = false``, ``LLM_DISABLE_THINKING``):
     рассуждающая модель (02.11.2026: prod_multimodal_llm) тратила весь лимит ответа на рассуждение — около 10 тыс.
     символов при ``max_tokens = 3000`` — и возвращала пустой ответ. Явно заданное вызывающим значение не меняется;
     серверу, отклонившему параметр, он больше не отправляется.
     """
     out = {k: v for k, v in kwargs.items() if not k.startswith("_")}
+    if "messages" in out:
+        out["messages"] = _fold_system(out["messages"])   # длинный system-промпт → в сообщение user
     if key not in _THINKING_REJECTED and _setting("LLM_DISABLE_THINKING", True):
         extra = dict(out.get("extra_body") or {})
         tpl = dict(extra.get("chat_template_kwargs") or {})
         tpl.setdefault("enable_thinking", False)
         extra["chat_template_kwargs"] = tpl
         out["extra_body"] = extra
+    return out
+
+
+def _fold_system(messages: Any) -> Any:
+    """Длинные system-сообщения (≥ ``LLM_SYSTEM_AS_USER_CHARS`` символов) — в начало первого сообщения ``user``.
+
+    Сервер prod_multimodal_llm (15.11.2026) на длинном system-промпте генерирует мусор («Register Register …»),
+    а тот же текст в сообщении пользователя обрабатывает нормально и в 4–5 раз быстрее. Короткие system-сообщения
+    остаются как есть. Список частей (текст + изображения) дополняется текстовой частью в начале.
+
+    Args:
+        messages: ``messages`` запроса.
+
+    Returns:
+        Any: Новый список сообщений (или исходный, если переносить нечего).
+    """
+    limit = int(_setting("LLM_SYSTEM_AS_USER_CHARS", 0) or 0)
+    if not limit or not isinstance(messages, list):
+        return messages
+    long_sys = [m for m in messages if isinstance(m, dict) and m.get("role") == "system"
+                and isinstance(m.get("content"), str) and len(m["content"]) >= limit]
+    if not long_sys or not any(isinstance(m, dict) and m.get("role") == "user" for m in messages):
+        return messages
+    prefix = "\n\n".join(m["content"] for m in long_sys)
+    out, folded = [], False
+    for m in messages:
+        if any(m is x for x in long_sys):
+            continue
+        if not folded and isinstance(m, dict) and m.get("role") == "user":
+            content = m.get("content")
+            if isinstance(content, list):
+                content = [{"type": "text", "text": prefix}] + content
+            else:
+                content = f"{prefix}\n\n{content or ''}"
+            m = {**m, "content": content}
+            folded = True
+        out.append(m)
     return out
 
 
