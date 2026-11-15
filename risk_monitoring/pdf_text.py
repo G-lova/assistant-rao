@@ -77,7 +77,9 @@ def text_layer(path: str) -> List[str]:
         logger.info(f"pdf_text: pypdf не прочитал {path}: {type(e).__name__}: {e}")
     try:
         import pdfplumber
-
+    except ImportError:   # pdfplumber не входит в requirements — запасной путь только при ручной установке
+        return []
+    try:
         with pdfplumber.open(path) as pdf:
             return [(page.extract_text() or "") for page in pdf.pages]
     except Exception as e:  # noqa: BLE001 — слоя нет, всё распознаём
