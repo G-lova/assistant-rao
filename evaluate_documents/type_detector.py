@@ -6,6 +6,7 @@ from json_repair import repair_json
 from string import Template
 from typing import Any, Dict, List, Optional
 
+from configs import settings
 from configs.logger import get_logger
 from configs.rate_limiter import llm_rate_limiter
 from configs.retry_utils import LLM_RETRY_CONFIG, async_retry
@@ -149,7 +150,7 @@ class TypeDetector:
                     ],
                     extra_body={
                         "guided_json": json.loads(schema)},
-                    max_tokens=3000,
+                    max_tokens=settings.TYPE_DETECT_MAX_TOKENS,   # короткий JSON; зацикливание обрывается раньше
                     temperature=0
                 )
             except asyncio.TimeoutError:
