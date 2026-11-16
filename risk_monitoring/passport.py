@@ -287,6 +287,72 @@ def apply_findings(risk: Dict[str, Any], findings: Sequence[Dict[str, Any]]) -> 
             risk["law"] = "; ".join(laws)
 
 
+def shorten_description(text: str, limit: int, findings: Optional[Sequence[Dict[str, Any]]] = None) -> str:
+    """Описание риска не длиннее ``limit`` символов — для записи во внешнюю БД (API отклоняет длиннее 16 000).
+
+    Описание из нескольких находок («Находок: N.» и строки «1. …») сокращается по целым находкам: первые, сколько
+    помещается, и строка «… ещё K находок — полный список в findings». Иначе (или если не помещается даже первая
+    находка) — обрезка по границе слова с «…».
+
+    Args:
+        text: Описание.
+        limit: Наибольшая длина, символов.
+        findings: ``risk["findings"]`` (номер и описание находки), если есть.
+
+    Returns:
+        str: Описание не длиннее ``limit`` (короткое — без изменений).
+    """
+    text = text or ""
+    if limit <= 0 or len(text) <= limit:
+        return text
+    items = [f for f in (findings or []) if isinstance(f, dict) and f.get("description")]
+    if len(items) > 1:
+        head = f"Находок: {len(items)}."
+        lines: List[str] = []
+        size = len(head)
+        for i, f in enumerate(items):
+            line = f"{f.get('no', i + 1)}. {f['description']}"
+            rest = len(items) - i - 1
+            tail = f"… ещё {rest} — полный список в findings" if rest else ""
+            # строка находки + (если останутся находки) строка-хвост должны поместиться
+            need = size + 1 + len(line) + (1 + len(tail) + 8 if rest else 0)
+            if need > limit:
+                break
+            lines.append(line)
+            size += 1 + len(line)
+        if lines:
+            left = len(items) - len(lines)
+            out = "\n".join([head, *lines])
+            if left:
+                out += f"\n… ещё {left} — полный список в findings"
+            return out[:limit]
+    cut = text[:max(0, limit - 1)]
+    space = cut.rfind(" ")
+    if space > limit * 0.9:
+        cut = cut[:space]
+    return cut.rstrip() + "…"
+
+
+def fit_external_descriptions(ai: Any, limit: int) -> Any:
+    """Копия ``ai_analysis`` для внешней БД с ``risks[].description`` не длиннее ``limit`` (:func:`shorten_description`).
+
+    Исходный словарь не меняется (он же сохраняется во внутренней БД — там описание полное). Если сокращать нечего,
+    возвращается тот же объект.
+    """
+    if not isinstance(ai, dict) or limit <= 0 or not isinstance(ai.get("risks"), list):
+        return ai
+    long_ = [i for i, r in enumerate(ai["risks"])
+             if isinstance(r, dict) and isinstance(r.get("description"), str) and len(r["description"]) > limit]
+    if not long_:
+        return ai
+    risks = list(ai["risks"])
+    for i in long_:
+        r = dict(risks[i])
+        r["description"] = shorten_description(r["description"], limit, r.get("findings"))
+        risks[i] = r
+    return {**ai, "risks": risks}
+
+
 def merge_risks(*lists: Iterable[Dict[str, Any]], fz: Any = None) -> List[Dict[str, Any]]:
     """Объединяет списки рисков по ``rule_id`` и дополняет их сведениями каталога.
 

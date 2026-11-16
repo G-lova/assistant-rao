@@ -1,6 +1,7 @@
 """Celery-задачи риск-мониторинга (очередь ``risk_monitoring``, отдельный воркер)."""
 import asyncio
-from typing import Any, Dict, List
+import contextlib
+from typing import Any, Dict, List, Optional
 
 from celery_app import celery_app
 from configs.logger import get_logger
@@ -578,9 +579,89 @@ async def _daily_run(environment: str, export_date: str, force: bool, push: bool
             if not force and daily.completed(stored):
                 # первый запуск закончил прогон, пока второй ждал в очереди
                 return {"status": "already_done", "date": d, "summary": stored["ai_analysis"]}
-            run = daily.DailyRun(mgr, environment, repo, push_results=push, use_llm=use_llm, stages=stages)
-            summary = await run.run(d)
-            return {"status": "done", "date": d, "summary": summary}
+            # одна дата за раз (DAILY_ONE_DATE_AT_A_TIME): 14–15.11.2026 прогоны за 13.11 и 14.11 шли параллельно
+            # и делили модель — медленнее оба
+            async with _one_date_lock(repo, env) as free:
+                if not free:
+                    logger.info(f"Ежедневный прогон {d} ({env}): идёт прогон за другую дату — запуск отложен на "
+                                f"{settings_value('DAILY_WAIT_OTHER_DATE_SEC', 600)} с")
+                    return {"status": "postponed", "date": d, "reason": "other_date_running", "stored": bool(stored)}
+                earlier = None if force else await _earlier_unfinished(repo, env, d)
+                if earlier:
+                    logger.info(f"Ежедневный прогон {d} ({env}): сначала доделывается незавершённый прогон за "
+                                f"{earlier} (DAILY_EARLIER_FIRST) — запуск отложен")
+                    return {"status": "postponed", "date": d, "reason": f"earlier_unfinished:{earlier}",
+                            "stored": bool(stored)}
+                run = daily.DailyRun(mgr, environment, repo, push_results=push, use_llm=use_llm, stages=stages)
+                summary = await run.run(d)
+                return {"status": "done", "date": d, "summary": summary}
+
+
+def settings_value(name: str, default: Any) -> Any:
+    """Значение настройки ``configs.settings`` (для журнала и проверок; без настройки — ``default``)."""
+    from configs import settings
+
+    return getattr(settings, name, default)
+
+
+ONE_DATE_LOCK_TRIES = 3       # попыток взять блокировку «идёт прогон за дату» (см. _one_date_lock)
+ONE_DATE_LOCK_PAUSE = 2.0     # пауза между попытками, с
+
+
+@contextlib.asynccontextmanager
+async def _one_date_lock(repo: Any, env: str, tries: Optional[int] = None, pause: Optional[float] = None):
+    """Блокировка «идёт прогон за какую-то дату» (``rm_daily:<env>``), если ``DAILY_ONE_DATE_AT_A_TIME``.
+
+    Несколько попыток с паузой: блокировку на доли секунды берёт и отложенный запуск другой даты (проверка и выход) —
+    продолжение идущей даты из-за такого совпадения не должно откладываться.
+
+    Yields:
+        bool: ``True`` — можно запускать (блокировка взята или проверка выключена); ``False`` — идёт другая дата.
+    """
+    if not settings_value("DAILY_ONE_DATE_AT_A_TIME", False):
+        yield True
+        return
+    tries = ONE_DATE_LOCK_TRIES if tries is None else tries
+    pause = ONE_DATE_LOCK_PAUSE if pause is None else pause
+    for i in range(max(1, tries)):
+        async with contextlib.AsyncExitStack() as stack:
+            got = await stack.enter_async_context(repo.advisory_lock(f"rm_daily:{env}"))
+            if got:
+                yield True
+                return
+        if i + 1 < tries:
+            await asyncio.sleep(pause)
+    yield False
+
+
+async def _earlier_unfinished(repo: Any, env: str, d: str) -> Optional[str]:
+    """Самая ранняя незавершённая дата раньше ``d``, которую сначала нужно доделать (``DAILY_EARLIER_FIRST``).
+
+    Незавершённые — ``partial`` / ``failed`` / ``running`` (оборванный) за ``DAILY_RESUME_LOOKBACK_HOURS`` часов, как у
+    страховки :func:`rm_daily_resume_task` (она же их и продолжает); дата, исчерпавшая
+    ``DAILY_CONTINUE_MAX_ATTEMPTS`` запусков, не задерживает остальные (дальше — только вручную).
+
+    Returns:
+        Optional[str]: Дата ``ГГГГ-ММ-ДД`` или ``None``.
+    """
+    from configs import settings
+    from risk_monitoring import daily
+
+    if not getattr(settings, "DAILY_EARLIER_FIRST", False):
+        return None
+    try:
+        rows = await repo.list_rm_unfinished(env, daily.KIND, settings.DAILY_RESUME_LOOKBACK_HOURS)
+    except Exception as e:  # noqa: BLE001 — без проверки не задерживаем прогон
+        logger.warning(f"Незавершённые прогоны не проверены: {type(e).__name__}: {e}")
+        return None
+    dates = []
+    for r in rows:
+        ai = r.get("ai_analysis") or {}
+        rd = str(ai.get("date") or daily.key_date(r["external_id"]))[:10]
+        attempt = int((ai.get("pipeline") or {}).get("attempt") or 0)
+        if rd < d and attempt < int(settings.DAILY_CONTINUE_MAX_ATTEMPTS):
+            dates.append(rd)
+    return min(dates) if dates else None
 
 
 def continuation_delay(status: str, chain: int, cfg: Any = None) -> Any:
@@ -596,6 +677,9 @@ def continuation_delay(status: str, chain: int, cfg: Any = None) -> Any:
     """
     if cfg is None:
         from configs import settings as cfg
+    if status == "postponed":
+        # отложен из-за прогона за другую дату — не продолжение, номер в цепочке не растёт (см. _continue)
+        return int(getattr(cfg, "DAILY_WAIT_OTHER_DATE_SEC", 600)) if cfg.DAILY_CONTINUE_ENABLED else None
     if not cfg.DAILY_CONTINUE_ENABLED or chain >= cfg.DAILY_CONTINUE_MAX_ATTEMPTS:
         return None
     if status == "partial":
@@ -606,29 +690,43 @@ def continuation_delay(status: str, chain: int, cfg: Any = None) -> Any:
 
 
 def _continue(environment: str, export_date: str, status: str, chain: int, push: Any, use_llm: bool,
-              stages: Any) -> None:
+              stages: Any, force: bool = False) -> None:
     """Ставит продолжение прогона за ту же дату, если он не завершён (``partial`` / ``failed``): ежедневная сводка
-    должна быть готова в тот же день, без ручного запуска."""
+    должна быть готова в тот же день, без ручного запуска.
+
+    ``postponed`` (идёт прогон за другую дату, :func:`_one_date_lock` / :func:`_earlier_unfinished`) — повтор того же
+    запуска через ``DAILY_WAIT_OTHER_DATE_SEC``: номер в цепочке не растёт, ``force`` сохраняется.
+    """
     delay = continuation_delay(status, chain)
     if delay is None:
         if status in ("partial", "failed"):
             logger.warning(f"Ежедневный прогон {export_date}: {status}, продолжений подряд {chain} — "
                            f"автоматически больше не продолжается, нужен ручной запуск")
         return
-    rm_daily_task.apply_async(
-        kwargs={"environment": environment, "export_date": export_date, "push": push, "use_llm": use_llm,
-                "stages": stages, "chain": chain + 1},
-        countdown=delay, queue="risk_monitoring")
-    logger.info(f"Ежедневный прогон {export_date}: {status} — продолжение №{chain + 1} через {delay} с")
+    postponed = status == "postponed"
+    kwargs = {"environment": environment, "export_date": export_date, "push": push, "use_llm": use_llm,
+              "stages": stages, "chain": chain if postponed else chain + 1}
+    if postponed and force:
+        kwargs["force"] = True
+    rm_daily_task.apply_async(kwargs=kwargs, countdown=delay, queue="risk_monitoring")
+    logger.info(f"Ежедневный прогон {export_date}: {status} — "
+                + (f"повтор через {delay} с" if postponed else f"продолжение №{chain + 1} через {delay} с"))
 
 
 def _outcome(out: Any) -> str:
-    """Итог прогона по результату ``_daily_run``: ``completed`` / ``partial`` / ``failed`` / ``skip``."""
+    """Итог прогона по результату ``_daily_run``: ``completed`` / ``partial`` / ``failed`` / ``postponed`` / ``skip``.
+
+    ``postponed`` — только для даты без сохранённого прогона (новая дата): её никто, кроме повтора задачи, не
+    запустит. Незавершённую дату (``stored``) продолжит страховка :func:`rm_daily_resume_task` — если повторять и
+    здесь, повторы копились бы: страховка ставит свой запуск каждые ``DAILY_RESUME_EVERY_MIN`` минут.
+    """
     if not isinstance(out, dict):
         return "skip"
     if out.get("status") == "done":
         return ((out.get("summary") or {}).get("pipeline") or {}).get("status") or "completed"
-    return "skip"   # already_done / already_running
+    if out.get("status") == "postponed" and not out.get("stored"):
+        return "postponed"
+    return "skip"   # already_done / already_running / отложенная незавершённая дата
 
 
 @celery_app.task(bind=True, name="rm_daily_task", soft_time_limit=13500, time_limit=14100)
@@ -668,7 +766,7 @@ def rm_daily_task(self, environment: str, export_date: str, force: bool = False,
         if isinstance(e, Exception) or type(e).__name__ == "SoftTimeLimitExceeded":
             _continue(environment, export_date, "failed", chain, push, use_llm, stages)
         raise
-    _continue(environment, export_date, _outcome(out), chain, push, use_llm, stages)
+    _continue(environment, export_date, _outcome(out), chain, push, use_llm, stages, force=force)
     return out
 
 

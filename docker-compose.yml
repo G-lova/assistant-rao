@@ -84,7 +84,9 @@ services:
     volumes:
       - .:/app
       - /tmp:/tmp
-    command: uvicorn main:app --host 0.0.0.0 --port 20142 --timeout-keep-alive 1200 --timeout-graceful-shutdown 600 --reload
+    # Параметры запуска — scripts/run_api.py: --reload только вне прода (settings.API_RELOAD = ENVIRONMENT != "prod");
+    # прежние --timeout-keep-alive 1200 и --timeout-graceful-shutdown 600 сохранены
+    command: python -m scripts.run_api
     restart: unless-stopped
     networks:
       - rao_network

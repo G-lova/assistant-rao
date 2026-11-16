@@ -515,6 +515,12 @@ def summary_facts(s: Dict[str, Any]) -> List[str]:
         left = max((v or {}).get("xml_left") or 0 for v in partial.values())
         facts.append(f"Прогон не успел обработать все документы (осталось XML: {left}) — сводка предварительная, "
                      "прогон за эту дату нужно повторить.")
+    deferred = [k for k, v in (s.get("stages") or {}).items() if (v or {}).get("status") == "deferred"]
+    if deferred:
+        names = {"customers": "заказчики", "suppliers": "поставщики"}
+        carried = " (показаны по прошлому запуску за дату)" if (s.get("carried") or {}).get("blocks") else ""
+        facts.append("Этапы " + ", ".join(names.get(k, k) for k in deferred) + " будут пересчитаны после обработки "
+                     f"всех документов{carried}.")
     failed = [k for k, v in (s.get("stages") or {}).items() if (v or {}).get("status") == "failed"]
     if failed:
         facts.append("Не завершились этапы: " + ", ".join(failed) + " — сводка может быть неполной.")
@@ -731,6 +737,9 @@ class DailyRun:
         # история запусков за дату: started_at / finished_at строки — последнего запуска, прежние — в pipeline.runs
         prev = (await self._internal(KIND, [run_key(d)])).get(run_key(d)) or {}
         self.runs = previous_runs(prev)
+        # сводка прошлого запуска за дату: блоки заказчиков и поставщиков переносятся, пока их этапы отложены
+        # (DAILY_DEFER_ORGS_UNTIL_DOCS_DONE, см. orgs_deferred)
+        self.prev_summary = prev
         marker = {"date": d, "pipeline": {"schema_version": SCHEMA_VERSION, "stage": "S0-S4", "status": "running",
                                           "started_at": started, "heartbeat_at": started, "runs": self.runs,
                                           "attempt": len(self.runs) + 1}}
@@ -1063,6 +1072,11 @@ class DailyRun:
                                  if c.get("organisation_id") is not None
                                  and (not settings.DAILY_MONITORED_ONLY or monitored(c))})
 
+        # заказчики и поставщики — один раз, в последнем запуске за дату (см. orgs_deferred)
+        defer = self.orgs_deferred()
+        if defer:
+            progress.note(f"заказчики и поставщики отложены до последнего запуска за дату: {defer}")
+
         async def customers() -> Any:
             """S3b: заказчики затронутых закупок (все организации системы; при ``DAILY_MONITORED_ONLY`` — только
             с ``monitoring = 1``)."""
@@ -1075,7 +1089,7 @@ class DailyRun:
             res = await oa.analyze_ids(monitored_orgs)
             return res, self._counts(res)
 
-        org_results = await self._stage("customers", customers) or []
+        org_results = (await self._stage("customers", customers) or []) if not defer else self._deferred("customers", defer)
 
         async def suppliers() -> Any:
             """S3c: поставщики затронутых закупок — строка организации по API
@@ -1093,13 +1107,17 @@ class DailyRun:
             res = await oa.analyze_ids(ids)
             return res, {**self._counts(res), "org_failed": failed}
 
-        sup_results = await self._stage("suppliers", suppliers) or []
+        sup_results = (await self._stage("suppliers", suppliers) or []) if not defer else self._deferred("suppliers", defer)
         summary = build_summary(export_date=d, environment=self.env, cards=cards, contracts=contract_ai,
                                 changed=changed, events=events, xml_cards=xml_cards, customers=org_results,
                                 suppliers=sup_results,
                                 scope=scope, stages=self.stages)
+        if defer:
+            carry_org_blocks(summary, self.__dict__.get("prev_summary") or {})
         resume, used_llm = default_resume(summary), False
-        if "summary" in self.stages_on and self.use_llm and settings.PACKAGE_LLM_RESUME and not quiet_day(summary):
+        # текст сводки моделью — тоже только в последнем запуске: промежуточная сводка обновится следующим
+        if "summary" in self.stages_on and self.use_llm and settings.PACKAGE_LLM_RESUME and not quiet_day(summary) \
+                and not defer:
             async with progress.step("S4: текст сводки (модель)"):
                 resume, used_llm = await self._resume(summary)
         self.stages["summary"] = {"status": "completed", "llm": used_llm}
@@ -1127,6 +1145,36 @@ class DailyRun:
                     f"этапы {json.dumps(self.stages, ensure_ascii=False, default=str)}")
         return summary
 
+    def orgs_deferred(self) -> Optional[str]:
+        """Отложить ли заказчиков, поставщиков и текст сводки моделью до последнего запуска за дату.
+
+        Откладываются (``DAILY_DEFER_ORGS_UNTIL_DOCS_DONE``), если файлы или события не обработаны до конца
+        (``partial``) **и** продолжение за дату ещё будет: ``DAILY_CONTINUE_ENABLED`` и номер запуска меньше
+        ``DAILY_CONTINUE_MAX_ATTEMPTS`` (на последнем разрешённом запуске организации считаются — иначе не посчитались
+        бы никогда). Этап закупок не откладывается: неизменившиеся закупки он пропускает по хэшу входных данных.
+
+        Returns:
+            Optional[str]: Причина (для журнала и ``stages``) или ``None`` — считать сейчас.
+        """
+        if not getattr(settings, "DAILY_DEFER_ORGS_UNTIL_DOCS_DONE", False) or not settings.DAILY_CONTINUE_ENABLED:
+            return None
+        docs = [k for k in ("files", "xml") if (self.stages.get(k) or {}).get("status") == "partial"]
+        if not docs:
+            return None
+        attempt = len(self.__dict__.get("runs") or []) + 1
+        if attempt >= int(settings.DAILY_CONTINUE_MAX_ATTEMPTS):
+            return None
+        return f"не обработаны до конца: {', '.join(docs)}; запуск {attempt} из {settings.DAILY_CONTINUE_MAX_ATTEMPTS}"
+
+    def _deferred(self, name: str, reason: str) -> List[Dict[str, Any]]:
+        """Этап отложен до последнего запуска за дату: ``status = deferred`` (сводка остаётся ``partial`` — документы
+        не обработаны), результатов нет."""
+        if name in self.stages_on:
+            self.stages[name] = {"status": "deferred", "seconds": 0, "reason": reason}
+        else:
+            self.stages[name] = {"status": "skipped"}
+        return []
+
     async def _resume(self, summary: Dict[str, Any]) -> Any:
         """Текст сводки моделью по фактам; при сбое — шаблон."""
         try:
@@ -1141,6 +1189,23 @@ class DailyRun:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Текст сводки шаблоном: {type(e).__name__}: {e}")
             return default_resume(summary), False
+
+
+def carry_org_blocks(summary: Dict[str, Any], prev: Dict[str, Any]) -> None:
+    """Этапы заказчиков и поставщиков отложены: в промежуточную сводку переносятся их блоки из сводки прошлого
+    запуска за ту же дату (если там они есть) — чтобы сводка не «теряла» организации между продолжениями.
+
+    Переносятся только блоки ``customers`` / ``suppliers``; пункты «внимания» по организациям и счётчики охвата
+    считаются заново в последнем запуске. В ``summary["carried"]`` — что перенесено и из какого запуска.
+    """
+    carried = []
+    for key in ("customers", "suppliers"):
+        if not summary.get(key) and (prev or {}).get(key):
+            summary[key] = prev[key]
+            carried.append(key)
+    if carried:
+        summary["carried"] = {"blocks": carried,
+                              "from_finished_at": ((prev or {}).get("pipeline") or {}).get("finished_at")}
 
 
 def previous_runs(prev: Dict[str, Any]) -> List[Dict[str, Any]]:

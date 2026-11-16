@@ -177,6 +177,11 @@ class RiskMonitoringAPI:
             # результаты до 23.10.2026: registry — объект; API ждёт список совпадений
             from risk_monitoring.contract_package import normalize_registry
             normalize_registry(ai_analysis)
+        # API отклоняет risks[].description длиннее 16 000 символов (422 — запись терялась целиком, прод 12–13.11.2026):
+        # во внешнюю БД — копия с сокращённым описанием, у вызывающего (и во внутренней БД) остаётся полное
+        from configs import settings
+        from risk_monitoring.passport import fit_external_descriptions
+        ai_analysis = fit_external_descriptions(ai_analysis, int(getattr(settings, "RM_EXTERNAL_DESCRIPTION_MAX", 0) or 0))
         try:
             data = await self._patch_body(table, record_id, ai_analysis)
         except RiskAPIError as e:
