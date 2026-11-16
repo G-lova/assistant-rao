@@ -71,5 +71,35 @@ class ResumeEntitiesTest(unittest.TestCase):
         self.assertEqual(out[0]["organisation_id"], 77)
 
 
+class FalseMentionsTest(unittest.TestCase):
+    """Ложные однословные упоминания из отчёта дашбордов 16.11.2026."""
+
+    def test_single_word_not_prefix(self):
+        """«признаки», «элементов», «университета», «Петровского» — не ООО «ПРИЗМА», «ЭЛЕМЕНТ», «УНИВЕРСАЛ», «ПЕТРОЛАБ»."""
+        cases = [('ООО "ПРИЗМА"', "Признаки дробления; признаков сговора нет"),
+                 ('ООО "ЭЛЕМЕНТ"', "не соответствует заявленному количеству элементов"),
+                 ('ООО "УНИВЕРСАЛ"', "Закупки университета выросли"),
+                 ('ООО "ПЕТРОЛАБ"', "РНЦХ им. акад. Б.В. Петровского")]
+        for name, text in cases:
+            self.assertEqual(re_.find_mentions({"role": "supplier", "name": name}, text), [], name)
+
+    def test_single_word_as_name(self):
+        """Однословное название — заглавными или в кавычках; обычное слово в тексте — нет."""
+        e = {"role": "supplier", "name": 'ООО "ЭЛЕМЕНТ"'}
+        self.assertEqual(re_.find_mentions(e, "Поставщик ООО «Элемент» выиграл"), ["Элемент"])
+        self.assertEqual(re_.find_mentions(e, "Поставщик ЭЛЕМЕНТ выиграл"), ["ЭЛЕМЕНТ"])
+        self.assertEqual(re_.find_mentions(e, "каждый элемент поставки"), [])
+        self.assertEqual(re_.find_mentions({"role": "customer", "name": "СИБАДИ"}, "Закупки СИБАДИ"), ["СИБАДИ"])
+
+    def test_declension_still_works(self):
+        """Многословные названия в падежах находятся, как раньше."""
+        self.assertEqual(re_.find_mentions({"role": "customer", "name": "Череповецкий государственный университет"},
+                                           "с Череповецким государственным университетом"),
+                         ["Череповецким государственным университетом"])
+        self.assertEqual(re_.find_mentions({"role": "customer", "name": "Томский НИМЦ"}, "у Томского НИМЦ"),
+                         ["Томского НИМЦ"])
+        self.assertEqual(re_.find_mentions({"role": "customer", "name": "Универсал Строй"}, "университета строй"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

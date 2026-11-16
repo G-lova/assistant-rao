@@ -95,30 +95,50 @@ def core_name(name: Any) -> str:
     return _FORMS.sub("", s).strip().lower()
 
 
-def _stem(word: str) -> str:
-    """Основа слова для сравнения с падежной формой: без последних букв окончания."""
-    if len(word) >= 6:
-        return word[:max(4, len(word) - 3)]
-    if len(word) >= 4:
-        return word[:len(word) - 1]
-    return word
+# Буквы, из которых состоят падежные окончания русских существительных и прилагательных («-ого», «-ому», «-ами»,
+# «-ой», «-ых», «-ем»…). Остаток слова после общей с названием основы должен состоять только из них, иначе это
+# другое слово: «университета» ≠ «универсал» (остаток «сал»), «признаки» ≠ «призма» (16.11.2026)
+_ENDING_LETTERS = set("аеёиоуыэюяйьмхвг")
+_QUOTE_BEFORE = re.compile(r"[«\"“„']\s*$")
 
 
 def _word_match(name_word: str, text_word: str) -> bool:
-    """Слово текста — то же слово названия, возможно в другом падеже; короткие слова и цифры — точно."""
+    """Слово текста — то же слово названия, возможно в другом падеже.
+
+    Короткие слова (меньше 4 букв), цифры и аббревиатуры сравниваются точно. Для остальных:
+    общая основа — всё слово названия, кроме не больше трёх последних букв, а остатки обоих слов
+    (не длиннее трёх букв) состоят только из букв падежных окончаний.
+    """
     t = text_word.lower()
     if name_word == t:
         return True
     if len(name_word) < 4 or name_word.isdigit() or name_word.isupper():
         return False
-    return t.startswith(_stem(name_word)) and abs(len(t) - len(name_word)) <= 3
+    p = 0
+    while p < min(len(name_word), len(t)) and name_word[p] == t[p]:
+        p += 1
+    rest_name, rest_text = name_word[p:], t[p:]
+    return (p >= max(4, len(name_word) - 3) and len(rest_name) <= 3 and len(rest_text) <= 3
+            and set(rest_name) <= _ENDING_LETTERS and set(rest_text) <= _ENDING_LETTERS)
+
+
+def _single_word_match(name_word: str, token: "re.Match[str]", src: str) -> bool:
+    """Название из одного слова («ПРИЗМА», «СИБАДИ») — только то же слово целиком, без падежей, и только если в
+    тексте оно выглядит как название: написано заглавными или стоит в кавычках. Иначе «признаки», «элементов»,
+    «университета» становились упоминаниями ООО «ПРИЗМА», «ЭЛЕМЕНТ», «УНИВЕРСАЛ» (16.11.2026)."""
+    word = token.group(0)
+    if word.lower() != name_word:
+        return False
+    return word.isupper() or bool(_QUOTE_BEFORE.search(src[:token.start()]))
 
 
 def find_mentions(e: Dict[str, Any], text: Any, limit: int = 5) -> List[str]:
     """Упоминания организации в тексте так, как они написаны: название и сокращённое название без
     организационно-правовой формы, с учётом падежных окончаний; ИНН — как есть.
 
-    Название из одного слова короче 6 букв не ищется (как в правилах дашбордов: «МАИ», «КГУ»).
+    Название из одного слова короче 6 букв не ищется (как в правилах дашбордов: «МАИ», «КГУ»); длиннее — только
+    точное совпадение заглавными или в кавычках (:func:`_single_word_match`). Слова многословного названия
+    сравниваются с падежными окончаниями (:func:`_word_match`).
 
     Args:
         e: Запись :func:`entity`.
@@ -137,7 +157,11 @@ def find_mentions(e: Dict[str, Any], text: Any, limit: int = 5) -> List[str]:
             continue
         n = len(words)
         for i in range(len(tokens) - n + 1):
-            if all(_word_match(words[j], tokens[i + j].group(0)) for j in range(n)):
+            if n == 1:
+                ok = _single_word_match(words[0], tokens[i], src)
+            else:
+                ok = all(_word_match(words[j], tokens[i + j].group(0)) for j in range(n))
+            if ok:
                 start, end = tokens[i].start(), tokens[i + n - 1].end()
                 found.append((start, src[start:end]))
     inn = e.get("inn")
