@@ -60,5 +60,5 @@ RUN python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
 # Код приложения (что не попадает в образ — .dockerignore)
 COPY . .
 
-# Run the application with auto-reload
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "20142", "--reload"]
+# Запуск API: --reload только вне прода (scripts/run_api.py, settings.API_RELOAD); docker-compose.yml задаёт ту же команду
+CMD ["python", "-m", "scripts.run_api"]
