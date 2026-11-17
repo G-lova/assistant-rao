@@ -22,11 +22,11 @@ try:
 except ImportError:   # модуль работает и без настроек (тесты, скрипты)
     settings = None
 
-DEFAULT_THRESHOLDS = {"procurement": (7, 10, 22), "report": (2, 3, 10)}
+DEFAULT_THRESHOLDS = {"procurement": (13, 21, 39), "report": (2, 3, 10)}
+DEFAULT_WEIGHTS = {"procurement": (3, 1, 1), "report": (1, 1, 1)}   # (пропуск нарушения, ложное нарушение, прочее)
 DEFAULT_MIN_COMMON = 5
 # Итоговые флаги отчётных документов (объект 7): field3_0, field4_2 …; подкритерии field3_0_3 — тоже
 _REPORT_KEY_RE = re.compile(r"^field[345]_\d+(?:_\d+)?$")
-WORDS = {1: "в наличии / соответствует", 0: "отсутствует / не соответствует", 2: "не предусмотрено / не применимо"}
 POSITIVE_COMMENT = "ЭЗ соответствует требованиям"
 
 
@@ -70,6 +70,11 @@ class Comparison:
     def count(self, kind: Optional[str] = None) -> int:
         """Число расхождений (всех или заданного вида)."""
         return sum(1 for d in self.differences if kind is None or d.kind == kind)
+
+    def score(self, weights: Optional[Sequence[float]] = None) -> float:
+        """Взвешенное число расхождений: пропущенное нарушение тяжелее остальных (веса — из настроек для группы)."""
+        w = tuple(weights or getattr(settings, "PRIMARY_REVIEW_WEIGHTS", DEFAULT_WEIGHTS)[self.group])
+        return w[0] * self.count("missed") + w[1] * self.count("false_alarm") + w[2] * self.count("other")
 
 
 def comparable(data: Dict[str, Any]) -> Dict[str, int]:
@@ -115,7 +120,7 @@ def suggest_range(cmp: Comparison, thresholds: Optional[Sequence[int]] = None,
 
     Args:
         cmp: Результат :func:`compare`.
-        thresholds: Три порога числа расхождений (для 1.00 / 0.75 / 0.50); по умолчанию — из настроек для группы случая.
+        thresholds: Три порога взвешенного числа расхождений (для 1.00 / 0.75 / 0.50); по умолчанию — из настроек для группы случая.
         min_common: Минимум общих критериев; при меньшем числе оценка не предлагается.
 
     Returns:
@@ -126,33 +131,42 @@ def suggest_range(cmp: Comparison, thresholds: Optional[Sequence[int]] = None,
     floor = min_common if min_common is not None else getattr(settings, "PRIMARY_REVIEW_MIN_COMMON", DEFAULT_MIN_COMMON)
     if cmp.common < floor:
         return None
-    n = cmp.count()
+    n = cmp.score()
     return 1.0 if n < t[0] else 0.75 if n < t[1] else 0.5 if n < t[2] else 0.0
 
 
+def criterion_number(key: str, labels: Dict[str, str]) -> str:
+    """Номер критерия для комментария: из названия (``1.30. Наличие…`` → ``1.30``), иначе ключ поля."""
+    match = re.match(r"\s*(\d+(?:\.\d+)+)\.?\s", labels.get(key) or "")
+    return match.group(1) if match else key
+
+
 def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
-                  issues: Optional[Sequence[primary_review.Issue]] = None, limit: int = 15) -> str:
+                  issues: Optional[Sequence[primary_review.Issue]] = None, limit: int = 30) -> str:
     """Собирает комментарий сводного эксперта из расхождений и объективных дефектов.
+
+    Расхождения сгруппированы по видам, критерии названы номерами (полные названия — в ``differences`` ответа API),
+    чтобы комментарий читался, а не повторял по строке на критерий.
 
     Args:
         cmp: Результат :func:`compare`.
         labels: ``ключ поля → название критерия`` (из ``pe_form_fields``); без названия выводится ключ.
         issues: Дефекты из :func:`knowledge_store.primary_review.review_opinion` (необязательно).
-        limit: Максимум пунктов о расхождениях; остальные сводятся в одну строку.
+        limit: Максимум номеров критериев в одной строке; остальные сводятся в «и ещё N».
 
     Returns:
         str: Нумерованный список замечаний; при полном совпадении и отсутствии дефектов — ``POSITIVE_COMMENT``.
     """
     labels = labels or {}
+    titles = {"missed": "Не выявлены нарушения, отмеченные в итоговом заключении (критерии: {})",
+              "false_alarm": "Указаны нарушения, которых нет в итоговом заключении (критерии: {})",
+              "other": "Не совпадает ответ «не предусмотрено / в наличии» с итоговым заключением (критерии: {})"}
     lines: List[str] = []
-    titles = {"missed": "не выявлено нарушение, которое есть в итоговом заключении",
-              "false_alarm": "указано нарушение, которого нет в итоговом заключении",
-              "other": "значение не совпадает с итоговым заключением"}
-    for d in cmp.differences[:limit]:
-        label = labels.get(d.key) or d.key
-        lines.append(f"{label}: {titles[d.kind]} (эксперт — «{WORDS[d.primary]}», итог — «{WORDS[d.summary]}»).")
-    if len(cmp.differences) > limit:
-        lines.append(f"Ещё расхождений: {len(cmp.differences) - limit}.")
+    for kind in ("missed", "false_alarm", "other"):
+        numbers = [criterion_number(d.key, labels) for d in cmp.differences if d.kind == kind]
+        if numbers:
+            shown = ", ".join(numbers[:limit]) + (f" и ещё {len(numbers) - limit}" if len(numbers) > limit else "")
+            lines.append(titles[kind].format(shown) + ".")
     lines += [i.message[0].upper() + i.message[1:] + "." for i in issues or []]
     if not lines:
         return POSITIVE_COMMENT

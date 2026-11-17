@@ -36,7 +36,7 @@ class PrimaryReviewPipelineTests(unittest.TestCase):
         self.assertEqual(result["summary_expert_id"], 99)
         by_expert = {r["expert_id"]: r for r in result["reviews"]}
         self.assertEqual(by_expert[1]["differences"][0]["kind"], "missed")
-        self.assertIn("1.2. Наличие адреса", by_expert[1]["comment"])
+        self.assertIn("критерии: 1.2)", by_expert[1]["comment"])
         self.assertEqual(by_expert[2]["differences"], [])
         self.assertEqual(by_expert[2]["comment"], "ЭЗ соответствует требованиям")
         self.assertEqual(by_expert[2]["suggested_range"], 1.0)
