@@ -36,7 +36,7 @@ class PrimaryReviewPipelineTests(unittest.TestCase):
         self.assertEqual(result["summary_expert_id"], 99)
         by_expert = {r["expert_id"]: r for r in result["reviews"]}
         self.assertEqual(by_expert[1]["differences"][0]["kind"], "missed")
-        self.assertIn("критерии: 1.2)", by_expert[1]["comment"])
+        self.assertIn("критерии: 1.2)", by_expert[1]["comment_details"])   # полный перечень; comment зависит от оценки
         self.assertEqual(by_expert[2]["differences"], [])
         self.assertEqual(by_expert[2]["comment"], "ЭЗ соответствует требованиям")
         self.assertIn(by_expert[2]["suggested_range"], (0.0, 0.5, 0.75, 1.0))
@@ -53,9 +53,10 @@ class PrimaryReviewPipelineTests(unittest.TestCase):
         self.assertEqual([d["key"] for d in result["shared_differences"]], ["field2_1_3"])
         first, second = result["reviews"]
         self.assertTrue(all(d["shared"] == (d["key"] == "field2_1_3") for d in first["differences"]))
-        self.assertIn("1.5", first["comment"])
-        self.assertNotIn("1.3", first["comment"])
+        self.assertIn("1.5", first["comment_details"])
+        self.assertNotIn("1.3", first["comment_details"])
         self.assertEqual(second["comment"], "ЭЗ соответствует требованиям")
+        self.assertEqual(second["comment_details"], "ЭЗ соответствует требованиям")
 
     def test_errors(self):
         """Нет первичных — 404; нет сводного — 409."""

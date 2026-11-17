@@ -26,6 +26,14 @@ class CompareTests(unittest.TestCase):
         self.assertIn("Не выявлены нарушения", text)
         self.assertEqual(pc.build_comment(pc.compare(SUMMARY, SUMMARY)), pc.POSITIVE_COMMENT)
 
+    def test_comment_follows_grade(self):
+        """1.00 — расхождения не перечисляются; 0.75 — «незначительные отклонения»; 0.50 — «существенные расхождения»."""
+        cmp = pc.compare({**SUMMARY, "field2_1_2": 1}, SUMMARY)
+        self.assertEqual(pc.build_comment(cmp, grade=1.0), pc.POSITIVE_COMMENT)
+        self.assertTrue(pc.build_comment(cmp, grade=0.75).startswith("1. Незначительные отклонения"))
+        self.assertTrue(pc.build_comment(cmp, grade=0.5).startswith("1. Существенные расхождения"))
+        self.assertIn("критерии: field2_1_2", pc.build_comment(cmp, grade=0.5))
+
     def test_suggest_range_thresholds(self):
         """Оценка по числу расхождений; при малом числе общих критериев — None."""
         cmp = pc.Comparison(common=50, differences=[pc.Difference(f"field2_1_{i}", 1, 0) for i in range(8)])

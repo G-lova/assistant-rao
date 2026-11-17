@@ -195,7 +195,7 @@ def shared_keys(comparisons: Sequence[Comparison]) -> Set[str]:
 
 def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
                   issues: Optional[Sequence[primary_review.Issue]] = None, limit: int = 30,
-                  shared: Optional[Set[str]] = None) -> str:
+                  shared: Optional[Set[str]] = None, grade: Optional[float] = None) -> str:
     """Собирает комментарий сводного эксперта из расхождений и объективных дефектов.
 
     Расхождения сгруппированы по видам, критерии названы номерами (полные названия — в ``differences`` ответа API),
@@ -208,6 +208,9 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
         limit: Максимум номеров критериев в одной строке; остальные сводятся в «и ещё N».
         shared: Ключи расхождений, общих для всех первичных экспертов (:func:`shared_keys`): в комментарий не попадают —
             ошибкой первичного эксперта они, скорее всего, не являются.
+        grade: Предлагаемая оценка: комментарий согласуется с ней. При 1.00 расхождения не перечисляются (по порядку это
+            «полное соответствие»; на истории при оценке 1.00 комментарий в 68% случаев — шаблонная фраза), при 0.75 перед
+            перечнем стоит «незначительные отклонения», при 0.50 и ниже — «существенные расхождения».
 
     Returns:
         str: Нумерованный список замечаний; при полном совпадении и отсутствии дефектов — ``POSITIVE_COMMENT``.
@@ -223,6 +226,11 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
         if numbers:
             shown = ", ".join(numbers[:limit]) + (f" и ещё {len(numbers) - limit}" if len(numbers) > limit else "")
             lines.append(titles[kind].format(shown) + ".")
+    if grade is not None and grade >= 1.0:
+        lines = []                       # оценка 1.00: расхождения остаются в differences, но в комментарий не идут
+    elif lines and grade is not None:
+        lines.insert(0, "Незначительные отклонения от сводного заключения." if grade >= 0.75
+                     else "Существенные расхождения со сводным заключением.")
     lines += [i.message[0].upper() + i.message[1:] + "." for i in issues or []]
     if not lines:
         return POSITIVE_COMMENT
