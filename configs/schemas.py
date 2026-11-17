@@ -138,6 +138,15 @@ class RAOConclusionRequest(BaseModel):
     send_to_external: bool = False
     
 
+class PrimaryReviewRequest(BaseModel):
+    """Запрос ``POST /evaluate-primary-opinions``.
+
+    Attributes:
+        expertise_id: Экспертиза, по которой сводное заключение уже заполнено.
+    """
+    expertise_id: int
+
+
 class ViolationsReportRequest(BaseModel):
     metric: str = ""
     filters: Dict[str, Any] = {}

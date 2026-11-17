@@ -175,11 +175,18 @@ class ArchiveCache:
         raise RuntimeError(f"архив {path} закрыт во время чтения {entry_name}")
 
     @staticmethod
-    def _read_member(zf: zipfile.ZipFile, name: str, entry_name: str) -> bytes:
+    def _check_size(info: zipfile.ZipInfo, entry_name: str) -> None:
+        """XML больше ``XML_LITE_MAX_BYTES`` не читается (и защита от zip-бомб); до него — полный или облегчённый
+        разбор (:meth:`XmlEventAnalyzer._parse`)."""
+        hard = int(getattr(settings, "XML_LITE_MAX_BYTES", xml_events.MAX_XML_BYTES))
+        if info.file_size > hard:
+            raise xml_events.XmlTooLarge(f"{entry_name}: XML {info.file_size // 2 ** 20} МБ больше предела "
+                                         f"{hard // 2 ** 20} МБ")
+
+    @classmethod
+    def _read_member(cls, zf: zipfile.ZipFile, name: str, entry_name: str) -> bytes:
         """Байты записи архива с проверкой размера XML."""
-        info = zf.getinfo(name)
-        if info.file_size > xml_events.MAX_XML_BYTES:
-            raise ValueError(f"{entry_name}: XML больше {xml_events.MAX_XML_BYTES} байт")
+        cls._check_size(zf.getinfo(name), entry_name)
         return zf.read(name)
 
     @staticmethod
@@ -191,9 +198,7 @@ class ArchiveCache:
                 (n for n in names if n.endswith("/" + entry_name) or n.rsplit("/", 1)[-1] == entry_name.rsplit("/", 1)[-1]), None)
             if name is None:
                 raise FileNotFoundError(f"в архиве нет {entry_name}")
-            info = zf.getinfo(name)
-            if info.file_size > xml_events.MAX_XML_BYTES:
-                raise ValueError(f"{entry_name}: XML больше {xml_events.MAX_XML_BYTES} байт")
+            ArchiveCache._check_size(zf.getinfo(name), entry_name)
             return zf.read(name)
 
     def close(self) -> None:
@@ -384,8 +389,16 @@ class XmlEventAnalyzer:
         if key not in c.parsed:
             try:
                 raw = await self.archives.read(x["archive_url"], x["entry_name"])
-                tag, version, body = xml_events.parse_xml(raw)
+                if len(raw) > xml_events.MAX_XML_BYTES:
+                    # большой XML: потоком, с урезанием повторов (поля версий потом не сравниваются)
+                    tag, version, body = await asyncio.to_thread(xml_events.parse_xml_lite, raw)
+                    lite = body.get("_lite") or {}
+                    logger.info(f"XML {key}: {len(raw) // 2 ** 20} МБ — облегчённый разбор (отброшено повторов "
+                                f"{lite.get('dropped', 0)}, обрезано текстов {lite.get('texts_cut', 0)})")
+                else:
+                    tag, version, body = xml_events.parse_xml(raw)
                 c.parsed[key] = (tag, version, body, len(raw))
+                del raw
             except Exception as e:  # noqa: BLE001 — запоминаем: повторное чтение даст то же
                 c.parsed[key] = e
         got = c.parsed[key]
@@ -558,7 +571,10 @@ class XmlEventAnalyzer:
 
     async def _failure(self, xml_id: int, attempt: int, e: BaseException) -> Dict[str, Any]:
         """Результат с ошибкой и запись ``pipeline.status = failed`` (кроме режима отладки)."""
-        logger.error(f"Ошибка анализа XML {xml_id}: {e}", exc_info=True)
+        if isinstance(e, xml_events.XmlTooLarge):   # не ошибка кода: XML больше предела, повтор не поможет
+            logger.warning(f"XML {xml_id} не разобран: {e}")
+        else:
+            logger.error(f"Ошибка анализа XML {xml_id}: {e}", exc_info=True)
         result = {"xml_id": xml_id, "status": "error", "error": f"{type(e).__name__}: {e}", "pushed": False}
         if self.push_results and not self.force:
             block = {"pipeline": passport.pipeline_block(STAGE, "failed", self.model, self.versions,
@@ -682,7 +698,15 @@ class XmlEventAnalyzer:
 
         facts = xml_events.extract_facts(tag, body)
         fz = risk_catalog.normalize_fz(row.get("fz")) or risk_catalog.normalize_fz(row.get("card_fz"))
-        changes = xml_events.diff(xml_events.strip_ignored(prev_body), xml_events.strip_ignored(body)) if prev_body else []
+        lite = body.get("_lite") or ((prev_body or {}).get("_lite") if prev_body else None)
+        if lite:
+            # урезанные списки дали бы ложные «удалённые позиции»: изменения полей не считаются, документы — да
+            progress.note(f"XML больше {xml_events.MAX_XML_BYTES // 2 ** 20} МБ — разобран облегчённо, "
+                          f"изменения полей между версиями не сравниваются")
+            changes = []
+        else:
+            changes = xml_events.diff(xml_events.strip_ignored(prev_body), xml_events.strip_ignored(body)) \
+                if prev_body else []
         atts = xml_events.attachments(body)
         doc_changes = xml_events.document_changes(xml_events.attachments(prev_body) if prev_body else None, atts)
         async with progress.step("файлы события и их результаты анализа") as st:
@@ -707,6 +731,7 @@ class XmlEventAnalyzer:
             payload = xml_events.build_llm_payload(event, facts, changes, doc_changes, files)
             payload["law"] = f"{fz}-ФЗ" if fz else "закон не определён"
         return {"status": "prepared", "xml_id": xml_id, "row": row, "attempt": attempt, "previous": previous,
+                "xml_lite": lite,
                 "facts": facts, "fz": fz, "changes": changes, "doc_changes": doc_changes, "files": files,
                 "all_files": all_files, "event": event, "link": link, "rules": rules,
                 "needs_llm": bool(needs_llm and self.event_analyzer), "llm_reason": reason, "payload": payload}
@@ -727,6 +752,9 @@ class XmlEventAnalyzer:
                                            _int(previous["id"]) if previous else None, self.force, ctx["attempt"],
                                            export_date=str(row.get("exact_date"))[:10] if row.get("exact_date") else None)
         pipeline["llm"] = {"used": llm is not None, "reason": ctx["llm_reason"]}
+        if ctx.get("xml_lite"):
+            # большой XML разобран облегчённо: изменения полей не сравнивались (parse_xml_lite)
+            pipeline["xml_lite"] = ctx["xml_lite"]
         if ctx.get("llm_deferred"):
             pipeline["llm"]["deferred"] = ctx["llm_deferred"]
         ai = xml_events.build_xml_analysis(event=ctx["event"], facts=ctx["facts"], changes=ctx["changes"],

@@ -20,7 +20,7 @@ from configs.eis_parsing import EISParser
 from configs.http_client_manager import HTTPClientManager
 from configs.llm_client import get_llm
 from configs.logger import setup_logging, get_logger
-from configs.schemas import EISParseRequest, EvaluateRequest, SummaryOpinionRequest, ExpertsScoringRequest, ExpertsRatingRequest, ExpertPublicationsSyncRequest, FileEntity, RAOConclusionRequest, ViolationsReportRequest
+from configs.schemas import EISParseRequest, EvaluateRequest, SummaryOpinionRequest, ExpertsScoringRequest, ExpertsRatingRequest, ExpertPublicationsSyncRequest, FileEntity, PrimaryReviewRequest, RAOConclusionRequest, ViolationsReportRequest
 from configs.utils import APIKeyMiddleware, first_text_chunk
 from configs.working_with_db import get_async_summary_report_from_db, get_contract_info_from_db
 from evaluate_documents.send_subject_service import SendSubjectService
@@ -438,6 +438,32 @@ async def get_rao_conclusion(
     except Exception as e:
         logger.error(f"Ошибка при создании сводного отчета эксперта РАО: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Ошибка при создании сводного отчета эксперта РАО: {str(e)}")
+
+@app.post("/evaluate-primary-opinions")
+async def evaluate_primary_opinions(
+    request: PrimaryReviewRequest,
+    x_api_database: str = Header(default="dev", alias="X-API-Database")
+):
+    """Оценивает заключения первичных экспертов по готовому сводному заключению.
+
+    Заключения читаются из внешней БД (как в ``/rao_conclusion``). Для каждого первичного эксперта возвращаются
+    расхождения с итоговым заключением, дефекты, предлагаемая оценка ``suggested_range`` и черновик комментария.
+    Ничего не записывается в основную БД: ``range`` и ``comment`` ставит сводный эксперт.
+
+    Raises:
+        HTTPException: 404 — нет заключений первичных экспертов; 409 — сводное заключение ещё не заполнено;
+            500 — внутренняя ошибка.
+    """
+    from conclusion.primary_review_pipeline import PrimaryReviewError, PrimaryReviewPipeline
+
+    try:
+        return await PrimaryReviewPipeline(http_manager, request.expertise_id, x_api_database).run()
+    except PrimaryReviewError as e:
+        raise HTTPException(status_code=e.http_status, detail=e.message)
+    except Exception as e:
+        logger.error(f"Ошибка оценки первичных экспертов: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка оценки первичных экспертов: {str(e)}")
+
 
 @app.post("/get-violations-report")
 async def get_violations_report(request: ViolationsReportRequest):
