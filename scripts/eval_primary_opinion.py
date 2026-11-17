@@ -56,8 +56,19 @@ def load_pairs(experts_csv: str, opinions_csv: str) -> List[Tuple[str, dict, dic
     return out
 
 
-def load_compare_cases(experts_csv: str, opinions_csv: str) -> List[Tuple[dict, dict, dict]]:
-    """Случаи для сравнения: оценённое заключение и итоговое (последнее по ``updated_at`` среди неоценённых той же экспертизы).
+def load_summary_experts(users_csv: str) -> set:
+    """Идентификаторы сводных экспертов (``users.role = 'raoExpert'``) из выгрузки ``users``."""
+    csv.field_size_limit(sys.maxsize)
+    with open(users_csv, encoding="utf-8") as fh:
+        return {row["id"] for row in csv.DictReader(fh) if row["role"] == "raoExpert"}
+
+
+def load_compare_cases(experts_csv: str, opinions_csv: str, summary_experts: Optional[set] = None) -> List[Tuple[dict, dict, dict]]:
+    """Случаи для сравнения: оценённое заключение и итоговое сводное той же экспертизы.
+
+    Итоговое — последнее по ``updated_at`` заключение сводного эксперта (``summary_experts`` — id с ролью ``raoExpert``);
+    без списка ролей — последнее среди неоценённых заключений экспертизы (приближение: может попасть неоценённое
+    заключение первичного эксперта).
 
     Returns:
         list: ``(строка expertise_experts, data первичного, data итогового)``.
@@ -80,6 +91,8 @@ def load_compare_cases(experts_csv: str, opinions_csv: str) -> List[Tuple[dict, 
                 continue            # заключения тестовых пользователей не берём ни как оцениваемые, ни как итоговые
             if m and m["range"] not in ("NULL", ""):
                 rated[row["expertise_id"]].append((m, data))
+            elif summary_experts is not None and row["expert_id"] not in summary_experts:
+                continue            # итоговым может быть только заключение сводного эксперта
             elif row["expertise_id"] not in final or row["updated_at"] > final[row["expertise_id"]][0]:
                 final[row["expertise_id"]] = (row["updated_at"], data)
     return [(m, d, final[e][1]) for e, items in rated.items() if e in final for m, d in items]
@@ -135,10 +148,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Проверка первичных заключений по истории")
     parser.add_argument("experts_csv")
     parser.add_argument("opinions_csv")
+    parser.add_argument("--users", help="users.csv: итоговым считать заключение сводного эксперта (role = raoExpert)")
     parser.add_argument("--compare", action="store_true", help="качество оценки по расхождениям с итоговым заключением")
     args = parser.parse_args(argv)
     if args.compare:
-        report_compare(load_compare_cases(args.experts_csv, args.opinions_csv))
+        report_compare(load_compare_cases(args.experts_csv, args.opinions_csv,
+                                          load_summary_experts(args.users) if args.users else None))
         return 0
     report(load_pairs(args.experts_csv, args.opinions_csv))
     return 0

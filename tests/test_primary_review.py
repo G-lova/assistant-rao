@@ -36,8 +36,23 @@ class TestExpertsTests(unittest.TestCase):
     def test_is_test_expert(self):
         """Идентификаторы из настроек (в том числе строкой, как в CSV) — тестовые; остальные и мусор — нет."""
         from scripts.eval_primary_opinion import is_test_expert
-        self.assertTrue(is_test_expert("3") and is_test_expert(1638))
+        self.assertTrue(is_test_expert("3") and is_test_expert(1638) and is_test_expert("7"))
         self.assertFalse(is_test_expert("1645") or is_test_expert("NULL") or is_test_expert(None))
+
+
+class FindTestExpertsTests(unittest.TestCase):
+    """Поиск тестовых экспертов по косвенным признакам."""
+
+    def test_signals(self):
+        """Имя «Тест», заглушки в реквизитах, «Моя работа» и повторяющиеся буквы находятся; обычный эксперт — нет."""
+        from scripts.find_test_experts import find_candidates, is_placeholder
+        plain = {"id": "10", "role": "expert", "name": "Иванова Анна", "email": "a@mail.ru", "inn": "123456789012", "phone": "79161234567"}
+        fake = {"id": "7", "role": "raoExpert", "name": "Кулешова С.", "phone": "71111111111", "inn": "111111111111"}
+        named = {"id": "8", "role": "expert", "name": "Тестовый"}
+        junk = {"id": "9", "role": "expert", "name": "Ковалёва gggggggggg"}
+        got = find_candidates([plain, fake, named, junk, {"id": "1", "role": "expertise", "name": "Тест"}])
+        self.assertEqual(got, {"7": ["profile"], "8": ["name"], "9": ["junk-name"]})
+        self.assertTrue(is_placeholder("11111111111") and not is_placeholder("79161234567"))
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@
 
 Запуск::
 
-    python -m scripts.fit_primary_range expertise_experts.csv expertise_expert_opinion7s.csv
+    python -m scripts.fit_primary_range expertise_experts.csv expertise_expert_opinion7s.csv --users users.csv
 """
 import argparse
 import json
@@ -16,7 +16,7 @@ from collections import Counter
 from typing import List, Optional
 
 from knowledge_store import primary_compare, primary_review
-from scripts.eval_primary_opinion import load_compare_cases
+from scripts.eval_primary_opinion import load_compare_cases, load_summary_experts
 
 GRADES = [0.0, 0.5, 0.75, 1.0]
 STRONG_C = 0.05      # сильная регуляризация: признаков-критериев много, примеров на критерий мало
@@ -31,11 +31,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Обучение модели оценки первичных экспертов")
     parser.add_argument("experts_csv")
     parser.add_argument("opinions_csv")
+    parser.add_argument("--users", help="users.csv: итоговым считать заключение сводного эксперта (role = raoExpert)")
     parser.add_argument("--min-count", type=int, default=10)
     parser.add_argument("--out", default=primary_compare.MODEL_PATH)
     args = parser.parse_args(argv)
 
-    cases = load_compare_cases(args.experts_csv, args.opinions_csv)
+    cases = load_compare_cases(args.experts_csv, args.opinions_csv, load_summary_experts(args.users) if args.users else None)
     model = {}
     for group in ("procurement", "report"):
         rows = []
