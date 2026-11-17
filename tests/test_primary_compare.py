@@ -35,6 +35,11 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(pc.suggest_range(pc.Comparison(common=2), (7, 10, 22)), None)
         self.assertEqual(pc.suggest_range(pc.Comparison(common=50), (7, 10, 22)), 1.0)
 
+    def test_scale_by_analyst(self):
+        """Шкала аналитика: 0–25% → 0, 25–50% → 0.5, 50–75% → 0.75, выше 75% → 1; границы включаются в нижний диапазон."""
+        got = [pc.range_by_scale(p) for p in (0, 25, 25.1, 50, 75, 75.1, 100, None)]
+        self.assertEqual(got, [0.0, 0.0, 0.5, 0.5, 0.75, 1.0, 1.0, None])
+
     def test_report_form_uses_flags(self):
         """Для отчётных документов сравниваются булевы флаги field3_*/field4_*, а группа определяет пороги."""
         a = {"field1_3": [], "field3_0": True, "field3_1": True, "field4_0": False, "field4_1": True, "field4_2": True}

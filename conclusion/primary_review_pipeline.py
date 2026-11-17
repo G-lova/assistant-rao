@@ -1,11 +1,10 @@
 """Оценка заключений первичных экспертов по готовому сводному заключению (без отправки в основную БД).
 
 Заключения берутся из внешней БД тем же способом, что в :mod:`conclusion.conclusion_pipeline` (SQL через
-``DataFetcher``). Различие ролей — по таблице назначений ``expertise_experts``:
+``DataFetcher``). Роли — по ``users.role``:
 
-* **первичный эксперт** — у него есть назначение на экспертизу;
-* **сводный эксперт** — заключение есть, а назначения нет; берётся последнее по ``updated_at``
-  (на истории так отличаются 94 сводных эксперта, и именно они ставят оценки).
+* **первичный эксперт** — ``expert``;
+* **сводный эксперт** — ``raoExpert``; берётся последнее его заключение по ``updated_at``.
 
 Для каждого первичного эксперта считаются расхождения с итоговым заключением, комментарий и предлагаемая оценка
 (:mod:`knowledge_store.primary_compare`). Результат только возвращается; ``range`` и ``comment`` в основную БД
@@ -22,18 +21,20 @@ if TYPE_CHECKING:   # тяжёлые зависимости (aiohttp, pandas) н
 
 logger = get_logger(__name__)
 
-# Заключения экспертизы с признаком назначения: ``assignment_id`` пуст у сводного эксперта.
+# Заключения экспертизы с ролью автора (``users.role``): ``expert`` — первичный, ``raoExpert`` — сводный.
 SQL_OPINIONS = """
     SELECT o.id, o.expert_id, o.data, o.updated_at,
            e.object, e.type AS type_orig, e.checkType2,
-           ee.id AS assignment_id, ee.accept, ee.`range` AS current_range
+           u.role AS expert_role, ee.accept, ee.`range` AS current_range
     FROM `expertise_expert_opinion7s` o
     INNER JOIN expertises e ON e.id = o.expertise_id
+    INNER JOIN users u ON u.id = o.expert_id AND u.role IN ('expert', 'raoExpert')
     LEFT JOIN expertise_experts ee
            ON ee.expertise_id = o.expertise_id AND ee.expert_id = o.expert_id
     WHERE o.deleted_at IS NULL AND o.data IS NOT NULL AND o.data != CAST('[]' AS JSON)
       AND e.id = ?
 """
+PRIMARY_ROLE, SUMMARY_ROLE = "expert", "raoExpert"      # users.role
 LAW_BY_TYPE = {4: "44-ФЗ", 5: "223-ФЗ"}      # expertises.type: 4 — 44-ФЗ, 5 — 223-ФЗ
 
 
@@ -62,7 +63,7 @@ def _is_blank(value: Any) -> bool:
 
 
 def split_opinions(rows: List[dict]) -> Dict[str, Any]:
-    """Делит заключения экспертизы на первичные и итоговое сводное.
+    """Делит заключения экспертизы по роли автора (``users.role``) на первичные и итоговое сводное.
 
     Args:
         rows: Строки :data:`SQL_OPINIONS`.
@@ -76,7 +77,11 @@ def split_opinions(rows: List[dict]) -> Dict[str, Any]:
         if data is None:
             continue
         item = {**row, "data": data}
-        (summaries if _is_blank(row.get("assignment_id")) else primary).append(item)
+        role = row.get("expert_role")
+        if role == SUMMARY_ROLE:
+            summaries.append(item)
+        elif role == PRIMARY_ROLE:
+            primary.append(item)
     summary = max(summaries, key=lambda r: str(r.get("updated_at") or "")) if summaries else None
     return {"primary": primary, "summary": summary}
 
@@ -91,7 +96,7 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
     Returns:
         dict: ``expertise_id`` не входит (добавляет вызывающий); ``summary_expert_id``, ``group`` и ``reviews`` —
         по записи на первичного эксперта: ``expert_id``, ``common``, ``differences`` (по видам), ``issues``,
-        ``suggested_range`` (``None`` при малом числе общих критериев), ``comment``, ``current_range``.
+        ``suggested_range`` (``None`` при малом числе общих критериев), ``match_percent`` и ``range_by_scale`` (шкала аналитика), ``comment``, ``current_range``.
 
     Raises:
         PrimaryReviewError: 404 — первичных заключений нет; 409 — сводное заключение ещё не заполнено.
@@ -114,6 +119,8 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
                              "primary": d.primary, "summary": d.summary} for d in cmp.differences],
             "issues": [{"code": i.code, "severity": i.severity, "message": i.message, "keys": i.keys} for i in issues],
             "suggested_range": primary_compare.suggest_range(cmp),
+            "match_percent": cmp.match_percent,
+            "range_by_scale": primary_compare.range_by_scale(cmp.match_percent),
             "comment": primary_compare.build_comment(cmp, labels, issues),
             "current_range": None if _is_blank(current) else float(current),
         })

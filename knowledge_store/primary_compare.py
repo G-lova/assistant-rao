@@ -23,6 +23,7 @@ except ImportError:   # модуль работает и без настроек
     settings = None
 
 DEFAULT_THRESHOLDS = {"procurement": (13, 21, 39), "report": (2, 3, 10)}
+DEFAULT_SCALE = ((25, 0.0), (50, 0.5), (75, 0.75))
 DEFAULT_WEIGHTS = {"procurement": (3, 1, 1), "report": (1, 1, 1)}   # (пропуск нарушения, ложное нарушение, прочее)
 DEFAULT_MIN_COMMON = 5
 # Итоговые флаги отчётных документов (объект 7): field3_0, field4_2 …; подкритерии field3_0_3 — тоже
@@ -70,6 +71,11 @@ class Comparison:
     def count(self, kind: Optional[str] = None) -> int:
         """Число расхождений (всех или заданного вида)."""
         return sum(1 for d in self.differences if kind is None or d.kind == kind)
+
+    @property
+    def match_percent(self) -> Optional[float]:
+        """Доля общих критериев, по которым первичный эксперт совпал с итоговым заключением, в процентах."""
+        return None if not self.common else round(100 * (1 - len(self.differences) / self.common), 1)
 
     def score(self, weights: Optional[Sequence[float]] = None) -> float:
         """Взвешенное число расхождений: пропущенное нарушение тяжелее остальных (веса — из настроек для группы)."""
@@ -139,6 +145,23 @@ def criterion_number(key: str, labels: Dict[str, str]) -> str:
     """Номер критерия для комментария: из названия (``1.30. Наличие…`` → ``1.30``), иначе ключ поля."""
     match = re.match(r"\s*(\d+(?:\.\d+)+)\.?\s", labels.get(key) or "")
     return match.group(1) if match else key
+
+
+def range_by_scale(percent: Optional[float]) -> Optional[float]:
+    """Оценка по шкале аналитика (``PRIMARY_REVIEW_SCALE``): 0–25% → 0, 25–50% → 0.5, 50–75% → 0.75, выше 75% → 1.
+
+    Args:
+        percent: Процент, например :attr:`Comparison.match_percent`; ``None`` — оценка не предлагается.
+
+    Returns:
+        float | None: 0 / 0.5 / 0.75 / 1.
+    """
+    if percent is None:
+        return None
+    for upper, value in getattr(settings, "PRIMARY_REVIEW_SCALE", DEFAULT_SCALE):
+        if percent <= upper:
+            return value
+    return getattr(settings, "PRIMARY_REVIEW_SCALE_TOP", 1.0)
 
 
 def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
