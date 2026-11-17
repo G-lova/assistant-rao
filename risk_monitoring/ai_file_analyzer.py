@@ -35,11 +35,13 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
 from configs.config import Config
 from configs.logger import get_logger
 from configs.file_errors import BrokenFile
+from configs import llm_resilience
 from configs.llm_resilience import ModelUnavailable
 from configs.resources import read_text
 from configs import settings
@@ -675,26 +677,61 @@ class AIFileAnalyzer:
             if row.get("rm_status") == "failed" and attempt > MAX_ATTEMPTS:
                 progress.note(f"исчерпаны попытки ({MAX_ATTEMPTS}) — пропуск")
                 return {"file_id": file_id, "status": "skipped", "reason": "max_attempts"}
+        entered = time.monotonic()
         async with self.semaphore:
-            progress.note(f"начало анализа (попытка {attempt})")
-            try:
-                return await self.analyze_file(row, previous, attempt)
-            except FileUnavailable as e:
-                logger.warning(f"Файл {file_id} недоступен: {e}")
-                return await self._push_failure(file_id, attempt, f"download_failed: {e}")
-            except ModelUnavailable as e:
-                # сервер модели недоступен (5xx/таймаут после всех повторов): файл не виноват — попытка не
-                # засчитывается (иначе за пару сбоев модели файл исчерпал бы MAX_ATTEMPTS и не анализировался бы)
-                logger.warning(f"Файл {file_id}: модель недоступна — анализ повторится позже: {e}")
-                return await self._push_failure(file_id, attempt - 1, f"model_unavailable: {e}")
-            except Exception as e:  # noqa: BLE001 — сбой одного файла не останавливает остальные
-                if type(e).__name__ == "ExtractionFailed":
-                    # модель не дала годного ответа ни по одному блоку — причина видна выше в журнале, без трассировки
-                    logger.warning(f"Файл {file_id}: извлечение не удалось ({e}) — повтор в следующем прогоне "
-                                   f"(попытка {attempt} из {MAX_ATTEMPTS})")
-                else:
-                    logger.error(f"Ошибка анализа файла {file_id}: {e}", exc_info=True)
-                return await self._push_failure(file_id, attempt, f"{type(e).__name__}: {e}")
+            # замер файла (17.11.2026): этапы, запросы к модели, ожидание очереди — в pipeline.timings результата и
+            # в журнал анализатора (timing_log), из которого ежедневный прогон считает P50 / P95 и самые долгие файлы
+            with progress.collect() as tm, llm_resilience.scope() as llm:
+                tm["queue_sec"] = round(time.monotonic() - entered, 1)
+                res: Optional[Dict[str, Any]] = None
+                try:
+                    res = await self._attempt(row, previous, attempt)
+                    return res
+                finally:
+                    self._log_timing(row, tm, llm, res)
+
+    def _log_timing(self, row: Dict[str, Any], tm: Dict[str, Any], llm: Dict[str, Any],
+                    res: Optional[Dict[str, Any]]) -> None:
+        """Запись о времени файла в ``timing_log`` (и при прерывании пачки по времени: ``status = interrupted``)."""
+        log = self.__dict__.setdefault("timing_log", [])
+        snap = progress.snapshot(tm) or {}
+        log.append({"file_id": int(row["id"]), "name": str(row.get("file_name") or "")[:80],
+                    "status": (res or {}).get("status") or "interrupted",
+                    "seconds": snap.get("total_sec", 0), "queue_sec": snap.get("queue_sec", 0),
+                    "steps": snap.get("steps", {}), "llm": dict(llm)})
+
+    def _timings_block(self) -> Optional[Dict[str, Any]]:
+        """``pipeline.timings`` текущего файла: время с начала, ожидание очереди, самые долгие этапы, запросы к модели."""
+        snap = progress.snapshot()
+        if snap is None:
+            return None
+        llm = llm_resilience.current_scope()
+        if llm is not None:
+            snap["llm"] = dict(llm)
+        return snap
+
+    async def _attempt(self, row: Dict[str, Any], previous: Optional[Dict[str, Any]], attempt: int) -> Dict[str, Any]:
+        """Анализ файла с обработкой ошибок (файл недоступен, модель недоступна, прочие сбои)."""
+        file_id = int(row["id"])
+        progress.note(f"начало анализа (попытка {attempt})")
+        try:
+            return await self.analyze_file(row, previous, attempt)
+        except FileUnavailable as e:
+            logger.warning(f"Файл {file_id} недоступен: {e}")
+            return await self._push_failure(file_id, attempt, f"download_failed: {e}")
+        except ModelUnavailable as e:
+            # сервер модели недоступен (5xx/таймаут после всех повторов): файл не виноват — попытка не
+            # засчитывается (иначе за пару сбоев модели файл исчерпал бы MAX_ATTEMPTS и не анализировался бы)
+            logger.warning(f"Файл {file_id}: модель недоступна — анализ повторится позже: {e}")
+            return await self._push_failure(file_id, attempt - 1, f"model_unavailable: {e}")
+        except Exception as e:  # noqa: BLE001 — сбой одного файла не останавливает остальные
+            if type(e).__name__ == "ExtractionFailed":
+                # модель не дала годного ответа ни по одному блоку — причина видна выше в журнале, без трассировки
+                logger.warning(f"Файл {file_id}: извлечение не удалось ({e}) — повтор в следующем прогоне "
+                               f"(попытка {attempt} из {MAX_ATTEMPTS})")
+            else:
+                logger.error(f"Ошибка анализа файла {file_id}: {e}", exc_info=True)
+            return await self._push_failure(file_id, attempt, f"{type(e).__name__}: {e}")
 
     async def _reuse_internal(self, file_id: int, stored: Dict[str, Any]) -> Dict[str, Any]:
         """Файл уже проанализирован, но результата нет во внешней БД (запись не удалась или прогон был без записи):
@@ -727,6 +764,9 @@ class AIFileAnalyzer:
         if self.push_results and not self.force:
             block = {"pipeline": passport.pipeline_block(STAGE, "failed", self.model, self.versions,
                                                          attempt=attempt, error=error)}
+            timings = self._timings_block()
+            if timings:
+                block["pipeline"]["timings"] = timings
             try:
                 await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, file_id, block)
                 result["pushed"] = True
@@ -1680,6 +1720,9 @@ class AIFileAnalyzer:
         """Записывает ``ai_analysis`` во внешнюю БД (если включено) и возвращает итог по файлу."""
         response = {"file_id": file_id, "document_id": document_id, "status": "done",
                     "pushed": False, "ai_analysis": ai_analysis}
+        timings = self._timings_block()
+        if timings and isinstance(ai_analysis.get("pipeline"), dict):
+            ai_analysis["pipeline"]["timings"] = timings
         if self.push_results:
             try:
                 async with progress.step("запись результата во внешнюю БД"):

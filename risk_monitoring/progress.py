@@ -14,6 +14,7 @@
 """
 import contextlib
 import contextvars
+import re
 import time
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -22,6 +23,9 @@ from configs.logger import get_logger
 logger = get_logger("risk_monitoring.progress")
 
 _SUBJECT: contextvars.ContextVar = contextvars.ContextVar("rm_subject", default="")
+# Замер этапов одного объекта (файла): :func:`collect` задаёт словарь, :func:`_track` прибавляет к нему длительность
+# этапа по ключу :func:`step_key`. Как и субъект — в contextvars; словарь общий с дочерними задачами gather.
+_TIMINGS: contextvars.ContextVar = contextvars.ContextVar("rm_timings", default=None)
 _ACTIVE: Dict[int, Tuple[str, str, float]] = {}
 _seq = 0
 
@@ -70,6 +74,10 @@ def _track(title: str) -> Iterator[Dict[str, Any]]:
         logger.info(f"{who} ✓ {title} — {time.monotonic() - start:.1f} с{tail}")
     finally:
         _ACTIVE.pop(key, None)
+        acc = _TIMINGS.get()
+        if acc is not None:
+            k = step_key(title)
+            acc["steps"][k] = round(acc["steps"].get(k, 0) + time.monotonic() - start, 1)
 
 
 @contextlib.asynccontextmanager
@@ -96,3 +104,45 @@ def active(limit: int = 6) -> List[str]:
 def analysis_title(analysis_type: str, cached: Optional[bool] = None) -> str:
     """Название этапа по виду анализа документа."""
     return ANALYSIS_TITLES.get(analysis_type.split(":")[0], analysis_type)
+
+
+def step_key(title: str) -> str:
+    """Ключ этапа для замеров: без уточнений в скобках, номеров и имени модели — чтобы одинаковые этапы разных
+    файлов складывались («анализ рисков: запрос к модели prod_multimodal_llm» → «анализ рисков: модель»,
+    «загрузка прошлой редакции (файл 12)» → «загрузка прошлой редакции»)."""
+    t = re.sub(r"\s*\([^)]*\)", "", title or "")
+    t = re.sub(r"запрос к модели\s+\S+", "модель", t)
+    return t.strip()[:80] or "этап"
+
+
+@contextlib.contextmanager
+def collect() -> Iterator[Dict[str, Any]]:
+    """Замер этапов одного объекта: ``with progress.collect() as t: …`` — в ``t["steps"]`` секунды по этапам
+    (:func:`step_key`; вложенные этапы считаются и в своём, и во внешнем, поэтому сумма больше общего времени).
+
+    Yields:
+        Dict[str, Any]: ``started`` (monotonic) и ``steps``.
+    """
+    acc: Dict[str, Any] = {"started": time.monotonic(), "steps": {}}
+    token = _TIMINGS.set(acc)
+    try:
+        yield acc
+    finally:
+        _TIMINGS.reset(token)
+
+
+def snapshot(acc: Optional[Dict[str, Any]] = None, top: int = 12) -> Optional[Dict[str, Any]]:
+    """Замер текущего объекта на этот момент (или ``acc``): ``total_sec`` с начала и самые долгие этапы.
+
+    Returns:
+        Optional[Dict[str, Any]]: ``total_sec``, ``steps`` (не больше ``top``, по убыванию) или ``None`` вне
+        :func:`collect`.
+    """
+    acc = acc if acc is not None else _TIMINGS.get()
+    if acc is None:
+        return None
+    steps = sorted(acc["steps"].items(), key=lambda kv: -kv[1])[:top]
+    out: Dict[str, Any] = {"total_sec": round(time.monotonic() - acc["started"], 1), "steps": dict(steps)}
+    if acc.get("queue_sec") is not None:
+        out["queue_sec"] = acc["queue_sec"]   # ожидание места среди параллельных объектов до начала
+    return out
