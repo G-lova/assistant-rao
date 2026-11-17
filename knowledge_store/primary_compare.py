@@ -157,6 +157,35 @@ def criterion_number(key: str, labels: Dict[str, str]) -> str:
     return match.group(1) if match else key
 
 
+def apply_full_match_rule(grade: Optional[float], cmp: Comparison, shared: Optional[Set[str]] = None,
+                          mode: Optional[str] = "settings") -> Tuple[Optional[float], bool]:
+    """Постпроверка оценки по порядку включения в Реестр: 1 балл — только при полном соответствии сводному заключению.
+
+    Модель обучена на поведении оценивающих, которые на истории ставят 1.00 и при наличии отклонений (67% случаев без
+    пропусков нарушений), поэтому оценку 1.00 она выдаёт чаще, чем допускает порядок. Постпроверка снижает 1.00 до 0.75,
+    если остались расхождения, которые не общие для всех первичных экспертов (:func:`shared_keys`).
+
+    Args:
+        grade: Оценка модели или порогов.
+        cmp: Результат :func:`compare`.
+        shared: Расхождения, общие для всех первичных (не засчитываются).
+        mode: ``any`` — любое расхождение; ``missfa`` — только пропуск нарушения и лишнее нарушение (1 против 2 не в счёт);
+            ``missed`` — только пропуск нарушения; ``None`` — без постпроверки; ``settings`` (по умолчанию) — режим из
+            ``settings.PRIMARY_REVIEW_FULL_MATCH_RULE``.
+
+    Returns:
+        tuple: ``(оценка, изменена_ли)``.
+    """
+    if mode == "settings":
+        mode = getattr(settings, "PRIMARY_REVIEW_FULL_MATCH_RULE", "any")
+    if grade is None or grade < 1.0 or mode is None:
+        return grade, False
+    kinds = {"any": ("missed", "false_alarm", "other"), "missfa": ("missed", "false_alarm"), "missed": ("missed",)}[mode]
+    if any(d.kind in kinds and d.key not in (shared or ()) for d in cmp.differences):
+        return 0.75, True
+    return grade, False
+
+
 def range_by_scale(percent: Optional[float]) -> Optional[float]:
     """Оценка по шкале аналитика (``PRIMARY_REVIEW_SCALE``): 0–25% → 0, 25–50% → 0.5, 50–75% → 0.75, выше 75% → 1.
 
@@ -198,8 +227,9 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
                   shared: Optional[Set[str]] = None, grade: Optional[float] = None) -> str:
     """Собирает комментарий сводного эксперта из расхождений и объективных дефектов.
 
-    Расхождения сгруппированы по видам, критерии названы номерами (полные названия — в ``differences`` ответа API),
-    чтобы комментарий читался, а не повторял по строке на критерий.
+    Формулировки — по сути ошибки первичного эксперта («не выявлено нарушение по критерию 3.1», «неверно указано
+    нарушение по критерию 2.1.5»), а не «не совпало с итоговым». Критерии названы номерами (полные названия — в
+    ``differences`` ответа API), по одной строке на вид ошибки.
 
     Args:
         cmp: Результат :func:`compare`.
@@ -216,16 +246,31 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
         str: Нумерованный список замечаний; при полном совпадении и отсутствии дефектов — ``POSITIVE_COMMENT``.
     """
     labels = labels or {}
-    titles = {"missed": "Не выявлены нарушения, отмеченные в итоговом заключении (критерии: {})",
-              "false_alarm": "Указаны нарушения, которых нет в итоговом заключении (критерии: {})",
-              "other": "Не совпадает ответ «не предусмотрено / в наличии» с итоговым заключением (критерии: {})"}
-    lines: List[str] = []
-    for kind in ("missed", "false_alarm", "other"):
-        numbers = [criterion_number(d.key, labels) for d in cmp.differences
-                   if d.kind == kind and d.key not in (shared or ())]
-        if numbers:
-            shown = ", ".join(numbers[:limit]) + (f" и ещё {len(numbers) - limit}" if len(numbers) > limit else "")
-            lines.append(titles[kind].format(shown) + ".")
+    shared = shared or set()
+
+    def numbers_of(selected: List[Difference]) -> str:
+        """Номера критериев через запятую (не больше ``limit``, остальные — «и ещё N»)."""
+        nums = [criterion_number(d.key, labels) for d in selected]
+        return ", ".join(nums[:limit]) + (f" и ещё {len(nums) - limit}" if len(nums) > limit else "")
+
+    def phrase(selected: List[Difference], one: str, many: str) -> Optional[str]:
+        """Фраза в единственном или множественном числе; ``None``, если расхождений нет."""
+        return (one if len(selected) == 1 else many).format(numbers_of(selected)) if selected else None
+
+    own = [d for d in cmp.differences if d.key not in shared]
+    lines: List[str] = [x for x in (
+        phrase([d for d in own if d.kind == "missed"], "Не выявлено нарушение по критерию {}.",
+               "Не выявлены нарушения по критериям: {}."),
+        phrase([d for d in own if d.kind == "false_alarm"], "Неверно указано нарушение по критерию {}.",
+               "Неверно указаны нарушения по критериям: {}."),
+        # 1 против 2: «не предусмотрено» отмечено там, где требование есть, и наоборот
+        phrase([d for d in own if d.kind == "other" and d.primary == 2],
+               "Неверно отмечено «не предусмотрено» по критерию {} (требование предусмотрено).",
+               "Неверно отмечено «не предусмотрено» по критериям: {} (требование предусмотрено)."),
+        phrase([d for d in own if d.kind == "other" and d.primary != 2],
+               "Неверно отмечено «в наличии» по критерию {} (требование не предусмотрено).",
+               "Неверно отмечено «в наличии» по критериям: {} (требование не предусмотрено)."),
+    ) if x]
     if grade is not None and grade >= 1.0:
         lines = []                       # оценка 1.00: расхождения остаются в differences, но в комментарий не идут
     elif lines and grade is not None:

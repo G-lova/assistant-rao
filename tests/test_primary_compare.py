@@ -22,8 +22,7 @@ class CompareTests(unittest.TestCase):
         """Комментарий называет критерий по названию; без расхождений — шаблонная фраза."""
         cmp = pc.compare({**SUMMARY, "field2_1_2": 1}, SUMMARY)
         text = pc.build_comment(cmp, {"field2_1_2": "1.2. Наличие адреса"})
-        self.assertIn("критерии: 1.2)", text)             # номер берётся из названия
-        self.assertIn("Не выявлены нарушения", text)
+        self.assertIn("Не выявлено нарушение по критерию 1.2.", text)   # номер берётся из названия, единственное число
         self.assertEqual(pc.build_comment(pc.compare(SUMMARY, SUMMARY)), pc.POSITIVE_COMMENT)
 
     def test_comment_follows_grade(self):
@@ -32,7 +31,29 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(pc.build_comment(cmp, grade=1.0), pc.POSITIVE_COMMENT)
         self.assertTrue(pc.build_comment(cmp, grade=0.75).startswith("1. Незначительные отклонения"))
         self.assertTrue(pc.build_comment(cmp, grade=0.5).startswith("1. Существенные расхождения"))
-        self.assertIn("критерии: field2_1_2", pc.build_comment(cmp, grade=0.5))
+        self.assertIn("по критерию field2_1_2", pc.build_comment(cmp, grade=0.5))
+
+    def test_comment_phrases(self):
+        """Формулировки по сути ошибки: пропуск, лишнее нарушение, «не предусмотрено» отмечено неверно — единственное и множественное число."""
+        primary = {**SUMMARY, "field2_1_1": 0, "field2_1_2": 1, "field2_1_3": 0, "field2_1_4": 1, "field2_1_5": 2}
+        summary = {**SUMMARY, "field2_1_5": 1, "field2_1_6": 1}
+        text = pc.build_comment(pc.compare(primary, summary))
+        self.assertIn("Не выявлено нарушение по критерию field2_1_2.", text)
+        self.assertIn("Неверно указаны нарушения по критериям: field2_1_1, field2_1_3.", text)
+        self.assertIn("Неверно отмечено «не предусмотрено» по критерию field2_1_5 (требование предусмотрено).", text)
+        self.assertIn("Неверно отмечено «в наличии» по критерию field2_1_4 (требование не предусмотрено).", text)
+
+    def test_full_match_rule(self):
+        """1.00 снижается до 0.75 при любом расхождении, кроме общих для всех первичных; режимы missfa/missed смягчают правило."""
+        other = pc.compare({**SUMMARY, "field2_1_4": 1}, SUMMARY)                       # только «1 против 2»
+        missed = pc.compare({**SUMMARY, "field2_1_2": 1}, SUMMARY)
+        self.assertEqual(pc.apply_full_match_rule(1.0, other, mode="any"), (0.75, True))
+        self.assertEqual(pc.apply_full_match_rule(1.0, other, mode="missfa"), (1.0, False))
+        self.assertEqual(pc.apply_full_match_rule(1.0, missed, mode="missed"), (0.75, True))
+        self.assertEqual(pc.apply_full_match_rule(1.0, missed, {"field2_1_2"}, mode="any"), (1.0, False))   # общее расхождение
+        self.assertEqual(pc.apply_full_match_rule(0.5, missed, mode="any"), (0.5, False))
+        self.assertEqual(pc.apply_full_match_rule(1.0, missed, mode=None), (1.0, False))
+        self.assertEqual(pc.apply_full_match_rule(1.0, pc.compare(SUMMARY, SUMMARY), mode="any"), (1.0, False))
 
     def test_suggest_range_thresholds(self):
         """Оценка по числу расхождений; при малом числе общих критериев — None."""
