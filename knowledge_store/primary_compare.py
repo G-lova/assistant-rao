@@ -22,7 +22,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from knowledge_store import primary_review
 from knowledge_store.primary_review import normalize
@@ -174,8 +174,28 @@ def range_by_scale(percent: Optional[float]) -> Optional[float]:
     return getattr(settings, "PRIMARY_REVIEW_SCALE_TOP", 1.0)
 
 
+def shared_keys(comparisons: Sequence[Comparison]) -> Set[str]:
+    """Критерии, по которым все первичные эксперты разошлись с итоговым заключением одинаково.
+
+    Если два и более первичных эксперта независимо дали одно значение, а итоговое заключение иное, вероятнее всего
+    итоговое значение выбрано сводным экспертом сознательно (или требует проверки), а не ошибка первичных.
+
+    Args:
+        comparisons: Результаты :func:`compare` по всем первичным экспертам экспертизы.
+
+    Returns:
+        set[str]: Ключи полей; пусто, если первичных меньше двух.
+    """
+    if len(comparisons) < 2:
+        return set()
+    per_expert = [{d.key: (d.primary, d.summary) for d in c.differences} for c in comparisons]
+    first = per_expert[0]
+    return {k for k, pair in first.items() if all(e.get(k) == pair for e in per_expert[1:])}
+
+
 def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
-                  issues: Optional[Sequence[primary_review.Issue]] = None, limit: int = 30) -> str:
+                  issues: Optional[Sequence[primary_review.Issue]] = None, limit: int = 30,
+                  shared: Optional[Set[str]] = None) -> str:
     """Собирает комментарий сводного эксперта из расхождений и объективных дефектов.
 
     Расхождения сгруппированы по видам, критерии названы номерами (полные названия — в ``differences`` ответа API),
@@ -186,6 +206,8 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
         labels: ``ключ поля → название критерия`` (из ``pe_form_fields``); без названия выводится ключ.
         issues: Дефекты из :func:`knowledge_store.primary_review.review_opinion` (необязательно).
         limit: Максимум номеров критериев в одной строке; остальные сводятся в «и ещё N».
+        shared: Ключи расхождений, общих для всех первичных экспертов (:func:`shared_keys`): в комментарий не попадают —
+            ошибкой первичного эксперта они, скорее всего, не являются.
 
     Returns:
         str: Нумерованный список замечаний; при полном совпадении и отсутствии дефектов — ``POSITIVE_COMMENT``.
@@ -196,7 +218,8 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
               "other": "Не совпадает ответ «не предусмотрено / в наличии» с итоговым заключением (критерии: {})"}
     lines: List[str] = []
     for kind in ("missed", "false_alarm", "other"):
-        numbers = [criterion_number(d.key, labels) for d in cmp.differences if d.kind == kind]
+        numbers = [criterion_number(d.key, labels) for d in cmp.differences
+                   if d.kind == kind and d.key not in (shared or ())]
         if numbers:
             shown = ", ".join(numbers[:limit]) + (f" и ещё {len(numbers) - limit}" if len(numbers) > limit else "")
             lines.append(titles[kind].format(shown) + ".")

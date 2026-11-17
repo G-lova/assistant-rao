@@ -45,6 +45,18 @@ class PrimaryReviewPipelineTests(unittest.TestCase):
         self.assertEqual((by_expert[2]["match_percent"], by_expert[2]["range_by_scale"]), (100.0, 1.0))
         self.assertEqual(by_expert[1]["match_percent"], 83.3)     # 1 расхождение из 6 общих критериев
 
+    def test_shared_difference_is_not_blamed(self):
+        """Расхождение, одинаковое у всех первичных, выделяется и не попадает в комментарий; у одного эксперта — остаётся."""
+        both = {**SUMMARY, "field2_1_3": 0}             # итоговое: 1, оба первичных: 0
+        rows = [row(1, {**both, "field2_1_5": 0}), row(2, both), row(99, SUMMARY, role="raoExpert")]
+        result = review_expertise(rows, {"field2_1_3": "1.3. Наличие почты", "field2_1_5": "1.5. Наличие сайта"})
+        self.assertEqual([d["key"] for d in result["shared_differences"]], ["field2_1_3"])
+        first, second = result["reviews"]
+        self.assertTrue(all(d["shared"] == (d["key"] == "field2_1_3") for d in first["differences"]))
+        self.assertIn("1.5", first["comment"])
+        self.assertNotIn("1.3", first["comment"])
+        self.assertEqual(second["comment"], "ЭЗ соответствует требованиям")
+
     def test_errors(self):
         """Нет первичных — 404; нет сводного — 409."""
         with self.assertRaises(PrimaryReviewError) as no_primary:

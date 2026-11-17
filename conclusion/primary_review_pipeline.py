@@ -11,6 +11,7 @@
 не записываются — их ставит сводный эксперт.
 """
 import json
+import re
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from configs.logger import get_logger
@@ -94,7 +95,7 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
         labels: ``ключ поля → название критерия`` для комментария (необязательно).
 
     Returns:
-        dict: ``expertise_id`` не входит (добавляет вызывающий); ``summary_expert_id``, ``group`` и ``reviews`` —
+        dict: ``expertise_id`` не входит (добавляет вызывающий); ``summary_expert_id``, ``group``, ``shared_differences`` (критерии, по которым все первичные эксперты расходятся с итоговым одинаково — вероятно, решение сводного эксперта; в комментарии они не упоминаются и помечены ``shared`` в ``differences``) и ``reviews`` —
         по записи на первичного эксперта: ``expert_id``, ``common``, ``differences`` (по видам), ``issues``,
         ``suggested_range`` (модель; ``None`` при малом числе общих критериев) с ``range_source`` и ``probabilities``, ``range_by_thresholds``, ``match_percent`` и ``range_by_scale`` (шкала аналитика), ``comment``, ``current_range``.
 
@@ -108,8 +109,10 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
         raise PrimaryReviewError(409, "Сводное заключение ещё не заполнено: оценивать не с чем")
     summary = parts["summary"]
     reviews = []
-    for row in sorted(parts["primary"], key=lambda r: int(r["expert_id"])):
-        cmp = primary_compare.compare(row["data"], summary["data"])
+    ordered = sorted(parts["primary"], key=lambda r: int(r["expert_id"]))
+    comparisons = [primary_compare.compare(row["data"], summary["data"]) for row in ordered]
+    shared = primary_compare.shared_keys(comparisons)      # одинаковое расхождение у всех первичных: проверить итоговое
+    for row, cmp in zip(ordered, comparisons):
         issues = primary_review.review_opinion(row["data"])
         current = row.get("current_range")
         feats = primary_compare.features(row["data"], summary["data"], cmp)
@@ -119,7 +122,8 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
             "expert_id": int(row["expert_id"]),
             "common": cmp.common,
             "differences": [{"key": d.key, "label": (labels or {}).get(d.key), "kind": d.kind,
-                             "primary": d.primary, "summary": d.summary} for d in cmp.differences],
+                             "primary": d.primary, "summary": d.summary, "shared": d.key in shared}
+                            for d in cmp.differences],
             "issues": [{"code": i.code, "severity": i.severity, "message": i.message, "keys": i.keys} for i in issues],
             # обученная модель точнее порогов (на кросс-валидации 58% / 55% против 41% / 52%); без модели или при малом
             # числе общих критериев — пороги
@@ -129,11 +133,16 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
             "range_by_thresholds": threshold_range,
             "match_percent": cmp.match_percent,
             "range_by_scale": primary_compare.range_by_scale(cmp.match_percent),
-            "comment": primary_compare.build_comment(cmp, labels, issues),
+            "comment": primary_compare.build_comment(cmp, labels, issues, shared=shared),
             "current_range": None if _is_blank(current) else float(current),
         })
     group = "report" if primary_review.is_report_data(summary["data"]) else "procurement"
-    return {"summary_expert_id": int(summary["expert_id"]), "group": group, "reviews": reviews}
+    # критерии, по которым все первичные эксперты разошлись с итоговым одинаково (при двух и более первичных)
+    shared_list = [{"key": k, "label": (labels or {}).get(k), "primary": pv, "summary": sv}
+                   for k in sorted(shared, key=lambda x: [int(n) for n in re.findall(r"\d+", x)])
+                   for pv, sv in [next((d.primary, d.summary) for d in comparisons[0].differences if d.key == k)]]
+    return {"summary_expert_id": int(summary["expert_id"]), "group": group, "shared_differences": shared_list,
+            "reviews": reviews}
 
 
 class PrimaryReviewPipeline:
