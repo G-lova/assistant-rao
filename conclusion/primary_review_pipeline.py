@@ -96,7 +96,7 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
     Returns:
         dict: ``expertise_id`` не входит (добавляет вызывающий); ``summary_expert_id``, ``group`` и ``reviews`` —
         по записи на первичного эксперта: ``expert_id``, ``common``, ``differences`` (по видам), ``issues``,
-        ``suggested_range`` (``None`` при малом числе общих критериев), ``match_percent`` и ``range_by_scale`` (шкала аналитика), ``comment``, ``current_range``.
+        ``suggested_range`` (модель; ``None`` при малом числе общих критериев) с ``range_source`` и ``probabilities``, ``range_by_thresholds``, ``match_percent`` и ``range_by_scale`` (шкала аналитика), ``comment``, ``current_range``.
 
     Raises:
         PrimaryReviewError: 404 — первичных заключений нет; 409 — сводное заключение ещё не заполнено.
@@ -112,13 +112,21 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
         cmp = primary_compare.compare(row["data"], summary["data"])
         issues = primary_review.review_opinion(row["data"])
         current = row.get("current_range")
+        feats = primary_compare.features(row["data"], summary["data"], cmp)
+        model = primary_compare.predict_range(feats, cmp.group)
+        threshold_range = primary_compare.suggest_range(cmp)
         reviews.append({
             "expert_id": int(row["expert_id"]),
             "common": cmp.common,
             "differences": [{"key": d.key, "label": (labels or {}).get(d.key), "kind": d.kind,
                              "primary": d.primary, "summary": d.summary} for d in cmp.differences],
             "issues": [{"code": i.code, "severity": i.severity, "message": i.message, "keys": i.keys} for i in issues],
-            "suggested_range": primary_compare.suggest_range(cmp),
+            # обученная модель точнее порогов (на кросс-валидации 58% / 55% против 41% / 52%); без модели или при малом
+            # числе общих критериев — пороги
+            "suggested_range": model["range"] if model and threshold_range is not None else threshold_range,
+            "range_source": "model" if model and threshold_range is not None else ("thresholds" if threshold_range is not None else None),
+            "probabilities": model["probabilities"] if model and threshold_range is not None else None,
+            "range_by_thresholds": threshold_range,
             "match_percent": cmp.match_percent,
             "range_by_scale": primary_compare.range_by_scale(cmp.match_percent),
             "comment": primary_compare.build_comment(cmp, labels, issues),

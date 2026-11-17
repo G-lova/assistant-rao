@@ -10,6 +10,10 @@
 точное совпадение ~44% при базе 33–36%; пороги подобраны на тех же данных, то есть оценка оптимистична), потому что оценка зависит и от того, кто её ставит, и от текстовых полей,
 которые здесь не сравниваются. Поэтому оценка — ориентир, а комментарий — основной результат.
 """
+import difflib
+import json
+import math
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -194,3 +198,98 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
     if not lines:
         return POSITIVE_COMMENT
     return "\n".join(f"{n}. {text}" for n, text in enumerate(lines, start=1))
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Обученная модель оценки (многоклассовая логистическая регрессия, коэффициенты — в JSON, вывод на чистом Python).
+# Признаки: счётчики расхождений, отдельные расхождения по каждому критерию (у критериев разный вес), сходство текстовых
+# полей с итоговым заключением. Файл строит ``scripts/fit_primary_range.py`` по истории оценок.
+# ---------------------------------------------------------------------------------------------------------------------
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "primary_range_model.json")
+_TEXT_KEYS = ("field1_1", "documents", "field3", "field4")
+_TEXT_LIMIT = 1500          # символов для сравнения текстов (SequenceMatcher квадратичен)
+_LEN_NORM = 3000
+_model_cache: Optional[Dict[str, Any]] = None
+
+
+def _text_value(data: Dict[str, Any], key: str) -> str:
+    """Текст поля заключения (нестроки и пустое → пустая строка)."""
+    value = data.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _similarity(a: str, b: str) -> float:
+    """Сходство двух текстов 0–1 (оба пусты → 1, один пуст → 0)."""
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, a[:_TEXT_LIMIT], b[:_TEXT_LIMIT]).ratio()
+
+
+def features(primary: Dict[str, Any], summary: Dict[str, Any], cmp: Optional[Comparison] = None) -> Dict[str, float]:
+    """Признаки пары «первичное заключение — итоговое» для обученной модели.
+
+    Args:
+        primary: ``data`` первичного заключения.
+        summary: ``data`` итогового заключения.
+        cmp: Готовый результат :func:`compare` (чтобы не считать дважды).
+
+    Returns:
+        dict: ``имя признака → число``; расхождения по критериям — ``missed:ключ`` / ``false_alarm:ключ`` / ``other:ключ``.
+    """
+    cmp = cmp or compare(primary, summary)
+    out: Dict[str, float] = {"n_missed": cmp.count("missed"), "n_false_alarm": cmp.count("false_alarm"),
+                             "n_other": cmp.count("other"), "match_percent": cmp.match_percent or 0.0}
+    for d in cmp.differences:
+        out[f"{d.kind}:{d.key}"] = 1.0
+    for key in _TEXT_KEYS:
+        a, b = _text_value(primary, key), _text_value(summary, key)
+        out[f"sim_{key}"] = _similarity(a, b)
+        out[f"len_{key}"] = min(len(a), _LEN_NORM) / _LEN_NORM
+        out[f"empty_{key}"] = float(not a)
+    out["primary_zeros"] = sum(1 for v in comparable(primary).values() if v == 0)
+    out["summary_zeros"] = sum(1 for v in comparable(summary).values() if v == 0)
+    return out
+
+
+def load_model(path: str = MODEL_PATH) -> Dict[str, Any]:
+    """Читает коэффициенты модели (кэшируется); пустой словарь, если файла нет."""
+    global _model_cache
+    if _model_cache is None or path != MODEL_PATH:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                loaded = json.load(fh)
+        except (OSError, ValueError):
+            loaded = {}
+        if path != MODEL_PATH:
+            return loaded
+        _model_cache = loaded
+    return _model_cache
+
+
+def predict_range(feats: Dict[str, float], group: str, model: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Оценка и вероятности по обученной модели группы.
+
+    Args:
+        feats: Результат :func:`features`.
+        group: ``procurement`` или ``report``.
+        model: Коэффициенты (по умолчанию из :data:`MODEL_PATH`).
+
+    Returns:
+        dict | None: ``{"range": 0.75, "probabilities": {"0.0": .., "0.5": .., "0.75": .., "1.0": ..}}``;
+        ``None``, если модели группы нет.
+    """
+    spec = (model if model is not None else load_model()).get(group)
+    if not spec:
+        return None
+    names, mean, scale = spec["features"], spec["mean"], spec["scale"]
+    x = [(feats.get(n, 0.0) - m) / (s or 1.0) for n, m, s in zip(names, mean, scale)]
+    logits = [b + sum(w * v for w, v in zip(row, x)) for row, b in zip(spec["coef"], spec["intercept"])]
+    top = max(logits)
+    exps = [math.exp(v - top) for v in logits]
+    total = sum(exps)
+    probs = [v / total for v in exps]
+    classes = spec["classes"]
+    return {"range": classes[probs.index(max(probs))],
+            "probabilities": {str(c): round(p, 3) for c, p in zip(classes, probs)}}

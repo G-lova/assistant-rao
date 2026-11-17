@@ -39,7 +39,9 @@ class PrimaryReviewPipelineTests(unittest.TestCase):
         self.assertIn("критерии: 1.2)", by_expert[1]["comment"])
         self.assertEqual(by_expert[2]["differences"], [])
         self.assertEqual(by_expert[2]["comment"], "ЭЗ соответствует требованиям")
-        self.assertEqual(by_expert[2]["suggested_range"], 1.0)
+        self.assertIn(by_expert[2]["suggested_range"], (0.0, 0.5, 0.75, 1.0))
+        self.assertEqual(by_expert[2]["range_by_thresholds"], 1.0)
+        self.assertIn(by_expert[2]["range_source"], ("model", "thresholds"))
         self.assertEqual((by_expert[2]["match_percent"], by_expert[2]["range_by_scale"]), (100.0, 1.0))
         self.assertEqual(by_expert[1]["match_percent"], 83.3)     # 1 расхождение из 6 общих критериев
 
