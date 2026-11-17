@@ -15,7 +15,7 @@ import sys
 from collections import Counter, defaultdict
 from typing import Dict, List, Optional, Tuple
 
-from knowledge_store import primary_review
+from knowledge_store import primary_compare, primary_review
 
 GRADES = ["0.00", "0.50", "0.75", "1.00"]
 
@@ -47,6 +47,57 @@ def load_pairs(experts_csv: str, opinions_csv: str) -> List[Tuple[str, dict, dic
     return out
 
 
+def load_compare_cases(experts_csv: str, opinions_csv: str) -> List[Tuple[dict, dict, dict]]:
+    """Случаи для сравнения: оценённое заключение и итоговое (последнее по ``updated_at`` среди неоценённых той же экспертизы).
+
+    Returns:
+        list: ``(строка expertise_experts, data первичного, data итогового)``.
+    """
+    csv.field_size_limit(sys.maxsize)
+    meta: Dict[Tuple[str, str], dict] = {}
+    with open(experts_csv, encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            meta[(row["expertise_id"], row["expert_id"])] = row
+    rated: Dict[str, List[Tuple[dict, dict]]] = defaultdict(list)
+    final: Dict[str, Tuple[str, dict]] = {}
+    with open(opinions_csv, encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            try:
+                data = json.loads(row["data"])
+            except ValueError:
+                continue
+            m = meta.get((row["expertise_id"], row["expert_id"]))
+            if not isinstance(data, dict):
+                continue
+            if m and m["range"] not in ("NULL", ""):
+                rated[row["expertise_id"]].append((m, data))
+            elif row["expertise_id"] not in final or row["updated_at"] > final[row["expertise_id"]][0]:
+                final[row["expertise_id"]] = (row["updated_at"], data)
+    return [(m, d, final[e][1]) for e, items in rated.items() if e in final for m, d in items]
+
+
+def report_compare(cases: List[Tuple[dict, dict, dict]]) -> None:
+    """Печатает качество предложения оценки по расхождениям с итоговым заключением."""
+    confusion: Counter = Counter()
+    skipped = 0
+    for meta, primary, summary in cases:
+        cmp = primary_compare.compare(primary, summary)
+        suggested = primary_compare.suggest_range(cmp)
+        if suggested is None:
+            skipped += 1
+            continue
+        confusion[(f"{suggested:.2f}", f"{float(meta['range']):.2f}")] += 1
+    total = sum(confusion.values())
+    print(f"\n=== сравнение с итоговым: {total} случаев (пропущено {skipped}: мало общих критериев)")
+    print("предложено \\ реально " + "".join(f"{g:>8}" for g in GRADES))
+    for sug in GRADES:
+        print(f"{sug:22}" + "".join(f"{confusion[(sug, g)]:8}" for g in GRADES))
+    exact = sum(c for (s, r), c in confusion.items() if s == r)
+    near = sum(c for (s, r), c in confusion.items() if abs(GRADES.index(s) - GRADES.index(r)) <= 1)
+    base = max(sum(confusion[(s, g)] for s in GRADES) for g in GRADES) / total
+    print(f"точно {exact / total:.1%} (база «самая частая оценка» {base:.1%}), в пределах ступени {near / total:.1%}")
+
+
 def report(pairs: List[Tuple[str, dict, dict]]) -> None:
     """Печатает таблицу связи кодов замечаний с оценкой."""
     for group in ("procurement", "report"):
@@ -75,7 +126,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Проверка первичных заключений по истории")
     parser.add_argument("experts_csv")
     parser.add_argument("opinions_csv")
+    parser.add_argument("--compare", action="store_true", help="качество оценки по расхождениям с итоговым заключением")
     args = parser.parse_args(argv)
+    if args.compare:
+        report_compare(load_compare_cases(args.experts_csv, args.opinions_csv))
+        return 0
     report(load_pairs(args.experts_csv, args.opinions_csv))
     return 0
 
