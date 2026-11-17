@@ -14,7 +14,11 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tupl
 from risk_monitoring import risk_catalog
 from risk_monitoring.passport import merge_risks, now_iso, total_risk, SCHEMA_VERSION_XML
 
-MAX_XML_BYTES = 30 * 1024 * 1024
+MAX_XML_BYTES = 30 * 1024 * 1024   # больше — облегчённый разбор (parse_xml_lite)
+
+
+class XmlTooLarge(ValueError):
+    """XML больше предела облегчённого разбора (``settings.XML_LITE_MAX_BYTES``): не разбирается, повтор не поможет."""
 MAX_CHANGES_STORED = 200
 MAX_CHANGES_LLM = 60
 
@@ -25,6 +29,7 @@ IGNORED_KEYS = {
     "fileHash", "signature", "serviceSigns", "printFormInfo", "extPrintFormInfo", "printForm", "extPrintForm",
     "docPublishDTInEIS", "publishDTInEIS", "publishDate", "docPublishDate", "href", "contentId",
     "docDate", "plannedPublishDate", "docRegDate",
+    "_lite",   # отметка облегчённого разбора (parse_xml_lite)
 }
 # Поля, по которым элементы повторяющихся блоков сопоставляются между версиями
 LIST_KEY_FIELDS = ("sid", "externalSid", "ordinalNumber", "stageOrdinalNumber", "regNum", "code", "fileName", "url")
@@ -205,6 +210,80 @@ def parse_xml(raw: bytes) -> Tuple[str, Optional[int], Dict[str, Any]]:
         version = None
     return tag, version, body
 
+
+def _setting(name: str, default: Any) -> Any:
+    """Настройка из ``configs.settings`` (без неё — значение по умолчанию: модуль используется и в тестах)."""
+    try:
+        from configs import settings
+
+        return getattr(settings, name, default)
+    except Exception:  # noqa: BLE001
+        return default
+
+
+def parse_xml_lite(raw: bytes) -> Tuple[str, Optional[int], Dict[str, Any]]:
+    """Облегчённый разбор большого XML (больше ``MAX_XML_BYTES``): потоком, с урезанием повторов и длинных текстов.
+
+    Полный разбор (``xmltodict``) двух версий по 40 МБ занимает около 730 МБ памяти и даёт десятки тысяч
+    «изменений» по позициям. Здесь ``lxml.iterparse`` читает XML потоком; у каждого родителя остаётся не больше
+    ``XML_LITE_MAX_CHILDREN`` одноимённых элементов (лишние удаляются сразу после чтения — память не растёт),
+    тексты длиннее ``XML_LITE_MAX_TEXT`` обрезаются. Урезанный XML разбирается как обычно (:func:`parse_xml`).
+
+    В теле — ключ ``_lite``: сколько элементов отброшено и текстов обрезано, исходный размер. Сравнивать такие тела
+    между версиями нельзя (урезанные списки дали бы ложные «удалённые позиции») — это решает вызывающий.
+
+    Args:
+        raw: Байты XML.
+
+    Returns:
+        Tuple[str, Optional[int], Dict[str, Any]]: ``(тег, versionNumber, тело)``, как у :func:`parse_xml`.
+
+    Raises:
+        XmlTooLarge: XML больше ``XML_LITE_MAX_BYTES``.
+        ValueError: DTD/сущности или некорректный XML.
+    """
+    import io
+
+    from lxml import etree
+
+    hard = int(_setting("XML_LITE_MAX_BYTES", 200 * 1024 * 1024))
+    if len(raw) > hard:
+        raise XmlTooLarge(f"XML {len(raw) // 2 ** 20} МБ больше предела {hard // 2 ** 20} МБ")
+    if b"<!DOCTYPE" in raw[:2048] or b"<!ENTITY" in raw[:4096]:
+        raise ValueError("XML с DTD/сущностями не принимается")
+    max_children = int(_setting("XML_LITE_MAX_CHILDREN", 200))
+    max_text = int(_setting("XML_LITE_MAX_TEXT", 64 * 1024))
+    dropped = cut = 0
+    root = None
+    try:
+        # без сети, DTD и раскрытия сущностей; huge_tree — длинные тексты и глубокие деревья
+        for event, el in etree.iterparse(io.BytesIO(raw), events=("start", "end"), resolve_entities=False,
+                                         no_network=True, load_dtd=False, huge_tree=True):
+            if event == "start":
+                root = el if root is None else root
+                continue
+            if el.text and len(el.text) > max_text:
+                el.text = el.text[:max_text]
+                cut += 1
+            parent = el.getparent()
+            if parent is None or not isinstance(el.tag, str):   # корень, комментарии, инструкции
+                continue
+            # одноимённые дети, уже прочитанные у родителя (лишние удаляются сразу — их не больше предела + 1);
+            # счётчик по id(parent) ненадёжен: обёртки элементов lxml создаются заново
+            n = sum(1 for c in parent if c.tag == el.tag)
+            if n > max_children:
+                parent.remove(el)   # лишний повтор — сразу из дерева (освобождает память)
+                dropped += 1
+    except etree.XMLSyntaxError as e:
+        raise ValueError(f"некорректный XML: {e}") from e
+    if root is None:
+        raise ValueError("пустой XML")
+    reduced = etree.tostring(root, encoding="utf-8")
+    if len(reduced) > MAX_XML_BYTES:   # огромным оказался не список, а что-то иное — полный разбор опасен
+        raise XmlTooLarge(f"XML {len(raw) // 2 ** 20} МБ: после урезания повторов {len(reduced) // 2 ** 20} МБ")
+    tag, version, body = parse_xml(reduced)
+    body["_lite"] = {"size": len(raw), "dropped": dropped, "texts_cut": cut, "max_children": max_children}
+    return tag, version, body
 
 def strip_ignored(node: Any) -> Any:
     """Удаляет служебные поля (``IGNORED_KEYS``) на всех уровнях.
