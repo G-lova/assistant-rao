@@ -15,9 +15,18 @@ import sys
 from collections import Counter, defaultdict
 from typing import Dict, List, Optional, Tuple
 
+from configs import settings
 from knowledge_store import primary_compare, primary_review
 
 GRADES = ["0.00", "0.50", "0.75", "1.00"]
+
+
+def is_test_expert(expert_id) -> bool:
+    """Тестовый пользователь (``settings.PRIMARY_REVIEW_TEST_EXPERT_IDS``): его данные не используются для обучения и оценки."""
+    try:
+        return int(expert_id) in settings.PRIMARY_REVIEW_TEST_EXPERT_IDS
+    except (TypeError, ValueError):
+        return False
 
 
 def load_pairs(experts_csv: str, opinions_csv: str) -> List[Tuple[str, dict, dict]]:
@@ -30,7 +39,7 @@ def load_pairs(experts_csv: str, opinions_csv: str) -> List[Tuple[str, dict, dic
     rated: Dict[Tuple[str, str], dict] = {}
     with open(experts_csv, encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
-            if row["range"] not in ("NULL", ""):
+            if row["range"] not in ("NULL", "") and not is_test_expert(row["expert_id"]):
                 rated[(row["expertise_id"], row["expert_id"])] = row
     out = []
     with open(opinions_csv, encoding="utf-8") as fh:
@@ -67,8 +76,8 @@ def load_compare_cases(experts_csv: str, opinions_csv: str) -> List[Tuple[dict, 
             except ValueError:
                 continue
             m = meta.get((row["expertise_id"], row["expert_id"]))
-            if not isinstance(data, dict):
-                continue
+            if not isinstance(data, dict) or is_test_expert(row["expert_id"]):
+                continue            # заключения тестовых пользователей не берём ни как оцениваемые, ни как итоговые
             if m and m["range"] not in ("NULL", ""):
                 rated[row["expertise_id"]].append((m, data))
             elif row["expertise_id"] not in final or row["updated_at"] > final[row["expertise_id"]][0]:

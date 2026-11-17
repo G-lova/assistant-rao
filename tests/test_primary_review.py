@@ -30,5 +30,15 @@ class PrimaryReviewTests(unittest.TestCase):
         self.assertEqual([pr.normalize(v) for v in (True, "false", 2, "x", None)], [1, 0, 2, None, None])
 
 
+class TestExpertsTests(unittest.TestCase):
+    """Тестовые пользователи исключаются из обучения."""
+
+    def test_is_test_expert(self):
+        """Идентификаторы из настроек (в том числе строкой, как в CSV) — тестовые; остальные и мусор — нет."""
+        from scripts.eval_primary_opinion import is_test_expert
+        self.assertTrue(is_test_expert("3") and is_test_expert(1638))
+        self.assertFalse(is_test_expert("1645") or is_test_expert("NULL") or is_test_expert(None))
+
+
 if __name__ == "__main__":
     unittest.main()
