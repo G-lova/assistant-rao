@@ -17,6 +17,7 @@
 """
 import re
 from dataclasses import dataclass, field
+from configs import settings
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 MINOR = "minor"
@@ -33,11 +34,11 @@ _KINDS: List[Tuple[str, "re.Pattern"]] = [
     ("дополнительное соглашение", re.compile(r"дополнительн\w+\s+соглашени", re.I)),
     ("договор", re.compile(r"договор|контракт", re.I)),
     ("счёт-фактура", re.compile(r"сч[её]т[\s-]*фактур", re.I)),
-    ("УПД", re.compile(r"универсальн\w+\s+передаточн|\bупд\b", re.I)),
+    ("УПД", re.compile(r"универсальн\w+[\s-]+передаточн|\bупд\b", re.I)),
     ("накладная", re.compile(r"накладн", re.I)),
-    ("документ о приёмке", re.compile(r"документ\w*\s+о\s+приемк|документ\w*\s+о\s+приёмк", re.I)),
+    ("документ о приёмке", re.compile(r"документ\w*[\s-]+о[\s-]+приемк|документ\w*[\s-]+о[\s-]+приёмк", re.I)),
     ("акт", re.compile(r"\bакт\w*\b", re.I)),
-    ("платёжное поручение", re.compile(r"платеж\w+\s+поручени|платёж\w+\s+поручени", re.I)),
+    ("платёжное поручение", re.compile(r"платеж\w+[\s-]+поручени|платёж\w+[\s-]+поручени", re.I)),
     ("счёт", re.compile(r"сч[её]т(?![\s-]*фактур)", re.I)),
     ("спецификация", re.compile(r"спецификац", re.I)),
 ]
@@ -47,13 +48,15 @@ _REQ_KINDS: List[Tuple[str, "re.Pattern"]] = [
     ("акт сдачи-приёмки", re.compile(r"\bакт\w*\b", re.I)),
     ("товарная накладная", re.compile(r"накладн", re.I)),
     ("счёт-фактура", re.compile(r"сч[её]т[\s-]*фактур", re.I)),
-    ("УПД", re.compile(r"универсальн\w+\s+передаточн|\bупд\b", re.I)),
+    ("УПД", re.compile(r"универсальн\w+[\s-]+передаточн|\bупд\b", re.I)),
     ("счёт на оплату", re.compile(r"сч[её]т(?![\s-]*фактур)", re.I)),
     ("техническая / эксплуатационная документация", re.compile(r"эксплуатационн|паспорт|инструкци\w+ по эксплуатации|руководств\w+ пользовател|технической документации", re.I)),
     ("документы о соответствии (сертификат, декларация)", re.compile(r"сертификат|деклараци\w+ о соответствии|оценк\w+ соответствия|соответстви\w+ ТР", re.I)),
     ("гарантийные документы", re.compile(r"гарантийн", re.I)),
-    ("платёжное поручение", re.compile(r"платеж\w+\s+поручени|платёж\w+\s+поручени", re.I)),
+    ("платёжное поручение", re.compile(r"платеж\w+[\s-]+поручени|платёж\w+[\s-]+поручени", re.I)),
 ]
+# Слово перед названием документа, после которого это ссылка, а не сам документ: «к договору», «по акту»
+_REFERENCE_PREFIX = re.compile(r"(?:\bк|\bпо|\bв|\bна|\bсогласно|\bс|\bот)\s+$", re.I)
 _REFS_RE = re.compile(r"\bп\.|\bпп\.|пункт|приложени|раздел|ст\.|статья", re.I)
 _CONCLUSION_WORDS = re.compile(r"полное соответствие|не соответствует|соответствует|рекомендую|рекомендуется|принять|выводы?\b", re.I)
 _SUBJECT_START = re.compile(r"^\s*оценка\b", re.I)
@@ -118,7 +121,10 @@ def normalize_number(raw: Optional[str]) -> Optional[str]:
     """Номер документа без пробелов, регистра и хвостовой пунктуации (``№201,`` → ``201``)."""
     if not raw:
         return None
-    return raw.strip(" .,;:()").replace(" ", "").lower().lstrip("0") or None
+    value = raw.strip(" .,;:()").replace(" ", "").lower()
+    if value in ("б/н", "бн", "-"):                     # «без номера» — номера нет
+        return None
+    return value.lstrip("0") or None
 
 
 def parse_documents(text: Optional[str]) -> List[DocRef]:
@@ -140,10 +146,14 @@ def parse_documents(text: Optional[str]) -> List[DocRef]:
         for m in pattern.finditer(text):
             hits.append((m.start(), m.end(), kind))
     hits.sort()
-    # вхождения, вложенные в уже найденный документ («счёт» в «счёт-фактура»), отбрасываем
+    # вхождения, вложенные в уже найденный документ («счёт» в «счёт-фактура»), отбрасываем; так же — упоминания внутри
+    # скобок («УПД (счёт-фактура и передаточный документ)») и ссылки на документ («по договору», «к контракту»)
     chosen: List[Tuple[int, int, str]] = []
     for hit in hits:
         if chosen and hit[0] < chosen[-1][1]:
+            continue
+        before = text[:hit[0]]
+        if before.count("(") > before.count(")") or _REFERENCE_PREFIX.search(before):
             continue
         chosen.append(hit)
     docs = []
@@ -155,13 +165,25 @@ def parse_documents(text: Optional[str]) -> List[DocRef]:
     return docs
 
 
+# Документы о приёмке (акт, накладная, УПД со счётом-фактурой, документ о приёмке в ЕИС) в перечнях записывают по-разному
+# и взаимозаменяемо («УПД/акт № 3»), поэтому при сравнении они считаются одной группой
+_KIND_GROUP = {"УПД": "приёмка", "счёт-фактура": "приёмка", "накладная": "приёмка", "акт": "приёмка",
+               "документ о приёмке": "приёмка"}
+
+
 def _same(a: DocRef, b: DocRef) -> bool:
-    """Один и тот же документ: тот же вид и номер, а без номеров — та же дата."""
-    if a.kind != b.kind:
+    """Один и тот же документ: тот же вид и не противоречащие друг другу номер и дата.
+
+    Если у одного из документов номера (или даты) нет, они считаются одним документом: эксперт мог записать короче, это
+    не пропуск. Противоречие — когда номера (или даты) указаны у обоих и различаются.
+    """
+    if _KIND_GROUP.get(a.kind, a.kind) != _KIND_GROUP.get(b.kind, b.kind):
         return False
     if a.number and b.number:
         return a.number == b.number
-    return bool(a.date and a.date == b.date) or (not a.number and not b.number and not a.date and not b.date)
+    if a.date and b.date:
+        return a.date == b.date
+    return True
 
 
 def compare_documents(primary: str, summary: Optional[str], uploaded: Sequence[str] = ()) -> List[Remark]:
@@ -200,7 +222,7 @@ def compare_documents(primary: str, summary: Optional[str], uploaded: Sequence[s
             if m.kind == r.kind and m.number and m.number == r.number and m.date and r.date and m.date != r.date:
                 date_wrong.append((m, r))
                 break
-    if seen:
+    if len(seen) >= getattr(settings, "PRIMARY_REVIEW_DOCS_MISSING_MIN", 3):
         out.append(Remark("DOCS_MISSING", MAJOR, "Перечень документов, поступивших на экспертизу, указан не полностью; не указаны: "
                           + "; ".join(d.display() for d in seen[:8]) + ("; …" if len(seen) > 8 else "") + ".",
                           ["field1_1"], {"missing": [d.display() for d in seen]}))
