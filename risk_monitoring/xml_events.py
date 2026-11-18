@@ -203,7 +203,10 @@ def parse_xml(raw: bytes) -> Tuple[str, Optional[int], Dict[str, Any]]:
         if inner:
             tag, body = inner[0]
     body = body if isinstance(body, dict) else {"value": body}
+    # versionNumber в корне тела (старые схемы) или в commonInfo (схемы 16.x: checkResult, unplannedCheck и др.)
     version = body.get("versionNumber")
+    if version in (None, "") and isinstance(body.get("commonInfo"), dict):
+        version = body["commonInfo"].get("versionNumber")
     try:
         version = int(version) if version not in (None, "") else None
     except (TypeError, ValueError):
@@ -539,6 +542,11 @@ COMPLAINT_RESULTS = (
 # номер жалобы: 44-ФЗ — 18 цифр (202600100161005752), 223-ФЗ — «дата.номер» (19.10.2026.307017)
 COMPLAINANT_IN_FILE_RE = re.compile(r"по\s+(?:жалобе|делу)\s+(.+?)\s+от\s+\d", re.I)
 COMPLAINT_NUMBER_RE = re.compile(r"\d{18}|\d{2}\.\d{2}\.\d{4}\.\d+")
+# номер проверки/результата: длинный числовой (202600100161018148), числовой с кириллической буквой у
+# региональных органов (2026452А3086001084), либо «слэш»-формат приказа/проверки (ЕИ/50335/22, 26/44/104/621).
+# Шире COMPLAINT_NUMBER_RE: москомконтроль и отмены проверок используют номера не из 18 цифр, и без этого
+# такие проверки выпадали из checks_recent.sql и ежедневного прогона (check_number IS NULL).
+CHECK_NUMBER_RE = re.compile(r"\d{10,}|\d{4,}[А-Яа-яA-Za-z]\d{4,}|[0-9A-Za-zА-Яа-я]+(?:[/-][0-9A-Za-zА-Яа-я]+)+")
 
 
 CHECK_RESULTS = (("no_violations", re.compile(r"NO_VIOLATION|NOT_VIOLATION|WITHOUT", re.I)),
@@ -556,13 +564,20 @@ def check_facts(body: Dict[str, Any]) -> Dict[str, Any]:
         body: Нормализованное тело.
 
     Returns:
-        Dict[str, Any]: ``check_number``, ``check_result`` (``violations`` / ``no_violations``), ``check_result_code``,
+        Dict[str, Any]: ``check_number``, ``check_version`` (номер редакции результата), ``check_result``
+        (``violations`` / ``no_violations``), ``check_result_code``,
         ``check_prescription``, ``check_decision_date``, ``check_inspection_type``, ``check_subjects``
         (``role``, ``inn``, ``kpp``, ``name``), ``check_purchases`` (номера), ``check_customer_inns`` (ИНН заказчиков
         из ИКЗ).
     """
     uc = next((v for p, k, v in walk(body) if k == "unplannedCheck" and isinstance(v, dict)), None) or body
     code = _first(uc, ["checkResult"])
+    # версия редакции результата (commonInfo/versionNumber): по ней выбираем актуальную запись при дедупликации
+    ver = (body.get("commonInfo") or {}).get("versionNumber") if isinstance(body.get("commonInfo"), dict) else None
+    try:
+        ver = int(ver) if ver not in (None, "") else None
+    except (TypeError, ValueError):
+        ver = None
     subjects = []
     for p, k, v in walk(uc.get("checkSubjects") or {}):
         if isinstance(v, dict) and (v.get("INN") or v.get("inn")):
@@ -573,14 +588,20 @@ def check_facts(body: Dict[str, Any]) -> Dict[str, Any]:
         if k == "purchaseNumber" and re.fullmatch(r"\d{11,19}", str(v or "")) and str(v) not in purchases:
             purchases.append(str(v))
         if k == "purchaseCode":
-            parts = parse_ikz(v)
-            if parts and parts["customer_inn"] not in inns:
-                inns.append(parts["customer_inn"])
-    f = {"check_number": _first(uc, ["regNumber"], pred=lambda v: COMPLAINT_NUMBER_RE.fullmatch(v)),
+            # у совместной закупки несколько purchaseCode — xmltodict отдаёт их списком, поэтому
+            # разбираем и скаляр, и список (иначе ИНН заказчиков совместных закупок терялись: 36 из 80)
+            for code_val in (v if isinstance(v, list) else [v]):
+                parts = parse_ikz(code_val)
+                if parts and parts["customer_inn"] not in inns:
+                    inns.append(parts["customer_inn"])
+    f = {"check_number": _first(uc, ["regNumber"], pred=lambda v: CHECK_NUMBER_RE.fullmatch(v)),
+         "check_version": ver,
          "check_result_code": code,
          "check_result": next((k for k, rx in CHECK_RESULTS if rx.search(str(code or ""))), None),
          "check_prescription": bool(next((v for p, k, v in walk(uc) if k == "decisionPrescription" and v), None)),
-         "check_decision_date": _first(uc, ["decisionDate"], path_re=r"decision"),
+         # дата решения, а при его отсутствии — дата акта (у региональных органов вместо decision — act)
+         "check_decision_date": (_first(uc, ["decisionDate"], path_re=r"decision")
+                                 or _first(uc, ["actDate"], path_re=r"act")),
          "check_inspection_type": _first(uc, ["inspectionType"]),
          "check_subjects": subjects, "check_purchases": purchases, "check_customer_inns": inns}
     return {k: v for k, v in f.items() if v not in (None, "", [])}
