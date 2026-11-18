@@ -133,6 +133,40 @@ class FileUnavailable(Exception):
     """Файл не удалось скачать (ожидаемая ситуация, без traceback в логах)."""
 
 
+class SourceBlocked(FileUnavailable):
+    """ЕИС заблокировал запросы («подозрительная активность»): файл не виноват — попытка не засчитывается.
+
+    18.11.2026 ЕИС отвечал 403 со страницей «подозрительная активность» на все файлы подряд (около запроса в
+    секунду), и каждый файл тратил попытку: после трёх таких прогонов файлы перестали бы анализироваться.
+    """
+
+
+# Монотонное время, до которого скачивание из ЕИС приостановлено (после блокировки; на процесс воркера)
+_EIS_PAUSED_UNTIL = 0.0
+
+
+def _is_eis(url: Optional[str]) -> bool:
+    """Ссылка ведёт в ЕИС (zakupki.gov.ru)."""
+    from urllib.parse import urlsplit
+
+    return urlsplit(url or "").netloc.lower().endswith("zakupki.gov.ru")
+
+
+def _eis_pause_left() -> float:
+    """Сколько секунд ещё действует пауза скачивания из ЕИС (0 — паузы нет)."""
+    return max(0.0, _EIS_PAUSED_UNTIL - time.monotonic())
+
+
+def _pause_eis() -> None:
+    """Приостанавливает скачивание из ЕИС на ``RM_EIS_BLOCK_PAUSE_SEC`` (первая блокировка — в журнал)."""
+    global _EIS_PAUSED_UNTIL
+    pause = float(getattr(settings, "RM_EIS_BLOCK_PAUSE_SEC", 900))
+    if _eis_pause_left() <= 0:
+        logger.warning(f"ЕИС заблокировал запросы («подозрительная активность») — скачивание из ЕИС "
+                       f"приостановлено на {pause / 60:.0f} мин; файлы повторятся без траты попытки")
+    _EIS_PAUSED_UNTIL = time.monotonic() + pause
+
+
 def _with_service_doc001(compact: Dict[str, Any], text: str, detected_type: Optional[str],
                          allowed: bool) -> Dict[str, Any]:
     """DOC-001 модели убирается (в том числе из результата кэша); DOC-001 сервиса по оглавлению документа
@@ -287,6 +321,13 @@ class AIFileAnalyzer:
 
         ex_client = ResilientClient(client, retries=settings.LLM_PROXY_RETRIES)
         self.file_reader = FileReader(ex_client, self.extraction_model)
+        # архив в РМ читается с пределами (не больше файлов, картинок и символов) — см. settings.RM_ARCHIVE_*
+        self.file_reader.archive_limits = {
+            "max_files": int(getattr(settings, "RM_ARCHIVE_MAX_FILES", 40)),
+            "max_images": int(getattr(settings, "RM_ARCHIVE_MAX_IMAGES", 10)),
+            "max_chars": int(getattr(settings, "RM_ARCHIVE_MAX_CHARS", 300_000)),
+            "concurrency": int(getattr(settings, "RM_ARCHIVE_CONCURRENCY", 4)),
+        }
         self.type_detector = TypeDetector(ex_client, self.extraction_model)
         self.extractor = DataExtractor(ex_client, self.extraction_model)
         self.profiler = DocumentProfiler(r_client, self.model)
@@ -716,6 +757,10 @@ class AIFileAnalyzer:
         progress.note(f"начало анализа (попытка {attempt})")
         try:
             return await self.analyze_file(row, previous, attempt)
+        except SourceBlocked as e:
+            # ЕИС заблокировал запросы: файл не виноват — попытка не засчитывается, повтор в следующем запуске
+            logger.warning(f"Файл {file_id}: ЕИС недоступен (блокировка) — повтор позже: {e}")
+            return await self._push_failure(file_id, attempt - 1, f"eis_blocked: {e}")
         except FileUnavailable as e:
             logger.warning(f"Файл {file_id} недоступен: {e}")
             return await self._push_failure(file_id, attempt, f"download_failed: {e}")
@@ -1373,7 +1418,7 @@ class AIFileAnalyzer:
         except FileUnavailable as e:
             first = f"{e} ({_source_label(url, source_url)})"
             if not alternative:
-                raise FileUnavailable(first) from None
+                raise type(e)(first) from None   # SourceBlocked остаётся SourceBlocked
             logger.warning(f"Файл {file_id}: {first} — скачиваем по ссылке ЕИС")
         except BrokenFile as e:
             # копия в хранилище бывает обрезанной («EOF marker not found») — файл из ЕИС может быть целым
@@ -1382,7 +1427,8 @@ class AIFileAnalyzer:
         try:
             return await self._load_document(file_id, source_url, file_name, card_id=card_id, broken_ok=True)
         except FileUnavailable as e:
-            raise FileUnavailable(f"{first}; ЕИС: {e} ({_source_label(source_url, source_url)})") from None
+            # SourceBlocked остаётся SourceBlocked: попытка не засчитывается
+            raise type(e)(f"{first}; ЕИС: {e} ({_source_label(source_url, source_url)})") from None
 
     async def _load_document(self, file_id: int, url: str, file_name: str, card_id: Optional[int] = None,
                              local_path: Optional[str] = None, broken_ok: bool = True):
@@ -1410,9 +1456,16 @@ class AIFileAnalyzer:
         if local_path:
             res = {"status": "success", "file_path": local_path, "keep": True}
         else:
+            if _is_eis(url) and _eis_pause_left() > 0:
+                # после блокировки ЕИС не дёргаем: каждый запрос продлевал бы блокировку
+                raise SourceBlocked(f"скачивание из ЕИС приостановлено после блокировки, ещё "
+                                    f"{_eis_pause_left() / 60:.0f} мин")
             res = await self.parser._download_http_file(url=url, procurement_id=None, source="risk_monitoring",
                                                          original_filename=file_name)
         if not res or res.get("status") != "success":
+            if (res or {}).get("blocked"):
+                _pause_eis()
+                raise SourceBlocked(res.get("error") or "ЕИС: подозрительная активность")
             raise FileUnavailable((res or {}).get("error", "неизвестная ошибка скачивания"))
         tmp_path = res["file_path"]
         try:
@@ -1600,14 +1653,19 @@ class AIFileAnalyzer:
             doc = await self.repo.get_document(link["document_id"])
             out["text"] = doc["text"] if doc else None
         purged = bool(link) and out["text"] is None and bool(doc and doc.get("text_purged_at"))
-        if (not link or purged) and previous.get("url"):
+        failed = self.__dict__.setdefault("_prev_failed", {})   # id прошлой редакции → ошибка (на прогон)
+        if (not link or purged) and previous.get("url") and prev_id in failed:
+            # уже не скачалась в этом прогоне (18.11.2026: одна и та же редакция 972335 — для десятков печатных
+            # форм подряд, каждый раз 403) — не скачиваем снова
+            out["error"] = failed[prev_id]
+        elif (not link or purged) and previous.get("url"):
             # связи нет или текст прошлой редакции очищен по сроку хранения — читаем файл заново
             try:
                 doc_id, prev_text, prev_sha, _ = await self._load_document(prev_id, previous["url"],
                                                                            previous.get("file_name") or file_name)
                 out.update(doc_id=doc_id, text=prev_text, identical=prev_sha == sha)
             except FileUnavailable as e:
-                out["error"] = f"Предыдущая версия недоступна: {e}"
+                out["error"] = failed[prev_id] = f"Предыдущая версия недоступна: {e}"
         if out["text"] is None and not out["identical"] and not out["error"]:
             out["error"] = "Нет текста предыдущей версии"
         return out

@@ -1,0 +1,182 @@
+"""Прод, 18.11.2026: блокировка ЕИС, служебные файлы и огромные архивы.
+
+* ЕИС отвечал 403 «подозрительная активность» на все файлы подряд — каждый файл тратил попытку. Теперь
+  ``SourceBlocked``: попытка не засчитывается, скачивание из ЕИС приостанавливается (``RM_EIS_BLOCK_PAUSE_SEC``).
+* Одна и та же прошлая редакция (972335) скачивалась для десятков печатных форм подряд — неудача запоминается.
+* Архив проектной документации: временные файлы Word ``~$*.docx`` давали ошибки с трассировкой; сотни смет и
+  картинок читались больше 30 мин — в РМ архив читается с пределами (``RM_ARCHIVE_*``).
+"""
+import asyncio
+import os
+import tempfile
+import types
+import unittest
+import zipfile
+from unittest import mock
+
+
+def analyzer(download):
+    """``AIFileAnalyzer`` без конструктора: ``parser._download_http_file`` подменён."""
+    from risk_monitoring import ai_file_analyzer as m
+
+    a = m.AIFileAnalyzer.__new__(m.AIFileAnalyzer)
+    a.parser = types.SimpleNamespace(_download_http_file=download)
+    return a
+
+
+class EisBlockTest(unittest.TestCase):
+    """``SourceBlocked``: пауза скачивания из ЕИС, попытка не засчитывается."""
+
+    def setUp(self):
+        from risk_monitoring import ai_file_analyzer as m
+
+        m._EIS_PAUSED_UNTIL = 0.0
+        self.m = m
+
+    tearDown = setUp
+
+    def test_block_pauses_eis(self):
+        calls = []
+
+        async def download(url, **kw):
+            calls.append(url)
+            return {"status": "error", "blocked": True,
+                    "error": "HTTP 403: ЕИС заблокировал запросы («подозрительная активность»)"}
+
+        a = analyzer(download)
+        eis = "https://zakupki.gov.ru/44fz/filestore/public/1.0/download/priz/file.html?uid=1"
+        with self.assertRaises(self.m.SourceBlocked):
+            asyncio.run(a._load_document(1, eis, "a.pdf"))
+        self.assertGreater(self.m._eis_pause_left(), 0)
+        with self.assertRaises(self.m.SourceBlocked):          # во время паузы ЕИС не запрашивается
+            asyncio.run(a._load_document(2, eis, "b.pdf"))
+        self.assertEqual(len(calls), 1)
+
+    def test_storage_403_then_eis_blocked_keeps_type(self):
+        """Хранилище 403 (nginx), ЕИС — блокировка: ошибка остаётся ``SourceBlocked``."""
+        async def download(url, **kw):
+            if "zakupki" in url:
+                return {"status": "error", "blocked": True, "error": "ЕИС: подозрительная активность"}
+            return {"status": "error", "error": "HTTP 403: не удалось скачать файл"}
+
+        a = analyzer(download)
+        row = {"url": "https://expert.example/storage/x.pdf", "source_url": "https://zakupki.gov.ru/x"}
+        with self.assertRaises(self.m.SourceBlocked) as cm:
+            asyncio.run(a._load_with_fallback(5, row, "x.pdf"))
+        self.assertIn("хранилище", str(cm.exception))
+
+    def test_attempt_not_counted(self):
+        a = self.m.AIFileAnalyzer.__new__(self.m.AIFileAnalyzer)
+        pushed = []
+
+        async def analyze_file(row, previous, attempt):
+            raise self.m.SourceBlocked("ЕИС: подозрительная активность")
+
+        async def push_failure(file_id, attempt, error):
+            pushed.append((file_id, attempt, error))
+            return {"status": "failed"}
+
+        a.analyze_file, a._push_failure = analyze_file, push_failure
+        asyncio.run(a._attempt({"id": 7}, None, 2))
+        self.assertEqual(pushed[0][1], 1)                       # попытка 2 → записана как 1
+        self.assertTrue(pushed[0][2].startswith("eis_blocked"))
+
+    def test_storage_403_is_still_counted(self):
+        """Обычный 403 хранилища (не блокировка ЕИС) — как раньше, ``FileUnavailable`` с тратой попытки."""
+        async def download(url, **kw):
+            return {"status": "error", "error": "HTTP 403: не удалось скачать файл"}
+
+        a = analyzer(download)
+        with self.assertRaises(self.m.FileUnavailable) as cm:
+            asyncio.run(a._load_document(1, "https://expert.example/storage/x.pdf", "x.pdf"))
+        self.assertNotIsInstance(cm.exception, self.m.SourceBlocked)
+        self.assertEqual(self.m._eis_pause_left(), 0)
+
+
+class PreviousCacheTest(unittest.TestCase):
+    """Прошлая редакция, не скачавшаяся в этом прогоне, не скачивается снова."""
+
+    def test_failed_previous_not_reloaded(self):
+        from risk_monitoring import ai_file_analyzer as m
+
+        a = m.AIFileAnalyzer.__new__(m.AIFileAnalyzer)
+        a.env = "prod"
+        calls = []
+
+        async def get_link(env, fid):
+            return None
+
+        async def load(file_id, url, file_name, **kw):
+            calls.append(file_id)
+            raise m.FileUnavailable("HTTP 403: не удалось скачать файл")
+
+        a.repo = types.SimpleNamespace(get_link=get_link)
+        a._load_document = load
+        prev = {"id": 972335, "url": "https://expert.example/storage/p.html", "file_name": "p.html"}
+        for _ in range(3):
+            out = asyncio.run(a._load_previous(prev, "sha", "x.html"))
+            self.assertIn("Предыдущая версия недоступна", out["error"])
+        self.assertEqual(calls, [972335])
+
+
+class ArchiveTest(unittest.TestCase):
+    """``FileReader.process_archive``: служебные файлы и пределы чтения."""
+
+    def reader(self, limits=None):
+        from tests.stubs import stubbed_import
+
+        with stubbed_import("configs.file_reader") as module:
+            r = module.FileReader.__new__(module.FileReader)
+            r.archive_limits = limits
+            seen = []
+
+            async def read_file(path, original_filename=None):
+                seen.append(original_filename)
+                if original_filename.startswith("~$") or "/~$" in original_filename:
+                    raise ValueError("Package not found")
+                return "т" * 100
+
+            r.read_file = read_file
+            return module, r, seen
+
+    def make_zip(self, names):
+        path = os.path.join(tempfile.mkdtemp(), "a.zip")
+        with zipfile.ZipFile(path, "w") as zf:
+            for n in names:
+                zf.writestr(n, b"x")
+        return path
+
+    def test_junk(self):
+        module, _, _ = self.reader()
+        self.assertTrue(module.is_archive_junk("ПД/Формат разработки/~$5-092-ООС1.3.docx"))
+        self.assertTrue(module.is_archive_junk("__MACOSX/ПД/._Том1.pdf"))
+        self.assertTrue(module.is_archive_junk("Т-15/Thumbs.db"))
+        self.assertFalse(module.is_archive_junk("ПД/215-092-ООС1.3 изм.1.docx"))
+
+    def test_junk_skipped_without_limits(self):
+        module, r, seen = self.reader()
+        path = self.make_zip(["ПД/~$Том.docx", "ПД/Том.docx", "ПД/Thumbs.db"])
+        text = asyncio.run(r.process_archive(path, ".zip"))
+        self.assertEqual(seen, ["ПД/Том.docx"])
+        self.assertNotIn("Ошибка чтения", text)
+
+    def test_limits_order_and_list(self):
+        names = [f"Сметы/ЛСР-{i:02d}.xlsx" for i in range(10)] + [f"Чертежи/{i}.jpg" for i in range(5)] + \
+                ["ТЗ.docx", "Контракт.pdf"]
+        module, r, seen = self.reader({"max_files": 6, "max_images": 1, "max_chars": 0, "concurrency": 2})
+        text = asyncio.run(r.process_archive(self.make_zip(names), ".zip"))
+        self.assertEqual(seen[:2], ["Контракт.pdf", "ТЗ.docx"])        # документы — первыми
+        self.assertEqual(len(seen), 6)
+        self.assertEqual(sum(n.endswith(".jpg") for n in seen), 0)      # таблицы раньше картинок, предел файлов
+        self.assertIn("Не прочитано", text)
+        self.assertIn("прочитано 6 из 17", text)
+
+    def test_char_limit(self):
+        names = [f"Д{i}.docx" for i in range(10)]
+        module, r, seen = self.reader({"max_files": 10, "max_images": 0, "max_chars": 250, "concurrency": 2})
+        asyncio.run(r.process_archive(self.make_zip(names), ".zip"))
+        self.assertEqual(len(seen), 4)                                   # 2 пачки по 2 файла → больше 250 символов
+
+
+if __name__ == "__main__":
+    unittest.main()
