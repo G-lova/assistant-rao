@@ -683,6 +683,9 @@ PRIMARY_REVIEW_FULL_MATCH_EXEMPT_PERCENT = 95
 # knowledge_store/primary_score_model.json). False — многоклассовая модель primary_range_model.json (запасная, сравнение)
 PRIMARY_REVIEW_USE_WEIGHTED_PERCENT = True
 PRIMARY_REVIEW_PERCENT_MARGIN = 2.0   # п. п. до ближайшего порога, в пределах которых показывается вторая оценка (alternative_range)
+# Отбор расхождений в комментарий по вероятности, что сводный эксперт упомянет критерий (primary_mention_model.json, закупки);
+# False — в комментарий идут все расхождения, поле mention_probability в ответе остаётся
+PRIMARY_REVIEW_MENTION_FILTER = True
 PRIMARY_REVIEW_MIN_COMMON = 5   # меньше общих критериев — сравнение ненадёжно, оценка не предлагается
 
 # Шкала аналитика: процент → оценка. Верхняя граница включается: до 25% включительно — 0, до 50% — 0.5, до 75% — 0.75, выше — 1.
