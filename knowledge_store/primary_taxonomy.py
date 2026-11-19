@@ -1,6 +1,6 @@
 """Таксономия замечаний к заключению первичного эксперта.
 
-Восемь категорий для всех источников замечаний: расхождений по критериям (:mod:`knowledge_store.primary_compare`),
+Девять категорий для всех источников замечаний: расхождений по критериям (:mod:`knowledge_store.primary_compare`),
 объективных дефектов (:mod:`knowledge_store.primary_review`) и замечаний по текстовым полям
 (:mod:`knowledge_store.primary_remarks`). Категория показывает, какого рода недостаток; оценку ``range`` она не определяет —
 её ставит сводный эксперт.
@@ -12,6 +12,8 @@
 * «Несоответствия» — остальные расхождения по критериям с итоговым заключением (лишнее нарушение, неверное «в наличии»);
 * «Фактические ошибки» — значение текстового поля (дата, сумма, номер, реквизиты) отличается от итогового заключения
   (:mod:`knowledge_store.primary_remarks`; подкрепление фактами хранилища — отдельный шаг);
+* «Методологические ошибки» — первичный выбрал иной метод обоснования НМЦК (``field2_2_2_0``), чем итоговое
+  заключение (:func:`knowledge_store.primary_review.compare_method`); остальное — по смыслу текста (модель);
 * «Нормативные ошибки» — неверная ссылка на норму закона в комментарии к нарушению (проверка по загруженным редакциям актов,
   :mod:`risk_monitoring.legal_refs`; пока не подключено);
 * «Неполнота» — не заполнен пункт или раздел;
@@ -26,6 +28,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 CATEGORIES: Dict[str, str] = {
     "INCOMPLETE": "Неполнота",
     "FACTUAL": "Фактические ошибки",
+    "METHODOLOGICAL": "Методологические ошибки",
     "NORMATIVE": "Нормативные ошибки",
     "ARGUMENTATION": "Недостаточная аргументация",
     "CONTRADICTION": "Противоречия",
@@ -36,7 +39,7 @@ CATEGORIES: Dict[str, str] = {
 
 # Порядок строк в комментарии: как пишут сводные эксперты — сначала пропущенные нарушения и несоответствия критериям,
 # затем ошибки в текстовых полях, затем недостатки заключения
-COMMENT_ORDER: Tuple[str, ...] = ("MISSED_VIOLATION", "MISMATCH", "INCOMPLETE", "FACTUAL", "NORMATIVE",
+COMMENT_ORDER: Tuple[str, ...] = ("MISSED_VIOLATION", "MISMATCH", "INCOMPLETE", "FACTUAL", "METHODOLOGICAL", "NORMATIVE",
                                   "ARGUMENTATION", "CONTRADICTION", "FORMAL")
 
 # Название категории в строке комментария совпадает с CATEGORIES
@@ -54,7 +57,7 @@ CODE: Dict[str, str] = {
     "DOCS_NO_REQUISITES": "FORMAL",
     "SUBJECT_EMPTY": "INCOMPLETE", "SUBJECT_IS_CONCLUSION": "FORMAL", "SUBJECT_REQUISITES": "FACTUAL",
     "REQ_EMPTY": "INCOMPLETE", "REQ_MISSING": "INCOMPLETE", "REQ_EXTRA": "FACTUAL", "REQ_NO_REFS": "FORMAL",
-    "CONCLUSION_POLARITY": "MISMATCH",
+    "CONCLUSION_POLARITY": "MISMATCH", "METHOD_MISMATCH": "METHODOLOGICAL",
 }
 
 

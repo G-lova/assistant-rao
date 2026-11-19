@@ -124,6 +124,24 @@ def _check_report(data: Dict[str, Any], out: List[Issue]) -> None:
         out.append(Issue("JUNK_TEXT", MINOR, "в описании недостатков остались заглушки", sorted(set(junk))[:10]))
 
 
+def compare_method(primary: Dict[str, Any], summary: Dict[str, Any]) -> Optional[Issue]:
+    """Методологическая ошибка: метод обоснования НМЦК (``field2_2_2_0``) первичного отличается от итогового.
+
+    Поле заполняется редко (в истории ~2% заключений), поэтому при пустом значении у любого из заключений проверка
+    не срабатывает. Только для закупок.
+
+    Returns:
+        Issue | None: ``METHOD_MISMATCH`` или ``None``.
+    """
+    if is_report_data(summary):
+        return None
+    # метод может храниться числом или строкой («1» / 1): сравниваем как строки
+    ours, theirs = (str(v).strip() if v is not None else "" for v in (primary.get("field2_2_2_0"), summary.get("field2_2_2_0")))
+    if not ours or not theirs or ours == theirs:
+        return None
+    return Issue("METHOD_MISMATCH", MAJOR, "метод обоснования НМЦК выбран иначе, чем в итоговом заключении", ["field2_2_2_0"])
+
+
 def review_opinion(data: Dict[str, Any]) -> List[Issue]:
     """Находит объективные дефекты заключения первичного эксперта.
 

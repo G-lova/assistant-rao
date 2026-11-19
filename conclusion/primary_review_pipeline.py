@@ -116,6 +116,9 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
     shared = primary_compare.shared_keys(comparisons)      # одинаковое расхождение у всех первичных: проверить итоговое
     for row, cmp in zip(ordered, comparisons):
         issues = primary_review.review_opinion(row["data"])
+        method_issue = primary_review.compare_method(row["data"], summary["data"])   # методологическая ошибка: метод НМЦК
+        if method_issue:
+            issues.append(method_issue)
         current = row.get("current_range")
         feats = primary_compare.features(row["data"], summary["data"], cmp)
         model = primary_compare.predict_range(feats, cmp.group)
