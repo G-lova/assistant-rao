@@ -146,13 +146,19 @@ def previous_ref(file_row: Dict[str, Any], body: Dict[str, Any], prev_body: Opti
         ``no_previous_xml`` / ``not_in_xml``; ``urls`` — ссылки предыдущей версии файла;
         ``file_name`` — имя файла в предыдущей версии; ``print_form`` — признак печатной формы.
     """
-    is_print = doc_kind.is_print_form(file_row) or any(
-        url_key(u) == url_key(file_row.get("source_url")) for u in print_form_urls(body) if file_row.get("source_url"))
+    src_key = url_key(file_row.get("source_url"))
+    atts = xml_events.attachments(body)
+    # Вложение XML с именем «Печатная форма …» (печатные формы доп. соглашений, «контракт с учётом ДС 1–4» в XML
+    # контракта, ссылка filestore …?uid=) — обычное вложение: его прошлая редакция ищется по списку вложений.
+    # 18.11.2026 такие файлы сводились к сгенерированной печатной форме прошлого XML (printForm/view.html), и всем
+    # вложениям версии 24 контракта 28456 доставался один «предшественник» — файл 972335.
+    in_atts = bool(src_key) and any(url_key(a.get("url")) == src_key for a in atts)
+    generated = bool(src_key) and any(url_key(u) == src_key for u in print_form_urls(body))
+    is_print = generated or (doc_kind.is_print_form(file_row) and not in_atts)
     if prev_body is None:
         return {"match": "no_previous_xml", "urls": [], "print_form": is_print}
     if is_print:
         return {"match": "print_form", "urls": print_form_urls(prev_body), "print_form": True}
-    atts = xml_events.attachments(body)
     att = locate(file_row, atts)
     if att is None:
         return {"match": "not_in_xml", "urls": [], "print_form": False}
@@ -193,7 +199,12 @@ def pick_previous(ref: Dict[str, Any], current: Dict[str, Any], candidates: Iter
     same_xml = [c for c in pool if prev_xml_id is not None and _int(c.get("xml_source_id")) == int(prev_xml_id)]
     if ref.get("print_form"):
         forms = [c for c in same_xml if doc_kind.is_print_form(c)]
-        return forms[0] if len(forms) == 1 else None
+        # сгенерированная печатная форма (ссылка printForm) важнее вложений с именем «Печатная форма …»
+        generated = [c for c in forms if "printform" in (c.get("source_url") or "").lower()]
+        for group in (generated, forms):
+            if len(group) == 1:
+                return group[0]
+        return None
     names = {name_key(ref.get("file_name")), name_key(current.get("file_name"))} - {""}
     by_name = [c for c in same_xml if name_key(c.get("file_name")) in names]
     return by_name[0] if len(by_name) == 1 else None
