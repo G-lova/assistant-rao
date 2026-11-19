@@ -128,6 +128,8 @@ EMBEDDING_CONCURRENCY = 8
 # ---------------------------------------------------------------- рейтинг экспертов (POST /get-experts-rating)
 # Без флага by_period рейтинг считается с этой даты по завтрашнюю дату (текущий день целиком; дата — по часовому поясу
 # EXPERT_RATING_TIMEZONE); с флагом — за период запроса
+# С этой же даты считаются показатели и критерии экспертов при подборе (experts_for_expertise.sql, {{RATING_START}};
+# раньше — за последний год)
 EXPERT_RATING_DEFAULT_START = "2025-01-01"
 EXPERT_RATING_TIMEZONE = "Europe/Moscow"
 

@@ -433,18 +433,18 @@ blocked_experts AS (
         ) AS constraint_experts,
 		COUNT(CASE WHEN ee.expertise_id IN (SELECT id FROM expertises WHERE status IN (4,5)) THEN 1 END) AS countExpertise,
 		COUNT(CASE 
-				WHEN ee.group_formed_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
+				WHEN ee.group_formed_at >= '{{RATING_START}}' 
 				THEN 1 
 			END) AS countTotalExpertises_lastYear,
 		COUNT(CASE 
-				WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
+				WHEN ee.uploadExpertDate >= '{{RATING_START}}' 
 				THEN COALESCE(ee.accept, 0)
 			END) AS countAcceptedExpertises_lastYear,
 		COALESCE(SUM(CASE 
-			WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
+			WHEN ee.uploadExpertDate >= '{{RATING_START}}' 
 			THEN COALESCE(ee.secondUpload, 0)
 		END), 0) AS secondUpload_lastYear,
-		COALESCE(SUM(CASE WHEN ee.deleted_at >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
+		COALESCE(SUM(CASE WHEN ee.deleted_at >= '{{RATING_START}}'
 			AND ee.uploadExpertDate IS NULL 
 			AND (u.id MEMBER OF(e.declineExperts) 
 			OR JSON_CONTAINS_PATH(
@@ -454,7 +454,7 @@ blocked_experts AS (
 			))
 			THEN 1
 		END), 0) AS overdues,
-    	COALESCE(SUM(CASE WHEN e.dateStatus2 >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
+    	COALESCE(SUM(CASE WHEN e.dateStatus2 >= '{{RATING_START}}'
 			AND (u.id MEMBER OF(e.declineExperts) 
 			OR JSON_CONTAINS_PATH(
 				e.declineExperts,
@@ -484,12 +484,12 @@ blocked_experts AS (
             AND e1.status = 2 AND ee1.group_formed_at IS NULL AND ee1.deleted_at IS NULL AND e1.deleted_at IS NULL
         ) AS expert_requests,
 		ROUND(AVG(CASE 
-			WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR)
+			WHEN ee.uploadExpertDate >= '{{RATING_START}}'
 			THEN ee.`range`
 			ELSE NULL 
 		END), 3) AS criterion4,
 		ROUND(AVG(CASE 
-			WHEN ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 1 YEAR) 
+			WHEN ee.uploadExpertDate >= '{{RATING_START}}' 
 			THEN CASE 
 				WHEN e.object IN (1,7) AND ee.accept = 1
 				THEN CASE
