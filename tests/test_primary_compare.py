@@ -22,7 +22,7 @@ class CompareTests(unittest.TestCase):
         """Комментарий называет критерий по названию; без расхождений — шаблонная фраза."""
         cmp = pc.compare({**SUMMARY, "field2_1_2": 1}, SUMMARY)
         text = pc.build_comment(cmp, {"field2_1_2": "1.2. Наличие адреса"})
-        self.assertIn("Не выявлено нарушение по критерию 1.2.", text)   # номер берётся из названия, единственное число
+        self.assertIn("Пропущенные нарушения: не выявлено нарушение по критерию 1.2.", text)   # номер из названия, категория таксономии
         self.assertEqual(pc.build_comment(pc.compare(SUMMARY, SUMMARY)), pc.POSITIVE_COMMENT)
 
     def test_comment_follows_grade(self):
@@ -38,10 +38,35 @@ class CompareTests(unittest.TestCase):
         primary = {**SUMMARY, "field2_1_1": 0, "field2_1_2": 1, "field2_1_3": 0, "field2_1_4": 1, "field2_1_5": 2}
         summary = {**SUMMARY, "field2_1_5": 1, "field2_1_6": 1}
         text = pc.build_comment(pc.compare(primary, summary))
-        self.assertIn("Не выявлено нарушение по критерию field2_1_2.", text)
-        self.assertIn("Неверно указаны нарушения по критериям: field2_1_1, field2_1_3.", text)
-        self.assertIn("Неверно отмечено «не предусмотрено» по критерию field2_1_5 (требование предусмотрено).", text)
-        self.assertIn("Неверно отмечено «в наличии» по критерию field2_1_4 (требование не предусмотрено).", text)
+        # раздел 1 («Наличие информации»): всё, что первичный не учёл, — одна строка «Пропущенные нарушения», фразы через «;»
+        self.assertIn("Пропущенные нарушения: не выявлено нарушение по критерию field2_1_2; ", text)
+        self.assertIn("не учтена информация, имеющаяся в документах, по критериям: field2_1_1, field2_1_3; ", text)
+        self.assertIn("неверно отмечено «не предусмотрено» по критерию field2_1_5 (требование предусмотрено).", text)
+        # «в наличии» там, где требование не предусмотрено, — фактическая ошибка
+        self.assertIn("Фактические ошибки: неверно отмечено «в наличии» по критерию field2_1_4 (требование не предусмотрено).", text)
+        self.assertEqual(text.count("Пропущенные нарушения:"), 1)
+
+    def test_comment_splits_errors_by_form_section(self):
+        """Ложное нарушение в разделе «Соответствие требованиям» (2–4) — нормативная ошибка; в разделе 1 — не учтённая информация (пропуск)."""
+        summary = {"field2_1_1": 1, "field2_1_2": 1, "field2_3_7": 1, "field2_3_4": 0, "field2_1_5": 1, "field2_1_6": 1}
+        primary = {**summary, "field2_1_1": 0, "field2_3_7": 0, "field2_3_4": 1}
+        text = pc.build_comment(pc.compare(primary, summary), grade=0.5)
+        self.assertIn("Пропущенные нарушения: не выявлено нарушение по критерию field2_3_4; "
+                      "не учтена информация, имеющаяся в документах, по критерию field2_1_1.", text)
+        self.assertIn("Нормативные ошибки: неверно указано нарушение по критерию field2_3_7.", text)
+        lines = text.split("\n")          # порядок: заголовок, пропуски, нормативные
+        self.assertEqual([l.split(":")[0][3:] for l in lines[1:]], ["Пропущенные нарушения", "Нормативные ошибки"])
+
+    def test_comment_groups_issues_by_category(self):
+        """Объективные дефекты идут в свою категорию таксономии; категории — в порядке таксономии, после заголовка по оценке."""
+        issue = primary_review.Issue("EMPTY_DOCS", primary_review.MAJOR, "не заполнен перечень документов", ["documents"])
+        cmp = pc.compare({**SUMMARY, "field2_1_2": 1}, SUMMARY)
+        lines = pc.build_comment(cmp, issues=[issue], grade=0.75).split("\n")
+        self.assertEqual(lines[0], "1. Незначительные отклонения от сводного заключения.")
+        self.assertTrue(lines[1].startswith("2. Пропущенные нарушения: "))
+        self.assertEqual(lines[2], "3. Неполнота: не заполнен перечень документов.")
+        # при 1.00 расхождения не перечисляются, но дефект остаётся
+        self.assertEqual(pc.build_comment(cmp, issues=[issue], grade=1.0), "1. Неполнота: не заполнен перечень документов.")
 
     def test_full_match_rule(self):
         """1.00 снижается до 0.75 при любом расхождении, кроме общих для всех первичных; режимы missfa/missed смягчают правило."""
@@ -97,3 +122,21 @@ class CompareTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FullMatchExemptionTests(unittest.TestCase):
+    """Исключение постпроверки: почти полное совпадение не снижает 1.00."""
+
+    def test_high_match_percent_keeps_full_grade(self):
+        """При match_percent выше порога единичное расхождение 1.00 не отменяет; ниже порога — снижает до 0.75."""
+        summary = {f"field2_1_{i}": 1 for i in range(1, 41)}
+        primary = {**summary, "field2_1_2": 0}           # 1 расхождение из 40: 97.5%
+        cmp = pc.compare(primary, summary)
+        self.assertGreater(cmp.match_percent, 95)
+        self.assertEqual(pc.apply_full_match_rule(1.0, cmp, set(), "any"), (1.0, False))
+        few = pc.compare({**{f"field2_1_{i}": 1 for i in range(1, 11)}, "field2_1_2": 0},
+                                      {f"field2_1_{i}": 1 for i in range(1, 11)})    # 90%
+        self.assertEqual(pc.apply_full_match_rule(1.0, few, set(), "any"), (0.75, True))
+        # переданный взвешенный процент важнее обычного match_percent
+        self.assertEqual(pc.apply_full_match_rule(1.0, few, set(), "any", percent=96.0), (1.0, False))
+        self.assertEqual(pc.apply_full_match_rule(1.0, cmp, set(), "any", percent=80.0), (0.75, True))

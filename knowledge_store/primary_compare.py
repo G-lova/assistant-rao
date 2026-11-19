@@ -24,7 +24,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
-from knowledge_store import primary_review
+from knowledge_store import primary_review, primary_taxonomy
 from knowledge_store.primary_review import normalize
 
 try:
@@ -158,7 +158,7 @@ def criterion_number(key: str, labels: Dict[str, str]) -> str:
 
 
 def apply_full_match_rule(grade: Optional[float], cmp: Comparison, shared: Optional[Set[str]] = None,
-                          mode: Optional[str] = "settings") -> Tuple[Optional[float], bool]:
+                          mode: Optional[str] = "settings", percent: Optional[float] = None) -> Tuple[Optional[float], bool]:
     """Постпроверка оценки по порядку включения в Реестр: 1 балл — только при полном соответствии сводному заключению.
 
     Модель обучена на поведении оценивающих, которые на истории ставят 1.00 и при наличии отклонений (67% случаев без
@@ -172,6 +172,10 @@ def apply_full_match_rule(grade: Optional[float], cmp: Comparison, shared: Optio
         mode: ``any`` — любое расхождение; ``missfa`` — только пропуск нарушения и лишнее нарушение (1 против 2 не в счёт);
             ``missed`` — только пропуск нарушения; ``None`` — без постпроверки; ``settings`` (по умолчанию) — режим из
             ``settings.PRIMARY_REVIEW_FULL_MATCH_RULE``.
+        percent: Взвешенный процент сходства для исключения (по умолчанию — ``cmp.match_percent``).
+
+    Исключение: если процент сходства выше ``PRIMARY_REVIEW_FULL_MATCH_EXEMPT_PERCENT``, оценка не снижается. Процент —
+    взвешенный (``percent``, :mod:`knowledge_store.primary_score`), без него — обычный ``match_percent``.
 
     Returns:
         tuple: ``(оценка, изменена_ли)``.
@@ -180,6 +184,10 @@ def apply_full_match_rule(grade: Optional[float], cmp: Comparison, shared: Optio
         mode = getattr(settings, "PRIMARY_REVIEW_FULL_MATCH_RULE", "any")
     if grade is None or grade < 1.0 or mode is None:
         return grade, False
+    exempt = getattr(settings, "PRIMARY_REVIEW_FULL_MATCH_EXEMPT_PERCENT", None)
+    similarity = percent if percent is not None else cmp.match_percent
+    if exempt is not None and similarity is not None and similarity > exempt:
+        return grade, False        # почти полное совпадение: единичные расхождения 1.00 не отменяют
     kinds = {"any": ("missed", "false_alarm", "other"), "missfa": ("missed", "false_alarm"), "missed": ("missed",)}[mode]
     if any(d.kind in kinds and d.key not in (shared or ()) for d in cmp.differences):
         return 0.75, True
@@ -229,7 +237,9 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
 
     Формулировки — по сути ошибки первичного эксперта («не выявлено нарушение по критерию 3.1», «неверно указано
     нарушение по критерию 2.1.5»), а не «не совпало с итоговым». Критерии названы номерами (полные названия — в
-    ``differences`` ответа API), по одной строке на вид ошибки.
+    ``differences`` ответа API). Замечания сгруппированы по категориям таксономии
+    (:mod:`knowledge_store.primary_taxonomy`): одна строка на категорию — «Пропущенные нарушения: не выявлено нарушение по
+    критерию 2.1.3.», «Фактические ошибки: неверно указано нарушение по критерию 1.29; …», «Неполнота: …».
 
     Args:
         cmp: Результат :func:`compare`.
@@ -258,28 +268,49 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
         return (one if len(selected) == 1 else many).format(numbers_of(selected)) if selected else None
 
     own = [d for d in cmp.differences if d.key not in shared]
-    lines: List[str] = [x for x in (
-        phrase([d for d in own if d.kind == "missed"], "Не выявлено нарушение по критерию {}.",
-               "Не выявлены нарушения по критериям: {}."),
-        phrase([d for d in own if d.kind == "false_alarm"], "Неверно указано нарушение по критерию {}.",
-               "Неверно указаны нарушения по критериям: {}."),
+    # шаблоны фраз: (отбор расхождений, в единственном числе, во множественном)
+    specs = (
+        (lambda d: d.kind == "missed", "Не выявлено нарушение по критерию {}.", "Не выявлены нарушения по критериям: {}."),
+        # раздел 1 закупок («Наличие информации»): первичный указал отсутствие информации, которая есть в документах
+        (lambda d: d.kind == "false_alarm" and primary_taxonomy.difference_category(d.kind, d.key, cmp.group, d.primary) == "MISSED_VIOLATION",
+         "Не учтена информация, имеющаяся в документах, по критерию {}.",
+         "Не учтена информация, имеющаяся в документах, по критериям: {}."),
+        (lambda d: d.kind == "false_alarm" and primary_taxonomy.difference_category(d.kind, d.key, cmp.group, d.primary) != "MISSED_VIOLATION",
+         "Неверно указано нарушение по критерию {}.", "Неверно указаны нарушения по критериям: {}."),
         # 1 против 2: «не предусмотрено» отмечено там, где требование есть, и наоборот
-        phrase([d for d in own if d.kind == "other" and d.primary == 2],
-               "Неверно отмечено «не предусмотрено» по критерию {} (требование предусмотрено).",
-               "Неверно отмечено «не предусмотрено» по критериям: {} (требование предусмотрено)."),
-        phrase([d for d in own if d.kind == "other" and d.primary != 2],
-               "Неверно отмечено «в наличии» по критерию {} (требование не предусмотрено).",
-               "Неверно отмечено «в наличии» по критериям: {} (требование не предусмотрено)."),
-    ) if x]
-    if grade is not None and grade >= 1.0:
-        lines = []                       # оценка 1.00: расхождения остаются в differences, но в комментарий не идут
-    elif lines and grade is not None:
+        (lambda d: d.kind == "other" and d.primary == 2,
+         "Неверно отмечено «не предусмотрено» по критерию {} (требование предусмотрено).",
+         "Неверно отмечено «не предусмотрено» по критериям: {} (требование предусмотрено)."),
+        (lambda d: d.kind == "other" and d.primary != 2,
+         "Неверно отмечено «в наличии» по критерию {} (требование не предусмотрено).",
+         "Неверно отмечено «в наличии» по критериям: {} (требование не предусмотрено)."),
+    )
+    by_category: Dict[str, List[str]] = {}          # код категории таксономии → фразы без заглавной буквы и точки
+    if grade is None or grade < 1.0:                # оценка 1.00: расхождения остаются в differences, но в комментарий не идут
+        for select, one, many in specs:
+            for code in primary_taxonomy.COMMENT_ORDER:   # категория расхождения зависит от вида и раздела формы
+                text = phrase([d for d in own if select(d) and
+                               primary_taxonomy.difference_category(d.kind, d.key, cmp.group, d.primary) == code], one, many)
+                if text:
+                    by_category.setdefault(code, []).append(_inline(text))
+    for issue in issues or []:
+        by_category.setdefault(primary_taxonomy.CODE.get(issue.code, "FORMAL"), []).append(_inline(issue.message))
+    # по одной строке на категорию: «Пропущенные нарушения: не выявлено нарушение по критерию 2.1.3.»
+    lines: List[str] = [f"{primary_taxonomy.COMMENT_NAMES[code]}: {'; '.join(by_category[code])}."
+                        for code in primary_taxonomy.COMMENT_ORDER if code in by_category]
+    if lines and grade is not None and grade < 1.0 and any(
+            code in by_category for code in ("MISSED_VIOLATION", "FACTUAL", "METHODOLOGICAL", "NORMATIVE")):
         lines.insert(0, "Незначительные отклонения от сводного заключения." if grade >= 0.75
                      else "Существенные расхождения со сводным заключением.")
-    lines += [i.message[0].upper() + i.message[1:] + "." for i in issues or []]
     if not lines:
         return POSITIVE_COMMENT
     return "\n".join(f"{n}. {text}" for n, text in enumerate(lines, start=1))
+
+
+def _inline(text: str) -> str:
+    """Фраза для строки категории: без заглавной буквы и конечной точки («Не выявлено …» → «не выявлено …»)."""
+    text = text.strip().rstrip(".")
+    return text[:1].lower() + text[1:]
 
 
 # ---------------------------------------------------------------------------------------------------------------------

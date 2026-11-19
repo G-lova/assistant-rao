@@ -1,7 +1,8 @@
 import json
 import asyncio
+import re
 import time
-from typing import List
+from typing import List, Optional
 
 import aiofiles
 import pandas as pd
@@ -18,6 +19,36 @@ from search_experts.conflict_detector import ConflictDetector
 
 
 logger = get_logger(__name__)
+
+
+def apply_rating_start(sql: str, start: Optional[str] = None) -> str:
+    """Подставляет в SQL подбора начало периода, за который считаются показатели и критерии эксперта.
+
+    В ``experts_for_expertise.sql`` вместо годового окна (``DATE_SUB(NOW(), INTERVAL 1 YEAR)``) стоит
+    ``'{{RATING_START}}'``: работы, принятые, повторные загрузки, просрочки, отказы и критерии 1–5 считаются с
+    ``settings.EXPERT_RATING_DEFAULT_START`` (01.01.2025) — так же, как рейтинг ``/get-experts-rating`` по
+    умолчанию (решение 19.11.2026). С годовым окном у эксперта, чьи оценённые работы старше года, а новые ещё
+    не оценены, критерии становились пустыми, и в балл подбора шёл максимальный рейтинг
+    (``COALESCE(..., 1)``) — так эксперт 385 с 06.11 оказывался первым почти во всех подборах.
+
+    Дата подставляется в текст запроса, а не привязкой: число привязок (``?``) у запроса остаётся прежним.
+
+    Args:
+        sql: Текст запроса.
+        start: Начало периода ``YYYY-MM-DD`` (по умолчанию — ``settings.EXPERT_RATING_DEFAULT_START``).
+
+    Returns:
+        str: Запрос с подставленной датой.
+
+    Raises:
+        ValueError: Дата не в формате ``YYYY-MM-DD`` (защита от подстановки произвольного текста в SQL).
+    """
+    from configs import settings
+
+    start = start or settings.EXPERT_RATING_DEFAULT_START
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(start)):
+        raise ValueError(f"EXPERT_RATING_DEFAULT_START должен быть в формате YYYY-MM-DD, получено {start!r}")
+    return sql.replace("{{RATING_START}}", start)
 
 
 def brief(ids, limit: int = 15) -> str:
@@ -452,7 +483,7 @@ class ScoringPipeline:
 
         try:
             # Загрузка SQL запроса
-            sql_query = await load_sql_query_async(sql_file_path)
+            sql_query = apply_rating_start(await load_sql_query_async(sql_file_path))
             
             # Получение данных
             df = await self.data_fetcher.fetch_async_expertise_data(sql_query, bindings=[expertise_id] * 4)
