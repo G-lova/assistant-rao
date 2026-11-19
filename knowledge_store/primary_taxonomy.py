@@ -10,16 +10,19 @@
 (см. :func:`difference_category`) — это допущение, оно собрано в одном месте и правится здесь:
 
 * пропуск нарушения (первичный не увидел то, что в итоговом) — «Существенные пропуски»;
-* неверный ответ в разделе 1 «Наличие информации…» (закупки) и в отчётных документах (соответствие результатов, сроков,
-  состава документации требованиям контракта) — «Фактические ошибки»: сведения документов поняты неверно;
-* неверный ответ в разделах 2–4 «Соответствие … требованиям законодательства» (закупки) — «Нормативные ошибки».
+* раздел 1 «Наличие информации…» (закупки): первичный не нашёл информацию, которая есть в документах (указал нарушение),
+  или отметил «не предусмотрено» там, где требование есть — тоже пропуск («Существенные пропуски»); «в наличии» там, где
+  требование не предусмотрено, — «Фактические ошибки» (сведения документов поняты неверно);
+* неверный ответ в разделах 2–4 «Соответствие … требованиям законодательства» (закупки) — «Нормативные ошибки»;
+* отчётные документы (соответствие результатов, сроков, состава документации требованиям контракта): неверный ответ —
+  «Фактические ошибки».
 
 «Методологические ошибки» и «Недостаточная аргументация» по структуре формы определяются слабо (методологические — только
 расхождение выбранного метода НМЦК, пока не подключено).
 """
 import re
 from collections import Counter
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 # код категории → название (в порядке классификации аналитика)
 CATEGORIES: Dict[str, str] = {
@@ -57,13 +60,14 @@ CODE: Dict[str, str] = {
 }
 
 
-def difference_category(kind: str, key: str, group: str = "procurement") -> str:
+def difference_category(kind: str, key: str, group: str = "procurement", primary: Optional[int] = None) -> str:
     """Категория расхождения по критерию.
 
     Args:
         kind: Вид расхождения (``missed`` / ``false_alarm`` / ``other``).
         key: Ключ поля критерия (``field2_1_12``).
         group: ``procurement`` (закупки) или ``report`` (отчётные документы).
+        primary: Значение первичного эксперта (1/0/2); для ``other`` отличает «не предусмотрено» (2) от «в наличии» (1).
 
     Returns:
         str: Код категории из :data:`CATEGORIES`.
@@ -74,21 +78,23 @@ def difference_category(kind: str, key: str, group: str = "procurement") -> str:
         match = _PROCUREMENT_SECTION.match(key)
         if match and match.group(1) != "1":
             return "NORMATIVE"
+        if match and (kind == "false_alarm" or primary == 2):
+            return "MISSED_VIOLATION"      # раздел 1: информация в документах есть, а первичный её не учёл
     return "FACTUAL"
 
 
-def categorize(differences: Iterable[Tuple[str, str]] = (), codes: Iterable[str] = (),
+def categorize(differences: Iterable[Tuple[str, str, Optional[int]]] = (), codes: Iterable[str] = (),
                group: str = "procurement") -> List[Dict[str, object]]:
     """Сводка замечаний по категориям таксономии.
 
     Args:
-        differences: Расхождения по критериям как пары ``(вид, ключ)``, без общих для всех первичных.
+        differences: Расхождения по критериям как ``(вид, ключ, значение первичного)``, без общих для всех первичных.
         codes: Коды объективных дефектов и замечаний.
         group: ``procurement`` или ``report``.
 
     Returns:
         list[dict]: ``{"code", "name", "count"}`` по категориям в порядке :data:`CATEGORIES`; пустые не включаются.
     """
-    counts: Counter = Counter(difference_category(kind, key, group) for kind, key in differences)
+    counts: Counter = Counter(difference_category(kind, key, group, primary) for kind, key, primary in differences)
     counts.update(CODE[c] for c in codes if c in CODE)
     return [{"code": code, "name": name, "count": counts[code]} for code, name in CATEGORIES.items() if counts[code]]

@@ -15,10 +15,11 @@ class TaxonomyTests(unittest.TestCase):
         self.assertEqual(sorted(tx.COMMENT_ORDER), sorted(tx.CATEGORIES))
 
     def test_difference_category(self):
-        """Пропуск — «Существенные пропуски»; в разделе 1 закупок неверный ответ — фактическая, в разделах 2–4 — нормативная; в отчётных — фактическая."""
+        """Пропуск — «Существенные пропуски»; раздел 1 закупок: не учтённая информация — пропуск, «в наличии» при «не предусмотрено» — фактическая; разделы 2–4 — нормативная; отчётные — фактическая."""
         self.assertEqual(tx.difference_category("missed", "field2_3_7"), "MISSED_VIOLATION")
-        self.assertEqual(tx.difference_category("false_alarm", "field2_1_29"), "FACTUAL")
-        self.assertEqual(tx.difference_category("other", "field2_1_12"), "FACTUAL")
+        self.assertEqual(tx.difference_category("false_alarm", "field2_1_29"), "MISSED_VIOLATION")
+        self.assertEqual(tx.difference_category("other", "field2_1_12", primary=2), "MISSED_VIOLATION")   # «не предусмотрено», а требование есть
+        self.assertEqual(tx.difference_category("other", "field2_1_12", primary=1), "FACTUAL")            # «в наличии», а требования нет
         self.assertEqual(tx.difference_category("false_alarm", "field2_3_7"), "NORMATIVE")
         self.assertEqual(tx.difference_category("false_alarm", "field2_2_3"), "NORMATIVE")
         self.assertEqual(tx.difference_category("false_alarm", "field4_1", "report"), "FACTUAL")
@@ -26,7 +27,7 @@ class TaxonomyTests(unittest.TestCase):
 
     def test_categorize_counts_in_taxonomy_order(self):
         """Расхождения и коды складываются по категориям; пустые категории не выводятся; порядок как в CATEGORIES."""
-        result = tx.categorize([("false_alarm", "field2_1_2"), ("missed", "field2_1_3"), ("false_alarm", "field2_3_7")],
+        result = tx.categorize([("other", "field2_1_2", 1), ("missed", "field2_1_3", 1), ("false_alarm", "field2_3_7", 0)],
                                ["EMPTY_DOCS", "UNKNOWN"])
         self.assertEqual([(c["code"], c["count"]) for c in result],
                          [("INCOMPLETE", 1), ("FACTUAL", 1), ("NORMATIVE", 1), ("MISSED_VIOLATION", 1)])

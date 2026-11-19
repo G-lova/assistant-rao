@@ -271,8 +271,12 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
     # шаблоны фраз: (отбор расхождений, в единственном числе, во множественном)
     specs = (
         (lambda d: d.kind == "missed", "Не выявлено нарушение по критерию {}.", "Не выявлены нарушения по критериям: {}."),
-        (lambda d: d.kind == "false_alarm", "Неверно указано нарушение по критерию {}.",
-         "Неверно указаны нарушения по критериям: {}."),
+        # раздел 1 закупок («Наличие информации»): первичный указал отсутствие информации, которая есть в документах
+        (lambda d: d.kind == "false_alarm" and primary_taxonomy.difference_category(d.kind, d.key, cmp.group, d.primary) == "MISSED_VIOLATION",
+         "Не учтена информация, имеющаяся в документах, по критерию {}.",
+         "Не учтена информация, имеющаяся в документах, по критериям: {}."),
+        (lambda d: d.kind == "false_alarm" and primary_taxonomy.difference_category(d.kind, d.key, cmp.group, d.primary) != "MISSED_VIOLATION",
+         "Неверно указано нарушение по критерию {}.", "Неверно указаны нарушения по критериям: {}."),
         # 1 против 2: «не предусмотрено» отмечено там, где требование есть, и наоборот
         (lambda d: d.kind == "other" and d.primary == 2,
          "Неверно отмечено «не предусмотрено» по критерию {} (требование предусмотрено).",
@@ -286,7 +290,7 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
         for select, one, many in specs:
             for code in primary_taxonomy.COMMENT_ORDER:   # категория расхождения зависит от вида и раздела формы
                 text = phrase([d for d in own if select(d) and
-                               primary_taxonomy.difference_category(d.kind, d.key, cmp.group) == code], one, many)
+                               primary_taxonomy.difference_category(d.kind, d.key, cmp.group, d.primary) == code], one, many)
                 if text:
                     by_category.setdefault(code, []).append(_inline(text))
     for issue in issues or []:
