@@ -45,6 +45,17 @@ class CompareTests(unittest.TestCase):
         self.assertIn("неверно отмечено «в наличии» по критерию field2_1_4 (требование не предусмотрено).", text)
         self.assertEqual(text.count("Фактические ошибки:"), 1)
 
+    def test_comment_splits_errors_by_form_section(self):
+        """Ложное нарушение в разделе «Соответствие требованиям» (2–4) — нормативная ошибка, в разделе 1 — фактическая."""
+        summary = {"field2_1_1": 1, "field2_1_2": 1, "field2_3_7": 1, "field2_3_4": 0, "field2_1_5": 1, "field2_1_6": 1}
+        primary = {**summary, "field2_1_1": 0, "field2_3_7": 0, "field2_3_4": 1}
+        text = pc.build_comment(pc.compare(primary, summary), grade=0.5)
+        self.assertIn("Пропущенные нарушения: не выявлено нарушение по критерию field2_3_4.", text)
+        self.assertIn("Фактические ошибки: неверно указано нарушение по критерию field2_1_1.", text)
+        self.assertIn("Нормативные ошибки: неверно указано нарушение по критерию field2_3_7.", text)
+        lines = text.split("\n")          # порядок: заголовок, пропуски, фактические, нормативные
+        self.assertEqual([l.split(":")[0][3:] for l in lines[1:]], ["Пропущенные нарушения", "Фактические ошибки", "Нормативные ошибки"])
+
     def test_comment_groups_issues_by_category(self):
         """Объективные дефекты идут в свою категорию таксономии; категории — в порядке таксономии, после заголовка по оценке."""
         issue = primary_review.Issue("EMPTY_DOCS", primary_review.MAJOR, "не заполнен перечень документов", ["documents"])

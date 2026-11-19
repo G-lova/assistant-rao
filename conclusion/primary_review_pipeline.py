@@ -138,7 +138,7 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
         else:
             alternative = (float(ranked[1][0]) if len(ranked) > 1 and ranked[0][1] - ranked[1][1] < AMBIGUITY_GAP
                            and not rule_applied else None)   # после постпроверки по порядку оценка определена правилом
-        own = [d.kind for d in cmp.differences if d.key not in shared]       # общие для всех первичных не считаем
+        own = [(d.kind, d.key) for d in cmp.differences if d.key not in shared]       # общие для всех первичных не считаем
         reviews.append({
             "expert_id": int(row["expert_id"]),
             "common": cmp.common,
@@ -160,7 +160,7 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
             "deductions": [{**d, "label": (labels or {}).get(d["key"]), "shared": d["key"] in shared}
                            for d in weighted["deductions"]] if weighted else [],
             "probabilities": probs,
-            "categories": primary_taxonomy.categorize(own, [i.code for i in issues]),
+            "categories": primary_taxonomy.categorize(own, [i.code for i in issues], cmp.group),
             "range_by_thresholds": threshold_range,
             "match_percent": cmp.match_percent,
             "range_by_scale": primary_compare.range_by_scale(cmp.match_percent),

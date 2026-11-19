@@ -1,33 +1,48 @@
 """Таксономия замечаний к заключению первичного эксперта.
 
-Единый набор категорий (по классификации недостатков, предложенной аналитиком) для всех источников замечаний:
-расхождений по критериям (:mod:`knowledge_store.primary_compare`), объективных дефектов
-(:mod:`knowledge_store.primary_review`) и замечаний по текстовым полям (:mod:`knowledge_store.primary_remarks`).
-Категория показывает, какого рода недостаток; оценку ``range`` она не определяет — её ставит сводный эксперт.
-"""
-from collections import Counter
-from typing import Dict, Iterable, List, Sequence
+Восемь категорий (классификация недостатков, принятая вместе с аналитиком) для всех источников замечаний: расхождений по
+критериям (:mod:`knowledge_store.primary_compare`), объективных дефектов (:mod:`knowledge_store.primary_review`) и
+замечаний по текстовым полям (:mod:`knowledge_store.primary_remarks`). Категория показывает, какого рода недостаток;
+оценку ``range`` она не определяет — её ставит сводный эксперт.
 
-# код категории → название (формулировки аналитика)
+Что может определить код, а что нет. Расхождение по критерию говорит только о том, что первичный эксперт ответил иначе,
+чем итоговое заключение, но не о причине. Поэтому категория расхождения выводится из вида расхождения и раздела формы
+(см. :func:`difference_category`) — это допущение, оно собрано в одном месте и правится здесь:
+
+* пропуск нарушения (первичный не увидел то, что в итоговом) — «Существенные пропуски»;
+* неверный ответ в разделе 1 «Наличие информации…» (закупки) и в отчётных документах (соответствие результатов, сроков,
+  состава документации требованиям контракта) — «Фактические ошибки»: сведения документов поняты неверно;
+* неверный ответ в разделах 2–4 «Соответствие … требованиям законодательства» (закупки) — «Нормативные ошибки».
+
+«Методологические ошибки» и «Недостаточная аргументация» по структуре формы определяются слабо (методологические — только
+расхождение выбранного метода НМЦК, пока не подключено).
+"""
+import re
+from collections import Counter
+from typing import Dict, Iterable, List, Sequence, Tuple
+
+# код категории → название (в порядке классификации аналитика)
 CATEGORIES: Dict[str, str] = {
-    "MISSED_VIOLATION": "Существенные пропуски",
     "INCOMPLETE": "Неполнота",
     "FACTUAL": "Фактические ошибки",
+    "METHODOLOGICAL": "Методологические ошибки",
+    "NORMATIVE": "Нормативные ошибки",
     "ARGUMENTATION": "Недостаточная аргументация",
     "CONTRADICTION": "Противоречия",
     "FORMAL": "Формальные недостатки",
+    "MISSED_VIOLATION": "Существенные пропуски",
 }
+
+# Порядок строк в комментарии: как пишут сводные эксперты — сначала пропущенные нарушения, затем ошибки, затем недостатки заключения
+COMMENT_ORDER: Tuple[str, ...] = ("MISSED_VIOLATION", "INCOMPLETE", "FACTUAL", "METHODOLOGICAL", "NORMATIVE",
+                                  "ARGUMENTATION", "CONTRADICTION", "FORMAL")
 
 # Название категории в строке комментария. Совпадает с CATEGORIES, кроме пропуска нарушений: «существенные» в начале строки
 # противоречило бы заголовку «Незначительные отклонения» при оценке 0.75, степень тяжести задаёт оценка
 COMMENT_NAMES: Dict[str, str] = {**CATEGORIES, "MISSED_VIOLATION": "Пропущенные нарушения"}
 
-# вид расхождения с итоговым заключением (``Difference.kind``) → категория
-DIFFERENCE_KIND: Dict[str, str] = {
-    "missed": "MISSED_VIOLATION",     # не выявлено нарушение, отмеченное в итоговом
-    "false_alarm": "FACTUAL",         # указано нарушение, которого в итоговом нет
-    "other": "FACTUAL",               # неверно отмечено «в наличии» / «не предусмотрено»
-}
+# Закупки: ключ ``field2_<раздел>_…``; раздел 1 — «Наличие информации», разделы 2–4 — «Соответствие … требованиям»
+_PROCUREMENT_SECTION = re.compile(r"^field2_(\d+)_")
 
 # код объективного дефекта (``primary_review.Issue.code``) или замечания (``primary_remarks.Remark.code``) → категория
 CODE: Dict[str, str] = {
@@ -42,16 +57,38 @@ CODE: Dict[str, str] = {
 }
 
 
-def categorize(difference_kinds: Iterable[str] = (), codes: Iterable[str] = ()) -> List[Dict[str, object]]:
+def difference_category(kind: str, key: str, group: str = "procurement") -> str:
+    """Категория расхождения по критерию.
+
+    Args:
+        kind: Вид расхождения (``missed`` / ``false_alarm`` / ``other``).
+        key: Ключ поля критерия (``field2_1_12``).
+        group: ``procurement`` (закупки) или ``report`` (отчётные документы).
+
+    Returns:
+        str: Код категории из :data:`CATEGORIES`.
+    """
+    if kind == "missed":
+        return "MISSED_VIOLATION"
+    if group == "procurement":
+        match = _PROCUREMENT_SECTION.match(key)
+        if match and match.group(1) != "1":
+            return "NORMATIVE"
+    return "FACTUAL"
+
+
+def categorize(differences: Iterable[Tuple[str, str]] = (), codes: Iterable[str] = (),
+               group: str = "procurement") -> List[Dict[str, object]]:
     """Сводка замечаний по категориям таксономии.
 
     Args:
-        difference_kinds: Виды расхождений по критериям (``missed`` / ``false_alarm`` / ``other``), без общих для всех первичных.
+        differences: Расхождения по критериям как пары ``(вид, ключ)``, без общих для всех первичных.
         codes: Коды объективных дефектов и замечаний.
+        group: ``procurement`` или ``report``.
 
     Returns:
-        list[dict]: ``{"code", "name", "count"}`` по категориям, в порядке :data:`CATEGORIES`; пустые не включаются.
+        list[dict]: ``{"code", "name", "count"}`` по категориям в порядке :data:`CATEGORIES`; пустые не включаются.
     """
-    counts: Counter = Counter(DIFFERENCE_KIND[k] for k in difference_kinds if k in DIFFERENCE_KIND)
+    counts: Counter = Counter(difference_category(kind, key, group) for kind, key in differences)
     counts.update(CODE[c] for c in codes if c in CODE)
     return [{"code": code, "name": name, "count": counts[code]} for code, name in CATEGORIES.items() if counts[code]]

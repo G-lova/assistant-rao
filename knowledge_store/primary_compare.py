@@ -268,31 +268,34 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
         return (one if len(selected) == 1 else many).format(numbers_of(selected)) if selected else None
 
     own = [d for d in cmp.differences if d.key not in shared]
-    # замечания по расхождениям: (вид расхождения, фраза); категория таксономии определяется видом
-    found: List[Tuple[str, Optional[str]]] = [
-        ("missed", phrase([d for d in own if d.kind == "missed"], "Не выявлено нарушение по критерию {}.",
-                          "Не выявлены нарушения по критериям: {}.")),
-        ("false_alarm", phrase([d for d in own if d.kind == "false_alarm"], "Неверно указано нарушение по критерию {}.",
-                               "Неверно указаны нарушения по критериям: {}.")),
+    # шаблоны фраз: (отбор расхождений, в единственном числе, во множественном)
+    specs = (
+        (lambda d: d.kind == "missed", "Не выявлено нарушение по критерию {}.", "Не выявлены нарушения по критериям: {}."),
+        (lambda d: d.kind == "false_alarm", "Неверно указано нарушение по критерию {}.",
+         "Неверно указаны нарушения по критериям: {}."),
         # 1 против 2: «не предусмотрено» отмечено там, где требование есть, и наоборот
-        ("other", phrase([d for d in own if d.kind == "other" and d.primary == 2],
-                         "Неверно отмечено «не предусмотрено» по критерию {} (требование предусмотрено).",
-                         "Неверно отмечено «не предусмотрено» по критериям: {} (требование предусмотрено).")),
-        ("other", phrase([d for d in own if d.kind == "other" and d.primary != 2],
-                         "Неверно отмечено «в наличии» по критерию {} (требование не предусмотрено).",
-                         "Неверно отмечено «в наличии» по критериям: {} (требование не предусмотрено).")),
-    ]
+        (lambda d: d.kind == "other" and d.primary == 2,
+         "Неверно отмечено «не предусмотрено» по критерию {} (требование предусмотрено).",
+         "Неверно отмечено «не предусмотрено» по критериям: {} (требование предусмотрено)."),
+        (lambda d: d.kind == "other" and d.primary != 2,
+         "Неверно отмечено «в наличии» по критерию {} (требование не предусмотрено).",
+         "Неверно отмечено «в наличии» по критериям: {} (требование не предусмотрено)."),
+    )
     by_category: Dict[str, List[str]] = {}          # код категории таксономии → фразы без заглавной буквы и точки
     if grade is None or grade < 1.0:                # оценка 1.00: расхождения остаются в differences, но в комментарий не идут
-        for kind, text in found:
-            if text:
-                by_category.setdefault(primary_taxonomy.DIFFERENCE_KIND[kind], []).append(_inline(text))
+        for select, one, many in specs:
+            for code in primary_taxonomy.COMMENT_ORDER:   # категория расхождения зависит от вида и раздела формы
+                text = phrase([d for d in own if select(d) and
+                               primary_taxonomy.difference_category(d.kind, d.key, cmp.group) == code], one, many)
+                if text:
+                    by_category.setdefault(code, []).append(_inline(text))
     for issue in issues or []:
         by_category.setdefault(primary_taxonomy.CODE.get(issue.code, "FORMAL"), []).append(_inline(issue.message))
-    # по одной строке на категорию, в порядке таксономии: «Пропущенные нарушения: не выявлено нарушение по критерию 2.1.3.»
+    # по одной строке на категорию: «Пропущенные нарушения: не выявлено нарушение по критерию 2.1.3.»
     lines: List[str] = [f"{primary_taxonomy.COMMENT_NAMES[code]}: {'; '.join(by_category[code])}."
-                        for code in primary_taxonomy.CATEGORIES if code in by_category]
-    if lines and grade is not None and grade < 1.0 and any(code in by_category for code in ("MISSED_VIOLATION", "FACTUAL")):
+                        for code in primary_taxonomy.COMMENT_ORDER if code in by_category]
+    if lines and grade is not None and grade < 1.0 and any(
+            code in by_category for code in ("MISSED_VIOLATION", "FACTUAL", "METHODOLOGICAL", "NORMATIVE")):
         lines.insert(0, "Незначительные отклонения от сводного заключения." if grade >= 0.75
                      else "Существенные расхождения со сводным заключением.")
     if not lines:
