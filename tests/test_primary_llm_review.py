@@ -48,6 +48,23 @@ class LlmReviewTests(unittest.TestCase):
                            for q in ("первая цитата для проверки", "вторая цитата для проверки", "третья цитата для проверки")], source)
         self.assertEqual(len(found), pl.MAX_PER_CATEGORY)
 
+    def test_verify_accepts_alias_keys_and_rejects_leaks(self):
+        """Ключи type/description принимаются; не объекты и пояснения с рассуждениями («Давайте пересмотрим») отбрасываются."""
+        source = "в то врем как предметом закупки является поставка оборудования"
+        found = pl.verify([{"type": "FORMAL", "quote": "в то врем как предметом закупки", "description": "опечатка"},
+                           "строка", {"type": "FORMAL", "quote": "поставка оборудования", "description": "Давайте пересмотрим цитату"}], source)
+        self.assertEqual([(f["category"], f["explanation"]) for f in found], [("FORMAL", "опечатка")])
+
+    def test_report_text_uses_section_fields(self):
+        """Отчётные документы: длинные текстовые поля разделов попадают в текст, короткие и служебные — нет."""
+        data = {"field1_1": "1. Договор от 01.02.2025 № 5, акт от 02.03.2025 № 7 и иные документы", "field5_3_3": "Комментарий по разделу " * 3,
+                "field5_0": "ok", "documents": "x" * 100}
+        text = pl.opinion_text(data, report=True)
+        self.assertIn("[field1_1]", text)
+        self.assertIn("[field5_3_3]", text)
+        self.assertNotIn("[field5_0]", text)
+        self.assertEqual(pl.opinion_text(data), "")
+
     def test_review_without_text_does_not_call_model(self):
         """Нет текста — пустой результат без вызова модели; с текстом — только подтверждённые замечания."""
         self.assertEqual(asyncio.run(pl.review(FakeLlm([{"category": "FORMAL", "quote": "x" * 20, "explanation": ""}]), {})), [])

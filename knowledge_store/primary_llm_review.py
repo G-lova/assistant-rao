@@ -12,6 +12,8 @@
 import re
 from typing import Any, Dict, List, Optional
 
+from knowledge_store import primary_review
+
 # код категории таксономии → описание для промпта
 CATEGORY_HINTS: Dict[str, str] = {
     "ARGUMENTATION": ("Недостаточная аргументация: нарушение названо без пояснения, в чём оно состоит; нет ссылки на пункт документа "
@@ -25,6 +27,9 @@ MAX_TEXT = 6000            # символов текста первичного,
 MAX_FINDINGS = 6           # не больше замечаний на заключение
 MAX_PER_CATEGORY = 2       # и не больше замечаний одной категории (однотипные цитаты повторяют одну мысль)
 MIN_QUOTE = 8              # минимальная длина цитаты
+MIN_FIELD_TEXT = 40        # отчётные документы: минимальная длина текстового поля, чтобы его показать модели
+# следы рассуждений модели в ответе («Давайте пересмотрим цитату»): такое замечание ненадёжно
+_LEAK_RE = re.compile(r"давайте|пересмотрим|попробуем|на самом деле", re.I)
 
 SCHEMA = {"type": "object", "properties": {"findings": {"type": "array", "maxItems": MAX_FINDINGS, "items": {
     "type": "object", "properties": {
@@ -34,18 +39,32 @@ SCHEMA = {"type": "object", "properties": {"findings": {"type": "array", "maxIte
     "required": ["category", "quote", "explanation"], "additionalProperties": False}}},
     "required": ["findings"], "additionalProperties": False}
 
-SYSTEM = ("Ты проверяешь заключение первичного эксперта по закупке или отчётным документам. Найди в его текстах недостатки трёх видов:\n"
-          + "\n".join(f"- {code}: {text}" for code, text in CATEGORY_HINTS.items())
-          + "\nПравила: сообщай только недостаток, который можно подтвердить дословной цитатой из заключения ПЕРВИЧНОГО эксперта "
-            "(поле quote — подряд идущие слова из его текста, до 300 символов). Не оценивай, правильно ли эксперт нашёл нарушение — "
-            "это проверяется отдельно. Слова «необоснованно», «некорректно», «не установил» в описании нарушения ЗАКАЗЧИКА — это содержание "
-            "замечания, а не слабая аргументация эксперта: ARGUMENTATION ставь, только если замечание ни в одном месте не поясняет, в чём "
-            "нарушение, и не ссылается ни на пункт документа, ни на норму; по одной сути недостатка — одно замечание, не повторяй "
-            "однотипные цитаты. Если недостатков нет, верни пустой список findings. Не придумывай недостатки.")
+SYSTEM = (
+    "Ты проверяешь заключение первичного эксперта по закупке или отчётным документам. Найди в его текстах недостатки трёх видов:\n"
+    + "\n".join(f"- {code}: {text}" for code, text in CATEGORY_HINTS.items())
+    + "\nПравила: сообщай только недостаток, который можно подтвердить дословной цитатой из заключения ПЕРВИЧНОГО эксперта "
+      "(поле quote — подряд идущие слова из его текста, до 300 символов). Не оценивай, правильно ли эксперт нашёл нарушение — "
+      "это проверяется отдельно, и не отмечай расхождения с итоговым заключением как противоречия (итоговое — только для справки): "
+      "CONTRADICTION — только противоречие внутри самого заключения первичного. Слова «необоснованно», «некорректно», «не установил» "
+      "в описании нарушения ЗАКАЗЧИКА — это содержание замечания, а не слабая аргументация эксперта: ARGUMENTATION ставь, только если "
+      "замечание ни в одном месте не поясняет, в чём нарушение, и не ссылается ни на пункт документа, ни на норму; по одной сути "
+      "недостатка — одно замечание, не повторяй однотипные цитаты. Если недостатков нет, верни пустой список findings. "
+      "Не придумывай недостатки. Ответ — строго JSON "
+      '{"findings": [{"category": "...", "quote": "...", "explanation": "..."}]}; пояснение — одно-два предложения без рассуждений.')
 
 
-def opinion_text(data: Dict[str, Any], limit: int = MAX_TEXT) -> str:
-    """Текстовая часть заключения для модели: ``field3`` (замечания), ``field4`` (вывод), текстовые поля критериев ``*_text``."""
+def opinion_text(data: Dict[str, Any], limit: int = MAX_TEXT, report: bool = False) -> str:
+    """Текстовая часть заключения для модели.
+
+    Закупки: ``field3`` (замечания), ``field4`` (вывод), текстовые поля критериев ``*_text``. Отчётные документы: замечания лежат
+    в других полях (перечень документов ``field1_1``, предмет ``field2_1``, комментарии и выводы по разделам ``field5_*``,
+    ``field6_*``), поэтому берутся все текстовые поля формы длиной от :data:`MIN_FIELD_TEXT` символов.
+
+    Args:
+        data: Содержимое заключения.
+        limit: Максимум символов.
+        report: Заключение по отчётным документам.
+    """
     parts = []
     for key in ("field3", "field4"):
         value = data.get(key)
@@ -54,6 +73,12 @@ def opinion_text(data: Dict[str, Any], limit: int = MAX_TEXT) -> str:
     for key, value in data.items():
         if key.endswith("_text") and isinstance(value, str) and value.strip():
             parts.append(f"[{key}] {value.strip()}")
+    if report:
+        for key in sorted(data):
+            value = data[key]
+            if (key.startswith("field") and key not in ("field3", "field4") and not key.endswith("_text")
+                    and isinstance(value, str) and len(value.strip()) >= MIN_FIELD_TEXT):
+                parts.append(f"[{key}] {value.strip()}")
     return "\n".join(parts)[:limit]
 
 
@@ -62,18 +87,27 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text.replace("«", '"').replace("»", '"')).strip().casefold()
 
 
-def verify(findings: List[Dict[str, Any]], source: str) -> List[Dict[str, str]]:
-    """Оставляет замечания с известной категорией и цитатой, которая дословно есть в тексте первичного."""
+def verify(findings: List[Any], source: str) -> List[Dict[str, str]]:
+    """Оставляет замечания с известной категорией и цитатой, которая дословно есть в тексте первичного.
+
+    Модель не всегда следует схеме: ключи ``type`` / ``description`` принимаются как ``category`` / ``explanation``; элементы, не
+    являющиеся объектами, и замечания со следами рассуждений в пояснении отбрасываются.
+    """
     haystack = _norm(source)
     out, seen = [], set()
     for f in findings or []:
-        code, quote = f.get("category"), _norm(str(f.get("quote") or ""))
-        if code not in CATEGORY_HINTS or len(quote) < MIN_QUOTE or quote not in haystack or (code, quote) in seen:
+        if not isinstance(f, dict):
+            continue
+        code = f.get("category") or f.get("type")
+        quote = _norm(str(f.get("quote") or ""))
+        explanation = str(f.get("explanation") or f.get("description") or "").strip()
+        if (code not in CATEGORY_HINTS or len(quote) < MIN_QUOTE or quote not in haystack or (code, quote) in seen
+                or _LEAK_RE.search(explanation)):
             continue
         seen.add((code, quote))
         if sum(1 for o in out if o["category"] == code) >= MAX_PER_CATEGORY:
             continue
-        out.append({"category": code, "quote": str(f["quote"]).strip(), "explanation": str(f.get("explanation") or "").strip()})
+        out.append({"category": code, "quote": str(f["quote"]).strip(), "explanation": explanation})
     return out[:MAX_FINDINGS]
 
 
@@ -91,7 +125,7 @@ async def review(llm: Any, primary: Dict[str, Any], summary: Optional[Dict[str, 
     Returns:
         list[dict]: ``category``, ``quote``, ``explanation``; пусто, если текста нет или недостатков не найдено.
     """
-    source = opinion_text(primary)
+    source = opinion_text(primary, report=primary_review.is_report_data(summary or primary))
     if trace is not None:
         trace.update({"has_text": bool(source), "raw": [], "verified": []})
     if not source:
