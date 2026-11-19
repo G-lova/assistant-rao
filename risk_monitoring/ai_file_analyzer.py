@@ -35,11 +35,13 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
 from configs.config import Config
 from configs.logger import get_logger
 from configs.file_errors import BrokenFile
+from configs import llm_resilience
 from configs.llm_resilience import ModelUnavailable
 from configs.resources import read_text
 from configs import settings
@@ -129,6 +131,40 @@ def file_ext(file_name: Optional[str], download_ext: Optional[str], path: Option
 
 class FileUnavailable(Exception):
     """Файл не удалось скачать (ожидаемая ситуация, без traceback в логах)."""
+
+
+class SourceBlocked(FileUnavailable):
+    """ЕИС заблокировал запросы («подозрительная активность»): файл не виноват — попытка не засчитывается.
+
+    18.11.2026 ЕИС отвечал 403 со страницей «подозрительная активность» на все файлы подряд (около запроса в
+    секунду), и каждый файл тратил попытку: после трёх таких прогонов файлы перестали бы анализироваться.
+    """
+
+
+# Монотонное время, до которого скачивание из ЕИС приостановлено (после блокировки; на процесс воркера)
+_EIS_PAUSED_UNTIL = 0.0
+
+
+def _is_eis(url: Optional[str]) -> bool:
+    """Ссылка ведёт в ЕИС (zakupki.gov.ru)."""
+    from urllib.parse import urlsplit
+
+    return urlsplit(url or "").netloc.lower().endswith("zakupki.gov.ru")
+
+
+def _eis_pause_left() -> float:
+    """Сколько секунд ещё действует пауза скачивания из ЕИС (0 — паузы нет)."""
+    return max(0.0, _EIS_PAUSED_UNTIL - time.monotonic())
+
+
+def _pause_eis() -> None:
+    """Приостанавливает скачивание из ЕИС на ``RM_EIS_BLOCK_PAUSE_SEC`` (первая блокировка — в журнал)."""
+    global _EIS_PAUSED_UNTIL
+    pause = float(getattr(settings, "RM_EIS_BLOCK_PAUSE_SEC", 900))
+    if _eis_pause_left() <= 0:
+        logger.warning(f"ЕИС заблокировал запросы («подозрительная активность») — скачивание из ЕИС "
+                       f"приостановлено на {pause / 60:.0f} мин; файлы повторятся без траты попытки")
+    _EIS_PAUSED_UNTIL = time.monotonic() + pause
 
 
 def _with_service_doc001(compact: Dict[str, Any], text: str, detected_type: Optional[str],
@@ -285,6 +321,13 @@ class AIFileAnalyzer:
 
         ex_client = ResilientClient(client, retries=settings.LLM_PROXY_RETRIES)
         self.file_reader = FileReader(ex_client, self.extraction_model)
+        # архив в РМ читается с пределами (не больше файлов, картинок и символов) — см. settings.RM_ARCHIVE_*
+        self.file_reader.archive_limits = {
+            "max_files": int(getattr(settings, "RM_ARCHIVE_MAX_FILES", 40)),
+            "max_images": int(getattr(settings, "RM_ARCHIVE_MAX_IMAGES", 10)),
+            "max_chars": int(getattr(settings, "RM_ARCHIVE_MAX_CHARS", 300_000)),
+            "concurrency": int(getattr(settings, "RM_ARCHIVE_CONCURRENCY", 4)),
+        }
         self.type_detector = TypeDetector(ex_client, self.extraction_model)
         self.extractor = DataExtractor(ex_client, self.extraction_model)
         self.profiler = DocumentProfiler(r_client, self.model)
@@ -675,26 +718,65 @@ class AIFileAnalyzer:
             if row.get("rm_status") == "failed" and attempt > MAX_ATTEMPTS:
                 progress.note(f"исчерпаны попытки ({MAX_ATTEMPTS}) — пропуск")
                 return {"file_id": file_id, "status": "skipped", "reason": "max_attempts"}
+        entered = time.monotonic()
         async with self.semaphore:
-            progress.note(f"начало анализа (попытка {attempt})")
-            try:
-                return await self.analyze_file(row, previous, attempt)
-            except FileUnavailable as e:
-                logger.warning(f"Файл {file_id} недоступен: {e}")
-                return await self._push_failure(file_id, attempt, f"download_failed: {e}")
-            except ModelUnavailable as e:
-                # сервер модели недоступен (5xx/таймаут после всех повторов): файл не виноват — попытка не
-                # засчитывается (иначе за пару сбоев модели файл исчерпал бы MAX_ATTEMPTS и не анализировался бы)
-                logger.warning(f"Файл {file_id}: модель недоступна — анализ повторится позже: {e}")
-                return await self._push_failure(file_id, attempt - 1, f"model_unavailable: {e}")
-            except Exception as e:  # noqa: BLE001 — сбой одного файла не останавливает остальные
-                if type(e).__name__ == "ExtractionFailed":
-                    # модель не дала годного ответа ни по одному блоку — причина видна выше в журнале, без трассировки
-                    logger.warning(f"Файл {file_id}: извлечение не удалось ({e}) — повтор в следующем прогоне "
-                                   f"(попытка {attempt} из {MAX_ATTEMPTS})")
-                else:
-                    logger.error(f"Ошибка анализа файла {file_id}: {e}", exc_info=True)
-                return await self._push_failure(file_id, attempt, f"{type(e).__name__}: {e}")
+            # замер файла (17.11.2026): этапы, запросы к модели, ожидание очереди — в pipeline.timings результата и
+            # в журнал анализатора (timing_log), из которого ежедневный прогон считает P50 / P95 и самые долгие файлы
+            with progress.collect() as tm, llm_resilience.scope() as llm:
+                tm["queue_sec"] = round(time.monotonic() - entered, 1)
+                res: Optional[Dict[str, Any]] = None
+                try:
+                    res = await self._attempt(row, previous, attempt)
+                    return res
+                finally:
+                    self._log_timing(row, tm, llm, res)
+
+    def _log_timing(self, row: Dict[str, Any], tm: Dict[str, Any], llm: Dict[str, Any],
+                    res: Optional[Dict[str, Any]]) -> None:
+        """Запись о времени файла в ``timing_log`` (и при прерывании пачки по времени: ``status = interrupted``)."""
+        log = self.__dict__.setdefault("timing_log", [])
+        snap = progress.snapshot(tm) or {}
+        log.append({"file_id": int(row["id"]), "name": str(row.get("file_name") or "")[:80],
+                    "status": (res or {}).get("status") or "interrupted",
+                    "seconds": snap.get("total_sec", 0), "queue_sec": snap.get("queue_sec", 0),
+                    "steps": snap.get("steps", {}), "llm": dict(llm)})
+
+    def _timings_block(self) -> Optional[Dict[str, Any]]:
+        """``pipeline.timings`` текущего файла: время с начала, ожидание очереди, самые долгие этапы, запросы к модели."""
+        snap = progress.snapshot()
+        if snap is None:
+            return None
+        llm = llm_resilience.current_scope()
+        if llm is not None:
+            snap["llm"] = dict(llm)
+        return snap
+
+    async def _attempt(self, row: Dict[str, Any], previous: Optional[Dict[str, Any]], attempt: int) -> Dict[str, Any]:
+        """Анализ файла с обработкой ошибок (файл недоступен, модель недоступна, прочие сбои)."""
+        file_id = int(row["id"])
+        progress.note(f"начало анализа (попытка {attempt})")
+        try:
+            return await self.analyze_file(row, previous, attempt)
+        except SourceBlocked as e:
+            # ЕИС заблокировал запросы: файл не виноват — попытка не засчитывается, повтор в следующем запуске
+            logger.warning(f"Файл {file_id}: ЕИС недоступен (блокировка) — повтор позже: {e}")
+            return await self._push_failure(file_id, attempt - 1, f"eis_blocked: {e}")
+        except FileUnavailable as e:
+            logger.warning(f"Файл {file_id} недоступен: {e}")
+            return await self._push_failure(file_id, attempt, f"download_failed: {e}")
+        except ModelUnavailable as e:
+            # сервер модели недоступен (5xx/таймаут после всех повторов): файл не виноват — попытка не
+            # засчитывается (иначе за пару сбоев модели файл исчерпал бы MAX_ATTEMPTS и не анализировался бы)
+            logger.warning(f"Файл {file_id}: модель недоступна — анализ повторится позже: {e}")
+            return await self._push_failure(file_id, attempt - 1, f"model_unavailable: {e}")
+        except Exception as e:  # noqa: BLE001 — сбой одного файла не останавливает остальные
+            if type(e).__name__ == "ExtractionFailed":
+                # модель не дала годного ответа ни по одному блоку — причина видна выше в журнале, без трассировки
+                logger.warning(f"Файл {file_id}: извлечение не удалось ({e}) — повтор в следующем прогоне "
+                               f"(попытка {attempt} из {MAX_ATTEMPTS})")
+            else:
+                logger.error(f"Ошибка анализа файла {file_id}: {e}", exc_info=True)
+            return await self._push_failure(file_id, attempt, f"{type(e).__name__}: {e}")
 
     async def _reuse_internal(self, file_id: int, stored: Dict[str, Any]) -> Dict[str, Any]:
         """Файл уже проанализирован, но результата нет во внешней БД (запись не удалась или прогон был без записи):
@@ -727,6 +809,9 @@ class AIFileAnalyzer:
         if self.push_results and not self.force:
             block = {"pipeline": passport.pipeline_block(STAGE, "failed", self.model, self.versions,
                                                          attempt=attempt, error=error)}
+            timings = self._timings_block()
+            if timings:
+                block["pipeline"]["timings"] = timings
             try:
                 await self.risk_api.patch_ai_analysis(EXTERNAL_TABLE, file_id, block)
                 result["pushed"] = True
@@ -1333,7 +1418,7 @@ class AIFileAnalyzer:
         except FileUnavailable as e:
             first = f"{e} ({_source_label(url, source_url)})"
             if not alternative:
-                raise FileUnavailable(first) from None
+                raise type(e)(first) from None   # SourceBlocked остаётся SourceBlocked
             logger.warning(f"Файл {file_id}: {first} — скачиваем по ссылке ЕИС")
         except BrokenFile as e:
             # копия в хранилище бывает обрезанной («EOF marker not found») — файл из ЕИС может быть целым
@@ -1342,7 +1427,8 @@ class AIFileAnalyzer:
         try:
             return await self._load_document(file_id, source_url, file_name, card_id=card_id, broken_ok=True)
         except FileUnavailable as e:
-            raise FileUnavailable(f"{first}; ЕИС: {e} ({_source_label(source_url, source_url)})") from None
+            # SourceBlocked остаётся SourceBlocked: попытка не засчитывается
+            raise type(e)(f"{first}; ЕИС: {e} ({_source_label(source_url, source_url)})") from None
 
     async def _load_document(self, file_id: int, url: str, file_name: str, card_id: Optional[int] = None,
                              local_path: Optional[str] = None, broken_ok: bool = True):
@@ -1370,9 +1456,16 @@ class AIFileAnalyzer:
         if local_path:
             res = {"status": "success", "file_path": local_path, "keep": True}
         else:
+            if _is_eis(url) and _eis_pause_left() > 0:
+                # после блокировки ЕИС не дёргаем: каждый запрос продлевал бы блокировку
+                raise SourceBlocked(f"скачивание из ЕИС приостановлено после блокировки, ещё "
+                                    f"{_eis_pause_left() / 60:.0f} мин")
             res = await self.parser._download_http_file(url=url, procurement_id=None, source="risk_monitoring",
                                                          original_filename=file_name)
         if not res or res.get("status") != "success":
+            if (res or {}).get("blocked"):
+                _pause_eis()
+                raise SourceBlocked(res.get("error") or "ЕИС: подозрительная активность")
             raise FileUnavailable((res or {}).get("error", "неизвестная ошибка скачивания"))
         tmp_path = res["file_path"]
         try:
@@ -1560,14 +1653,19 @@ class AIFileAnalyzer:
             doc = await self.repo.get_document(link["document_id"])
             out["text"] = doc["text"] if doc else None
         purged = bool(link) and out["text"] is None and bool(doc and doc.get("text_purged_at"))
-        if (not link or purged) and previous.get("url"):
+        failed = self.__dict__.setdefault("_prev_failed", {})   # id прошлой редакции → ошибка (на прогон)
+        if (not link or purged) and previous.get("url") and prev_id in failed:
+            # уже не скачалась в этом прогоне (18.11.2026: одна и та же редакция 972335 — для десятков печатных
+            # форм подряд, каждый раз 403) — не скачиваем снова
+            out["error"] = failed[prev_id]
+        elif (not link or purged) and previous.get("url"):
             # связи нет или текст прошлой редакции очищен по сроку хранения — читаем файл заново
             try:
                 doc_id, prev_text, prev_sha, _ = await self._load_document(prev_id, previous["url"],
                                                                            previous.get("file_name") or file_name)
                 out.update(doc_id=doc_id, text=prev_text, identical=prev_sha == sha)
             except FileUnavailable as e:
-                out["error"] = f"Предыдущая версия недоступна: {e}"
+                out["error"] = failed[prev_id] = f"Предыдущая версия недоступна: {e}"
         if out["text"] is None and not out["identical"] and not out["error"]:
             out["error"] = "Нет текста предыдущей версии"
         return out
@@ -1680,6 +1778,9 @@ class AIFileAnalyzer:
         """Записывает ``ai_analysis`` во внешнюю БД (если включено) и возвращает итог по файлу."""
         response = {"file_id": file_id, "document_id": document_id, "status": "done",
                     "pushed": False, "ai_analysis": ai_analysis}
+        timings = self._timings_block()
+        if timings and isinstance(ai_analysis.get("pipeline"), dict):
+            ai_analysis["pipeline"]["timings"] = timings
         if self.push_results:
             try:
                 async with progress.step("запись результата во внешнюю БД"):

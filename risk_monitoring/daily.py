@@ -909,6 +909,9 @@ class DailyRun:
             """Пачка прервана по времени: этап partial, остаток — следующим запуском за ту же дату."""
             st.update(status="partial", batches_left=len(parts) - n + 1, xml_left=sum(len(p) for p in parts[n - 1:]),
                       interrupted=True)
+            # что выполнялось в момент прерывания (самое долгое первым): по этому видно, на каких файлах встала пачка
+            # (13.11.2026: 6 файлов за 11 400 с, а какие — по сводке не узнать)
+            st["active_at_cut"] = progress.active(10)
             logger.warning(f"Ежедневный прогон: пачка {n} прервана — время на документы исчерпано; "
                            f"повторите прогон за эту дату")
 
@@ -966,6 +969,8 @@ class DailyRun:
             cache.release_xml()
             logger.info(f"Ежедневный прогон: пачка {n}/{len(parts)} — файлы {st_files}, события {st_xml}; "
                         f"запросов к внешней БД {cache.queries}; внутренних обращений {cache.internal}")
+        if fa is not None and fa.__dict__.get("timing_log"):
+            st_files["timings"] = file_timings_summary(fa.timing_log)
         self.stages["files"], self.stages["xml"] = st_files, st_xml
 
     async def _supplier_ids(self, found: List[Dict[str, Any]]) -> Any:
@@ -1138,7 +1143,7 @@ class DailyRun:
                                "internal_calls": dict(cache.internal)}
         summary["pipeline"]["runs"] = self.__dict__.get("runs", []) + [
             {"started_at": started, "finished_at": summary["pipeline"]["finished_at"],
-             "status": summary["pipeline"]["status"]}]
+             "status": summary["pipeline"]["status"], "stages": run_stage_brief(self.stages)}]
         summary["pipeline"]["attempt"] = len(summary["pipeline"]["runs"])
         await self.save(d, summary)
         logger.info(f"Ежедневный прогон {d}: {json.dumps(summary['scope'], ensure_ascii=False)}; "
@@ -1189,6 +1194,78 @@ class DailyRun:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Текст сводки шаблоном: {type(e).__name__}: {e}")
             return default_resume(summary), False
+
+
+def _percentile(values: Sequence[float], q: float) -> float:
+    """Перцентиль ``q`` (0–1) по ближайшему рангу; пустой список — 0."""
+    vals = sorted(values)
+    if not vals:
+        return 0.0
+    import math
+
+    return float(vals[min(len(vals) - 1, max(0, math.ceil(q * len(vals)) - 1))])
+
+
+def file_timings_summary(records: Sequence[Dict[str, Any]], slowest: int = 10) -> Dict[str, Any]:
+    """Сводка времени файлов прогона (``stages.files.timings``) по журналу анализатора (``AIFileAnalyzer.timing_log``).
+
+    Учитываются файлы, которые действительно анализировались (не пропуски и не взятые из внутренней БД — те в
+    журнал не попадают); прерванные по времени пачки — со ``status = interrupted``.
+
+    Returns:
+        Dict[str, Any]: ``analyzed``, ``interrupted``, ``p50_sec`` / ``p95_sec`` / ``max_sec`` / ``sum_sec`` (время
+        файла с начала анализа), ``queue_p95_sec`` (ожидание места среди параллельных файлов), ``llm`` — запросов
+        на файл в среднем, упавших, прерванных по пределу, секунд запросов и ожидания очереди к серверу модели
+        (``gate_share`` — доля ожидания), ``steps_sec`` — секунды по этапам за все файлы (8 самых долгих),
+        ``slowest`` — самые долгие файлы с тремя главными этапами.
+    """
+    recs = [r for r in records if isinstance(r, dict)]
+    secs = [float(r.get("seconds") or 0) for r in recs]
+    llm_tot: Dict[str, float] = {}
+    steps: Dict[str, float] = {}
+    for r in recs:
+        for k, v in (r.get("llm") or {}).items():
+            llm_tot[k] = llm_tot.get(k, 0) + float(v or 0)
+        for k, v in (r.get("steps") or {}).items():
+            steps[k] = steps.get(k, 0) + float(v or 0)
+    n = len(recs)
+    wait, busy = llm_tot.get("gate_wait_sec", 0.0), llm_tot.get("llm_sec", 0.0)
+    out: Dict[str, Any] = {
+        "analyzed": n,
+        "interrupted": sum(1 for r in recs if r.get("status") == "interrupted"),
+        "p50_sec": round(_percentile(secs, 0.5), 1), "p95_sec": round(_percentile(secs, 0.95), 1),
+        "max_sec": round(max(secs), 1) if secs else 0.0, "sum_sec": round(sum(secs)),
+        "queue_p95_sec": round(_percentile([float(r.get("queue_sec") or 0) for r in recs], 0.95), 1),
+        "llm": {"requests_per_file": round(llm_tot.get("requests", 0) / n, 1) if n else 0.0,
+                "requests": int(llm_tot.get("requests", 0)), "failed": int(llm_tot.get("failed", 0)),
+                "deadline": int(llm_tot.get("deadline", 0)), "loop_cut": int(llm_tot.get("loop_cut", 0)),
+                "llm_sec": round(busy), "gate_wait_sec": round(wait),
+                "gate_share": round(wait / (wait + busy), 2) if wait + busy else 0.0},
+        "steps_sec": {k: round(v) for k, v in sorted(steps.items(), key=lambda kv: -kv[1])[:8]},
+    }
+    top = sorted(recs, key=lambda r: -float(r.get("seconds") or 0))[:slowest]
+    out["slowest"] = [{"file_id": r.get("file_id"), "name": r.get("name"), "status": r.get("status"),
+                       "sec": r.get("seconds"),
+                       "llm_requests": int((r.get("llm") or {}).get("requests", 0)),
+                       "steps": dict(sorted((r.get("steps") or {}).items(), key=lambda kv: -kv[1])[:3])}
+                      for r in top]
+    return out
+
+
+def run_stage_brief(stages: Dict[str, Any]) -> Dict[str, Any]:
+    """Кратко об этапах запуска для истории ``pipeline.runs``: ``{этап: [статус, секунды]}`` (+ P95 файлов).
+
+    Раньше в истории были только время и статус запуска, и по выгрузке нельзя было понять, на что уходили прежние
+    продолжения (17.11.2026).
+    """
+    out: Dict[str, Any] = {}
+    for k, v in (stages or {}).items():
+        if isinstance(v, dict) and v.get("status") and v.get("status") != "skipped":
+            out[k] = [v.get("status"), v.get("seconds")]
+    p95 = (((stages or {}).get("files") or {}).get("timings") or {}).get("p95_sec")
+    if p95 is not None:
+        out["files_p95_sec"] = p95
+    return out
 
 
 def carry_org_blocks(summary: Dict[str, Any], prev: Dict[str, Any]) -> None:

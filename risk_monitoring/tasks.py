@@ -886,3 +886,43 @@ def rm_daily_resume_task(self) -> Dict[str, Any]:
         return {"queued": queued, "skipped": skipped}
 
     return asyncio.run(run())
+
+
+@celery_app.task(bind=True, name="rm_reparse_checks_task", soft_time_limit=10500, time_limit=10800)
+def rm_reparse_checks_task(self, environment: str, since: str, push: bool = True) -> Dict[str, Any]:
+    """Пересборка фактов контрольных проверок за период без модели (18.11.2026).
+
+    Факты проверок (``ai_analysis.facts``) строятся при анализе XML один раз, поэтому исправления разбора
+    (``xml_events.check_facts``) не меняют факты уже загруженных документов — их нужно пересобрать. Задача не
+    вызывает модель и меняет только ветку ``facts`` сохранённого ``ai_analysis`` у документов проверок
+    (``risk_monitoring.reparse_checks``). Безопасна для повторного запуска.
+
+    Args:
+        environment: Окружение внешней системы (``X-API-Database``).
+        since: Начало периода ``ГГГГ-ММ-ДД``.
+        push: Записывать результат во внешнюю БД (``False`` — только подсчёт).
+
+    Returns:
+        Dict[str, Any]: ``scanned``, ``updated``, ``unchanged``, ``errors``.
+    """
+    from celery_app import already_succeeded
+
+    if already_succeeded(self):
+        return self.AsyncResult(self.request.id).result
+    from configs.http_client_manager import HTTPClientManager
+    from risk_monitoring import reparse_checks
+    from risk_monitoring.xml_event_analyzer import XmlEventAnalyzer
+
+    async def run() -> Dict[str, Any]:
+        """Создаёт анализатор без модели и пересобирает факты за период."""
+        async with HTTPClientManager(timeout=180.0) as mgr:
+            analyzer = XmlEventAnalyzer(mgr, environment, push_results=push, use_llm=False)
+            try:
+                return await reparse_checks.reparse(analyzer, since, push=push)
+            finally:
+                if getattr(analyzer, "own_archives", True):
+                    analyzer.archives.close()
+
+    out = asyncio.run(_pulsed(run(), self.name, self.request.id))
+    logger.info(f"Риск-мониторинг, пересборка фактов проверок с {since}: {out}")
+    return out

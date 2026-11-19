@@ -290,6 +290,40 @@ class FileVersionsTest(unittest.TestCase):
         prev = [{"id": 4, "file_name": "Печатная форма извещения (версия 1).html", "source_url": None, "xml_source_id": 5}]
         self.assertEqual(fv.pick_previous(ref, pf, prev, 5)["id"], 4)
 
+    def test_print_form_attachment_is_attachment(self):
+        """Вложение «Печатная форма доп. соглашения …» (ссылка filestore) — вложение, а не печатная форма XML.
+
+        Прод, 18.11.2026, контракт 28456: вложениям версии 24 («Печатная форма доп. соглашения 8», «… с учетом
+        доп. соглашений 1–8», «электронного контракта») прошлой редакцией назначалась печатная форма версии 23
+        (printForm/view.html, файл 972335).
+        """
+        from risk_monitoring import file_versions as fv
+
+        fs = "https://zakupki.gov.ru/44fz/filestore/public/1.0/download/rgk2/file.html?uid="
+        old = self.body(("Печатная форма электронного контракта.html", fs + "630B"),
+                        print_url="https://zakupki.gov.ru/epz/contract/printForm/view.html?contractInfoId=112912795")
+        new = self.body(("Печатная форма электронного контракта.html", fs + "630B"),
+                        ("Печатная форма доп. соглашения 8.html", fs + "E260"),
+                        print_url="https://zakupki.gov.ru/epz/contract/printForm/view.html?contractInfoId=113000000")
+        same = fv.previous_ref({"id": 969734, "file_name": "Печатная форма электронного контракта.html",
+                                "source_url": fs + "630B"}, new, old)
+        self.assertEqual((same["match"], same["urls"]), ("unchanged", [fs + "630B"]))
+        added = fv.previous_ref({"id": 967851, "file_name": "Печатная форма доп. соглашения 8.html",
+                                 "source_url": fs + "E260"}, new, old)
+        self.assertEqual(added["match"], "added")
+        generated = {"id": 972335, "file_name": "Печатная форма контракта № 3420800174825001336 (версия 23).html",
+                     "source_url": "https://zakupki.gov.ru/epz/contract/printForm/view.html?contractInfoId=112912795",
+                     "xml_source_id": 5}
+        self.assertIsNone(fv.pick_previous(added, {"id": 967851}, [generated], 5))
+        # сгенерированная печатная форма нового XML — по-прежнему к печатной форме прошлого XML
+        pf = {"id": 1, "file_name": "Печатная форма контракта (версия 24).html",
+              "source_url": "https://zakupki.gov.ru/epz/contract/printForm/view.html?contractInfoId=113000000"}
+        ref = fv.previous_ref(pf, new, old)
+        self.assertEqual(ref["match"], "print_form")
+        attachment_v23 = {"id": 2, "file_name": "Печатная форма электронного контракта.html",
+                          "source_url": fs + "630B", "xml_source_id": 5}
+        self.assertEqual(fv.pick_previous(ref, pf, [attachment_v23, generated], 5)["id"], 972335)
+
     def test_choose_xml_by_owner(self):
         """XML для файла без xml_source_id: та же версия и группа владельца."""
         from risk_monitoring import file_versions as fv

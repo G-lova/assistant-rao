@@ -12,7 +12,7 @@
 Сведения проверок — ``ai_analysis.facts`` XML (``xml_events.check_facts``).
 """
 import json
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from risk_monitoring import risk_catalog
 
@@ -41,18 +41,33 @@ def normalize(rows: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     Returns:
         List[Dict[str, Any]]: ``xml_id``, ``number``, ``result``, ``prescription``, ``date``, ``subjects``,
         ``purchases`` (множество), ``customer_inns`` (множество).
+
+    При нескольких строках с одним ``check_number`` выбирается актуальная детерминированно: по наибольшей
+    редакции (``check_version``), затем по поздней дате. Без этого при отсутствии ``ORDER BY`` в запросе
+    побеждала случайная строка.
     """
     out: Dict[str, Dict[str, Any]] = {}
+    rank: Dict[str, Tuple[int, str]] = {}
     for r in rows or []:
         num = r.get("check_number")
         if not num:
             continue
-        out[str(num)] = {"xml_id": r.get("id") or r.get("xml_id"), "number": str(num),
-                         "result": r.get("check_result"), "prescription": _flag(r.get("check_prescription")),
-                         "date": str(r.get("check_decision_date") or r.get("event_at") or "")[:10] or None,
-                         "subjects": [s for s in _list(r.get("check_subjects")) if isinstance(s, dict)],
-                         "purchases": {str(p) for p in _list(r.get("check_purchases"))},
-                         "customer_inns": {str(i) for i in _list(r.get("check_customer_inns"))}}
+        num = str(num)
+        date = str(r.get("check_decision_date") or r.get("event_at") or "")[:10] or None
+        try:
+            ver = int(r.get("check_version")) if r.get("check_version") not in (None, "") else -1
+        except (TypeError, ValueError):
+            ver = -1
+        key = (ver, date or "")
+        if num in rank and key < rank[num]:
+            continue
+        rank[num] = key
+        out[num] = {"xml_id": r.get("id") or r.get("xml_id"), "number": num,
+                    "result": r.get("check_result"), "prescription": _flag(r.get("check_prescription")),
+                    "date": date,
+                    "subjects": [s for s in _list(r.get("check_subjects")) if isinstance(s, dict)],
+                    "purchases": {str(p) for p in _list(r.get("check_purchases"))},
+                    "customer_inns": {str(i) for i in _list(r.get("check_customer_inns"))}}
     return list(out.values())
 
 

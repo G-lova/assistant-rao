@@ -1,0 +1,109 @@
+<ns3:export xmlns="http://zakupki.gov.ru/oos/types/1" xmlns:ns2="http://zakupki.gov.ru/oos/base/1" xmlns:ns4="http://zakupki.gov.ru/oos/common/1" xmlns:ns3="http://zakupki.gov.ru/oos/export/1" xmlns:ns6="http://zakupki.gov.ru/oos/TPtypes/1" xmlns:ns5="http://zakupki.gov.ru/oos/EPtypes/1" xmlns:ns8="http://zakupki.gov.ru/oos/CPtypes/1" xmlns:ns7="http://zakupki.gov.ru/oos/KOTypes/1" xmlns:ns13="http://zakupki.gov.ru/oos/EATypes/1" xmlns:ns9="http://zakupki.gov.ru/oos/pprf615types/1" xmlns:ns12="http://zakupki.gov.ru/oos/URTypes/1" xmlns:ns11="http://zakupki.gov.ru/oos/SMTypes/1" xmlns:ns10="http://zakupki.gov.ru/oos/CETypes/1" xmlns:ns14="http://zakupki.gov.ru/oos/printform/1">
+    <ns3:checkResult schemeVersion="16.3">
+        <commonInfo>
+            <checkResultNumber> </checkResultNumber>
+            <regNumber>2026452А3086001114</regNumber>
+            <docNumber>2026452А30860011140001</docNumber>
+            <versionNumber>1</versionNumber>
+            <createDate>2026-10-30T14:45:00.000+03:00</createDate>
+            <publishDate>2026-10-30T14:48:42.351+03:00</publishDate>
+            <owner xsi:type="zfcs_organizationInfoType" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+                <regNum>01732000142</regNum>
+                <fullName>ГЛАВНОЕ КОНТРОЛЬНОЕ УПРАВЛЕНИЕ ГОРОДА МОСКВЫ</fullName>
+                <INN>7701107851</INN>
+                <KPP>770301001</KPP>
+            </owner>
+            <printFormInfo>
+                <createOrganization>
+                    <regNum>01732000142</regNum>
+                    <fullName>ГЛАВНОЕ КОНТРОЛЬНОЕ УПРАВЛЕНИЕ ГОРОДА МОСКВЫ</fullName>
+                    <INN>7701107851</INN>
+                    <KPP>770301001</KPP>
+                </createOrganization>
+                <createUser>Фисенко Юрий Михайлович</createUser>
+                <editDate>2026-10-30T14:48:42.351+03:00</editDate>
+                <editOrganization>
+                    <regNum>01732000142</regNum>
+                    <fullName>ГЛАВНОЕ КОНТРОЛЬНОЕ УПРАВЛЕНИЕ ГОРОДА МОСКВЫ</fullName>
+                    <INN>7701107851</INN>
+                    <KPP>770301001</KPP>
+                </editOrganization>
+                <editUser>Фисенко Юрий Михайлович</editUser>
+                <publishOrganization>
+                    <regNum>01732000142</regNum>
+                    <fullName>ГЛАВНОЕ КОНТРОЛЬНОЕ УПРАВЛЕНИЕ ГОРОДА МОСКВЫ</fullName>
+                    <INN>7701107851</INN>
+                    <KPP>770301001</KPP>
+                </publishOrganization>
+                <publishUser>Фисенко Юрий Михайлович</publishUser>
+            </printFormInfo>
+        </commonInfo>
+        <base>
+            <unplannedCheck>
+                <regNumber>2026452А3086001084</regNumber>
+                <inspectionType>K</inspectionType>
+                <checkSubjects>
+                    <customerNew>
+                        <fullName>ГОСУДАРСТВЕННОЕ БЮДЖЕТНОЕ УЧРЕЖДЕНИЕ ГОРОДА МОСКВЫ "ФИНАНСОВО-ХОЗЯЙСТВЕННОЕ УПРАВЛЕНИЕ"</fullName>
+                        <shortName>ГБУ "ФХУ"</shortName>
+                        <legalForm>
+                            <code>75203</code>
+                            <singularName>Государственное бюджетное учреждение субъекта Российской Федерации</singularName>
+                        </legalForm>
+                        <INN>7710177774</INN>
+                        <KPP>771001001</KPP>
+                        <registrationDate>1996-02-25</registrationDate>
+                        <OKPO>41105722</OKPO>
+                        <address>Российская Федерация, 125032, Москва г, Тверская ул, Д.13</address>
+                        <contactPhone>7-495-6291132</contactPhone>
+                        <contactEMail>fhu@mos.ru</contactEMail>
+                    </customerNew>
+                </checkSubjects>
+                <info>Получение обращения о согласовании заключения контракта с единственным поставщиком (подрядчиком, исполнителем)</info>
+                <orders>
+                    <purchase>
+                        <purchaseNumber>0173200001426001953</purchaseNumber>
+                        <lots/>
+                        <purchaseCodes>
+                            <purchaseCode>262771017777477100100101080010000244</purchaseCode>
+                        </purchaseCodes>
+                        <purchaseName>Оказание комплексных услуг по уборке</purchaseName>
+                        <purchasePlacingDate>2026-10-05T03:00:00.000</purchasePlacingDate>
+                        <placingWay>
+                            <code>EA20</code>
+                            <name>Электронный аукцион</name>
+                        </placingWay>
+                    </purchase>
+                </orders>
+                <act>
+                    <actNumber>422/21</actNumber>
+                    <actDate>2026-10-30</actDate>
+                    <actText>В связи с не выявлением нарушений, предусмотренных пунктом 13 Правил № 961, согласовать заключение контракта с единственным поставщиком (подрядчиком, исполнителем) – Обществом с ограниченной ответственностью «Сангард» по результатам несостоявшегося электронного аукциона на оказание комплексных услуг по уборке (реестровый номер закупки 0173200001426001953, начальная (максимальная) цена контракта – 472 026 254,93 рублей).
+Основания для выдачи обязательного для исполнения предписания 
+и передачи материалов дела для рассмотрения вопроса о возбуждении дела 
+об административном правонарушении отсутствуют.</actText>
+                    <attachments>
+                        <attachment>
+                            <publishedContentId>01A18CA3856F7AD88299AB28DDFD4A49</publishedContentId>
+                            <fileName>Акт_еис_1953.docx</fileName>
+                            <docDescription>Акт_еис_1953</docDescription>
+                            <docNumber>2026452А30860011140003</docNumber>
+                            <url>https://zakupki.gov.ru/controls/documentIcrDownload?documentId=3986613</url>
+                            <cryptoSigns>
+                                <signature/>
+                            </cryptoSigns>
+                        </attachment>
+                    </attachments>
+                </act>
+                <checkResult>NO_VIOLATIONS</checkResult>
+                <agreementResult>ACCEPTED</agreementResult>
+            </unplannedCheck>
+        </base>
+        <startDate>2026-10-29</startDate>
+        <endDate>2026-10-29</endDate>
+        <printForm>
+            <url>https://zakupki.gov.ru/controls/printForm?type=ICR&amp;id=2676659</url>
+            <signature>TUlJVzBBWUpLb1pJaHZjTkFRY0NvSUlXd1RDQ0ZyMENBUUV4RGpBTUJnZ3FoUU1IQVFFQ0FnVUFNQXNHQ1NxR1NJYjNEUUVIQWFDQw0KRWpBd2dnaE5NSUlIK3FBREFnRUNBZ3NBdTNMaEtnQUFBQUFNakRBS0JnZ3FoUU1IQVFFREFqQ0NBVHN4SVRBZkJna3Foa2lHOXcwQg0KQ1FFV0VtUnBkRUJrYVdkcGRHRnNMbWR2ZGk1eWRURUxNQWtHQTFVRUJoTUNVbFV4R0RBV0JnTlZCQWdNRHpjM0lOQ2MwTDdSZ2RDNg0KMExMUXNERVpNQmNHQTFVRUJ3d1EwTE11SU5DYzBMN1JnZEM2MExMUXNERlRNRkVHQTFVRUNReEswSi9SZ05DMTBZSFF2ZEMxMEwzUg0KZ2RDNjBMRFJqeURRdmRDdzBMSFF0ZEdBMExYUXR0QzkwTERSanl3ZzBMVFF2dEM4SURFd0xDRFJnZEdDMFlEUXZ0QzEwTDNRdU5DMQ0KSURJeEpqQWtCZ05WQkFvTUhkQ2MwTGpRdmRHRzBMalJoTkdBMFlzZzBLRFF2dEdCMFlIUXVOQzRNUmd3RmdZRktvVURaQUVTRFRFdw0KTkRjM01ESXdNalkzTURFeEZUQVRCZ1VxaFFOa0JCSUtOemN4TURRM05ETTNOVEVtTUNRR0ExVUVBd3dkMEp6UXVOQzkwWWJRdU5HRQ0KMFlEUml5RFFvTkMrMFlIUmdkQzQwTGd3SGhjTk1qWXdPVEl5TURrek1qVTVXaGNOTkRFd09USXlNRGt6TWpVNVdqQ0NBV3N4SURBZQ0KQmdrcWhraUc5dzBCQ1FFV0VYVmpYMlpyUUhKdmMydGhlbTVoTG5KMU1SZ3dGZ1lEVlFRSURBODNOeURRbk5DKzBZSFF1dEN5MExBeA0KRlRBVEJnVXFoUU5rQkJJS056Y3hNRFUyT0RjMk1ERVlNQllHQlNxRkEyUUJFZzB4TURRM056azNNREU1T0RNd01XQXdYZ1lEVlFRSg0KREZmUWtkQyswTHZSak5HSTBMN1F1U0RRbDlDNzBMRFJndEMrMFlQUmdkR0MwTGpRdmRHQjBMclF1TkM1SU5DLzBMWFJnTkMxMFlQUQ0KdTlDKzBMb3NJTkMwTGlBMkxDRFJnZEdDMFlEUXZ0QzEwTDNRdU5DMUlERXhHVEFYQmdOVkJBY01FTkN6TGlEUW5OQyswWUhRdXRDeQ0KMExBeEN6QUpCZ05WQkFZVEFsSlZNVGd3TmdZRFZRUUtEQy9RcE5DMTBMVFF0ZEdBMExEUXU5R00wTDNRdnRDMUlOQzYwTERRdDlDOQ0KMExEUmg5QzEwTG5SZ2RHQzBMTFF2akU0TURZR0ExVUVBd3d2MEtUUXRkQzAwTFhSZ05DdzBMdlJqTkM5MEw3UXRTRFF1dEN3MExmUQ0KdmRDdzBZZlF0ZEM1MFlIUmd0Q3kwTDR3WmpBZkJnZ3FoUU1IQVFFQkFUQVRCZ2NxaFFNQ0FpTUJCZ2dxaFFNSEFRRUNBZ05EQUFSQQ0KL3hKVW0vOGlQKzNiaFN3NDVPc2sycVd4OWtSOTFka2IxejN5N3haSG52cXdObEY5UkhFU3dyclh5WEUyMkpOVDQvVUorUDBuZnlWcQ0Kd0hFU0N6aUJvYU9DQktJd2dnU2VNQklHQTFVZEV3RUIvd1FJTUFZQkFmOENBUUF3Z1pRR0JTcUZBMlJ2QklHS0RJR0gwSi9SZ05DKw0KMExQUmdOQ3cwTHpRdk5DOTBMNHQwTERRdjlDLzBMRFJnTkN3MFlMUXZkR0wwTGtnMExyUXZ0QzgwTC9RdTlDMTBMclJnU0JXYVZCTw0KWlhRZ1VFdEpJRk5sY25acFkyVWdLTkM5MExBZzBMRFF2OUMvMExEUmdOQ3cwWUxRdmRDKzBMa2cwTC9RdTlDdzBZTFJoTkMrMFlEUQ0Kdk5DMUlFaFRUU0F5TURBd1VUSXBNQTRHQTFVZER3RUIvd1FFQXdJQnhqQXJCZ05WSFJBRUpEQWlnQTh5TURJMk1Ea3dOakl4TWpVdw0KTUZxQkR6SXdNamt3T1RBMk1qRXlOVEF3V2pBbkJnTlZIU0FFSURBZU1BZ0dCaXFGQTJSeEFUQUlCZ1lxaFFOa2NRSXdDQVlHS29VRA0KWkhFRE1JSUJmQVlEVlIwakJJSUJjekNDQVcrQUZNRkZ3QTMzekszS0NOOG5UT0V6dUlvaCs4dFRvWUlCUTZTQ0FUOHdnZ0U3TVNFdw0KSHdZSktvWklodmNOQVFrQkZoSmthWFJBWkdsbmFYUmhiQzVuYjNZdWNuVXhDekFKQmdOVkJBWVRBbEpWTVJnd0ZnWURWUVFJREE4Mw0KTnlEUW5OQyswWUhRdXRDeTBMQXhHVEFYQmdOVkJBY01FTkN6TGlEUW5OQyswWUhRdXRDeTBMQXhVekJSQmdOVkJBa01TdENmMFlEUQ0KdGRHQjBMM1F0ZEM5MFlIUXV0Q3cwWThnMEwzUXNOQ3gwTFhSZ05DMTBMYlF2ZEN3MFk4c0lOQzAwTDdRdkNBeE1Dd2cwWUhSZ3RHQQ0KMEw3UXRkQzkwTGpRdFNBeU1TWXdKQVlEVlFRS0RCM1FuTkM0MEwzUmh0QzQwWVRSZ05HTElOQ2cwTDdSZ2RHQjBMalF1REVZTUJZRw0KQlNxRkEyUUJFZzB4TURRM056QXlNREkyTnpBeE1SVXdFd1lGS29VRFpBUVNDamMzTVRBME56UXpOelV4SmpBa0JnTlZCQU1NSGRDYw0KMExqUXZkR0cwTGpSaE5HQTBZc2cwS0RRdnRHQjBZSFF1TkM0Z2hBWXcwMzFOcm45NGlsNTVWeElDRFpRTUIwR0ExVWREZ1FXQkJUcg0KVWxENmxnbHY0enhRcktaaDJKQjBVK3h5bkRCb0JnTlZIUjhFWVRCZk1DMmdLNkFwaGlkb2RIUndPaTh2WTNKc0xtZHZjM1Z6YkhWbg0KYVM1eWRTOWpaSEF2WjNWak1qQXlOaTVqY213d0xxQXNvQ3FHS0doMGRIQTZMeTlqY213eUxtZHZjM1Z6YkhWbmFTNXlkUzlqWkhBdg0KWjNWak1qQXlOaTVqY213d1F3WUlLd1lCQlFVSEFRRUVOekExTURNR0NDc0dBUVVGQnpBQ2hpZG9kSFJ3T2k4dlkzSnNMbWR2YzNWeg0KYkhWbmFTNXlkUzlqWkhBdlozVmpNakF5Tmk1amNuUXdnZ0V0QmdVcWhRTmtjQVNDQVNJd2dnRWVER25RbjlDUTBKclFuQ0RDcTlDYQ0KMFlEUXVOQy8wWUxRdnRDZjBZRFF2aUJJVTAzQ3V5RFFzdEMxMFlEUmdkQzQwWThnTWk0d0lDalF1dEMrMEx6UXY5QzcwTFhRdXRHQw0KMExEUmh0QzQwWThnTVNrbzBMalJnZEMvMEw3UXU5QzkwTFhRdmRDNDBMVWdNU2tNUTlDZjBKRFFtaURDcTlDVDBMN1F1OUMrMExMUQ0KdmRDKzBMa2cwWVBRdE5DKzBZSFJndEMrMExMUXRkR0EwWS9SanRHSjBMalF1U0RSaHRDMTBMM1JndEdBd3JzTU50Q1gwTERRdXRDNw0KMFk3Umg5QzEwTDNRdU5DMUlPS0VsaUF4TkRrdk15OHlMekV2TWpFd0lOQyswWUlnTXpFdU1ERXVNakF5TXd3MDBKZlFzTkM2MEx2Ug0KanRHSDBMWFF2ZEM0MExVZzRvU1dJREUwT1M4M0x6WXZORFEzSU5DKzBZSWdNekF1TURrdU1qQXlOVEFNQmdVcWhRTmtjZ1FEQWdFQg0KTUFvR0NDcUZBd2NCQVFNQ0EwRUFLQzVMelpoZjAxNzAxdy9zcHVRUmljWG13clo0elgyTTM4UWovNWVaUjJTMmoveWxEdGFmNEV1Sw0KaDhWaXkrRXR6WWJOL2xnREd6L1ZvRXFLV3kwRE16Q0NDZHN3Z2dtSW9BTUNBUUlDRUJxS2FGczFFYVhiOWxjZjM0dlJESzB3Q2dZSQ0KS29VREJ3RUJBd0l3Z2dGck1TQXdIZ1lKS29aSWh2Y05BUWtCRmhGMVkxOW1hMEJ5YjNOcllYcHVZUzV5ZFRFWU1CWUdBMVVFQ0F3UA0KTnpjZzBKelF2dEdCMExyUXN0Q3dNUlV3RXdZRktvVURaQVFTQ2pjM01UQTFOamczTmpBeEdEQVdCZ1VxaFFOa0FSSU5NVEEwTnpjNQ0KTnpBeE9UZ3pNREZnTUY0R0ExVUVDUXhYMEpIUXZ0QzcwWXpSaU5DKzBMa2cwSmZRdTlDdzBZTFF2dEdEMFlIUmd0QzQwTDNSZ2RDNg0KMExqUXVTRFF2OUMxMFlEUXRkR0QwTHZRdnRDNkxDRFF0QzRnTml3ZzBZSFJndEdBMEw3UXRkQzkwTGpRdFNBeE1Sa3dGd1lEVlFRSA0KREJEUXN5NGcwSnpRdnRHQjBMclFzdEN3TVFzd0NRWURWUVFHRXdKU1ZURTRNRFlHQTFVRUNnd3YwS1RRdGRDMDBMWFJnTkN3MEx2Ug0Kak5DOTBMN1F0U0RRdXRDdzBMZlF2ZEN3MFlmUXRkQzUwWUhSZ3RDeTBMNHhPREEyQmdOVkJBTU1MOUNrMExYUXROQzEwWURRc05DNw0KMFl6UXZkQyswTFVnMExyUXNOQzMwTDNRc05HSDBMWFF1ZEdCMFlMUXN0QytNQjRYRFRJMk1UQXhPVEE0TURnd00xb1hEVEk0TURFeA0KTWpBNE1EZ3dNMW93Z2dJYU1Rc3dDUVlEVlFRR0V3SlNWVEVaTUJjR0ExVUVDQXdRMExNdUlOQ2MwTDdSZ2RDNjBMTFFzREVaTUJjRw0KQTFVRUJ3d1EwTE11SU5DYzBMN1JnZEM2MExMUXNER0JxRENCcFFZRFZRUU1ESUdkMExQUXU5Q3cwTExRdmRHTDBMa2cwWUhRdjlDMQ0KMFliUXVOQ3cwTHZRdU5HQjBZSWcwTDdSZ3RDMDBMWFF1OUN3SU5DLzBMN1JnZEM3MExYUXROR0QwWTdSaWRDMTBMUFF2aURRdXRDKw0KMEwzUmd0R0EwTDdRdTlHUElOQ2owTC9SZ05DdzBMTFF1OUMxMEwzUXVOR1BJTkM2MEw3UXZkR0MwWURRdnRDNzBZOGcwTElnMFlIUg0KaE5DMTBZRFF0U0RRdDlDdzBMclJnOUMvMEw3UXVqRmRNRnNHQTFVRUNneFUwSlBRbTlDUTBKTFFuZENlMEpVZzBKclFudENkMEtMUQ0Kb05DZTBKdlFyTkNkMEo3UWxTRFFvOUNmMEtEUWtOQ1MwSnZRbGRDZDBKalFsU0RRazlDZTBLRFFudENVMEpBZzBKelFudENoMEpyUQ0Ka3RDck1SWXdGQVlGS29VRFpBTVNDekUzTkRFMU5EZ3hOamN4TVJvd0dBWUlLb1VEQTRFREFRRVNERGMzTWpZd05UZzJOemcyTVRFZg0KTUIwR0NTcUdTSWIzRFFFSkFSWVFabWx6Wlc1cmIzbHRRRzF2Y3k1eWRURW1NQ1FHQTFVRUtnd2QwSzdSZ05DNDBMa2cwSnpRdU5HRg0KMExEUXVkQzcwTDdRc3RDNDBZY3hGekFWQmdOVkJBUU1EdENrMExqUmdkQzEwTDNRdXRDK01UVXdNd1lEVlFRRERDelFwTkM0MFlIUQ0KdGRDOTBMclF2aURRcnRHQTBMalF1U0RRbk5DNDBZWFFzTkM1MEx2UXZ0Q3kwTGpSaHpCbU1COEdDQ3FGQXdjQkFRRUJNQk1HQnlxRg0KQXdJQ0pBQUdDQ3FGQXdjQkFRSUNBME1BQkVEODhHbHV5V25pS0dWK29YU3E0SzhyWFV4REZmMTg0ZTFNSEo1bUhkempISHY3YkJTdA0KaW5ncjR1RDR1S08zUEUyT2JMcWtiLzd4KzVrODVGRmlmNjkvbzRJRlREQ0NCVWd3S3dZRFZSMFFCQ1F3SW9BUE1qQXlOakV3TWpBeA0KTXpRM01EQmFnUTh5TURJNE1ERXhNekV6TkRjd01Gb3dEZ1lEVlIwUEFRSC9CQVFEQWdQNE1CTUdBMVVkSlFRTU1Bb0dDQ3NHQVFVRg0KQndNQ01CTUdBMVVkSUFRTU1Bb3dDQVlHS29VRFpIRUJNQXdHQlNxRkEyUnlCQU1DQVFFd0xRWUZLb1VEWkc4RUpBd2kwSnJSZ05DNA0KMEwvUmd0QyswSi9SZ05DK0lFTlRVQ0FvTlM0d0xqRXpNREF3S1RDQ0FhRUdCU3FGQTJSd0JJSUJsakNDQVpJTWdZZlFuOUdBMEw3UQ0KczlHQTBMRFF2TkM4MEwzUXZpM1FzTkMvMEwvUXNOR0EwTERSZ3RDOTBZdlF1U0RRdXRDKzBMelF2OUM3MExYUXV0R0JJRlpwVUU1bA0KZENCUVMwa2dVMlZ5ZG1salpTQW8wTDNRc0NEUXNOQy8wTC9Rc05HQTBMRFJndEM5MEw3UXVTRFF2OUM3MExEUmd0R0UwTDdSZ05DOA0KMExVZ1NGTk5JREl3TURCUk1pa01hTkNmMFlEUXZ0Q3owWURRc05DODBMelF2ZEMrTGRDdzBML1F2OUN3MFlEUXNOR0MwTDNSaTlDNQ0KSU5DNjBMN1F2TkMvMEx2UXRkQzYwWUVnd3F2UXJ0QzkwTGpSZ2RDMTBZRFJnaTNRazlDZTBLSFFvc0s3TGlEUWt0QzEwWURSZ2RDNA0KMFk4Z05DNHdERTFEMExYUmdOR0MwTGpSaE5DNDBMclFzTkdDSU5HQjBMN1F2dEdDMExMUXRkR0MwWUhSZ3RDeTBMalJqeURpaEpiUQ0Kb2RDa0x6RXlOQzAwTXpJNElOQyswWUlnTWprdU1EZ3VNakF5TWd4TlE5QzEwWURSZ3RDNDBZVFF1TkM2MExEUmdpRFJnZEMrMEw3Ug0KZ3RDeTBMWFJndEdCMFlMUXN0QzQwWThnNG9TVzBLSFFwQzh4TWpndE5EWXpPU0RRdnRHQ0lEQTBMakV3TGpJd01qTXdaZ1lEVlIwZg0KQkY4d1hUQXVvQ3lnS29Zb2FIUjBjRG92TDJOeWJDNXliM05yWVhwdVlTNXlkUzlqY213dmRXTm1hMTh5TURJMkxtTnliREFyb0NtZw0KSjRZbGFIUjBjRG92TDJOeWJDNW1heTVzYjJOaGJDOWpjbXd2ZFdObWExOHlNREkyTG1OeWJEQjNCZ2dyQmdFRkJRY0JBUVJyTUdrdw0KTkFZSUt3WUJCUVVITUFLR0tHaDBkSEE2THk5amNtd3VjbTl6YTJGNmJtRXVjblV2WTNKc0wzVmpabXRmTWpBeU5pNWpjblF3TVFZSQ0KS3dZQkJRVUhNQUtHSldoMGRIQTZMeTlqY213dVptc3ViRzlqWVd3dlkzSnNMM1ZqWm10Zk1qQXlOaTVqY25Rd2dZRUdCeXFGQXdJQw0KTVFJRWRqQjBNR1FXVFdoMGRIQnpPaTh2Y205emEyRjZibUV1WjI5MkxuSjFMMmRwY3k5MVpHOXpkRzkyWlhKNVlYbDFjMmhvYVdvdA0KWTJWdWRISXZiR2wwYzJWdWVtbHBMV2t0YzJWeWRHbG1hV3RoZEhrdkRBL1FtOUdPMExIUXNOR1BJTkNZMEtFREFnWGdCQXdPMFN3Mg0KcGVybHpsOWdnSDR3SFFZRFZSME9CQllFRk85YlF5aCtZdmFYS1NNYlh4MWVZNnJLRVZ0ME1JSUJkd1lEVlIwakJJSUJiakNDQVdxQQ0KRk90U1VQcVdDVy9qUEZDc3BtSFlrSFJUN0hLY29ZSUJRNlNDQVQ4d2dnRTdNU0V3SHdZSktvWklodmNOQVFrQkZoSmthWFJBWkdsbg0KYVhSaGJDNW5iM1l1Y25VeEN6QUpCZ05WQkFZVEFsSlZNUmd3RmdZRFZRUUlEQTgzTnlEUW5OQyswWUhRdXRDeTBMQXhHVEFYQmdOVg0KQkFjTUVOQ3pMaURRbk5DKzBZSFF1dEN5MExBeFV6QlJCZ05WQkFrTVN0Q2YwWURRdGRHQjBMM1F0ZEM5MFlIUXV0Q3cwWThnMEwzUQ0Kc05DeDBMWFJnTkMxMExiUXZkQ3cwWThzSU5DMDBMN1F2Q0F4TUN3ZzBZSFJndEdBMEw3UXRkQzkwTGpRdFNBeU1TWXdKQVlEVlFRSw0KREIzUW5OQzQwTDNSaHRDNDBZVFJnTkdMSU5DZzBMN1JnZEdCMExqUXVERVlNQllHQlNxRkEyUUJFZzB4TURRM056QXlNREkyTnpBeA0KTVJVd0V3WUZLb1VEWkFRU0NqYzNNVEEwTnpRek56VXhKakFrQmdOVkJBTU1IZENjMExqUXZkR0cwTGpSaE5HQTBZc2cwS0RRdnRHQg0KMFlIUXVOQzRnZ3NBdTNMaEtnQUFBQUFNakRBS0JnZ3FoUU1IQVFFREFnTkJBRE1VNTdSMzYyTUxZWGZFVTFhQnViMThiT2swalhpZA0KVUI0amQrc1VQSlNYbXlacUszVS95VUR4dGRud3JYeVpsYkhMaDZjVmpCRGREaWdoUVp6bE5ZNHhnZ1JsTUlJRVlRSUJBVENDQVlFdw0KZ2dGck1TQXdIZ1lKS29aSWh2Y05BUWtCRmhGMVkxOW1hMEJ5YjNOcllYcHVZUzV5ZFRFWU1CWUdBMVVFQ0F3UE56Y2cwSnpRdnRHQg0KMExyUXN0Q3dNUlV3RXdZRktvVURaQVFTQ2pjM01UQTFOamczTmpBeEdEQVdCZ1VxaFFOa0FSSU5NVEEwTnpjNU56QXhPVGd6TURGZw0KTUY0R0ExVUVDUXhYMEpIUXZ0QzcwWXpSaU5DKzBMa2cwSmZRdTlDdzBZTFF2dEdEMFlIUmd0QzQwTDNSZ2RDNjBMalF1U0RRdjlDMQ0KMFlEUXRkR0QwTHZRdnRDNkxDRFF0QzRnTml3ZzBZSFJndEdBMEw3UXRkQzkwTGpRdFNBeE1Sa3dGd1lEVlFRSERCRFFzeTRnMEp6UQ0KdnRHQjBMclFzdEN3TVFzd0NRWURWUVFHRXdKU1ZURTRNRFlHQTFVRUNnd3YwS1RRdGRDMDBMWFJnTkN3MEx2UmpOQzkwTDdRdFNEUQ0KdXRDdzBMZlF2ZEN3MFlmUXRkQzUwWUhSZ3RDeTBMNHhPREEyQmdOVkJBTU1MOUNrMExYUXROQzEwWURRc05DNzBZelF2ZEMrMExVZw0KMExyUXNOQzMwTDNRc05HSDBMWFF1ZEdCMFlMUXN0QytBaEFhaW1oYk5SR2wyL1pYSDkrTDBReXRNQXdHQ0NxRkF3Y0JBUUlDQlFDZw0KZ2dKa01CZ0dDU3FHU0liM0RRRUpBekVMQmdrcWhraUc5dzBCQndFd0hBWUpLb1pJaHZjTkFRa0ZNUThYRFRJMk1UQXpNREV4TkRnMA0KTmxvd0hRWUtLd1lCQkFHQ04xZ0NBVEVQQkExRWIyTjFiV1Z1ZENCT1lXMWxNQzhHQ1NxR1NJYjNEUUVKQkRFaUJDQmF2MU5LUER3Vg0KZmhTL3hYWjRzanZVSXV6SjBCOVVPS1lQck52L1Q4OGx1ekNDQWRnR0N5cUdTSWIzRFFFSkVBSXZNWUlCeHpDQ0FjTXdnZ0cvTUlJQg0KdXpBS0JnZ3FoUU1IQVFFQ0FnUWdUdmwySHl2WWIwR3VaWHlPbmtUT3Y1b1doZGN6S3lORmtJREJsTnFQZmxJd2dnR0pNSUlCYzZTQw0KQVc4d2dnRnJNU0F3SGdZSktvWklodmNOQVFrQkZoRjFZMTltYTBCeWIzTnJZWHB1WVM1eWRURVlNQllHQTFVRUNBd1BOemNnMEp6UQ0KdnRHQjBMclFzdEN3TVJVd0V3WUZLb1VEWkFRU0NqYzNNVEExTmpnM05qQXhHREFXQmdVcWhRTmtBUklOTVRBME56YzVOekF4T1Rneg0KTURGZ01GNEdBMVVFQ1F4WDBKSFF2dEM3MFl6UmlOQyswTGtnMEpmUXU5Q3cwWUxRdnRHRDBZSFJndEM0MEwzUmdkQzYwTGpRdVNEUQ0KdjlDMTBZRFF0ZEdEMEx2UXZ0QzZMQ0RRdEM0Z05pd2cwWUhSZ3RHQTBMN1F0ZEM5MExqUXRTQXhNUmt3RndZRFZRUUhEQkRRc3k0Zw0KMEp6UXZ0R0IwTHJRc3RDd01Rc3dDUVlEVlFRR0V3SlNWVEU0TURZR0ExVUVDZ3d2MEtUUXRkQzAwTFhSZ05DdzBMdlJqTkM5MEw3UQ0KdFNEUXV0Q3cwTGZRdmRDdzBZZlF0ZEM1MFlIUmd0Q3kwTDR4T0RBMkJnTlZCQU1NTDlDazBMWFF0TkMxMFlEUXNOQzcwWXpRdmRDKw0KMExVZzBMclFzTkMzMEwzUXNOR0gwTFhRdWRHQjBZTFFzdEMrQWhBYWltaGJOUkdsMi9aWEg5K0wwUXl0TUI4R0NDcUZBd2NCQVFFQg0KTUJNR0J5cUZBd0lDSkFBR0NDcUZBd2NCQVFJQ0JFQk9aZitiSUFIZ3p4S0FEbzVublpMY2x1SWc5ZW5YYVhLakdBTk1MK0QwbHNHTg0KdDh0cW52Wkp6ejByb1I1bFlQWmpodjZTTmJNeVN0cG4xSVFEU1ZIKw==</signature>
+        </printForm>
+    </ns3:checkResult>
+</ns3:export>

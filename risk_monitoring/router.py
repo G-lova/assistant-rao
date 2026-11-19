@@ -596,3 +596,49 @@ async def get_period_summary(kind: str, period: str,
     if not stored:
         raise HTTPException(status_code=404, detail="Сводки за этот период нет")
     return stored["ai_analysis"]
+
+
+class ReparseChecksRequest(BaseModel):
+    """Повторная сборка фактов контрольных проверок за период (без модели).
+
+    Attributes:
+        since: Начало периода ``ГГГГ-ММ-ДД`` — пересобираются документы проверок не раньше этой даты.
+        push: Записывать изменившиеся факты во внешнюю БД (``False`` — только подсчёт, для проверки).
+    """
+
+    since: str
+    push: bool = True
+
+    @field_validator("since")
+    @classmethod
+    def _check_since(cls, v: str) -> str:
+        """Дата ``ГГГГ-ММ-ДД``."""
+        from datetime import date
+
+        return date.fromisoformat(str(v)[:10]).isoformat()
+
+
+@router.post("/checks/reparse", status_code=status.HTTP_202_ACCEPTED)
+async def reparse_checks_endpoint(req: ReparseChecksRequest,
+                                  x_api_database: str = Header(default="dev", alias="X-API-Database")):
+    """Ставит в очередь пересборку фактов контрольных проверок (``checkResult`` / ``unplannedCheck`` /
+    ``unplannedCheckCancel`` / ``eventResult``) за период.
+
+    Нужна после исправлений разбора ``xml_events.check_facts``: факты уже загруженных XML иначе остаются
+    посчитанными старым разбором. Задача не вызывает модель и меняет только ветку ``ai_analysis.facts``
+    (``risk_monitoring.reparse_checks``), поэтому безопасна и идемпотентна. Окружение — заголовком
+    ``X-API-Database``, как у остального API.
+
+    Args:
+        req: Начало периода и режим записи.
+        x_api_database: Окружение внешней системы.
+
+    Returns:
+        dict: ``task_id``, ``since``; счётчики (``scanned``, ``updated``, ``unchanged``, ``errors``) — в
+        результате задачи по ``GET /task/{task_id}``.
+    """
+    from risk_monitoring.tasks import rm_reparse_checks_task
+
+    task = rm_reparse_checks_task.apply_async(
+        kwargs={"environment": x_api_database, "since": req.since, "push": req.push}, queue="risk_monitoring")
+    return {"task_id": task.id, "since": req.since, "status": "queued"}

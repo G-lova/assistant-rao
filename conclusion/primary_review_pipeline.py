@@ -35,6 +35,7 @@ SQL_OPINIONS = """
     WHERE o.deleted_at IS NULL AND o.data IS NOT NULL AND o.data != CAST('[]' AS JSON)
       AND e.id = ?
 """
+AMBIGUITY_GAP = 0.1          # разница вероятностей двух лучших оценок, при которой оценка считается неоднозначной
 PRIMARY_ROLE, SUMMARY_ROLE = "expert", "raoExpert"      # users.role
 LAW_BY_TYPE = {4: "44-ФЗ", 5: "223-ФЗ"}      # expertises.type: 4 — 44-ФЗ, 5 — 223-ФЗ
 
@@ -97,7 +98,7 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
     Returns:
         dict: ``expertise_id`` не входит (добавляет вызывающий); ``summary_expert_id``, ``group``, ``shared_differences`` (критерии, по которым все первичные эксперты расходятся с итоговым одинаково — вероятно, решение сводного эксперта; в комментарии они не упоминаются и помечены ``shared`` в ``differences``) и ``reviews`` —
         по записи на первичного эксперта: ``expert_id``, ``common``, ``differences`` (по видам), ``issues``,
-        ``suggested_range`` (модель; ``None`` при малом числе общих критериев) с ``range_source`` и ``probabilities``, ``range_by_thresholds``, ``match_percent`` и ``range_by_scale`` (шкала аналитика), ``comment``, ``current_range``.
+        ``suggested_range`` (модель; ``None`` при малом числе общих критериев) с ``range_source`` и ``probabilities``, ``range_by_thresholds``, ``match_percent`` и ``range_by_scale`` (шкала аналитика), ``comment`` (согласован с оценкой), ``comment_details`` (полный перечень расхождений), ``alternative_range``, ``confidence``, ``model_range`` (до постпроверки по порядку) и ``rule_applied``, ``current_range``.
 
     Raises:
         PrimaryReviewError: 404 — первичных заключений нет; 409 — сводное заключение ещё не заполнено.
@@ -118,6 +119,13 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
         feats = primary_compare.features(row["data"], summary["data"], cmp)
         model = primary_compare.predict_range(feats, cmp.group)
         threshold_range = primary_compare.suggest_range(cmp)
+        model_grade = model["range"] if model and threshold_range is not None else threshold_range
+        grade, rule_applied = primary_compare.apply_full_match_rule(model_grade, cmp, shared)   # 1.00 только при полном соответствии
+        probs = model["probabilities"] if model and threshold_range is not None else None
+        ranked = sorted(probs.items(), key=lambda kv: -kv[1]) if probs else []
+        # две соседние оценки почти равновероятны (разница меньше 0.1): показываем вторую, чтобы эксперт решил сам
+        alternative = (float(ranked[1][0]) if len(ranked) > 1 and ranked[0][1] - ranked[1][1] < AMBIGUITY_GAP
+                       and not rule_applied else None)   # после постпроверки по порядку оценка определена правилом
         reviews.append({
             "expert_id": int(row["expert_id"]),
             "common": cmp.common,
@@ -127,13 +135,19 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
             "issues": [{"code": i.code, "severity": i.severity, "message": i.message, "keys": i.keys} for i in issues],
             # обученная модель точнее порогов (на кросс-валидации 58% / 55% против 41% / 52%); без модели или при малом
             # числе общих критериев — пороги
-            "suggested_range": model["range"] if model and threshold_range is not None else threshold_range,
-            "range_source": "model" if model and threshold_range is not None else ("thresholds" if threshold_range is not None else None),
-            "probabilities": model["probabilities"] if model and threshold_range is not None else None,
+            "suggested_range": grade,
+            "alternative_range": alternative,
+            "model_range": model_grade,
+            "rule_applied": rule_applied,
+            "confidence": ranked[0][1] if ranked else None,
+            "range_source": ("model" if model and threshold_range is not None else ("thresholds" if threshold_range is not None else None)),
+            "probabilities": probs,
             "range_by_thresholds": threshold_range,
             "match_percent": cmp.match_percent,
             "range_by_scale": primary_compare.range_by_scale(cmp.match_percent),
-            "comment": primary_compare.build_comment(cmp, labels, issues, shared=shared),
+            "comment": primary_compare.build_comment(cmp, labels, issues, shared=shared, grade=grade),
+            # полный перечень расхождений для справки (комментарий при оценке 1.00 их не перечисляет)
+            "comment_details": primary_compare.build_comment(cmp, labels, issues, shared=shared),
             "current_range": None if _is_blank(current) else float(current),
         })
     group = "report" if primary_review.is_report_data(summary["data"]) else "procurement"

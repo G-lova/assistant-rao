@@ -20,6 +20,7 @@ from bs4 import BeautifulSoup
 from defusedxml import ElementTree as ET
 from docx import Document
 from pathlib import Path
+from typing import Dict, Optional
 from pptx import Presentation
 from pdf2image import convert_from_path
 
@@ -273,11 +274,43 @@ def _frames_text(excel_data: dict) -> str:
     return re.sub(r'\s+', ' ', "\n".join(result).strip())
 
 
+# Служебные файлы в архивах: не документы (временные файлы Word/Excel «~$…», метаданные macOS и Windows)
+_ARCHIVE_JUNK_NAMES = {"thumbs.db", ".ds_store", "desktop.ini"}
+ARCHIVE_RANK_DOC, ARCHIVE_RANK_TABLE, ARCHIVE_RANK_OTHER, ARCHIVE_RANK_IMAGE = 0, 1, 2, 3
+_DOC_EXT = {".pdf", ".doc", ".docx", ".odt", ".rtf", ".txt", ".html", ".htm", ".xml"}
+_TABLE_EXT = {".xlsx", ".xls", ".csv"}
+_IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff"}
+
+
+def is_archive_junk(relative_name: str) -> bool:
+    """Служебный файл архива: ``~$*.docx`` (файл-владелец открытого документа Word, 162 байта — LibreOffice и
+    python-docx его не открывают), ``._*`` и ``__MACOSX`` (macOS), ``Thumbs.db``, ``.DS_Store``, ``desktop.ini``."""
+    parts = re.split(r"[\\/]", relative_name or "")
+    base = parts[-1] if parts else ""
+    return (base.startswith("~$") or base.startswith("._") or base.lower() in _ARCHIVE_JUNK_NAMES
+            or "__MACOSX" in parts)
+
+
+def archive_entry_rank(relative_name: str) -> int:
+    """Очередь чтения файла архива при пределах: документы, таблицы, прочее (вложенные архивы …), картинки."""
+    ext = os.path.splitext(relative_name or "")[1].lower()
+    if ext in _DOC_EXT:
+        return ARCHIVE_RANK_DOC
+    if ext in _TABLE_EXT:
+        return ARCHIVE_RANK_TABLE
+    if ext in _IMAGE_EXT:
+        return ARCHIVE_RANK_IMAGE
+    return ARCHIVE_RANK_OTHER
+
+
 class FileReader:
     """
     """
     def __init__(self, llm_client, model):
         self.ocr_processor = OCRProcessor(llm_client, model)
+        # Пределы чтения архива (process_archive): None — архив читается целиком (экспертиза); риск-мониторинг
+        # задаёт словарь max_files / max_images / max_chars / concurrency (settings.RM_ARCHIVE_*)
+        self.archive_limits: Optional[Dict[str, int]] = None
 
         self.semaphore = asyncio.Semaphore(3)
         self.rate_limiter = llm_rate_limiter()  # общий на процесс лимит частоты запросов к модели
@@ -773,8 +806,22 @@ class FileReader:
 
 
     async def process_archive(self, file_path: str, ext: str) -> str:
-        """
-        Извлекает любой архив и читает все вложенные документы.
+        """Извлекает архив и читает вложенные документы.
+
+        Служебные файлы (временные файлы Word ``~$*.docx``, ``Thumbs.db``, ``__MACOSX`` …) пропускаются всегда:
+        это не документы, а их чтение давало ошибки с трассировкой (18.11.2026, архив проектной документации).
+
+        Без ``self.archive_limits`` (экспертиза) читаются все остальные файлы, как раньше — параллельно. С пределами
+        (риск-мониторинг): файлы по очереди «документы → таблицы → прочее → картинки», не больше ``max_files``
+        файлов и ``max_images`` картинок (OCR), пока текст не превысит ``max_chars``; по ``concurrency`` файлов
+        одновременно. Непрочитанные файлы перечисляются в конце текста именами.
+
+        Args:
+            file_path: Путь к архиву.
+            ext: Расширение архива.
+
+        Returns:
+            str: Тексты файлов с заголовками ``=== имя ===``.
         """
 
         async def process_single_file(file_path, relative_name):
@@ -788,33 +835,75 @@ class FileReader:
             except Exception as e:
                 return f"=== {relative_name} ===\n[Ошибка чтения: {e}]"
 
+        limits = self.archive_limits
         with tempfile.TemporaryDirectory() as tmpdir:
 
             await self.extract_archive(file_path, ext, tmpdir)
 
-            tasks = []
-
+            entries = []   # (полный путь, имя внутри архива)
+            skipped_junk = 0
             for root, _, files in os.walk(tmpdir):
-
                 for filename in files:
-
                     full_path = os.path.join(root, filename)
+                    relative_name = os.path.relpath(full_path, tmpdir)
+                    if is_archive_junk(relative_name):
+                        skipped_junk += 1
+                        continue
+                    entries.append((full_path, relative_name))
+            if skipped_junk:
+                logger.info(f"Архив {os.path.basename(file_path)}: пропущено служебных файлов {skipped_junk}")
 
-                    relative_name = os.path.relpath(
-                        full_path,
-                        tmpdir
-                    )
+            if not limits:
+                results = await asyncio.gather(*(process_single_file(f, n) for f, n in entries))
+                return "\n\n".join(results)
 
-                    tasks.append(
-                        process_single_file(
-                            full_path,
-                            relative_name
-                        )
-                    )
+            results, skipped, total = await self._read_archive_limited(entries, limits, process_single_file)
 
-            results = await asyncio.gather(*tasks)
-
+        if skipped:
+            shown = skipped[:100]
+            more = f" и ещё {len(skipped) - len(shown)}" if len(skipped) > len(shown) else ""
+            results.append(f"=== Не прочитано (предел чтения архива: прочитано {len(entries) - len(skipped)} из "
+                           f"{len(entries)} файлов, {total} символов) ===\n" + "\n".join(n for _, n in shown) + more)
+            logger.info(f"Архив {os.path.basename(file_path)}: прочитано {len(entries) - len(skipped)} из "
+                        f"{len(entries)} файлов ({total} символов), остальные — по пределам архива")
         return "\n\n".join(results)
+
+    @staticmethod
+    async def _read_archive_limited(entries, limits, read_one):
+        """Читает файлы архива по очереди приоритета до пределов (см. :meth:`process_archive`).
+
+        Args:
+            entries: ``[(путь, имя в архиве)]``.
+            limits: ``max_files``, ``max_images``, ``max_chars``, ``concurrency``.
+            read_one: Корутина ``(путь, имя) -> текст``.
+
+        Returns:
+            tuple: ``(тексты, непрочитанные [(путь, имя)], символов прочитано)``.
+        """
+        max_files = int(limits.get("max_files") or len(entries) or 1)
+        max_images = int(limits.get("max_images", max_files))
+        max_chars = int(limits.get("max_chars") or 0)
+        step = max(1, int(limits.get("concurrency") or 4))
+        ordered = sorted(entries, key=lambda e: (archive_entry_rank(e[1]), e[1]))
+        chosen, images = [], 0
+        for e in ordered:
+            if len(chosen) >= max_files:
+                break
+            if archive_entry_rank(e[1]) == ARCHIVE_RANK_IMAGE:
+                if images >= max_images:
+                    continue
+                images += 1
+            chosen.append(e)
+        results, total, done = [], 0, 0
+        while done < len(chosen) and not (max_chars and total >= max_chars):
+            batch = chosen[done:done + step]
+            texts = await asyncio.gather(*(read_one(f, n) for f, n in batch))
+            results.extend(texts)
+            total += sum(len(t) for t in texts)
+            done += len(batch)
+        read = {n for _, n in chosen[:done]}
+        skipped = [e for e in ordered if e[1] not in read]
+        return results, skipped, total
 
 
     async def read_html(self, html_path: str) -> str:

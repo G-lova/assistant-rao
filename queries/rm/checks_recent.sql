@@ -6,6 +6,7 @@ SELECT
     x.id,
     JSON_UNQUOTE(JSON_EXTRACT(x.ai_analysis, '$.event.event_at')) AS event_at,
     JSON_UNQUOTE(JSON_EXTRACT(x.ai_analysis, '$.facts.check_number')) AS check_number,
+    JSON_UNQUOTE(JSON_EXTRACT(x.ai_analysis, '$.facts.check_version')) AS check_version,
     JSON_UNQUOTE(JSON_EXTRACT(x.ai_analysis, '$.facts.check_result')) AS check_result,
     JSON_UNQUOTE(JSON_EXTRACT(x.ai_analysis, '$.facts.check_prescription')) AS check_prescription,
     JSON_UNQUOTE(JSON_EXTRACT(x.ai_analysis, '$.facts.check_decision_date')) AS check_decision_date,
@@ -16,3 +17,5 @@ FROM risk_monitoring_eis_xml_sources x
 WHERE x.entry_name LIKE 'checkResult%'
   AND COALESCE(x.created_at, x.updated_at) >= ?
   AND JSON_EXTRACT(x.ai_analysis, '$.facts.check_number') IS NOT NULL
+-- порядок детерминирует выбор актуальной редакции в risk_monitoring.control_checks.normalize
+ORDER BY check_version, COALESCE(x.created_at, x.updated_at)

@@ -1248,6 +1248,12 @@ class CloudStorageParser(EISSoapMixin):
                         )
                     else:
                         error_text = await resp.text()
+                        if resp.status == 403 and "подозрительная активность" in error_text[:2000]:
+                            # ЕИС блокирует частые запросы (страница «ЕИС: подозрительная активность …», 18.11.2026):
+                            # вызывающий приостанавливает скачивание из ЕИС, а не помечает файл недоступным
+                            logger.info(f"Ошибка скачивания: 403 — ЕИС: подозрительная активность ({url[:120]})")
+                            return {"status": "error", "blocked": True,
+                                    "error": "HTTP 403: ЕИС заблокировал запросы («подозрительная активность»)"}
                         logger.info(f"Ошибка скачивания: {resp.status}, тело: {error_text[:300]}")
                         return {
                             "status": "error",

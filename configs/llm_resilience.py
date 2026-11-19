@@ -11,6 +11,8 @@
   30 с (затем 60, 120 … до 300 с), чтобы сервер разгрузился, а не получал повторы.
 """
 import asyncio
+import contextlib
+import contextvars
 import os
 import random
 import time
@@ -47,6 +49,51 @@ BREAKER_PAUSE = (30.0, 300.0)        # пауза предохранителя: 
 _gates: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[str, asyncio.Semaphore]]" = weakref.WeakKeyDictionary()
 # счётчики запросов к модели в процессе: для сводки задачи и пульса (inflight — выполняются сейчас)
 CALLS: Dict[str, int] = {"requests": 0, "failed": 0, "inflight": 0, "deadline": 0, "loop_cut": 0}
+# Счётчики одного объекта анализа (файла риск-мониторинга и т. п.), см. scope(): сколько запросов к модели ушло на
+# него, сколько из них упало, сколько секунд шли запросы (llm_sec) и сколько ждали места в очереди к серверу
+# (gate_wait_sec, предел MAX_INFLIGHT). Словарь общий для дочерних задач asyncio.gather (контекст копируется со
+# ссылкой на тот же словарь), поэтому параллельные блоки документа считаются в один счётчик. 17.11.2026
+_SCOPE: contextvars.ContextVar = contextvars.ContextVar("llm_scope", default=None)
+
+
+def _count(key: str, value: float = 1) -> None:
+    """Прибавляет к счётчику процесса (``CALLS``, кроме секунд) и к счётчикам текущего объекта (:func:`scope`)."""
+    if not key.endswith("_sec"):
+        CALLS[key] = CALLS.get(key, 0) + value
+    acc = _SCOPE.get()
+    if acc is not None:
+        acc[key] = round(acc.get(key, 0) + value, 1) if key.endswith("_sec") else acc.get(key, 0) + value
+
+
+@contextlib.contextmanager
+def scope():
+    """Счётчики запросов к модели для одного объекта анализа: ``with llm_resilience.scope() as llm: …``.
+
+    Yields:
+        Dict[str, float]: ``requests``, ``failed``, ``deadline``, ``loop_cut`` — штук; ``llm_sec`` — суммарное время
+        запросов (параллельные складываются), ``gate_wait_sec`` — ожидание места в очереди к серверу модели.
+    """
+    acc: Dict[str, float] = {"requests": 0, "failed": 0, "deadline": 0, "loop_cut": 0,
+                             "llm_sec": 0.0, "gate_wait_sec": 0.0}
+    token = _SCOPE.set(acc)
+    try:
+        yield acc
+    finally:
+        _SCOPE.reset(token)
+
+
+def current_scope() -> Optional[Dict[str, float]]:
+    """Счётчики текущего объекта (:func:`scope`) или ``None`` вне его."""
+    return _SCOPE.get()
+
+
+@contextlib.asynccontextmanager
+async def _gated(key: str):
+    """Место в очереди запросов к серверу (:func:`_gate`) с учётом времени ожидания (``gate_wait_sec``)."""
+    t = time.monotonic()
+    async with _gate(key):
+        _count("gate_wait_sec", time.monotonic() - t)
+        yield
 _breaker: Dict[str, Dict[str, float]] = {}
 
 
@@ -471,7 +518,7 @@ async def _create_streamed(raw: Any, kwargs: Dict[str, Any], key: str = "") -> A
                     loop_cut = watch.check(total, tail)
             finish = getattr(ch, "finish_reason", None) or finish
         if loop_cut:
-            CALLS["loop_cut"] = CALLS.get("loop_cut", 0) + 1
+            _count("loop_cut")
             logger.warning(f"LLM {key}: модель зациклилась — поток оборван на {total} символах "
                            f"(сжатие хвоста {watch.last_ratio:.0f}×)")
             close = getattr(stream, "close", None)
@@ -495,14 +542,16 @@ async def _bounded(coro: Any, what: str) -> Any:
         asyncio.TimeoutError: Запрос превысил предел (временный сбой — вызывающий повторяет его).
     """
     CALLS["inflight"] += 1
+    t = time.monotonic()
     try:
         return await asyncio.wait_for(coro, timeout=REQUEST_DEADLINE)
     except asyncio.TimeoutError:
-        CALLS["deadline"] += 1
+        _count("deadline")
         logger.warning(f"LLM {what}: запрос дольше {REQUEST_DEADLINE} с — прерван")
         raise
     finally:
         CALLS["inflight"] -= 1
+        _count("llm_sec", time.monotonic() - t)
 
 
 async def _create(client: Any, stream: bool, kwargs: Dict[str, Any]) -> str:
@@ -540,7 +589,7 @@ async def _create(client: Any, stream: bool, kwargs: Dict[str, Any]) -> str:
                 tail = (tail + piece)[-watch.window * 2:]
                 loop_cut = watch.check(total, tail)
         if loop_cut:
-            CALLS["loop_cut"] = CALLS.get("loop_cut", 0) + 1
+            _count("loop_cut")
             logger.warning(f"LLM {kwargs.get('model')}: модель зациклилась — поток оборван на {total} символах "
                            f"(сжатие хвоста {watch.last_ratio:.0f}×)")
             close = getattr(resp, "close", None)
@@ -620,9 +669,9 @@ async def call_llm(client: Any, retries: int = len(RETRY_DELAYS) + 1, **kwargs: 
         if attempt - extra >= retries:
             break
         await _breaker_wait(key)
-        CALLS["requests"] += 1
+        _count("requests")
         try:
-            async with _gate(key):
+            async with _gated(key):
                 text = await _bounded(_create(client, stream, _sdk(kwargs, key)), key)
             _breaker_record(key, True)
             if getattr(text, "thinking_cut", False) and _boost_after_thinking(kwargs, key):
@@ -647,7 +696,7 @@ async def call_llm(client: Any, retries: int = len(RETRY_DELAYS) + 1, **kwargs: 
                 stream = False
                 extra += 1
                 continue
-            CALLS["failed"] += 1
+            _count("failed")
             if fit_output(e, kwargs):   # переполнение контекста: меньший ответ или ContextOverflow
                 extra += 1
                 continue
@@ -695,9 +744,9 @@ class _Completions:
             if attempt - extra >= retries:
                 break
             await _breaker_wait(key)
-            CALLS["requests"] += 1
+            _count("requests")
             try:
-                async with _gate(key):
+                async with _gated(key):
                     request = _sdk(kwargs, key)
                     # потоком: шлюз не обрывает длинную генерацию по таймауту начала ответа (504 через 90 с)
                     call = (_create_streamed(self._raw, request, key) if _setting("LLM_STREAM_RESPONSES", False)
@@ -723,7 +772,7 @@ class _Completions:
                 if _thinking_rejected(e, key):
                     extra += 1
                     continue
-                CALLS["failed"] += 1
+                _count("failed")
                 if fit_output(e, kwargs):   # переполнение контекста: меньший ответ (попытка не тратится)
                     extra += 1
                     continue
