@@ -14,6 +14,9 @@ class TaxonomyTests(unittest.TestCase):
                          [("MISSED_VIOLATION", 1), ("INCOMPLETE", 1), ("FACTUAL", 2)])
         self.assertEqual(result[0]["name"], "Существенные пропуски")
         self.assertEqual(primary_taxonomy.categorize(), [])
+        # в строке комментария пропуск назван нейтрально (тяжесть задаёт оценка), остальные названия те же
+        self.assertEqual(primary_taxonomy.COMMENT_NAMES["MISSED_VIOLATION"], "Пропущенные нарушения")
+        self.assertEqual(primary_taxonomy.COMMENT_NAMES["FACTUAL"], primary_taxonomy.CATEGORIES["FACTUAL"])
 
 
 if __name__ == "__main__":
