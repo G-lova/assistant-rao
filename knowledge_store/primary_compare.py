@@ -238,8 +238,8 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
     Формулировки — по сути ошибки первичного эксперта («не выявлено нарушение по критерию 3.1», «неверно указано
     нарушение по критерию 2.1.5»), а не «не совпало с итоговым». Критерии названы номерами (полные названия — в
     ``differences`` ответа API). Замечания сгруппированы по категориям таксономии
-    (:mod:`knowledge_store.primary_taxonomy`): одна строка на категорию — «Пропущенные нарушения: не выявлено нарушение по
-    критерию 2.1.3.», «Фактические ошибки: неверно указано нарушение по критерию 1.29; …», «Неполнота: …».
+    (:mod:`knowledge_store.primary_taxonomy`): одна строка на категорию — «Пропуски нарушений: не выявлено нарушение по
+    критерию 2.1.3.», «Несоответствия: неверно указано нарушение по критерию 1.29; …», «Неполнота: …».
 
     Args:
         cmp: Результат :func:`compare`.
@@ -295,11 +295,11 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
                     by_category.setdefault(code, []).append(_inline(text))
     for issue in issues or []:
         by_category.setdefault(primary_taxonomy.CODE.get(issue.code, "FORMAL"), []).append(_inline(issue.message))
-    # по одной строке на категорию: «Пропущенные нарушения: не выявлено нарушение по критерию 2.1.3.»
+    # по одной строке на категорию: «Пропуски нарушений: не выявлено нарушение по критерию 2.1.3.»
     lines: List[str] = [f"{primary_taxonomy.COMMENT_NAMES[code]}: {'; '.join(by_category[code])}."
                         for code in primary_taxonomy.COMMENT_ORDER if code in by_category]
     if lines and grade is not None and grade < 1.0 and any(
-            code in by_category for code in ("MISSED_VIOLATION", "FACTUAL", "METHODOLOGICAL", "NORMATIVE")):
+            code in by_category for code in ("MISSED_VIOLATION", "MISMATCH", "FACTUAL", "NORMATIVE")):
         lines.insert(0, "Незначительные отклонения от сводного заключения." if grade >= 0.75
                      else "Существенные расхождения со сводным заключением.")
     if not lines:
