@@ -54,6 +54,15 @@ class LlmReviewTests(unittest.TestCase):
         got = asyncio.run(pl.review(FakeLlm([{"category": "ARGUMENTATION", "quote": "ссылка на п. 5", "explanation": "е"}]), self.DATA))
         self.assertEqual([f["category"] for f in got], ["ARGUMENTATION"])
 
+    def test_trace_shows_where_findings_are_lost(self):
+        """Диагностика различает ответ модели и замечания, прошедшие проверку цитат."""
+        trace = {}
+        asyncio.run(pl.review(FakeLlm([{"category": "FORMAL", "quote": "такой цитаты в тексте нет совсем", "explanation": ""}]),
+                              self.DATA, trace=trace))
+        self.assertEqual((len(trace["raw"]), len(trace["verified"]), trace["has_text"]), (1, 0, True))
+        self.assertEqual(ev.diagnostics([{"trace": trace}]),
+                         {"with_text": 1, "answers_with_findings": 1, "raw_findings": 1, "verified_findings": 0})
+
     def test_score_precision_recall(self):
         """Точность — доля найденных категорий с темой в комментарии; полнота — доля тем, которые нашла модель."""
         rows = [{"found": {"FORMAL"}, "topics": {"FORMAL"}}, {"found": {"FORMAL"}, "topics": set()},

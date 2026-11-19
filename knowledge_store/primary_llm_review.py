@@ -77,18 +77,23 @@ def verify(findings: List[Dict[str, Any]], source: str) -> List[Dict[str, str]]:
     return out[:MAX_FINDINGS]
 
 
-async def review(llm: Any, primary: Dict[str, Any], summary: Optional[Dict[str, Any]] = None) -> List[Dict[str, str]]:
+async def review(llm: Any, primary: Dict[str, Any], summary: Optional[Dict[str, Any]] = None,
+                 trace: Optional[Dict[str, Any]] = None) -> List[Dict[str, str]]:
     """Недостатки текстовой части заключения первичного, найденные моделью и подтверждённые цитатой.
 
     Args:
         llm: ``LLMJson`` (или объект с ``ask(system, user, schema)``).
         primary: Данные заключения первичного эксперта.
         summary: Данные итогового заключения — только как опора (его вывод ``field4`` показывается модели).
+        trace: Если передан словарь — в него пишется диагностика: ``has_text`` (был ли текст), ``raw`` (ответ модели без проверки),
+            ``verified`` (после проверки цитат); нужна, чтобы отличить «модель ничего не нашла» от «цитаты не прошли проверку».
 
     Returns:
         list[dict]: ``category``, ``quote``, ``explanation``; пусто, если текста нет или недостатков не найдено.
     """
     source = opinion_text(primary)
+    if trace is not None:
+        trace.update({"has_text": bool(source), "raw": [], "verified": []})
     if not source:
         return []
     user = f"ЗАКЛЮЧЕНИЕ ПЕРВИЧНОГО ЭКСПЕРТА:\n{source}"
@@ -96,4 +101,7 @@ async def review(llm: Any, primary: Dict[str, Any], summary: Optional[Dict[str, 
     if isinstance(reference, str) and reference.strip():
         user += f"\n\nВЫВОД ИТОГОВОГО ЗАКЛЮЧЕНИЯ (для сравнения):\n{reference.strip()[:1500]}"
     answer = await llm.ask(SYSTEM, user, SCHEMA, max_tokens=1500, temperature=0.1, list_key="findings")
-    return verify(answer.get("findings") or [], source)
+    verified = verify(answer.get("findings") or [], source)
+    if trace is not None:
+        trace.update({"raw": list(answer.get("findings") or []), "verified": verified})
+    return verified
