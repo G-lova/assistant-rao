@@ -313,6 +313,47 @@ expert_decline_counts AS (
     GROUP BY expert_id
     HAVING COUNT(*) >= 2
 ),
+declines_since_start AS (
+    SELECT
+        d.expert_id,
+        COUNT(DISTINCT d.expertise_id) AS expert_declines
+    FROM (
+        SELECT
+            CAST(jt.expert_id AS UNSIGNED) AS expert_id,
+            e.id AS expertise_id
+        FROM expertises e,
+        JSON_TABLE(
+            JSON_KEYS(e.declineExperts),
+            '$[*]' COLUMNS (
+                expert_id VARCHAR(50) PATH '$'
+            )
+        ) AS jt
+        WHERE e.deleted_at IS NULL
+          AND JSON_TYPE(e.declineExperts) = 'OBJECT'
+          AND STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(e.declineExperts, CONCAT('$."', jt.expert_id, '"'))), '%Y-%m-%d %H:%i:%s') >= '{{RATING_START}}'
+        UNION ALL
+        SELECT
+            jt.expert_id,
+            e.id AS expertise_id
+        FROM expertises e,
+        JSON_TABLE(
+            e.declineExperts,
+            '$[*]' COLUMNS (
+                expert_id INT PATH '$'
+            )
+        ) AS jt
+        WHERE e.deleted_at IS NULL
+          AND JSON_TYPE(e.declineExperts) = 'ARRAY'
+          AND e.dateStatus2 >= '{{RATING_START}}'
+    ) d
+    WHERE d.expert_id IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM expertise_experts ee
+        WHERE ee.expertise_id = d.expertise_id
+          AND ee.expert_id = d.expert_id
+    )
+    GROUP BY d.expert_id
+),
 blocked_experts AS (
 	SELECT expert_id
     FROM expert_decline_counts
@@ -454,21 +495,11 @@ blocked_experts AS (
 			))
 			THEN 1
 		END), 0) AS overdues,
-    	COALESCE(SUM(CASE WHEN e.dateStatus2 >= '{{RATING_START}}'
-			AND (u.id MEMBER OF(e.declineExperts) 
-			OR JSON_CONTAINS_PATH(
-				e.declineExperts,
-				'one',
-				CONCAT('$."', u.id, '"')
-			))
-            AND NOT EXISTS (
-                SELECT 1 
-                FROM expertise_experts ee
-                WHERE ee.expertise_id = e.id 
-                AND ee.expert_id = u.id
-            )
-			THEN 1
-		END), 0) AS expert_declines,
+		COALESCE((
+			SELECT ds.expert_declines
+			FROM declines_since_start ds
+			WHERE ds.expert_id = u.id
+		), 0) AS expert_declines,
 		(
             SELECT COUNT(*)
             FROM expertises e1
@@ -481,7 +512,7 @@ blocked_experts AS (
             JOIN expertises e1
             ON e1.id = ee1.expertise_id
             WHERE ee1.expert_id = u.id
-            AND e1.status = 2 AND ee1.group_formed_at IS NULL AND ee1.deleted_at IS NULL AND e1.deleted_at IS NULL
+            AND ee1.group_formed_at IS NULL AND ee1.deleted_at IS NULL AND e1.deleted_at IS NULL
         ) AS expert_requests,
 		ROUND(AVG(CASE 
 			WHEN ee.uploadExpertDate >= '{{RATING_START}}'

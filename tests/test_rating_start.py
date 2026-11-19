@@ -16,9 +16,32 @@ class RatingStartTest(unittest.TestCase):
             self.sql = f.read()
 
     def test_no_year_window_left(self):
-        """В запросе не осталось годового окна, плейсхолдер — в 7 местах (показатели и критерии 1–5)."""
+        """В запросе не осталось годового окна; плейсхолдер — в 8 местах.
+
+        6 — показатели и критерии в CTE experts, 2 — в CTE declines_since_start (объект и массив declineExperts).
+        """
         self.assertNotIn("INTERVAL 1 YEAR", self.sql)
-        self.assertEqual(self.sql.count("'{{RATING_START}}'"), 7)
+        self.assertEqual(self.sql.count("'{{RATING_START}}'"), 8)
+
+    def test_declines_counted_from_expertises(self):
+        """expert_declines берётся из отдельного CTE по declineExperts, а не из соединения с expertise_experts.
+
+        Раньше SUM(... NOT EXISTS(expertise_experts ...)) шёл по строкам, где запись эксперта уже есть,
+        поэтому счётчик всегда был 0 (19.11.2026). Удалённые экспертизы для рейтинга не учитываются.
+        """
+        start = self.sql.index("declines_since_start AS (")
+        cte = self.sql[start:self.sql.index("blocked_experts AS (", start)]
+        self.assertEqual(cte.count("e.deleted_at IS NULL"), 2)
+        self.assertIn("JSON_TYPE(e.declineExperts) = 'OBJECT'", cte)
+        self.assertIn("JSON_TYPE(e.declineExperts) = 'ARRAY'", cte)
+        self.assertIn("NOT EXISTS", cte)
+        self.assertIn("FROM declines_since_start ds", self.sql)
+        self.assertNotIn("SUM(CASE WHEN e.dateStatus2", self.sql)
+
+    def test_expert_requests_without_status(self):
+        """Заявки эксперта (expert_requests) считаются без условия e1.status = 2."""
+        self.assertNotIn("e1.status = 2", self.sql)
+        self.assertIn("AND ee1.group_formed_at IS NULL AND ee1.deleted_at IS NULL AND e1.deleted_at IS NULL", self.sql)
 
     def test_apply(self):
         """Подставляется дата из настроек; число привязок «?» не меняется; кривая дата — ошибка."""
