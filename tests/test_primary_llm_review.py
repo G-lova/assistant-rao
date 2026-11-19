@@ -41,6 +41,13 @@ class LlmReviewTests(unittest.TestCase):
             {"category": "FORMAL", "quote": "короткая", "explanation": "г"}], source)
         self.assertEqual([f["category"] for f in found], ["CONTRADICTION"])
 
+    def test_verify_limits_per_category(self):
+        """Однотипные замечания одной категории ограничиваются MAX_PER_CATEGORY."""
+        source = "первая цитата для проверки; вторая цитата для проверки; третья цитата для проверки"
+        found = pl.verify([{"category": "FORMAL", "quote": q, "explanation": ""}
+                           for q in ("первая цитата для проверки", "вторая цитата для проверки", "третья цитата для проверки")], source)
+        self.assertEqual(len(found), pl.MAX_PER_CATEGORY)
+
     def test_review_without_text_does_not_call_model(self):
         """Нет текста — пустой результат без вызова модели; с текстом — только подтверждённые замечания."""
         self.assertEqual(asyncio.run(pl.review(FakeLlm([{"category": "FORMAL", "quote": "x" * 20, "explanation": ""}]), {})), [])

@@ -23,6 +23,7 @@ CATEGORY_HINTS: Dict[str, str] = {
 }
 MAX_TEXT = 6000            # символов текста первичного, который видит модель
 MAX_FINDINGS = 6           # не больше замечаний на заключение
+MAX_PER_CATEGORY = 2       # и не больше замечаний одной категории (однотипные цитаты повторяют одну мысль)
 MIN_QUOTE = 8              # минимальная длина цитаты
 
 SCHEMA = {"type": "object", "properties": {"findings": {"type": "array", "maxItems": MAX_FINDINGS, "items": {
@@ -37,7 +38,10 @@ SYSTEM = ("Ты проверяешь заключение первичного �
           + "\n".join(f"- {code}: {text}" for code, text in CATEGORY_HINTS.items())
           + "\nПравила: сообщай только недостаток, который можно подтвердить дословной цитатой из заключения ПЕРВИЧНОГО эксперта "
             "(поле quote — подряд идущие слова из его текста, до 300 символов). Не оценивай, правильно ли эксперт нашёл нарушение — "
-            "это проверяется отдельно. Если недостатков нет, верни пустой список findings. Не придумывай недостатки.")
+            "это проверяется отдельно. Слова «необоснованно», «некорректно», «не установил» в описании нарушения ЗАКАЗЧИКА — это содержание "
+            "замечания, а не слабая аргументация эксперта: ARGUMENTATION ставь, только если замечание ни в одном месте не поясняет, в чём "
+            "нарушение, и не ссылается ни на пункт документа, ни на норму; по одной сути недостатка — одно замечание, не повторяй "
+            "однотипные цитаты. Если недостатков нет, верни пустой список findings. Не придумывай недостатки.")
 
 
 def opinion_text(data: Dict[str, Any], limit: int = MAX_TEXT) -> str:
@@ -67,6 +71,8 @@ def verify(findings: List[Dict[str, Any]], source: str) -> List[Dict[str, str]]:
         if code not in CATEGORY_HINTS or len(quote) < MIN_QUOTE or quote not in haystack or (code, quote) in seen:
             continue
         seen.add((code, quote))
+        if sum(1 for o in out if o["category"] == code) >= MAX_PER_CATEGORY:
+            continue
         out.append({"category": code, "quote": str(f["quote"]).strip(), "explanation": str(f.get("explanation") or "").strip()})
     return out[:MAX_FINDINGS]
 
