@@ -117,6 +117,43 @@ def parse_date(text: str) -> Optional[str]:
     return f"{day:02d}.{month:02d}.{year}" if 1 <= month <= 12 and 1 <= day <= 31 else None
 
 
+def find_dates(text: Optional[str]) -> Set[str]:
+    """Все даты в тексте в виде ``дд.мм.гггг`` (``23.05.24``, ``23 мая 2024г`` → ``23.05.2024``); пусто, если дат нет."""
+    found: Set[str] = set()
+    for m in _DATE_NUM.finditer(text or ""):
+        day, month, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        year += 2000 if year < 100 else 0
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            found.add(f"{day:02d}.{month:02d}.{year}")
+    for m in _DATE_WORD.finditer(text or ""):
+        day = int(m.group(1))
+        if 1 <= day <= 31:
+            found.add(f"{day:02d}.{_MONTHS[m.group(2).lower()]:02d}.{m.group(3)}")
+    return found
+
+
+# Денежная сумма: «1 514 970,00», «1514970.00», «920170,00 рублей»; без десятичной части — не меньше 5 цифр (не номера и годы)
+_AMOUNT = re.compile(r"(?<![\d.,])(\d{1,3}(?:[\s\u00a0]\d{3})+(?:[.,]\d{1,2})?|\d{5,}(?:[.,]\d{1,2})?|\d+[.,]\d{2})(?![\d])")
+
+
+def find_amounts(text: Optional[str]) -> Set[float]:
+    """Суммы в тексте (числа с разрядами и копейками), округлённые до копеек; даты и номера документов не считаются суммами."""
+    cleaned = _DATE_NUM.sub(" ", text or "")
+    out: Set[float] = set()
+    for m in _AMOUNT.finditer(cleaned):
+        raw = re.sub(r"[\s\u00a0]", "", m.group(1)).replace(",", ".")
+        try:
+            out.add(round(float(raw), 2))
+        except ValueError:
+            continue
+    return out
+
+
+def find_numbers(text: Optional[str]) -> Set[str]:
+    """Номера после «№» / «N» (нормализованные: без пробелов, регистра, ведущих нулей и знака «б/н»)."""
+    return {n for n in (normalize_number(m.group(1)) for m in _NUMBER.finditer(text or "")) if n}
+
+
 def normalize_number(raw: Optional[str]) -> Optional[str]:
     """Номер документа без пробелов, регистра и хвостовой пунктуации (``№201,`` → ``201``)."""
     if not raw:
