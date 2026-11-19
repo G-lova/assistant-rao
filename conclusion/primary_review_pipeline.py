@@ -14,7 +14,6 @@ import json
 import re
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from configs import settings
 from configs.logger import get_logger
 from knowledge_store import forms, primary_compare, primary_review, primary_taxonomy
 
@@ -99,7 +98,7 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
     Returns:
         dict: ``expertise_id`` не входит (добавляет вызывающий); ``summary_expert_id``, ``group``, ``shared_differences`` (критерии, по которым все первичные эксперты расходятся с итоговым одинаково — вероятно, решение сводного эксперта; в комментарии они не упоминаются и помечены ``shared`` в ``differences``) и ``reviews`` —
         по записи на первичного эксперта: ``expert_id``, ``common``, ``differences`` (по видам), ``issues``,
-        ``suggested_range`` (модель; ``None`` при малом числе общих критериев) с ``range_source`` и ``probabilities``, ``probability_acceptable`` (вероятность оценки 0.75 и выше), ``substantial_risk`` (она ниже ``PRIMARY_REVIEW_REJECT_THRESHOLD``: риск существенных расхождений), ``categories`` (замечания по таксономии), ``range_by_thresholds``, ``match_percent`` и ``range_by_scale`` (шкала аналитика), ``comment`` (согласован с оценкой), ``comment_details`` (полный перечень расхождений), ``alternative_range``, ``confidence``, ``model_range`` (до постпроверки по порядку) и ``rule_applied``, ``current_range``.
+        ``suggested_range`` (модель; ``None`` при малом числе общих критериев) с ``range_source`` и ``probabilities``, ``categories`` (замечания по таксономии), ``range_by_thresholds``, ``match_percent`` и ``range_by_scale`` (шкала аналитика), ``comment`` (согласован с оценкой), ``comment_details`` (полный перечень расхождений), ``alternative_range``, ``confidence``, ``model_range`` (до постпроверки по порядку) и ``rule_applied``, ``current_range``.
 
     Raises:
         PrimaryReviewError: 404 — первичных заключений нет; 409 — сводное заключение ещё не заполнено.
@@ -127,9 +126,6 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
         # две соседние оценки почти равновероятны (разница меньше 0.1): показываем вторую, чтобы эксперт решил сам
         alternative = (float(ranked[1][0]) if len(ranked) > 1 and ranked[0][1] - ranked[1][1] < AMBIGUITY_GAP
                        and not rule_applied else None)   # после постпроверки по порядку оценка определена правилом
-        # вероятность оценки 0.75 и выше; ниже порога — риск существенных расхождений (флаг, оценку не меняет)
-        p_ok = round(probs["0.75"] + probs["1.0"], 3) if probs else None
-        risk_threshold = getattr(settings, "PRIMARY_REVIEW_REJECT_THRESHOLD", 0.38)
         own = [d.kind for d in cmp.differences if d.key not in shared]       # общие для всех первичных не считаем
         reviews.append({
             "expert_id": int(row["expert_id"]),
@@ -147,8 +143,6 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
             "confidence": ranked[0][1] if ranked else None,
             "range_source": ("model" if model and threshold_range is not None else ("thresholds" if threshold_range is not None else None)),
             "probabilities": probs,
-            "probability_acceptable": p_ok,
-            "substantial_risk": None if p_ok is None else p_ok < risk_threshold,
             "categories": primary_taxonomy.categorize(own, [i.code for i in issues]),
             "range_by_thresholds": threshold_range,
             "match_percent": cmp.match_percent,

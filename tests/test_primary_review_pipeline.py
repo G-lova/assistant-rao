@@ -47,17 +47,14 @@ class PrimaryReviewPipelineTests(unittest.TestCase):
         self.assertEqual((by_expert[2]["match_percent"], by_expert[2]["range_by_scale"]), (100.0, 1.0))
         self.assertEqual(by_expert[1]["match_percent"], 83.3)     # 1 расхождение из 6 общих критериев
 
-    def test_review_has_risk_flag_and_categories(self):
-        """В ответе есть вероятность «0.75 и выше», флаг риска и категории замечаний (общие расхождения не считаются)."""
+    def test_review_has_categories(self):
+        """В ответе есть категории замечаний (общие расхождения не считаются)."""
         rows = [row(1, {**SUMMARY, "field2_1_2": 1}), row(2, SUMMARY), row(99, SUMMARY, role="raoExpert")]
         by_expert = {r["expert_id"]: r for r in review_expertise(rows)["reviews"]}
         first = by_expert[1]
         self.assertIn("MISSED_VIOLATION", [c["code"] for c in first["categories"]])   # плюс дефекты шаблонных текстов
         self.assertNotIn("MISSED_VIOLATION", [c["code"] for c in by_expert[2]["categories"]])
-        if first["probabilities"]:
-            probs = first["probabilities"]
-            self.assertAlmostEqual(first["probability_acceptable"], probs["0.75"] + probs["1.0"], places=3)
-            self.assertEqual(first["substantial_risk"], first["probability_acceptable"] < 0.38)
+        self.assertNotIn("substantial_risk", first)
 
     def test_shared_difference_is_not_blamed(self):
         """Расхождение, одинаковое у всех первичных, выделяется и не попадает в комментарий; у одного эксперта — остаётся."""
