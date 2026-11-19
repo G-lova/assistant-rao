@@ -173,6 +173,8 @@ def apply_full_match_rule(grade: Optional[float], cmp: Comparison, shared: Optio
             ``missed`` — только пропуск нарушения; ``None`` — без постпроверки; ``settings`` (по умолчанию) — режим из
             ``settings.PRIMARY_REVIEW_FULL_MATCH_RULE``.
 
+    Исключение: при ``match_percent`` выше ``PRIMARY_REVIEW_FULL_MATCH_EXEMPT_PERCENT`` оценка не снижается.
+
     Returns:
         tuple: ``(оценка, изменена_ли)``.
     """
@@ -180,6 +182,9 @@ def apply_full_match_rule(grade: Optional[float], cmp: Comparison, shared: Optio
         mode = getattr(settings, "PRIMARY_REVIEW_FULL_MATCH_RULE", "any")
     if grade is None or grade < 1.0 or mode is None:
         return grade, False
+    exempt = getattr(settings, "PRIMARY_REVIEW_FULL_MATCH_EXEMPT_PERCENT", None)
+    if exempt is not None and cmp.match_percent is not None and cmp.match_percent > exempt:
+        return grade, False        # почти полное совпадение: единичные расхождения 1.00 не отменяют
     kinds = {"any": ("missed", "false_alarm", "other"), "missfa": ("missed", "false_alarm"), "missed": ("missed",)}[mode]
     if any(d.kind in kinds and d.key not in (shared or ()) for d in cmp.differences):
         return 0.75, True

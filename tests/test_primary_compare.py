@@ -97,3 +97,18 @@ class CompareTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FullMatchExemptionTests(unittest.TestCase):
+    """Исключение постпроверки: почти полное совпадение не снижает 1.00."""
+
+    def test_high_match_percent_keeps_full_grade(self):
+        """При match_percent выше порога единичное расхождение 1.00 не отменяет; ниже порога — снижает до 0.75."""
+        summary = {f"field2_1_{i}": 1 for i in range(1, 41)}
+        primary = {**summary, "field2_1_2": 0}           # 1 расхождение из 40: 97.5%
+        cmp = pc.compare(primary, summary)
+        self.assertGreater(cmp.match_percent, 95)
+        self.assertEqual(pc.apply_full_match_rule(1.0, cmp, set(), "any"), (1.0, False))
+        few = pc.compare({**{f"field2_1_{i}": 1 for i in range(1, 11)}, "field2_1_2": 0},
+                                      {f"field2_1_{i}": 1 for i in range(1, 11)})    # 90%
+        self.assertEqual(pc.apply_full_match_rule(1.0, few, set(), "any"), (0.75, True))
