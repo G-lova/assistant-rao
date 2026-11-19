@@ -14,8 +14,9 @@ import json
 import re
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from configs import settings
 from configs.logger import get_logger
-from knowledge_store import forms, primary_compare, primary_review, primary_taxonomy
+from knowledge_store import forms, primary_compare, primary_review, primary_score, primary_taxonomy
 
 if TYPE_CHECKING:   # тяжёлые зависимости (aiohttp, pandas) нужны только классу загрузки, не чистой логике оценки
     from configs.http_client_manager import HTTPClientManager
@@ -98,7 +99,7 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
     Returns:
         dict: ``expertise_id`` не входит (добавляет вызывающий); ``summary_expert_id``, ``group``, ``shared_differences`` (критерии, по которым все первичные эксперты расходятся с итоговым одинаково — вероятно, решение сводного эксперта; в комментарии они не упоминаются и помечены ``shared`` в ``differences``) и ``reviews`` —
         по записи на первичного эксперта: ``expert_id``, ``common``, ``differences`` (по видам), ``issues``,
-        ``suggested_range`` (модель; ``None`` при малом числе общих критериев) с ``range_source`` и ``probabilities``, ``categories`` (замечания по таксономии), ``range_by_thresholds``, ``match_percent`` и ``range_by_scale`` (шкала аналитика), ``comment`` (согласован с оценкой), ``comment_details`` (полный перечень расхождений), ``alternative_range``, ``confidence``, ``model_range`` (до постпроверки по порядку) и ``rule_applied``, ``current_range``.
+        ``suggested_range`` (модель; ``None`` при малом числе общих критериев) с ``range_source`` и ``probabilities``, ``categories`` (замечания по таксономии), ``range_by_thresholds``, ``weighted_percent`` и ``deductions`` (взвешенный процент сходства и вычеты по расхождениям; по нему при ``range_source = weighted_percent`` определяется оценка), ``match_percent`` и ``range_by_scale`` (шкала аналитика), ``comment`` (согласован с оценкой), ``comment_details`` (полный перечень расхождений), ``alternative_range``, ``confidence``, ``model_range`` (до постпроверки по порядку) и ``rule_applied``, ``current_range``.
 
     Raises:
         PrimaryReviewError: 404 — первичных заключений нет; 409 — сводное заключение ещё не заполнено.
@@ -119,13 +120,24 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
         feats = primary_compare.features(row["data"], summary["data"], cmp)
         model = primary_compare.predict_range(feats, cmp.group)
         threshold_range = primary_compare.suggest_range(cmp)
-        model_grade = model["range"] if model and threshold_range is not None else threshold_range
-        grade, rule_applied = primary_compare.apply_full_match_rule(model_grade, cmp, shared)   # 1.00 только при полном соответствии
+        # основной способ — взвешенный процент сходства и пороги по истории; многоклассовая модель и пороги числа расхождений — запасные
+        weighted = (primary_score.evaluate(cmp) if getattr(settings, "PRIMARY_REVIEW_USE_WEIGHTED_PERCENT", True)
+                    and threshold_range is not None else None)
+        if weighted:
+            model_grade = weighted["range"]
+        else:
+            model_grade = model["range"] if model and threshold_range is not None else threshold_range
+        grade, rule_applied = primary_compare.apply_full_match_rule(
+            model_grade, cmp, shared, percent=weighted["percent"] if weighted else None)   # 1.00 только при полном соответствии
         probs = model["probabilities"] if model and threshold_range is not None else None
         ranked = sorted(probs.items(), key=lambda kv: -kv[1]) if probs else []
         # две соседние оценки почти равновероятны (разница меньше 0.1): показываем вторую, чтобы эксперт решил сам
-        alternative = (float(ranked[1][0]) if len(ranked) > 1 and ranked[0][1] - ranked[1][1] < AMBIGUITY_GAP
-                       and not rule_applied else None)   # после постпроверки по порядку оценка определена правилом
+        if weighted:       # пограничный процент: вторая оценка — в сторону ближайшего порога
+            alternative = (None if rule_applied else primary_score.neighbour_grade(
+                weighted["percent"], weighted["spec"], getattr(settings, "PRIMARY_REVIEW_PERCENT_MARGIN", 2.0)))
+        else:
+            alternative = (float(ranked[1][0]) if len(ranked) > 1 and ranked[0][1] - ranked[1][1] < AMBIGUITY_GAP
+                           and not rule_applied else None)   # после постпроверки по порядку оценка определена правилом
         own = [d.kind for d in cmp.differences if d.key not in shared]       # общие для всех первичных не считаем
         reviews.append({
             "expert_id": int(row["expert_id"]),
@@ -141,7 +153,12 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
             "model_range": model_grade,
             "rule_applied": rule_applied,
             "confidence": ranked[0][1] if ranked else None,
-            "range_source": ("model" if model and threshold_range is not None else ("thresholds" if threshold_range is not None else None)),
+            "range_source": ("weighted_percent" if weighted else "model" if model and threshold_range is not None
+                             else ("thresholds" if threshold_range is not None else None)),
+            # взвешенный процент сходства и вычеты по расхождениям (отрицательный вычет — расхождение, которое обычно прощают)
+            "weighted_percent": weighted["percent"] if weighted else None,
+            "deductions": [{**d, "label": (labels or {}).get(d["key"]), "shared": d["key"] in shared}
+                           for d in weighted["deductions"]] if weighted else [],
             "probabilities": probs,
             "categories": primary_taxonomy.categorize(own, [i.code for i in issues]),
             "range_by_thresholds": threshold_range,

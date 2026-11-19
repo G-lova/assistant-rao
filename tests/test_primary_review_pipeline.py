@@ -41,7 +41,12 @@ class PrimaryReviewPipelineTests(unittest.TestCase):
         self.assertEqual(by_expert[2]["comment"], "ЭЗ соответствует требованиям")
         self.assertIn(by_expert[2]["suggested_range"], (0.0, 0.5, 0.75, 1.0))
         self.assertEqual(by_expert[2]["range_by_thresholds"], 1.0)
-        self.assertIn(by_expert[2]["range_source"], ("model", "thresholds"))
+        self.assertIn(by_expert[2]["range_source"], ("weighted_percent", "model", "thresholds"))
+        if by_expert[2]["range_source"] == "weighted_percent":      # основной способ: процент и вычеты в ответе
+            self.assertEqual(by_expert[2]["weighted_percent"], 100.0)
+            self.assertEqual(by_expert[2]["deductions"], [])
+            self.assertEqual(by_expert[1]["deductions"][0]["key"], "field2_1_2")
+            self.assertLess(by_expert[1]["weighted_percent"], 100.0)
         self.assertLessEqual(by_expert[1]["suggested_range"], 0.75)     # есть расхождение → по порядку не выше 0.75
         self.assertTrue(by_expert[1]["rule_applied"] or by_expert[1]["model_range"] < 1.0)
         self.assertEqual((by_expert[2]["match_percent"], by_expert[2]["range_by_scale"]), (100.0, 1.0))

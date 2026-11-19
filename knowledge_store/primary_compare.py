@@ -158,7 +158,7 @@ def criterion_number(key: str, labels: Dict[str, str]) -> str:
 
 
 def apply_full_match_rule(grade: Optional[float], cmp: Comparison, shared: Optional[Set[str]] = None,
-                          mode: Optional[str] = "settings") -> Tuple[Optional[float], bool]:
+                          mode: Optional[str] = "settings", percent: Optional[float] = None) -> Tuple[Optional[float], bool]:
     """Постпроверка оценки по порядку включения в Реестр: 1 балл — только при полном соответствии сводному заключению.
 
     Модель обучена на поведении оценивающих, которые на истории ставят 1.00 и при наличии отклонений (67% случаев без
@@ -172,8 +172,10 @@ def apply_full_match_rule(grade: Optional[float], cmp: Comparison, shared: Optio
         mode: ``any`` — любое расхождение; ``missfa`` — только пропуск нарушения и лишнее нарушение (1 против 2 не в счёт);
             ``missed`` — только пропуск нарушения; ``None`` — без постпроверки; ``settings`` (по умолчанию) — режим из
             ``settings.PRIMARY_REVIEW_FULL_MATCH_RULE``.
+        percent: Взвешенный процент сходства для исключения (по умолчанию — ``cmp.match_percent``).
 
-    Исключение: при ``match_percent`` выше ``PRIMARY_REVIEW_FULL_MATCH_EXEMPT_PERCENT`` оценка не снижается.
+    Исключение: если процент сходства выше ``PRIMARY_REVIEW_FULL_MATCH_EXEMPT_PERCENT``, оценка не снижается. Процент —
+    взвешенный (``percent``, :mod:`knowledge_store.primary_score`), без него — обычный ``match_percent``.
 
     Returns:
         tuple: ``(оценка, изменена_ли)``.
@@ -183,7 +185,8 @@ def apply_full_match_rule(grade: Optional[float], cmp: Comparison, shared: Optio
     if grade is None or grade < 1.0 or mode is None:
         return grade, False
     exempt = getattr(settings, "PRIMARY_REVIEW_FULL_MATCH_EXEMPT_PERCENT", None)
-    if exempt is not None and cmp.match_percent is not None and cmp.match_percent > exempt:
+    similarity = percent if percent is not None else cmp.match_percent
+    if exempt is not None and similarity is not None and similarity > exempt:
         return grade, False        # почти полное совпадение: единичные расхождения 1.00 не отменяют
     kinds = {"any": ("missed", "false_alarm", "other"), "missfa": ("missed", "false_alarm"), "missed": ("missed",)}[mode]
     if any(d.kind in kinds and d.key not in (shared or ()) for d in cmp.differences):

@@ -112,3 +112,6 @@ class FullMatchExemptionTests(unittest.TestCase):
         few = pc.compare({**{f"field2_1_{i}": 1 for i in range(1, 11)}, "field2_1_2": 0},
                                       {f"field2_1_{i}": 1 for i in range(1, 11)})    # 90%
         self.assertEqual(pc.apply_full_match_rule(1.0, few, set(), "any"), (0.75, True))
+        # переданный взвешенный процент важнее обычного match_percent
+        self.assertEqual(pc.apply_full_match_rule(1.0, few, set(), "any", percent=96.0), (1.0, False))
+        self.assertEqual(pc.apply_full_match_rule(1.0, cmp, set(), "any", percent=80.0), (0.75, True))
