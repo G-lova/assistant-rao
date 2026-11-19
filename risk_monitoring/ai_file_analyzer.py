@@ -36,7 +36,7 @@ import re
 import shutil
 import tempfile
 import time
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from configs.config import Config
 from configs.logger import get_logger
@@ -736,10 +736,13 @@ class AIFileAnalyzer:
         """Запись о времени файла в ``timing_log`` (и при прерывании пачки по времени: ``status = interrupted``)."""
         log = self.__dict__.setdefault("timing_log", [])
         snap = progress.snapshot(tm) or {}
+        ex = (((res or {}).get("ai_analysis") or {}).get("pipeline") or {}).get("extraction") or {}
         log.append({"file_id": int(row["id"]), "name": str(row.get("file_name") or "")[:80],
                     "status": (res or {}).get("status") or "interrupted",
                     "seconds": snap.get("total_sec", 0), "queue_sec": snap.get("queue_sec", 0),
-                    "steps": snap.get("steps", {}), "llm": dict(llm)})
+                    "steps": snap.get("steps", {}), "llm": dict(llm),
+                    # профиль и источник извлечения — для сравнения времени извлечения по ним (сводка прогона)
+                    "extraction": f"{ex.get('profile')}/{ex.get('source')}" if ex else None})
 
     def _timings_block(self) -> Optional[Dict[str, Any]]:
         """``pipeline.timings`` текущего файла: время с начала, ожидание очереди, самые долгие этапы, запросы к модели."""
@@ -911,6 +914,7 @@ class AIFileAnalyzer:
         if prev_ctx and prev_ctx.get("text") is not None:
             diff = version_diff.text_diff(prev_ctx["text"], text)
 
+        extraction_meta: Optional[Dict[str, Any]] = None   # откуда извлечение (pipeline.extraction), см. _extract
         if print_kind:
             mode = "print_form"
             xml_body = await self._owner_xml_body(row) if print_kind.get("group") == "contract" else None
@@ -954,16 +958,15 @@ class AIFileAnalyzer:
             if diff and prev_ctx.get("doc_id") and (diff["identical"] or diff["similarity"] >= version_diff.INCREMENTAL_SIMILARITY):
                 reuse_doc = prev_ctx["doc_id"]
             chunks = split_large_text(text, max_chunk_size=LLM_CHUNK_TOKENS) or [text]
-            extraction = await self._cached(document_id, "data_extraction",
-                                            # модель недоступна → ModelUnavailable: файл failed, повтор позже
-                                            # ни одного годного ответа (пустые, мусор) — ExtractionFailed: файл
-                                            # failed с засчитанной попыткой; последняя попытка принимает пустой
-                                            # результат, чтобы файл не остался без паспорта
-                                            lambda: self.extractor.extract_data_from_document(
-                                                chunks, file_name, raise_unavailable=True,
-                                                raise_empty=attempt < MAX_ATTEMPTS),
-                                            keep=lambda r: isinstance(r, dict) and bool(r.get("raw_data")),
-                                            fallback_doc=reuse_doc, reuse_if=_not_looping)
+            type_first = bool(getattr(settings, "RM_EXTRACTION_PROFILES", False))
+            if type_first:
+                # тип — до извлечения: от него зависит профиль полей (19.11.2026); запасной тип — по имени файла,
+                # а не по названию из извлечения
+                type_info, type_decode = await self._doc_type(document_id, chunks, file_name, None, row, None,
+                                                              fallback_doc=reuse_doc)
+            extraction, extraction_meta = await self._extract(
+                document_id, chunks, text, file_name, attempt, reuse_doc,
+                type_info["detected_type"] if type_first else None, type_decode if type_first else None)
             if isinstance(extraction, str):
                 extraction = json.loads(extraction)
             extraction = dict(extraction or {})
@@ -972,8 +975,9 @@ class AIFileAnalyzer:
                 raw_data, stale = version_diff.drop_stale_evidence(raw_data, text)
                 removed_ids += [f"сведение прошлой редакции, которого нет в новой: {x}" for x in stale]
             extraction["raw_data"] = text_quality.clean_value(raw_data)
-            type_info, type_decode = await self._doc_type(document_id, chunks, file_name, extraction, row, None,
-                                                          fallback_doc=reuse_doc)
+            if not type_first:
+                type_info, type_decode = await self._doc_type(document_id, chunks, file_name, extraction, row, None,
+                                                              fallback_doc=reuse_doc)
             summary = (extraction.get("raw_data") or {}).get("summary")
             allowed = ([] if doc_kind.no_risk_by_name(file_name) or doc_kind.is_execution_document(row)
                        else doc_kind.allowed_codes(type_info["detected_type"], None,
@@ -1059,6 +1063,8 @@ class AIFileAnalyzer:
                                            result="ocr_suspect" if quality["status"] == "suspect" else None)
         pipeline["models"] = {"extraction": self.extraction_model, "reasoning": self.model}
         pipeline["mode"] = mode
+        if extraction_meta:
+            pipeline["extraction"] = extraction_meta
         if blocks.get("meta"):
             pipeline["law_context"] = blocks["meta"]
         if getattr(self, "stats", None) is not None:
@@ -1078,6 +1084,71 @@ class AIFileAnalyzer:
         self._add_lookup(ai, file_id)
         progress.note(f"анализ готов: режим {mode}, тип {type_info.get('detected_type')}, рисков {len(ai.get('risks') or [])}")
         return await self._finalize(file_id, document_id, ai)
+
+    async def _extract(self, document_id: int, chunks: List[str], text: str, file_name: str, attempt: int,
+                       reuse_doc: Optional[int], detected_type: Optional[str] = None,
+                       type_decode: Optional[str] = None) -> Tuple[Any, Dict[str, Any]]:
+        """Извлечение данных документа (19.11.2026: профиль полей по типу, XML и платёжки — кодом).
+
+        * **Платёжное поручение**, разобранное кодом полностью, — без модели (``RM_CODE_EXTRACTION``).
+        * **Профиль полей** по типу (``RM_EXTRACTION_PROFILES``, :mod:`evaluate_documents.doc_profiles`): модель
+          заполняет только поля, уместные для типа (у допсоглашения, акта, сертификата — без НМЦК, отчётной
+          документации, места исполнения и т. п.), ответ короче. Тип известен, только если он определён до извлечения
+          (``detected_type``); иначе — полная схема, как раньше.
+        * **XML** (``RM_CODE_EXTRACTION``, :func:`code_extraction.is_flat_xml`): модели — только первые
+          ``RM_XML_MODEL_CHUNKS`` блоков (название, описание), реквизиты — кодом по тегам поверх ответа.
+
+        Кэш: версия извлечения + профиль (+ число блоков XML); результат полной схемы (прежние прогоны, прошлая
+        редакция) тоже годится — в нём больше полей.
+
+        Returns:
+            Tuple[Any, Dict[str, Any]]: Результат извлечения (как у ``DataExtractor``) и сведения для
+            ``pipeline.extraction``: ``source`` (``model`` / ``xml_code`` / ``payment_code``), ``profile``,
+            ``chunks``, ``model_chunks``.
+        """
+        from evaluate_documents import doc_profiles
+        from risk_monitoring import code_extraction
+
+        code_on = bool(getattr(settings, "RM_CODE_EXTRACTION", False))
+        meta: Dict[str, Any] = {"source": "model", "profile": "full", "chunks": len(chunks), "model_chunks": len(chunks)}
+        if code_on:
+            payment = code_extraction.payment_extraction(text, file_name)
+            if payment is not None:
+                progress.note("извлечение: платёжное поручение разобрано кодом, без модели")
+                meta.update(source="payment_code", profile="payment", model_chunks=0)
+                return payment, meta
+        profile = None
+        if detected_type and getattr(settings, "RM_EXTRACTION_PROFILES", False):
+            profile = doc_profiles.profile_for(detected_type, file_name, text[:2000])
+        hint = doc_profiles.profile_hint(profile, detected_type, type_decode or "") if profile else ""
+        is_xml = code_on and code_extraction.is_flat_xml(file_name, text)
+        parts = chunks
+        if is_xml:
+            parts = chunks[:max(0, int(getattr(settings, "RM_XML_MODEL_CHUNKS", 1)))]
+        base = self.versions["data_extraction"]
+        version = base + (f":p={profile}" if profile and profile != "full" else "") + (f":xml{len(parts)}" if is_xml else "")
+        meta.update(profile=profile or "full", model_chunks=len(parts))
+        result = None
+        if parts:
+            result = await self._cached(
+                document_id, "data_extraction",
+                # модель недоступна → ModelUnavailable: файл failed, повтор позже; ни одного годного ответа (пустые,
+                # мусор) — ExtractionFailed: файл failed с засчитанной попыткой; последняя попытка принимает пустой
+                # результат, чтобы файл не остался без паспорта. У XML реквизиты есть и без модели — без повтора
+                lambda: self.extractor.extract_data_from_document(
+                    parts, file_name, profile=profile, hint=hint, raise_unavailable=True,
+                    raise_empty=attempt < MAX_ATTEMPTS and not is_xml),
+                keep=lambda r: isinstance(r, dict) and bool(r.get("raw_data")),
+                fallback_doc=reuse_doc, reuse_if=_not_looping, version=version,
+                also_versions=(base,) if version != base else ())
+        if is_xml:
+            if isinstance(result, str):
+                result = json.loads(result)
+            result = code_extraction.xml_extraction(result if isinstance(result, dict) else None,
+                                                    code_extraction.parse_xml(text), file_name)
+            meta["source"] = "xml_code"
+            progress.note(f"извлечение XML: реквизиты кодом, модели — блоков {len(parts)} из {len(chunks)}")
+        return result, meta
 
     async def _law_blocks(self, document_id: int, fz: Any, on: Any, detected_type: Optional[str],
                           row: Dict[str, Any], embeddings_ok: bool) -> Dict[str, Any]:
@@ -1521,7 +1592,8 @@ class AIFileAnalyzer:
                       compact: Optional[Callable[[Any], Any]] = None,
                       keep: Optional[Callable[[Any], bool]] = None, version_key: Optional[str] = None,
                       version: Optional[str] = None, model: Optional[str] = None,
-                      fallback_doc: Optional[int] = None, reuse_if: Optional[Callable[[Any], bool]] = None) -> Any:
+                      fallback_doc: Optional[int] = None, reuse_if: Optional[Callable[[Any], bool]] = None,
+                      also_versions: Sequence[str] = ()) -> Any:
         """Результат анализа из кэша ``ai_document_analysis`` или новый (с сохранением).
 
         ``fallback_doc`` — документ прошлой редакции: при анализе изменений его результат (если он есть
@@ -1540,6 +1612,8 @@ class AIFileAnalyzer:
             fallback_doc: ``ai_documents.id`` прошлой редакции (анализ изменений).
             reuse_if: Условие, при котором результат из кэша годен (например, извлечение без зацикливания модели);
                 иначе анализ выполняется заново.
+            also_versions: Другие версии, чей результат тоже годится (извлечение по профилю: результат полной схемы —
+                надмножество полей), для текущего документа и прошлой редакции; сохраняется под ``version``.
 
         Returns:
             Any: Результат (``None``, если анализ не дал результата).
@@ -1552,12 +1626,20 @@ class AIFileAnalyzer:
             if cached and (reuse_if is None or reuse_if(cached["result"])):
                 progress.note(f"{title}: из кэша")
                 return cached["result"]
+            for alt in also_versions:
+                other = await self.repo.get_analysis(document_id, analysis_type, alt, model)
+                if other and (reuse_if is None or reuse_if(other["result"])):
+                    progress.note(f"{title}: из кэша (полная схема)")
+                    return other["result"]
             if cached:
                 progress.note(f"{title}: результат в кэше негоден (зацикливание модели или не тот формат) — выполняю заново")
         result = None
         stats = getattr(self, "stats", None)
         if fallback_doc and not self.recompute:
             result = await self._get_cached(fallback_doc, analysis_type, version, model)
+            for alt in also_versions:
+                if result is None:
+                    result = await self._get_cached(fallback_doc, analysis_type, alt, model)
             if result is not None and reuse_if is not None and not reuse_if(result):
                 result = None   # результат прошлой редакции негоден так же, как негодный кэш текущей
             if result is not None:

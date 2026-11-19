@@ -24,7 +24,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
-from knowledge_store import primary_review, primary_taxonomy
+from knowledge_store import primary_mention, primary_review, primary_taxonomy
 from knowledge_store.primary_review import normalize
 
 try:
@@ -232,14 +232,15 @@ def shared_keys(comparisons: Sequence[Comparison]) -> Set[str]:
 
 def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
                   issues: Optional[Sequence[primary_review.Issue]] = None, limit: int = 30,
-                  shared: Optional[Set[str]] = None, grade: Optional[float] = None) -> str:
+                  shared: Optional[Set[str]] = None, grade: Optional[float] = None,
+                  mention: Optional[Dict[str, float]] = None, mention_min: float = 0.0) -> str:
     """Собирает комментарий сводного эксперта из расхождений и объективных дефектов.
 
     Формулировки — по сути ошибки первичного эксперта («не выявлено нарушение по критерию 3.1», «неверно указано
     нарушение по критерию 2.1.5»), а не «не совпало с итоговым». Критерии названы номерами (полные названия — в
     ``differences`` ответа API). Замечания сгруппированы по категориям таксономии
-    (:mod:`knowledge_store.primary_taxonomy`): одна строка на категорию — «Пропущенные нарушения: не выявлено нарушение по
-    критерию 2.1.3.», «Фактические ошибки: неверно указано нарушение по критерию 1.29; …», «Неполнота: …».
+    (:mod:`knowledge_store.primary_taxonomy`): одна строка на категорию — «Пропуски нарушений: не выявлено нарушение по
+    критерию 2.1.3.», «Несоответствия: неверно указано нарушение по критерию 1.29; …», «Неполнота: …».
 
     Args:
         cmp: Результат :func:`compare`.
@@ -251,6 +252,10 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
         grade: Предлагаемая оценка: комментарий согласуется с ней. При 1.00 расхождения не перечисляются (по порядку это
             «полное соответствие»; на истории при оценке 1.00 комментарий в 68% случаев — шаблонная фраза), при 0.75 перед
             перечнем стоит «незначительные отклонения», при 0.50 и ниже — «существенные расхождения».
+
+        mention: ``ключ критерия → вероятность``, что сводный эксперт упомянет расхождение (:mod:`knowledge_store.primary_mention`);
+            с ``mention_min`` оставляет в комментарии только вероятные расхождения (остальные есть в ``comment_details``).
+        mention_min: Порог вероятности; ``0`` — отбора нет.
 
     Returns:
         str: Нумерованный список замечаний; при полном совпадении и отсутствии дефектов — ``POSITIVE_COMMENT``.
@@ -268,6 +273,8 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
         return (one if len(selected) == 1 else many).format(numbers_of(selected)) if selected else None
 
     own = [d for d in cmp.differences if d.key not in shared]
+    if mention and mention_min > 0:
+        own = primary_mention.select(own, mention, mention_min)     # только расхождения, которые эксперт, скорее всего, отметил бы
     # шаблоны фраз: (отбор расхождений, в единственном числе, во множественном)
     specs = (
         (lambda d: d.kind == "missed", "Не выявлено нарушение по критерию {}.", "Не выявлены нарушения по критериям: {}."),
@@ -295,11 +302,11 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
                     by_category.setdefault(code, []).append(_inline(text))
     for issue in issues or []:
         by_category.setdefault(primary_taxonomy.CODE.get(issue.code, "FORMAL"), []).append(_inline(issue.message))
-    # по одной строке на категорию: «Пропущенные нарушения: не выявлено нарушение по критерию 2.1.3.»
+    # по одной строке на категорию: «Пропуски нарушений: не выявлено нарушение по критерию 2.1.3.»
     lines: List[str] = [f"{primary_taxonomy.COMMENT_NAMES[code]}: {'; '.join(by_category[code])}."
                         for code in primary_taxonomy.COMMENT_ORDER if code in by_category]
     if lines and grade is not None and grade < 1.0 and any(
-            code in by_category for code in ("MISSED_VIOLATION", "FACTUAL", "METHODOLOGICAL", "NORMATIVE")):
+            code in by_category for code in ("MISSED_VIOLATION", "MISMATCH", "FACTUAL", "NORMATIVE")):
         lines.insert(0, "Незначительные отклонения от сводного заключения." if grade >= 0.75
                      else "Существенные расхождения со сводным заключением.")
     if not lines:

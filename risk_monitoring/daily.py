@@ -1243,6 +1243,17 @@ def file_timings_summary(records: Sequence[Dict[str, Any]], slowest: int = 10) -
                 "gate_share": round(wait / (wait + busy), 2) if wait + busy else 0.0},
         "steps_sec": {k: round(v) for k, v in sorted(steps.items(), key=lambda kv: -kv[1])[:8]},
     }
+    # извлечение по профилю / источнику (19.11.2026): файлов и секунд извлечения моделью — эффект профилей и кода
+    by_ex: Dict[str, List[float]] = {}
+    for r in recs:
+        if r.get("extraction"):
+            acc = by_ex.setdefault(r["extraction"], [0, 0.0])
+            acc[0] += 1
+            acc[1] += float((r.get("steps") or {}).get("извлечение данных: модель") or 0)
+    if by_ex:
+        out["extraction"] = {k: {"files": int(v[0]), "model_sec": round(v[1]),
+                                 "avg_sec": round(v[1] / v[0], 1) if v[0] else 0.0}
+                             for k, v in sorted(by_ex.items(), key=lambda kv: -kv[1][1])[:12]}
     top = sorted(recs, key=lambda r: -float(r.get("seconds") or 0))[:slowest]
     out["slowest"] = [{"file_id": r.get("file_id"), "name": r.get("name"), "status": r.get("status"),
                        "sec": r.get("seconds"),

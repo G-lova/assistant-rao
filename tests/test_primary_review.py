@@ -55,6 +55,13 @@ class FindTestExpertsTests(unittest.TestCase):
         self.assertEqual(got, {"7": ["profile"], "8": ["name"], "9": ["junk-name"]})
         self.assertTrue(is_placeholder("11111111111") and not is_placeholder("79161234567"))
 
+    def test_method_mismatch(self):
+        """Иной метод НМЦК — методологическая ошибка; пустое значение, одинаковый метод и отчётные документы — нет."""
+        base = {"field2_1_1": 1}
+        self.assertEqual(pr.compare_method({**base, "field2_2_2_0": 3}, {**base, "field2_2_2_0": "1"}).code, "METHOD_MISMATCH")
+        self.assertIsNone(pr.compare_method({**base, "field2_2_2_0": "1"}, {**base, "field2_2_2_0": 1}))
+        self.assertIsNone(pr.compare_method(base, {**base, "field2_2_2_0": 1}))
+
 
 if __name__ == "__main__":
     unittest.main()

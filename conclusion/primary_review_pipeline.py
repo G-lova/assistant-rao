@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from configs import settings
 from configs.logger import get_logger
-from knowledge_store import forms, primary_compare, primary_review, primary_score, primary_taxonomy
+from knowledge_store import forms, primary_compare, primary_mention, primary_review, primary_score, primary_taxonomy
 
 if TYPE_CHECKING:   # тяжёлые зависимости (aiohttp, pandas) нужны только классу загрузки, не чистой логике оценки
     from configs.http_client_manager import HTTPClientManager
@@ -116,6 +116,9 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
     shared = primary_compare.shared_keys(comparisons)      # одинаковое расхождение у всех первичных: проверить итоговое
     for row, cmp in zip(ordered, comparisons):
         issues = primary_review.review_opinion(row["data"])
+        method_issue = primary_review.compare_method(row["data"], summary["data"])   # методологическая ошибка: метод НМЦК
+        if method_issue:
+            issues.append(method_issue)
         current = row.get("current_range")
         feats = primary_compare.features(row["data"], summary["data"], cmp)
         model = primary_compare.predict_range(feats, cmp.group)
@@ -138,12 +141,16 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
         else:
             alternative = (float(ranked[1][0]) if len(ranked) > 1 and ranked[0][1] - ranked[1][1] < AMBIGUITY_GAP
                            and not rule_applied else None)   # после постпроверки по порядку оценка определена правилом
+        mention = primary_mention.probabilities(cmp.group, cmp.differences)        # вероятность упоминания критерия сводным
+        mention_min = float(primary_mention.load_model().get(cmp.group, {}).get("min_probability", 0.0)) \
+            if getattr(settings, "PRIMARY_REVIEW_MENTION_FILTER", True) else 0.0
         own = [(d.kind, d.key, d.primary) for d in cmp.differences if d.key not in shared]       # общие для всех первичных не считаем
         reviews.append({
             "expert_id": int(row["expert_id"]),
             "common": cmp.common,
             "differences": [{"key": d.key, "label": (labels or {}).get(d.key), "kind": d.kind,
-                             "primary": d.primary, "summary": d.summary, "shared": d.key in shared}
+                             "primary": d.primary, "summary": d.summary, "shared": d.key in shared,
+                             "mention_probability": mention.get(d.key)}
                             for d in cmp.differences],
             "issues": [{"code": i.code, "severity": i.severity, "message": i.message, "keys": i.keys} for i in issues],
             # обученная модель точнее порогов (на кросс-валидации 58% / 55% против 41% / 52%); без модели или при малом
@@ -164,7 +171,8 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
             "range_by_thresholds": threshold_range,
             "match_percent": cmp.match_percent,
             "range_by_scale": primary_compare.range_by_scale(cmp.match_percent),
-            "comment": primary_compare.build_comment(cmp, labels, issues, shared=shared, grade=grade),
+            "comment": primary_compare.build_comment(cmp, labels, issues, shared=shared, grade=grade,
+                                                     mention=mention, mention_min=mention_min),
             # полный перечень расхождений для справки (комментарий при оценке 1.00 их не перечисляет)
             "comment_details": primary_compare.build_comment(cmp, labels, issues, shared=shared),
             "current_range": None if _is_blank(current) else float(current),
