@@ -42,7 +42,8 @@ def load_pairs(experts_csv: str, opinions_csv: str) -> List[Tuple[str, dict, dic
             if row["range"] not in ("NULL", "") and not is_test_expert(row["expert_id"]):
                 rated[(row["expertise_id"], row["expert_id"])] = row
     out = []
-    with open(opinions_csv, encoding="utf-8", errors="replace")   # оборванный при копировании хвост файла не роняет загрузку (строка с битым JSON пропускается) as fh:
+    # errors="replace": оборванный при копировании хвост файла не роняет загрузку (строка с битым JSON пропускается)
+    with open(opinions_csv, encoding="utf-8", errors="replace") as fh:
         for row in csv.DictReader(fh):
             meta = rated.get((row["expertise_id"], row["expert_id"]))
             if not meta:
@@ -80,7 +81,8 @@ def load_compare_cases(experts_csv: str, opinions_csv: str, summary_experts: Opt
             meta[(row["expertise_id"], row["expert_id"])] = row
     rated: Dict[str, List[Tuple[dict, dict]]] = defaultdict(list)
     final: Dict[str, Tuple[str, dict]] = {}
-    with open(opinions_csv, encoding="utf-8", errors="replace")   # оборванный при копировании хвост файла не роняет загрузку (строка с битым JSON пропускается) as fh:
+    # errors="replace": оборванный при копировании хвост файла не роняет загрузку (строка с битым JSON пропускается)
+    with open(opinions_csv, encoding="utf-8", errors="replace") as fh:
         for row in csv.DictReader(fh):
             try:
                 data = json.loads(row["data"])
