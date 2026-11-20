@@ -102,7 +102,7 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
     Returns:
         dict: ``expertise_id`` не входит (добавляет вызывающий); ``summary_expert_id``, ``group``, ``shared_differences`` (критерии, по которым все первичные эксперты расходятся с итоговым одинаково — вероятно, решение сводного эксперта; в комментарии они не упоминаются и помечены ``shared`` в ``differences``) и ``reviews`` —
         по записи на первичного эксперта: ``expert_id``, ``common``, ``differences`` (по видам), ``issues``,
-        ``suggested_range`` (модель; ``None`` при малом числе общих критериев) с ``range_source`` и ``probabilities``, ``categories`` (замечания по таксономии), ``range_by_thresholds``, ``weighted_percent`` и ``deductions`` (взвешенный процент сходства и вычеты по расхождениям; по нему при ``range_source = weighted_percent`` определяется оценка), ``match_percent`` и ``range_by_scale`` (шкала аналитика), ``comment`` (согласован с оценкой), ``comment_details`` (полный перечень расхождений), ``alternative_range``, ``confidence``, ``model_range`` (до постпроверки по порядку) и ``rule_applied``, ``current_range``.
+        ``suggested_range`` (модель; ``None`` при малом числе общих критериев) с ``range_source`` и ``probabilities``, ``categories`` (замечания по таксономии), ``range_by_thresholds``, ``weighted_percent`` и ``deductions`` (взвешенный процент сходства и вычеты по расхождениям; по нему при ``range_source = weighted_percent`` определяется оценка), ``match_percent`` и ``range_by_scale`` (шкала аналитика), ``comment`` (согласован с оценкой, без нумерации; при 1.00 равен ``comment_details``), ``comment_details`` (полный перечень расхождений), ``alternative_range``, ``confidence``, ``model_range`` (до постпроверки по порядку) и ``rule_applied``, ``current_range``.
 
     Raises:
         PrimaryReviewError: 404 — первичных заключений нет; 409 — сводное заключение ещё не заполнено.
@@ -148,6 +148,7 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
         mention = primary_mention.probabilities(cmp.group, cmp.differences)        # вероятность упоминания критерия сводным
         mention_min = float(primary_mention.load_model().get(cmp.group, {}).get("min_probability", 0.0)) \
             if getattr(settings, "PRIMARY_REVIEW_MENTION_FILTER", True) else 0.0
+        details = primary_compare.build_comment(cmp, labels, issues, shared=shared)    # полный перечень расхождений
         own = [(d.kind, d.key, d.primary) for d in cmp.differences if d.key not in shared]       # общие для всех первичных не считаем
         reviews.append({
             "expert_id": int(row["expert_id"]),
@@ -175,10 +176,12 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
             "range_by_thresholds": threshold_range,
             "match_percent": cmp.match_percent,
             "range_by_scale": primary_compare.range_by_scale(cmp.match_percent),
-            "comment": primary_compare.build_comment(cmp, labels, issues, shared=shared, grade=grade,
-                                                     mention=mention, mention_min=mention_min),
-            # полный перечень расхождений для справки (комментарий при оценке 1.00 их не перечисляет)
-            "comment_details": primary_compare.build_comment(cmp, labels, issues, shared=shared),
+            # при 1.00 в комментарий идёт полный перечень расхождений (comment_details), при остальных оценках — только
+            # вероятные (отбор по mention_probability) с вводной фразой по оценке
+            "comment": details if grade == 1.0 else primary_compare.build_comment(
+                cmp, labels, issues, shared=shared, grade=grade, mention=mention, mention_min=mention_min),
+            # полный перечень расхождений (без отбора и вводной фразы)
+            "comment_details": details,
             "current_range": None if _is_blank(current) else float(current),
         })
     group = "report" if primary_review.is_report_data(summary["data"]) else "procurement"

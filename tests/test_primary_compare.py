@@ -26,11 +26,11 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(pc.build_comment(pc.compare(SUMMARY, SUMMARY)), pc.POSITIVE_COMMENT)
 
     def test_comment_follows_grade(self):
-        """1.00 — расхождения не перечисляются; 0.75 — «незначительные отклонения»; 0.50 — «существенные расхождения»."""
+        """1.00 — build_comment при grade=1.0 расхождения не перечисляет (в ответе API при 1.00 в comment кладётся полный перечень); 0.75 — «незначительные отклонения»; 0.50 — «существенные расхождения»."""
         cmp = pc.compare({**SUMMARY, "field2_1_2": 1}, SUMMARY)
         self.assertEqual(pc.build_comment(cmp, grade=1.0), pc.POSITIVE_COMMENT)
-        self.assertTrue(pc.build_comment(cmp, grade=0.75).startswith("1. Незначительные отклонения"))
-        self.assertTrue(pc.build_comment(cmp, grade=0.5).startswith("1. Существенные расхождения"))
+        self.assertTrue(pc.build_comment(cmp, grade=0.75).startswith("Незначительные отклонения"))
+        self.assertTrue(pc.build_comment(cmp, grade=0.5).startswith("Существенные расхождения"))
         self.assertIn("по критерию field2_1_2", pc.build_comment(cmp, grade=0.5))
 
     def test_comment_phrases(self):
@@ -55,18 +55,18 @@ class CompareTests(unittest.TestCase):
                       "не учтена информация, имеющаяся в документах, по критерию field2_1_1.", text)
         self.assertIn("Несоответствия: неверно указано нарушение по критерию field2_3_7.", text)
         lines = text.split("\n")          # порядок: заголовок, пропуски, несоответствия
-        self.assertEqual([l.split(":")[0][3:] for l in lines[1:]], ["Пропуски нарушений", "Несоответствия"])
+        self.assertEqual([l.split(":")[0] for l in lines[1:]], ["Пропуски нарушений", "Несоответствия"])
 
     def test_comment_groups_issues_by_category(self):
         """Объективные дефекты идут в свою категорию таксономии; категории — в порядке таксономии, после заголовка по оценке."""
         issue = primary_review.Issue("EMPTY_DOCS", primary_review.MAJOR, "не заполнен перечень документов", ["documents"])
         cmp = pc.compare({**SUMMARY, "field2_1_2": 1}, SUMMARY)
         lines = pc.build_comment(cmp, issues=[issue], grade=0.75).split("\n")
-        self.assertEqual(lines[0], "1. Незначительные отклонения от сводного заключения.")
-        self.assertTrue(lines[1].startswith("2. Пропуски нарушений: "))
-        self.assertEqual(lines[2], "3. Неполнота: не заполнен перечень документов.")
+        self.assertEqual(lines[0], "Незначительные отклонения от сводного заключения.")
+        self.assertTrue(lines[1].startswith("Пропуски нарушений: "))
+        self.assertEqual(lines[2], "Неполнота: не заполнен перечень документов.")
         # при 1.00 расхождения не перечисляются, но дефект остаётся
-        self.assertEqual(pc.build_comment(cmp, issues=[issue], grade=1.0), "1. Неполнота: не заполнен перечень документов.")
+        self.assertEqual(pc.build_comment(cmp, issues=[issue], grade=1.0), "Неполнота: не заполнен перечень документов.")
 
     def test_full_match_rule(self):
         """1.00 снижается до 0.75 при любом расхождении, кроме общих для всех первичных; режимы missfa/missed смягчают правило."""

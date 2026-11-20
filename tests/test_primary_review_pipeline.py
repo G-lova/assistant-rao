@@ -50,6 +50,9 @@ class PrimaryReviewPipelineTests(unittest.TestCase):
         self.assertLessEqual(by_expert[1]["suggested_range"], 0.75)     # есть расхождение → по порядку не выше 0.75
         self.assertTrue(by_expert[1]["rule_applied"] or by_expert[1]["model_range"] < 1.0)
         self.assertEqual((by_expert[2]["match_percent"], by_expert[2]["range_by_scale"]), (100.0, 1.0))
+        self.assertNotRegex(by_expert[1]["comment"], r"(?m)^\d+\. ")     # без нумерации
+        if by_expert[1]["suggested_range"] == 1.0:                     # при 1.00 comment содержит полный перечень расхождений
+            self.assertEqual(by_expert[1]["comment"], by_expert[1]["comment_details"])
         self.assertEqual(by_expert[1]["match_percent"], 83.3)     # 1 расхождение из 6 общих критериев
 
     def test_review_has_categories(self):
