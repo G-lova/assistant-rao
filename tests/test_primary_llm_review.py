@@ -80,6 +80,23 @@ class LlmReviewTests(unittest.TestCase):
         self.assertEqual(ev.diagnostics([{"trace": trace}]),
                          {"with_text": 1, "answers_with_findings": 1, "raw_findings": 1, "verified_findings": 0})
 
+    def test_llm_findings_flow_into_issues_and_comment(self):
+        """Замечания модели выбранных категорий становятся дефектами и попадают в «Формальные недостатки» комментария."""
+        from conclusion.primary_review_pipeline import review_expertise
+        import json
+        findings = [{"category": "FORMAL", "quote": "в то врем как предметом закупки", "explanation": "опечатка в слове «время»"},
+                    {"category": "ARGUMENTATION", "quote": "оценочное суждение", "explanation": "нет ссылок"}]
+        issues = pl.to_issues(findings, ("FORMAL",))
+        self.assertEqual([i.code for i in issues], ["LLM_FORMAL"])
+        summary = {"field2_1_1": 1, "field3": "1.1. Замечание", "field4": "Вывод"}
+        rows = [{"id": i, "expert_id": i, "data": json.dumps(summary), "updated_at": "2026-10-01", "expert_role": role,
+                 "current_range": None, "accept": None, "object": 6, "type_orig": 4, "checkType2": 1}
+                for i, role in ((1, "expert"), (9, "raoExpert"))]
+        review = review_expertise(rows, extra_issues={1: issues})["reviews"][0]
+        self.assertIn("Формальные недостатки", review["comment"])
+        self.assertIn("опечатка", review["comment"])
+        self.assertIn("FORMAL", [c["code"] for c in review["categories"]])
+
     def test_score_precision_recall(self):
         """Точность — доля найденных категорий с темой в комментарии; полнота — доля тем, которые нашла модель."""
         rows = [{"found": {"FORMAL"}, "topics": {"FORMAL"}}, {"found": {"FORMAL"}, "topics": set()},

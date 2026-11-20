@@ -21,7 +21,8 @@ CATEGORY_HINTS: Dict[str, str] = {
     "CONTRADICTION": ("Противоречия: разделы заключения противоречат друг другу (замечание есть, а вывод «соответствует»; "
                       "вывод о нарушении без замечания; утверждение в одном месте опровергается в другом)."),
     "FORMAL": ("Формальные недостатки: ошибки оформления, терминологии и структуры (опечатки, неверные термины, "
-               "нарушенная нумерация замечаний, перепутанные названия документов, не по форме)."),
+               "нарушенная нумерация замечаний, перепутанные названия документов, не по форме). Не отмечай мелочи: двойные пробелы, "
+               "отсутствие точки в конце, расстановку запятых."),
 }
 MAX_TEXT = 6000            # символов текста первичного, который видит модель
 MAX_FINDINGS = 6           # не больше замечаний на заключение
@@ -139,3 +140,14 @@ async def review(llm: Any, primary: Dict[str, Any], summary: Optional[Dict[str, 
     if trace is not None:
         trace.update({"raw": list(answer.get("findings") or []), "verified": verified})
     return verified
+
+
+def to_issues(findings: List[Dict[str, str]], categories: Optional[Any] = None) -> List[primary_review.Issue]:
+    """Замечания модели → дефекты для комментария и категорий (:class:`primary_review.Issue`, код ``LLM_<категория>``).
+
+    Args:
+        findings: Результат :func:`review`.
+        categories: Какие категории оставить (``settings.PRIMARY_REVIEW_LLM_CATEGORIES``); ``None`` — все.
+    """
+    return [primary_review.Issue(f"LLM_{f['category']}", "minor", f"«{f['quote'][:80].strip()}»: {f['explanation'][:200]}".strip(), [])
+            for f in findings if categories is None or f["category"] in categories]

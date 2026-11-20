@@ -143,8 +143,10 @@ class PrimaryReviewRequest(BaseModel):
 
     Attributes:
         expertise_id: Экспертиза, по которой сводное заключение уже заполнено.
+        with_llm: Добавить замечания модели к тексту заключений (формальные недостатки); медленнее, по умолчанию выключено.
     """
     expertise_id: int
+    with_llm: bool = False
 
 
 class ViolationsReportRequest(BaseModel):

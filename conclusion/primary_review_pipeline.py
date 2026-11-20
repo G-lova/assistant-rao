@@ -89,12 +89,15 @@ def split_opinions(rows: List[dict]) -> Dict[str, Any]:
     return {"primary": primary, "summary": summary}
 
 
-def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
+                     extra_issues: Optional[Dict[int, List[primary_review.Issue]]] = None) -> Dict[str, Any]:
     """Оценивает первичные заключения экспертизы по итоговому сводному (чистая функция, без БД).
 
     Args:
         rows: Строки :data:`SQL_OPINIONS`.
         labels: ``ключ поля → название критерия`` для комментария (необязательно).
+        extra_issues: Дополнительные дефекты по ``expert_id`` (замечания модели из :mod:`knowledge_store.primary_llm_review`);
+            попадают в ``issues``, ``categories`` и комментарий.
 
     Returns:
         dict: ``expertise_id`` не входит (добавляет вызывающий); ``summary_expert_id``, ``group``, ``shared_differences`` (критерии, по которым все первичные эксперты расходятся с итоговым одинаково — вероятно, решение сводного эксперта; в комментарии они не упоминаются и помечены ``shared`` в ``differences``) и ``reviews`` —
@@ -119,6 +122,7 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None) 
         method_issue = primary_review.compare_method(row["data"], summary["data"])   # методологическая ошибка: метод НМЦК
         if method_issue:
             issues.append(method_issue)
+        issues.extend((extra_issues or {}).get(int(row["expert_id"]), []))
         current = row.get("current_range")
         feats = primary_compare.features(row["data"], summary["data"], cmp)
         model = primary_compare.predict_range(feats, cmp.group)
@@ -232,8 +236,46 @@ class PrimaryReviewPipeline:
             logger.warning(f"Не удалось получить названия критериев: {exc}")
             return {}
 
-    async def run(self) -> Dict[str, Any]:
+    async def llm_issues(self, rows: List[dict]) -> Dict[int, List[primary_review.Issue]]:
+        """Замечания модели к тексту каждого первичного заключения (категории из ``PRIMARY_REVIEW_LLM_CATEGORIES``).
+
+        Сбой модели не прерывает оценку: по эксперту, чей вызов не удался, замечаний просто нет (предупреждение в логе).
+
+        Args:
+            rows: Строки :data:`SQL_OPINIONS`.
+
+        Returns:
+            dict: ``expert_id → [Issue]``.
+        """
+        from configs.llm_client import get_llm
+        from knowledge_store import primary_llm_review
+        from risk_monitoring.llm_json import LLMJson
+
+        parts = split_opinions(rows)
+        if not parts["summary"]:
+            return {}
+        categories = tuple(getattr(settings, "PRIMARY_REVIEW_LLM_CATEGORIES", ("FORMAL",)))
+        out: Dict[int, List[primary_review.Issue]] = {}
+        try:
+            client, model = get_llm()
+            llm = LLMJson(client, model, rate=1.0, concurrency=2)
+        except Exception as exc:  # noqa: BLE001 — без модели оценка всё равно выполняется
+            logger.warning(f"Модель недоступна, замечания к тексту пропущены: {exc}")
+            return {}
+        for row in parts["primary"]:
+            try:
+                findings = await primary_llm_review.review(llm, row["data"], parts["summary"]["data"])
+                out[int(row["expert_id"])] = primary_llm_review.to_issues(findings, categories)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"Замечания к тексту expert_id={row['expert_id']} не получены: {exc}")
+        return out
+
+    async def run(self, with_llm: bool = False) -> Dict[str, Any]:
         """Оценивает первичные заключения экспертизы.
+
+        Args:
+            with_llm: Добавить замечания модели к тексту (формальные недостатки). Замедляет ответ: по вызову модели на каждого
+                первичного эксперта; по умолчанию выключено.
 
         Returns:
             dict: Результат :func:`review_expertise` плюс ``expertise_id``.
@@ -244,6 +286,7 @@ class PrimaryReviewPipeline:
         rows = await self.fetch_rows()
         if not rows:
             raise PrimaryReviewError(404, "Заключения по экспертизе не найдены")
-        result = review_expertise(rows, await self.labels_for(rows))
+        extra = await self.llm_issues(rows) if with_llm else None
+        result = review_expertise(rows, await self.labels_for(rows), extra_issues=extra)
         logger.info(f"Оценка первичных экспертов expertise_id={self.expertise_id}: {len(result['reviews'])} заключений")
         return {"expertise_id": self.expertise_id, **result}

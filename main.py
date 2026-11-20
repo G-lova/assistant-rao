@@ -457,7 +457,7 @@ async def evaluate_primary_opinions(
     from conclusion.primary_review_pipeline import PrimaryReviewError, PrimaryReviewPipeline
 
     try:
-        return await PrimaryReviewPipeline(http_manager, request.expertise_id, x_api_database).run()
+        return await PrimaryReviewPipeline(http_manager, request.expertise_id, x_api_database).run(with_llm=request.with_llm)
     except PrimaryReviewError as e:
         raise HTTPException(status_code=e.http_status, detail=e.message)
     except Exception as e:
