@@ -23,6 +23,22 @@ from configs.utils import get_file_extension
 logger = logging.getLogger(__name__)
 
 
+def is_portal_file_url(url: str) -> bool:
+    """Ссылка портала экспертиз на файл: ``/storage/<id>/<имя>`` или ``/api/media/<id>/<имя>``.
+
+    Остальные адреса портала — страницы интерфейса (``/expertises/edit``, ``/experts/…``): файла по ним не
+    получить (страница открывается после входа и отдаёт HTML приложения).
+
+    Args:
+        url: Адрес на хосте портала.
+
+    Returns:
+        bool: ``True`` — ссылка на файл.
+    """
+    path = urlparse(url or "").path
+    return path.startswith("/storage/") or path.startswith("/api/media/")
+
+
 class CloudStorageParser(EISSoapMixin):
     """
     Парсер для извлечения документов из популярных облачных хранилищ.
@@ -802,6 +818,13 @@ class CloudStorageParser(EISSoapMixin):
         # 1. Поддерживаемые домены → специализированные парсеры
         if domain in self.supported_domains:
             parser_func = self.supported_domains[domain]
+            if parser_func == self.download_media and not is_portal_file_url(url):
+                # страница портала (…/expertises/edit и т. п.) — не файл: открывается только после входа, файла
+                # по ней не получить; раньше уходила в download_media → «Ошибка скачивания media …» с повторами
+                logger.info(f"Ссылка на страницу портала, а не на файл — пропущена: {url}")
+                return {"status": "error", "skipped": True, "original_url": url,
+                        "error": "Ссылка ведёт на страницу портала, а не на файл: приложите сам файл "
+                                 "или ссылку на него (…/storage/… или …/api/media/…)"}
             return await parser_func(url, procurement_id)
 
         # 2. Любые другие ссылки → попытка скачать напрямую
@@ -1337,8 +1360,11 @@ class CloudStorageParser(EISSoapMixin):
             EISRateLimitError: 429 (повторяется декоратором, после исчерпания попыток — наружу).
             RuntimeError: Другой ответ, кроме 200.
         """
-        if "storage" in url:
-            url = url.replace("storage", "api/media")
+        # /storage/<id>/<имя> → /api/media/<id>/<имя>: только префикс пути (раньше заменялось любое «storage»
+        # в адресе, в том числе в имени файла)
+        parts = urlparse(url)
+        if parts.path.startswith("/storage/"):
+            url = parts._replace(path="/api/media/" + parts.path[len("/storage/"):]).geturl()
         api_url = "/".join((url.split("/"))[:-1])
         filename = self._extract_filename_from_url(url)
 
