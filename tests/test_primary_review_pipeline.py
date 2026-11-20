@@ -41,7 +41,7 @@ class PrimaryReviewPipelineTests(unittest.TestCase):
         self.assertEqual(by_expert[2]["comment"], "ЭЗ соответствует требованиям")
         self.assertIn(by_expert[2]["suggested_range"], (0.0, 0.5, 0.75, 1.0))
         self.assertEqual(by_expert[2]["range_by_thresholds"], 1.0)
-        self.assertIn(by_expert[2]["range_source"], ("scale", "weighted_percent", "model", "thresholds"))
+        self.assertIn(by_expert[2]["range_source"], ("weighted_percent", "model", "thresholds"))
         if by_expert[2]["range_source"] == "weighted_percent":      # основной способ: процент и вычеты в ответе
             self.assertEqual(by_expert[2]["weighted_percent"], 100.0)
             self.assertEqual(by_expert[2]["deductions"], [])
@@ -51,10 +51,6 @@ class PrimaryReviewPipelineTests(unittest.TestCase):
         self.assertTrue(by_expert[1]["rule_applied"] or by_expert[1]["model_range"] < 1.0)
         self.assertEqual((by_expert[2]["match_percent"], by_expert[2]["range_by_scale"]), (100.0, 1.0))
         self.assertEqual(by_expert[1]["match_percent"], 83.3)     # 1 расхождение из 6 общих критериев
-        self.assertEqual((by_expert[1]["range_source"], by_expert[1]["suggested_range"]), ("scale", 0.5))   # 75 < 83,3 <= 90
-        self.assertEqual((by_expert[2]["range_source"], by_expert[2]["suggested_range"]), ("scale", 1.0))
-        self.assertEqual(by_expert[1]["alternative_range"], None)   # до границ 75 и 90 больше 2 п. п.
-        self.assertNotRegex(by_expert[1]["comment"], r"(?m)^\d+\. ")   # без нумерации
 
     def test_review_has_categories(self):
         """В ответе есть категории замечаний (общие расхождения не считаются)."""

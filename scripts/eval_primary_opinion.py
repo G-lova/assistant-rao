@@ -100,26 +100,9 @@ def load_compare_cases(experts_csv: str, opinions_csv: str, summary_experts: Opt
     return [(m, d, final[e][1]) for e, items in rated.items() if e in final for m, d in items]
 
 
-def _print_confusion(title: str, confusion: Counter, skipped: int) -> None:
-    """Печатает матрицу «предложено / реально» и точность (общая часть отчётов :func:`report_compare`)."""
-    total = sum(confusion.values())
-    print(f"\n=== {title}: {total} случаев (пропущено {skipped}: мало общих критериев)")
-    print("предложено \\ реально " + "".join(f"{g:>8}" for g in GRADES))
-    for sug in GRADES:
-        print(f"{sug:22}" + "".join(f"{confusion[(sug, g)]:8}" for g in GRADES))
-    exact = sum(c for (s, r), c in confusion.items() if s == r)
-    near = sum(c for (s, r), c in confusion.items() if abs(GRADES.index(s) - GRADES.index(r)) <= 1)
-    base = max(sum(confusion[(s, g)] for s in GRADES) for g in GRADES) / total
-    print(f"точно {exact / total:.1%} (база «самая частая оценка» {base:.1%}), в пределах ступени {near / total:.1%}")
-
-
 def report_compare(cases: List[Tuple[dict, dict, dict]]) -> None:
-    """Печатает качество предложения оценки по расхождениям с итоговым заключением.
-
-    Два отчёта: по порогам числа расхождений и по шкале процента совпадения (``PRIMARY_REVIEW_SCALE``, основной способ).
-    """
-    by_thresholds: Counter = Counter()
-    by_scale: Counter = Counter()
+    """Печатает качество предложения оценки по расхождениям с итоговым заключением."""
+    confusion: Counter = Counter()
     skipped = 0
     for meta, primary, summary in cases:
         cmp = primary_compare.compare(primary, summary)
@@ -127,11 +110,16 @@ def report_compare(cases: List[Tuple[dict, dict, dict]]) -> None:
         if suggested is None:
             skipped += 1
             continue
-        actual = f"{float(meta['range']):.2f}"
-        by_thresholds[(f"{suggested:.2f}", actual)] += 1
-        by_scale[(f"{primary_compare.range_by_scale(cmp.match_percent):.2f}", actual)] += 1
-    _print_confusion("сравнение с итоговым (пороги числа расхождений)", by_thresholds, skipped)
-    _print_confusion("сравнение с итоговым (шкала процента совпадения)", by_scale, skipped)
+        confusion[(f"{suggested:.2f}", f"{float(meta['range']):.2f}")] += 1
+    total = sum(confusion.values())
+    print(f"\n=== сравнение с итоговым: {total} случаев (пропущено {skipped}: мало общих критериев)")
+    print("предложено \\ реально " + "".join(f"{g:>8}" for g in GRADES))
+    for sug in GRADES:
+        print(f"{sug:22}" + "".join(f"{confusion[(sug, g)]:8}" for g in GRADES))
+    exact = sum(c for (s, r), c in confusion.items() if s == r)
+    near = sum(c for (s, r), c in confusion.items() if abs(GRADES.index(s) - GRADES.index(r)) <= 1)
+    base = max(sum(confusion[(s, g)] for s in GRADES) for g in GRADES) / total
+    print(f"точно {exact / total:.1%} (база «самая частая оценка» {base:.1%}), в пределах ступени {near / total:.1%}")
 
 
 def report(pairs: List[Tuple[str, dict, dict]]) -> None:
