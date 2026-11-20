@@ -33,7 +33,7 @@ except ImportError:   # модуль работает и без настроек
     settings = None
 
 DEFAULT_THRESHOLDS = {"procurement": (13, 21, 39), "report": (2, 3, 10)}
-DEFAULT_SCALE = ((25, 0.0), (50, 0.5), (75, 0.75))
+DEFAULT_SCALE = ((75, 0.0), (90, 0.5), (95, 0.75))
 DEFAULT_WEIGHTS = {"procurement": (3, 1, 1), "report": (1, 1, 1)}   # (пропуск нарушения, ложное нарушение, прочее)
 DEFAULT_MIN_COMMON = 5
 # Итоговые флаги отчётных документов (объект 7): field3_0, field4_2 …; подкритерии field3_0_3 — тоже
@@ -195,7 +195,7 @@ def apply_full_match_rule(grade: Optional[float], cmp: Comparison, shared: Optio
 
 
 def range_by_scale(percent: Optional[float]) -> Optional[float]:
-    """Оценка по шкале аналитика (``PRIMARY_REVIEW_SCALE``): 0–25% → 0, 25–50% → 0.5, 50–75% → 0.75, выше 75% → 1.
+    """Оценка по шкале процента совпадения (``PRIMARY_REVIEW_SCALE``): до 75% → 0, до 90% → 0.5, до 95% → 0.75, выше 95% → 1.
 
     Args:
         percent: Процент, например :attr:`Comparison.match_percent`; ``None`` — оценка не предлагается.
@@ -209,6 +209,32 @@ def range_by_scale(percent: Optional[float]) -> Optional[float]:
         if percent <= upper:
             return value
     return getattr(settings, "PRIMARY_REVIEW_SCALE_TOP", 1.0)
+
+
+def neighbour_by_scale(percent: Optional[float], margin: float) -> Optional[float]:
+    """Соседняя оценка шкалы, если процент отстоит от границы не больше чем на ``margin`` п. п.; иначе ``None``.
+
+    Показывает сводному эксперту, что оценка пограничная (вторая оценка — по другую сторону ближайшей границы шкалы).
+
+    Args:
+        percent: Процент совпадения (:attr:`Comparison.match_percent`).
+        margin: Ширина зоны у границы, п. п.
+
+    Returns:
+        float | None: Оценка по другую сторону ближайшей границы или ``None``.
+    """
+    if percent is None:
+        return None
+    scale = tuple(getattr(settings, "PRIMARY_REVIEW_SCALE", DEFAULT_SCALE))
+    grades = [value for _, value in scale] + [getattr(settings, "PRIMARY_REVIEW_SCALE_TOP", 1.0)]
+    idx = next((i for i, (upper, _) in enumerate(scale) if percent <= upper), len(scale))   # номер ступени процента
+    candidates = []
+    if idx > 0:                     # граница снизу: процент выше неё
+        candidates.append((percent - scale[idx - 1][0], grades[idx - 1]))
+    if idx < len(scale):            # граница сверху: до неё осталось
+        candidates.append((scale[idx][0] - percent, grades[idx + 1]))
+    gap, grade = min(candidates)
+    return grade if gap <= margin else None
 
 
 def shared_keys(comparisons: Sequence[Comparison]) -> Set[str]:
@@ -249,16 +275,16 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
         limit: Максимум номеров критериев в одной строке; остальные сводятся в «и ещё N».
         shared: Ключи расхождений, общих для всех первичных экспертов (:func:`shared_keys`): в комментарий не попадают —
             ошибкой первичного эксперта они, скорее всего, не являются.
-        grade: Предлагаемая оценка: комментарий согласуется с ней. При 1.00 расхождения не перечисляются (по порядку это
-            «полное соответствие»; на истории при оценке 1.00 комментарий в 68% случаев — шаблонная фраза), при 0.75 перед
-            перечнем стоит «незначительные отклонения», при 0.50 и ниже — «существенные расхождения».
+        grade: Предлагаемая оценка: комментарий согласуется с ней. При 1.00 расхождения перечисляются так же, как при
+            остальных оценках, но без вводной фразы; при 0.75 перед перечнем стоит «незначительные отклонения», при 0.50 и
+            ниже — «существенные расхождения».
 
         mention: ``ключ критерия → вероятность``, что сводный эксперт упомянет расхождение (:mod:`knowledge_store.primary_mention`);
             с ``mention_min`` оставляет в комментарии только вероятные расхождения (остальные есть в ``comment_details``).
         mention_min: Порог вероятности; ``0`` — отбора нет.
 
     Returns:
-        str: Нумерованный список замечаний; при полном совпадении и отсутствии дефектов — ``POSITIVE_COMMENT``.
+        str: Замечания по одному в строке (без нумерации); при полном совпадении и отсутствии дефектов — ``POSITIVE_COMMENT``.
     """
     labels = labels or {}
     shared = shared or set()
@@ -293,13 +319,12 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
          "Неверно отмечено «в наличии» по критериям: {} (требование не предусмотрено)."),
     )
     by_category: Dict[str, List[str]] = {}          # код категории таксономии → фразы без заглавной буквы и точки
-    if grade is None or grade < 1.0:                # оценка 1.00: расхождения остаются в differences, но в комментарий не идут
-        for select, one, many in specs:
-            for code in primary_taxonomy.COMMENT_ORDER:   # категория расхождения зависит от вида и раздела формы
-                text = phrase([d for d in own if select(d) and
-                               primary_taxonomy.difference_category(d.kind, d.key, cmp.group, d.primary) == code], one, many)
-                if text:
-                    by_category.setdefault(code, []).append(_inline(text))
+    for select, one, many in specs:                 # расхождения перечисляются при любой оценке, в том числе 1.00
+        for code in primary_taxonomy.COMMENT_ORDER:   # категория расхождения зависит от вида и раздела формы
+            text = phrase([d for d in own if select(d) and
+                           primary_taxonomy.difference_category(d.kind, d.key, cmp.group, d.primary) == code], one, many)
+            if text:
+                by_category.setdefault(code, []).append(_inline(text))
     for issue in issues or []:
         by_category.setdefault(primary_taxonomy.CODE.get(issue.code, "FORMAL"), []).append(_inline(issue.message))
     # по одной строке на категорию: «Пропуски нарушений: не выявлено нарушение по критерию 2.1.3.»
@@ -311,7 +336,7 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
                      else "Существенные расхождения со сводным заключением.")
     if not lines:
         return POSITIVE_COMMENT
-    return "\n".join(f"{n}. {text}" for n, text in enumerate(lines, start=1))
+    return "\n".join(lines)
 
 
 def _inline(text: str) -> str:

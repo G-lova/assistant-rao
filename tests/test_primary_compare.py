@@ -26,11 +26,12 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(pc.build_comment(pc.compare(SUMMARY, SUMMARY)), pc.POSITIVE_COMMENT)
 
     def test_comment_follows_grade(self):
-        """1.00 — расхождения не перечисляются; 0.75 — «незначительные отклонения»; 0.50 — «существенные расхождения»."""
+        """1.00 — расхождения перечисляются без вводной фразы; 0.75 — «незначительные отклонения»; 0.50 — «существенные расхождения»; без нумерации."""
         cmp = pc.compare({**SUMMARY, "field2_1_2": 1}, SUMMARY)
-        self.assertEqual(pc.build_comment(cmp, grade=1.0), pc.POSITIVE_COMMENT)
-        self.assertTrue(pc.build_comment(cmp, grade=0.75).startswith("1. Незначительные отклонения"))
-        self.assertTrue(pc.build_comment(cmp, grade=0.5).startswith("1. Существенные расхождения"))
+        self.assertEqual(pc.build_comment(cmp, grade=1.0), "Пропуски нарушений: не выявлено нарушение по критерию field2_1_2.")
+        self.assertEqual(pc.build_comment(pc.compare(SUMMARY, SUMMARY), grade=1.0), pc.POSITIVE_COMMENT)
+        self.assertTrue(pc.build_comment(cmp, grade=0.75).startswith("Незначительные отклонения"))
+        self.assertTrue(pc.build_comment(cmp, grade=0.5).startswith("Существенные расхождения"))
         self.assertIn("по критерию field2_1_2", pc.build_comment(cmp, grade=0.5))
 
     def test_comment_phrases(self):
@@ -55,18 +56,18 @@ class CompareTests(unittest.TestCase):
                       "не учтена информация, имеющаяся в документах, по критерию field2_1_1.", text)
         self.assertIn("Несоответствия: неверно указано нарушение по критерию field2_3_7.", text)
         lines = text.split("\n")          # порядок: заголовок, пропуски, несоответствия
-        self.assertEqual([l.split(":")[0][3:] for l in lines[1:]], ["Пропуски нарушений", "Несоответствия"])
+        self.assertEqual([l.split(":")[0] for l in lines[1:]], ["Пропуски нарушений", "Несоответствия"])
 
     def test_comment_groups_issues_by_category(self):
         """Объективные дефекты идут в свою категорию таксономии; категории — в порядке таксономии, после заголовка по оценке."""
         issue = primary_review.Issue("EMPTY_DOCS", primary_review.MAJOR, "не заполнен перечень документов", ["documents"])
         cmp = pc.compare({**SUMMARY, "field2_1_2": 1}, SUMMARY)
         lines = pc.build_comment(cmp, issues=[issue], grade=0.75).split("\n")
-        self.assertEqual(lines[0], "1. Незначительные отклонения от сводного заключения.")
-        self.assertTrue(lines[1].startswith("2. Пропуски нарушений: "))
-        self.assertEqual(lines[2], "3. Неполнота: не заполнен перечень документов.")
-        # при 1.00 расхождения не перечисляются, но дефект остаётся
-        self.assertEqual(pc.build_comment(cmp, issues=[issue], grade=1.0), "1. Неполнота: не заполнен перечень документов.")
+        self.assertEqual(lines[0], "Незначительные отклонения от сводного заключения.")
+        self.assertTrue(lines[1].startswith("Пропуски нарушений: "))
+        self.assertEqual(lines[2], "Неполнота: не заполнен перечень документов.")
+        # при 1.00 расхождения перечисляются так же (без вводной фразы), дефект остаётся
+        self.assertEqual(pc.build_comment(cmp, issues=[issue], grade=1.0).split("\n")[-1], "Неполнота: не заполнен перечень документов.")
 
     def test_full_match_rule(self):
         """1.00 снижается до 0.75 при любом расхождении, кроме общих для всех первичных; режимы missfa/missed смягчают правило."""
@@ -90,9 +91,17 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(pc.suggest_range(pc.Comparison(common=50), (7, 10, 22)), 1.0)
 
     def test_scale_by_analyst(self):
-        """Шкала аналитика: 0–25% → 0, 25–50% → 0.5, 50–75% → 0.75, выше 75% → 1; границы включаются в нижний диапазон."""
-        got = [pc.range_by_scale(p) for p in (0, 25, 25.1, 50, 75, 75.1, 100, None)]
-        self.assertEqual(got, [0.0, 0.0, 0.5, 0.5, 0.75, 1.0, 1.0, None])
+        """Шкала 75/90/95: до 75% → 0, до 90% → 0.5, до 95% → 0.75, выше 95% → 1; границы включаются в нижний диапазон."""
+        got = [pc.range_by_scale(p) for p in (0, 75, 75.1, 90, 90.1, 95, 95.1, 100, None)]
+        self.assertEqual(got, [0.0, 0.0, 0.5, 0.5, 0.75, 0.75, 1.0, 1.0, None])
+
+    def test_neighbour_by_scale(self):
+        """Вторая оценка — по другую сторону ближайшей границы, если до неё не больше margin п. п."""
+        self.assertEqual(pc.neighbour_by_scale(94.0, 2.0), 1.0)       # до границы 95 — 1 п. п.
+        self.assertEqual(pc.neighbour_by_scale(96.5, 2.0), 0.75)      # выше границы 95 на 1,5 п. п.
+        self.assertIsNone(pc.neighbour_by_scale(100.0, 2.0))
+        self.assertEqual(pc.neighbour_by_scale(76.0, 2.0), 0.0)
+        self.assertIsNone(pc.neighbour_by_scale(None, 2.0))
 
     def test_model_prediction(self):
         """Вывод на чистом Python: вероятности в сумме дают 1, класс — с наибольшей вероятностью; без модели группы — None."""
