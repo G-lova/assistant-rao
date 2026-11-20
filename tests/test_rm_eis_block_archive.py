@@ -180,3 +180,77 @@ class ArchiveTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SafeExtractTest(unittest.TestCase):
+    """``FileReader.extract_archive``: длинные имена, «..», cp866 в zip (прод, 20.11.2026: Errno 36)."""
+
+    LONG = ("33. Аппаратно-программный комплекс с технологиями искусственного интеллекта для отработки навыков "
+            "проведения медицинской консультации с виртуальным пациентом.pdf")
+
+    def module(self):
+        from tests.stubs import stubbed_import
+
+        with stubbed_import("configs.file_reader") as module:
+            return module
+
+    def test_long_name_shortened_and_read(self):
+        module = self.module()
+        r = module.FileReader.__new__(module.FileReader)
+        r.archive_limits = None
+        seen = []
+
+        async def read_file(path, original_filename=None):
+            seen.append((os.path.basename(path), original_filename))
+            return "текст"
+
+        r.read_file = read_file
+        path = os.path.join(tempfile.mkdtemp(), "a.zip")
+        with zipfile.ZipFile(path, "w") as zf:
+            zf.writestr("Документы/" + self.LONG, b"%PDF")
+            zf.writestr("Документы/ТЗ.docx", b"x")
+        self.assertGreater(len(self.LONG.encode("utf-8")), 255)
+        text = asyncio.run(r.process_archive(path, ".zip"))
+        saved = dict(seen)
+        short = next(n for n in saved if n.startswith("33."))
+        self.assertLessEqual(len(short.encode("utf-8")), 240)
+        self.assertTrue(short.endswith(".pdf"))
+        self.assertEqual(saved[short], "Документы/" + self.LONG)        # в тексте — исходное имя
+        self.assertIn("=== Документы/" + self.LONG + " ===", text)
+
+    def test_traversal_and_collisions(self):
+        module = self.module()
+        out = tempfile.mkdtemp()
+        self.assertEqual(module.safe_member_path("../../etc/passwd", out), os.path.join("etc", "passwd"))
+        self.assertEqual(module.safe_member_path("/abs/a.txt", out), os.path.join("abs", "a.txt"))
+        self.assertEqual(module.safe_member_path("..", out), "")
+        a = module.safe_member_path("x/" + self.LONG, out)
+        os.makedirs(os.path.join(out, "x"))
+        open(os.path.join(out, a), "w").close()
+        b = module.safe_member_path("x/" + self.LONG, out)
+        self.assertNotEqual(a, b)
+
+    def test_zip_cp866_and_tar(self):
+        import tarfile
+
+        module = self.module()
+        r = module.FileReader.__new__(module.FileReader)
+        d = tempfile.mkdtemp()
+        zpath = os.path.join(d, "w.zip")
+        # имя в cp866 без флага UTF-8, как пишет Windows: ASCII-имя той же длины, затем байты имени подменяются
+        cp866 = "ТЗ.docx".encode("cp866")
+        with zipfile.ZipFile(zpath, "w") as zf:
+            zf.writestr("TZ.docx", b"x")
+        raw = open(zpath, "rb").read().replace(b"TZ.docx", cp866)
+        open(zpath, "wb").write(raw)
+        out = tempfile.mkdtemp()
+        asyncio.run(r.extract_archive(zpath, ".zip", out))
+        self.assertEqual(os.listdir(out), ["ТЗ.docx"])
+        tpath = os.path.join(d, "t.tar")
+        src = os.path.join(d, "f.txt")
+        open(src, "w").write("x")
+        with tarfile.open(tpath, "w") as tf:
+            tf.add(src, arcname="../evil.txt")
+        out = tempfile.mkdtemp()
+        asyncio.run(r.extract_archive(tpath, ".tar", out))
+        self.assertEqual(os.listdir(out), ["evil.txt"])                   # не выше каталога распаковки

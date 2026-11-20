@@ -282,6 +282,65 @@ _TABLE_EXT = {".xlsx", ".xls", ".csv"}
 _IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tif", ".tiff"}
 
 
+# Предел длины одной части пути в байтах UTF-8 (NAME_MAX 255 у ext4/overlayfs, с запасом)
+_MEMBER_NAME_BYTES = 240
+
+
+def zip_name(name: str) -> str:
+    """Имя члена zip без флага UTF-8: zipfile декодирует его как cp437; архивы из Windows пишут cp866.
+
+    Args:
+        name: Имя от zipfile.
+
+    Returns:
+        str: Имя в cp866, если оно так перекодируется, иначе исходное.
+    """
+    try:
+        return name.encode("cp437").decode("cp866")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return name
+
+
+def _short_part(part: str) -> str:
+    """Часть пути не длиннее ``_MEMBER_NAME_BYTES`` байт: начало имени + ``~хеш`` + расширение."""
+    if len(part.encode("utf-8")) <= _MEMBER_NAME_BYTES:
+        return part
+    import hashlib
+
+    stem, ext = os.path.splitext(part)
+    if len(ext.encode("utf-8")) > 16:   # «расширение» из длинного хвоста после точки — не расширение
+        stem, ext = part, ""
+    tag = "~" + hashlib.sha1(part.encode("utf-8")).hexdigest()[:8]
+    room = _MEMBER_NAME_BYTES - len(tag.encode("utf-8")) - len(ext.encode("utf-8"))
+    stem = stem.encode("utf-8")[:room].decode("utf-8", errors="ignore").rstrip(" .")
+    return f"{stem}{tag}{ext}"
+
+
+def safe_member_path(name: str, output_dir: str) -> str:
+    """Безопасный относительный путь члена архива: без «..», абсолютных путей и слишком длинных частей.
+
+    Совпадения после сокращения различаются суффиксом ``(2)``, ``(3)`` …
+
+    Args:
+        name: Имя члена в архиве.
+        output_dir: Каталог распаковки (проверка, что файл с таким именем ещё не записан).
+
+    Returns:
+        str: Относительный путь (пусто — имя без пригодных частей).
+    """
+    parts = [p for p in re.split(r"[\\/]+", name or "") if p not in ("", ".", "..")]
+    parts = [_short_part(p) for p in parts]
+    if not parts:
+        return ""
+    rel = os.path.join(*parts)
+    stem, ext = os.path.splitext(rel)
+    n = 2
+    while os.path.exists(os.path.join(output_dir, rel)):
+        rel = f"{stem}({n}){ext}"
+        n += 1
+    return rel
+
+
 def is_archive_junk(relative_name: str) -> bool:
     """Служебный файл архива: ``~$*.docx`` (файл-владелец открытого документа Word, 162 байта — LibreOffice и
     python-docx его не открывают), ``._*`` и ``__MACOSX`` (macOS), ``Thumbs.db``, ``.DS_Store``, ``desktop.ini``."""
@@ -739,20 +798,52 @@ class FileReader:
             raise ValueError(f"Ошибка обработки DOCX: {str(e)}")
         
 
-    async def extract_archive(self, archive_path: str, ext: str, output_dir: str):
+    async def extract_archive(self, archive_path: str, ext: str, output_dir: str) -> Dict[str, str]:
+        """Извлекает архив любого поддерживаемого типа.
+
+        zip, rar и tar распаковываются по одному файлу с безопасными именами (:func:`safe_member_path`): имя длиннее
+        предела файловой системы (255 байт; кириллица — 2 байта на символ) сокращается — 20.11.2026 архив
+        с файлом «33. Аппаратно-программный комплекс … с виртуальным пациентом.pdf» не читался целиком (Errno 36);
+        пути с «..» и абсолютные не выходят за ``output_dir``; русские имена zip без флага UTF-8 — в cp866.
+
+        Args:
+            archive_path: Путь к архиву.
+            ext: Расширение архива.
+            output_dir: Каталог распаковки.
+
+        Returns:
+            Dict[str, str]: Сохранённое имя (относительно ``output_dir``) → исходное имя в архиве, для файлов,
+            имя которых пришлось изменить.
         """
-        Извлекает архив любого поддерживаемого типа.
-        """
+        renamed: Dict[str, str] = {}
+
+        def _save(name: str, open_member) -> None:
+            """Записывает член архива под безопасным именем."""
+            rel = safe_member_path(name, output_dir)
+            if not rel:
+                return
+            dst = os.path.join(output_dir, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with open_member() as src, open(dst, "wb") as out:
+                shutil.copyfileobj(src, out)
+            original = name.replace("\\", "/").lstrip("/")
+            if rel.replace(os.sep, "/") != original:
+                renamed[rel] = original
 
         def _extract():
 
             if ext == ".zip":
                 with zipfile.ZipFile(archive_path) as archive:
-                    archive.extractall(output_dir)
+                    for info in archive.infolist():
+                        if not info.is_dir():
+                            name = info.filename if info.flag_bits & 0x800 else zip_name(info.filename)
+                            _save(name, lambda i=info: archive.open(i))
 
             elif ext == ".rar":
                 with rarfile.RarFile(archive_path) as archive:
-                    archive.extractall(output_dir)
+                    for info in archive.infolist():
+                        if not info.is_dir():
+                            _save(info.filename, lambda i=info: archive.open(i))
 
             elif ext == ".7z":
                 with py7zr.SevenZipFile(archive_path, "r") as archive:
@@ -768,7 +859,9 @@ class FileReader:
                 ".txz",
             ]:
                 with tarfile.open(archive_path, "r:*") as archive:
-                    archive.extractall(output_dir)
+                    for member in archive.getmembers():
+                        if member.isfile():
+                            _save(member.name, lambda m=member: archive.extractfile(m))
 
             elif ext == ".gz":
                 filename = os.path.basename(archive_path[:-3])
@@ -803,6 +896,7 @@ class FileReader:
                 raise ValueError(f"Архив {ext} не поддерживается")
 
         await asyncio.to_thread(_extract)
+        return renamed
 
 
     async def process_archive(self, file_path: str, ext: str) -> str:
@@ -838,7 +932,7 @@ class FileReader:
         limits = self.archive_limits
         with tempfile.TemporaryDirectory() as tmpdir:
 
-            await self.extract_archive(file_path, ext, tmpdir)
+            renamed = await self.extract_archive(file_path, ext, tmpdir) or {}
 
             entries = []   # (полный путь, имя внутри архива)
             skipped_junk = 0
@@ -846,6 +940,7 @@ class FileReader:
                 for filename in files:
                     full_path = os.path.join(root, filename)
                     relative_name = os.path.relpath(full_path, tmpdir)
+                    relative_name = renamed.get(relative_name, relative_name)   # исходное имя, если сокращено
                     if is_archive_junk(relative_name):
                         skipped_junk += 1
                         continue

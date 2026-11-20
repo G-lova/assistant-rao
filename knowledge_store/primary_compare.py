@@ -258,7 +258,7 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
         mention_min: Порог вероятности; ``0`` — отбора нет.
 
     Returns:
-        str: Нумерованный список замечаний; при полном совпадении и отсутствии дефектов — ``POSITIVE_COMMENT``.
+        str: Замечания по одному в строке, без нумерации; при полном совпадении и отсутствии дефектов — ``POSITIVE_COMMENT``.
     """
     labels = labels or {}
     shared = shared or set()
@@ -311,7 +311,7 @@ def build_comment(cmp: Comparison, labels: Optional[Dict[str, str]] = None,
                      else "Существенные расхождения со сводным заключением.")
     if not lines:
         return POSITIVE_COMMENT
-    return "\n".join(f"{n}. {text}" for n, text in enumerate(lines, start=1))
+    return "\n".join(lines)
 
 
 def _inline(text: str) -> str:
