@@ -257,7 +257,7 @@ class SafeExtractTest(unittest.TestCase):
 
 
 class NotTextAndOcrLimitTest(unittest.TestCase):
-    """Прод, 21.11.2026: архив чертежей «РД (КЖ …).rar» (.dwg, .dwl, .tmp) и сканы в «ПСД (Раздел 9-10).zip» (837 с)."""
+    """Прод, 21.11.2026: архив чертежей «РД (КЖ …).rar» (.dwg, .dwl, .tmp)."""
 
     def module(self):
         from tests.stubs import stubbed_import
@@ -287,33 +287,3 @@ class NotTextAndOcrLimitTest(unittest.TestCase):
         self.assertIn("лл. 1-3 Общие данные.dwg", text)
         self.assertTrue(module.is_readable_name("а.docx"))
         self.assertFalse(module.is_readable_name("а.dwg"))
-
-    def test_ocr_page_limit(self):
-        module = self.module()
-        r = module.FileReader.__new__(module.FileReader)
-        r.semaphore = asyncio.Semaphore(4)
-        r.max_ocr_pages = 3
-        ocr = []
-
-        async def ocr_image(path, name):
-            ocr.append(path)
-            return "распознано"
-
-        r.ocr_processor = types.SimpleNamespace(ocr_image_with_qwen_vl=ocr_image)
-        with mock.patch.object(module, "pdf_layer_pages", return_value=[]), \
-                mock.patch.object(module, "pdf_page_count", return_value=10), \
-                mock.patch.object(module, "pdf_text_layer_enabled", return_value=True), \
-                mock.patch.object(module, "convert_from_path",
-                                  side_effect=lambda *a, **k: [os.path.join(k["output_folder"], "p.jpg")]):
-            text = asyncio.run(r.read_pdf_file("/tmp/скан.pdf", "скан.pdf"))
-        self.assertEqual(len(ocr), 3)
-        self.assertEqual(text.count("предел OCR 3"), 7)
-        r.max_ocr_pages = None   # экспертиза — все страницы
-        ocr.clear()
-        with mock.patch.object(module, "pdf_layer_pages", return_value=[]), \
-                mock.patch.object(module, "pdf_page_count", return_value=10), \
-                mock.patch.object(module, "pdf_text_layer_enabled", return_value=True), \
-                mock.patch.object(module, "convert_from_path",
-                                  side_effect=lambda *a, **k: [os.path.join(k["output_folder"], "p.jpg")]):
-            asyncio.run(r.read_pdf_file("/tmp/скан.pdf", "скан.pdf"))
-        self.assertEqual(len(ocr), 10)

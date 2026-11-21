@@ -436,9 +436,6 @@ RM_ARCHIVE_MAX_FILES = 40
 RM_ARCHIVE_MAX_IMAGES = 10
 RM_ARCHIVE_MAX_CHARS = 300_000
 RM_ARCHIVE_CONCURRENCY = 4
-# Страниц одного PDF на OCR в РМ (FileReader.max_ocr_pages): 21.11.2026 «ПСД (Раздел 9-10).zip» (сканы) читался
-# 837 с; остальные страницы — «[не распознана — предел OCR]». Экспертиза распознаёт все страницы
-RM_OCR_MAX_PAGES = 40
 RM_EVENT_CONCURRENCY = 3
 RM_RISK_LLM_CONCURRENCY = 3
 RM_RISK_LLM_RATE = 1.5          # запросов в секунду на экземпляр риск-анализа

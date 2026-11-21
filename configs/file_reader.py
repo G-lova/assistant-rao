@@ -383,9 +383,6 @@ class FileReader:
         # Пределы чтения архива (process_archive): None — архив читается целиком (экспертиза); риск-мониторинг
         # задаёт словарь max_files / max_images / max_chars / concurrency (settings.RM_ARCHIVE_*)
         self.archive_limits: Optional[Dict[str, int]] = None
-        # Предел страниц PDF на OCR (read_pdf): None — все страницы без текстового слоя (экспертиза);
-        # риск-мониторинг задаёт settings.RM_OCR_MAX_PAGES
-        self.max_ocr_pages: Optional[int] = None
 
         self.semaphore = asyncio.Semaphore(3)
         self.rate_limiter = llm_rate_limiter()  # общий на процесс лимит частоты запросов к модели
@@ -602,15 +599,6 @@ class FileReader:
                 # файл повреждён или обрезан — повторное чтение того же файла ничего не даст
                 raise BrokenFile("не удалось определить число страниц — PDF повреждён или обрезан")
             need_ocr = [i for i in range(total) if i >= len(layer) or not layer[i][1]]
-            limit = getattr(self, "max_ocr_pages", None)
-            over_limit = set()
-            if limit and len(need_ocr) > limit:
-                # скан на сотни страниц в РМ: 21.11.2026 «ПСД (Раздел 9-10).zip» читался 837 с — распознаются
-                # первые страницы (реквизиты, предмет, сроки), остальные помечаются
-                over_limit = set(need_ocr[limit:])
-                need_ocr = need_ocr[:limit]
-                logger.info(f"PDF {original_filename}: на OCR {len(need_ocr) + len(over_limit)} страниц — "
-                            f"распознаются первые {limit} (предел OCR)")
 
             ocr_texts: dict = {}
             if need_ocr:
@@ -621,17 +609,14 @@ class FileReader:
 
             results = []
             for i in range(total):
-                if i in over_limit:
-                    results.append(f"Page {i+1}:\nСтраница {i+1}: [не распознана — предел OCR {limit} страниц]")
-                elif i not in ocr_texts:
+                if i not in ocr_texts:
                     results.append(f"Page {i+1}:\nСтраница {i+1}: {layer[i][0].strip()}")
                 elif isinstance(ocr_texts[i], Exception):
                     results.append(f"Страница {i+1} (OCR): [Ошибка: {ocr_texts[i]}]")
                 else:
                     results.append(f'Page {i+1}:\n{ocr_texts[i]}')
-            logger.info(f"PDF {original_filename}: страниц {total}, текстовый слой "
-                        f"{total - len(need_ocr) - len(over_limit)}, OCR {len(need_ocr)}"
-                        + (f", не распознано по пределу {len(over_limit)}" if over_limit else ""))
+            logger.info(f"PDF {original_filename}: страниц {total}, текстовый слой {total - len(need_ocr)}, "
+                        f"OCR {len(need_ocr)}")
 
             result = "\n\n".join(results)
             return result.strip() if result.strip() else "[Нет читаемого текста]"
