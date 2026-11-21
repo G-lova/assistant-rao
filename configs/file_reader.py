@@ -386,8 +386,6 @@ class FileReader:
         # Предел страниц PDF на OCR (read_pdf): None — все страницы без текстового слоя (экспертиза);
         # риск-мониторинг задаёт settings.RM_OCR_MAX_PAGES
         self.max_ocr_pages: Optional[int] = None
-        # из них — последние страницы (подписи, печати, реквизиты сторон в конце документа)
-        self.ocr_tail_pages: int = 0
 
         self.semaphore = asyncio.Semaphore(3)
         self.rate_limiter = llm_rate_limiter()  # общий на процесс лимит частоты запросов к модели
@@ -607,16 +605,12 @@ class FileReader:
             limit = getattr(self, "max_ocr_pages", None)
             over_limit = set()
             if limit and len(need_ocr) > limit:
-                # скан на сотни страниц в РМ: 21.11.2026 «ПСД (Раздел 9-10).zip» читался 837 с. Распознаются
-                # начало (предмет, цена, сроки) и конец документа (подписи, печати, реквизиты сторон) — середина
-                # помечается
-                tail = min(max(0, int(getattr(self, "ocr_tail_pages", 0) or 0)), limit)
-                head = limit - tail
-                keep = need_ocr[:head] + (need_ocr[-tail:] if tail else [])
-                over_limit = set(need_ocr) - set(keep)
-                need_ocr = keep
+                # скан на сотни страниц в РМ: 21.11.2026 «ПСД (Раздел 9-10).zip» читался 837 с — распознаются
+                # первые страницы (реквизиты, предмет, сроки), остальные помечаются
+                over_limit = set(need_ocr[limit:])
+                need_ocr = need_ocr[:limit]
                 logger.info(f"PDF {original_filename}: на OCR {len(need_ocr) + len(over_limit)} страниц — "
-                            f"распознаются первые {head} и последние {tail} (предел OCR)")
+                            f"распознаются первые {limit} (предел OCR)")
 
             ocr_texts: dict = {}
             if need_ocr:

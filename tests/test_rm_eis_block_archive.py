@@ -293,7 +293,6 @@ class NotTextAndOcrLimitTest(unittest.TestCase):
         r = module.FileReader.__new__(module.FileReader)
         r.semaphore = asyncio.Semaphore(4)
         r.max_ocr_pages = 3
-        r.ocr_tail_pages = 0
         ocr = []
 
         async def ocr_image(path, name):
@@ -309,19 +308,6 @@ class NotTextAndOcrLimitTest(unittest.TestCase):
             text = asyncio.run(r.read_pdf_file("/tmp/скан.pdf", "скан.pdf"))
         self.assertEqual(len(ocr), 3)
         self.assertEqual(text.count("предел OCR 3"), 7)
-        self.assertIn("Страница 4: [не распознана", text)
-        r.ocr_tail_pages = 1   # первые 2 и последняя (подписи, реквизиты)
-        ocr.clear()
-        with mock.patch.object(module, "pdf_layer_pages", return_value=[]), \
-                mock.patch.object(module, "pdf_page_count", return_value=10), \
-                mock.patch.object(module, "pdf_text_layer_enabled", return_value=True), \
-                mock.patch.object(module, "convert_from_path",
-                                  side_effect=lambda *a, **k: [os.path.join(k["output_folder"], "p.jpg")]):
-            text = asyncio.run(r.read_pdf_file("/tmp/скан.pdf", "скан.pdf"))
-        self.assertEqual(len(ocr), 3)
-        self.assertIn("Страница 10 (OCR): распознано", text)
-        self.assertIn("Страница 3: [не распознана", text)
-        self.assertNotIn("Страница 2: [не распознана", text)
         r.max_ocr_pages = None   # экспертиза — все страницы
         ocr.clear()
         with mock.patch.object(module, "pdf_layer_pages", return_value=[]), \
