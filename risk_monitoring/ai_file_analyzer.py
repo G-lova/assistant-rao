@@ -328,6 +328,7 @@ class AIFileAnalyzer:
             "max_chars": int(getattr(settings, "RM_ARCHIVE_MAX_CHARS", 300_000)),
             "concurrency": int(getattr(settings, "RM_ARCHIVE_CONCURRENCY", 4)),
         }
+        self.file_reader.max_ocr_pages = int(getattr(settings, "RM_OCR_MAX_PAGES", 40)) or None
         self.type_detector = TypeDetector(ex_client, self.extraction_model)
         self.extractor = DataExtractor(ex_client, self.extraction_model)
         self.profiler = DocumentProfiler(r_client, self.model)
