@@ -350,6 +350,19 @@ def is_archive_junk(relative_name: str) -> bool:
             or "__MACOSX" in parts)
 
 
+# Расширения, которые читает read_file (остальные дают лишь строку «Бинарный файл …»)
+_READABLE_EXT = {".txt", ".csv", ".json", ".pdf", ".xlsx", ".xls", ".pptx", ".doc", ".docx", ".odt", ".rtf",
+                 ".html", ".xml", ".sig", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff",
+                 ".zip", ".rar", ".7z", ".tar", ".tgz", ".tbz2", ".txz", ".gz", ".bz2", ".xz", ".bin"}
+
+
+def is_readable_name(relative_name: str) -> bool:
+    """Файл архива стоит читать: формат, который понимает ``read_file``, или без расширения (определяется по
+    содержимому). Чертежи (``.dwg``, ``.dwl``), временные ``.tmp`` и пр. — нет (21.11.2026, архив «РД (КЖ …).rar»)."""
+    ext = os.path.splitext(relative_name or "")[1].lower()
+    return not ext or ext in _READABLE_EXT
+
+
 def archive_entry_rank(relative_name: str) -> int:
     """Очередь чтения файла архива при пределах: документы, таблицы, прочее (вложенные архивы …), картинки."""
     ext = os.path.splitext(relative_name or "")[1].lower()
@@ -935,6 +948,7 @@ class FileReader:
             renamed = await self.extract_archive(file_path, ext, tmpdir) or {}
 
             entries = []   # (полный путь, имя внутри архива)
+            not_text = []  # файлы форматов без текста — только имена
             skipped_junk = 0
             for root, _, files in os.walk(tmpdir):
                 for filename in files:
@@ -944,15 +958,29 @@ class FileReader:
                     if is_archive_junk(relative_name):
                         skipped_junk += 1
                         continue
+                    if not is_readable_name(relative_name):
+                        not_text.append(relative_name)   # чертежи .dwg, .tmp и пр.: read_file их не читает
+                        continue
                     entries.append((full_path, relative_name))
             if skipped_junk:
                 logger.info(f"Архив {os.path.basename(file_path)}: пропущено служебных файлов {skipped_junk}")
 
+            if not_text:
+                logger.info(f"Архив {os.path.basename(file_path)}: нетекстовых файлов {len(not_text)} "
+                            f"({', '.join(sorted({os.path.splitext(n)[1].lower() or '?' for n in not_text}))}) — "
+                            f"перечислены по именам")
             if not limits:
-                results = await asyncio.gather(*(process_single_file(f, n) for f, n in entries))
-                return "\n\n".join(results)
-
-            results, skipped, total = await self._read_archive_limited(entries, limits, process_single_file)
+                results = list(await asyncio.gather(*(process_single_file(f, n) for f, n in entries)))
+                skipped, total = [], 0
+            else:
+                results, skipped, total = await self._read_archive_limited(entries, limits, process_single_file)
+        if not_text:
+            shown = sorted(not_text)[:100]
+            more = f"\nи ещё {len(not_text) - len(shown)}" if len(not_text) > len(shown) else ""
+            results.append("=== Нетекстовые файлы (чертежи, служебные и пр. — не читались) ===\n"
+                           + "\n".join(shown) + more)
+        if not limits:
+            return "\n\n".join(results)
 
         if skipped:
             shown = skipped[:100]
