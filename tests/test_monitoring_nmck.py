@@ -26,6 +26,17 @@ class MonitoringNmckTest(unittest.TestCase):
         self.assertEqual(r["verdict"], "Не соответствует")
         self.assertEqual(r["findings"][0]["rule"], "NO_JUSTIFICATION")
 
+    def test_memo_only_is_insufficient(self):
+        """Одна служебная записка без КП — вывода о нарушении нет (закупка до 600 тыс. руб.)."""
+        r = nm.check_purchase([nm.Doc("СЗ Иванов 25.11.2025 охрана", "Прошу закупить")])
+        self.assertEqual(r["verdict"], "Недостаточно данных")
+
+    def test_latin_file_names(self):
+        """Имена из выгрузки ЕИС латиницей (KP_..., raschet, osnovanie) классифицируются."""
+        self.assertEqual(nm.classify(nm.Doc("KP_EP_14_25")), nm.DOC_OFFER)
+        self.assertEqual(nm.classify(nm.Doc("KP_raschet_EA_02_25")), nm.DOC_NMCK)
+        self.assertEqual(nm.classify(nm.Doc("Приказ 73 Росгвардия кп")), nm.DOC_NMCK)
+
     def test_empty_complect_is_insufficient(self):
         self.assertEqual(nm.check_purchase([nm.Doc("Контракт.pdf", None)])["verdict"], "Недостаточно данных")
 
