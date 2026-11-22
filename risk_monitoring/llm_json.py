@@ -111,13 +111,12 @@ def reasoning_llm(default_client: Any = None, default_model: Optional[str] = Non
         return default_client, default_model
     if not url:
         return default_client, model
-    from openai import AsyncOpenAI
-
     from configs.config import Config
-    key = os.getenv("RM_REASONING_API_KEY") or Config.OPENAI_API_KEY
+    from configs.llm_client import LoopBoundOpenAI   # свой клиент на цикл событий (см. get_llm)
     from configs.llm_resilience import resilient
 
-    return resilient(AsyncOpenAI(base_url=url.rstrip("/"), api_key=key, timeout=300)), model
+    key = os.getenv("RM_REASONING_API_KEY") or Config.OPENAI_API_KEY
+    return resilient(LoopBoundOpenAI(base_url=url.rstrip("/"), api_key=key, timeout=300)), model
 
 
 def _guided_unsupported(error: BaseException) -> bool:
