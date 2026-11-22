@@ -152,9 +152,20 @@ def suggest_range(cmp: Comparison, thresholds: Optional[Sequence[int]] = None,
 
 
 def criterion_number(key: str, labels: Dict[str, str]) -> str:
-    """Номер критерия для комментария: из названия (``1.30. Наличие…`` → ``1.30``), иначе ключ поля."""
-    match = re.match(r"\s*(\d+(?:\.\d+)+)\.?\s", labels.get(key) or "")
-    return match.group(1) if match else key
+    """Номер критерия для комментария; технический ключ поля (``field3_2``) в текст не попадает.
+
+    Порядок: номер в начале названия (``1.30. Наличие…`` → ``1.30``); номер подраздела отчётной формы
+    (``Итог по критерию: Подраздел 3.1 …`` → ``3.1``); название без номера, сокращённое до 70 символов, в кавычках;
+    без названия — цифры ключа через точку (``field2_1_4`` → ``2.1.4``).
+    """
+    label = (labels.get(key) or "").strip()
+    match = re.match(r"(\d+(?:\.\d+)+)\.?\s", label) or re.search(r"подраздел\s+(\d+(?:\.\d+)+)", label, re.I)
+    if match:
+        return match.group(1)
+    if label:
+        return "«" + (label if len(label) <= 70 else label[:67].rstrip() + "…") + "»"
+    digits = re.findall(r"\d+", key)
+    return ".".join(digits) if digits else "без названия"
 
 
 def apply_full_match_rule(grade: Optional[float], cmp: Comparison, shared: Optional[Set[str]] = None,

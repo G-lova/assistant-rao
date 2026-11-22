@@ -31,7 +31,7 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(pc.build_comment(cmp, grade=1.0), pc.POSITIVE_COMMENT)
         self.assertTrue(pc.build_comment(cmp, grade=0.75).startswith("Незначительные отклонения"))
         self.assertTrue(pc.build_comment(cmp, grade=0.5).startswith("Существенные расхождения"))
-        self.assertIn("по критерию field2_1_2", pc.build_comment(cmp, grade=0.5))
+        self.assertIn("по критерию 2.1.2", pc.build_comment(cmp, grade=0.5))
 
     def test_comment_phrases(self):
         """Формулировки по сути ошибки: пропуск, лишнее нарушение, «не предусмотрено» отмечено неверно — единственное и множественное число."""
@@ -39,11 +39,11 @@ class CompareTests(unittest.TestCase):
         summary = {**SUMMARY, "field2_1_5": 1, "field2_1_6": 1}
         text = pc.build_comment(pc.compare(primary, summary))
         # раздел 1 («Наличие информации»): всё, что первичный не учёл, — одна строка «Пропуски нарушений», фразы через «;»
-        self.assertIn("Пропуски нарушений: не выявлено нарушение по критерию field2_1_2; ", text)
-        self.assertIn("не учтена информация, имеющаяся в документах, по критериям: field2_1_1, field2_1_3; ", text)
-        self.assertIn("неверно отмечено «не предусмотрено» по критерию field2_1_5 (требование предусмотрено).", text)
+        self.assertIn("Пропуски нарушений: не выявлено нарушение по критерию 2.1.2; ", text)
+        self.assertIn("не учтена информация, имеющаяся в документах, по критериям: 2.1.1, 2.1.3; ", text)
+        self.assertIn("неверно отмечено «не предусмотрено» по критерию 2.1.5 (требование предусмотрено).", text)
         # «в наличии» там, где требование не предусмотрено, — несоответствие
-        self.assertIn("Несоответствия: неверно отмечено «в наличии» по критерию field2_1_4 (требование не предусмотрено).", text)
+        self.assertIn("Несоответствия: неверно отмечено «в наличии» по критерию 2.1.4 (требование не предусмотрено).", text)
         self.assertEqual(text.count("Пропуски нарушений:"), 1)
 
     def test_comment_splits_errors_by_form_section(self):
@@ -51,9 +51,9 @@ class CompareTests(unittest.TestCase):
         summary = {"field2_1_1": 1, "field2_1_2": 1, "field2_3_7": 1, "field2_3_4": 0, "field2_1_5": 1, "field2_1_6": 1}
         primary = {**summary, "field2_1_1": 0, "field2_3_7": 0, "field2_3_4": 1}
         text = pc.build_comment(pc.compare(primary, summary), grade=0.5)
-        self.assertIn("Пропуски нарушений: не выявлено нарушение по критерию field2_3_4; "
-                      "не учтена информация, имеющаяся в документах, по критерию field2_1_1.", text)
-        self.assertIn("Несоответствия: неверно указано нарушение по критерию field2_3_7.", text)
+        self.assertIn("Пропуски нарушений: не выявлено нарушение по критерию 2.3.4; "
+                      "не учтена информация, имеющаяся в документах, по критерию 2.1.1.", text)
+        self.assertIn("Несоответствия: неверно указано нарушение по критерию 2.3.7.", text)
         lines = text.split("\n")          # порядок: заголовок, пропуски, несоответствия
         self.assertEqual([l.split(":")[0] for l in lines[1:]], ["Пропуски нарушений", "Несоответствия"])
 
@@ -140,3 +140,15 @@ class FullMatchExemptionTests(unittest.TestCase):
         # переданный взвешенный процент важнее обычного match_percent
         self.assertEqual(pc.apply_full_match_rule(1.0, few, set(), "any", percent=96.0), (1.0, False))
         self.assertEqual(pc.apply_full_match_rule(1.0, cmp, set(), "any", percent=80.0), (0.75, True))
+
+
+class CriterionNumberTests(unittest.TestCase):
+    """Технические ключи полей не должны попадать в комментарий."""
+
+    def test_report_labels_give_subsection_number_or_short_title(self):
+        """Отчётная форма: «Подраздел 3.1» → 3.1; название без номера — в кавычках; ключ ``fieldN_M`` не выводится."""
+        labels = {"field3_2": "Итог по критерию: Подраздел 3.1 По критерию оценки «Соответствие»",
+                  "field5_0": "Есть ли в контракте требования к привлечению субподрядчиков?"}
+        self.assertEqual(pc.criterion_number("field3_2", labels), "3.1")
+        self.assertEqual(pc.criterion_number("field5_0", labels), "«Есть ли в контракте требования к привлечению субподрядчиков?»")
+        self.assertNotIn("field", pc.criterion_number("field4_3", {}))
