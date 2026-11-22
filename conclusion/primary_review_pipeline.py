@@ -65,14 +65,20 @@ def _is_blank(value: Any) -> bool:
     return value is None or value != value or str(value) in ("None", "nan", "")
 
 
-def split_opinions(rows: List[dict]) -> Dict[str, Any]:
+def split_opinions(rows: List[dict], summary_opinion_id: Optional[int] = None) -> Dict[str, Any]:
     """Делит заключения экспертизы по роли автора (``users.role``) на первичные и итоговое сводное.
 
     Args:
         rows: Строки :data:`SQL_OPINIONS`.
+        summary_opinion_id: ``id`` конкретной сохранённой версии итогового заключения (``expertise_expert_opinion7s.id``),
+            например подтверждённой человеком. Если не задан, берётся последнее сводное по ``updated_at`` — такой расчёт
+            предварительный: последняя сохранённая версия не обязательно подтверждена.
 
     Returns:
-        dict: ``primary`` (список строк с ``data``), ``summary`` (строка последнего сводного заключения или ``None``).
+        dict: ``primary`` (список строк с ``data``), ``summary`` (выбранная строка сводного заключения или ``None``).
+
+    Raises:
+        PrimaryReviewError: 404 — версия ``summary_opinion_id`` не найдена среди сводных заключений экспертизы.
     """
     primary, summaries = [], []
     for row in rows:
@@ -85,12 +91,18 @@ def split_opinions(rows: List[dict]) -> Dict[str, Any]:
             summaries.append(item)
         elif role == PRIMARY_ROLE:
             primary.append(item)
-    summary = max(summaries, key=lambda r: str(r.get("updated_at") or "")) if summaries else None
+    if summary_opinion_id is not None:
+        summary = next((r for r in summaries if int(r["id"]) == int(summary_opinion_id)), None)
+        if summary is None:
+            raise PrimaryReviewError(404, f"Версия итогового заключения {summary_opinion_id} не найдена у этой экспертизы")
+    else:
+        summary = max(summaries, key=lambda r: str(r.get("updated_at") or "")) if summaries else None
     return {"primary": primary, "summary": summary}
 
 
 def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
-                     extra_issues: Optional[Dict[int, List[primary_review.Issue]]] = None) -> Dict[str, Any]:
+                     extra_issues: Optional[Dict[int, List[primary_review.Issue]]] = None,
+                     summary_opinion_id: Optional[int] = None) -> Dict[str, Any]:
     """Оценивает первичные заключения экспертизы по итоговому сводному (чистая функция, без БД).
 
     Args:
@@ -98,16 +110,17 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
         labels: ``ключ поля → название критерия`` для комментария (необязательно).
         extra_issues: Дополнительные дефекты по ``expert_id`` (замечания модели из :mod:`knowledge_store.primary_llm_review`);
             попадают в ``issues``, ``categories`` и комментарий.
+        summary_opinion_id: Версия итогового заключения для сравнения (см. :func:`split_opinions`); ``None`` — последняя сохранённая.
 
     Returns:
-        dict: ``expertise_id`` не входит (добавляет вызывающий); ``summary_expert_id``, ``group``, ``shared_differences`` (критерии, по которым все первичные эксперты расходятся с итоговым одинаково — вероятно, решение сводного эксперта; в комментарии они не упоминаются и помечены ``shared`` в ``differences``) и ``reviews`` —
+        dict: ``expertise_id`` не входит (добавляет вызывающий); ``summary_expert_id``, ``summary_opinion_id`` и ``summary_updated_at`` (версия итогового заключения, с которой сравнивали; по ним портал определяет, что подсказка устарела), ``is_preliminary`` (``True``, если версия не была указана явно и взята последняя сохранённая), ``group``, ``shared_differences`` (критерии, по которым все первичные эксперты расходятся с итоговым одинаково — вероятно, решение сводного эксперта; в комментарии они не упоминаются и помечены ``shared`` в ``differences``) и ``reviews`` —
         по записи на первичного эксперта: ``expert_id``, ``common``, ``differences`` (по видам), ``issues``,
         ``suggested_range`` (модель; ``None`` при малом числе общих критериев) с ``range_source`` и ``probabilities``, ``categories`` (замечания по таксономии), ``range_by_thresholds``, ``weighted_percent`` и ``deductions`` (взвешенный процент сходства и вычеты по расхождениям; по нему при ``range_source = weighted_percent`` определяется оценка), ``match_percent`` и ``range_by_scale`` (шкала аналитика), ``comment`` (согласован с оценкой, без нумерации; при 1.00 равен ``comment_details``), ``comment_details`` (полный перечень расхождений), ``alternative_range``, ``confidence``, ``model_range`` (до постпроверки по порядку) и ``rule_applied``, ``current_range``.
 
     Raises:
         PrimaryReviewError: 404 — первичных заключений нет; 409 — сводное заключение ещё не заполнено.
     """
-    parts = split_opinions(rows)
+    parts = split_opinions(rows, summary_opinion_id)
     if not parts["primary"]:
         raise PrimaryReviewError(404, "Нет заключений первичных экспертов по этой экспертизе")
     if not parts["summary"]:
@@ -189,14 +202,16 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
     shared_list = [{"key": k, "label": (labels or {}).get(k), "primary": pv, "summary": sv}
                    for k in sorted(shared, key=lambda x: [int(n) for n in re.findall(r"\d+", x)])
                    for pv, sv in [next((d.primary, d.summary) for d in comparisons[0].differences if d.key == k)]]
-    return {"summary_expert_id": int(summary["expert_id"]), "group": group, "shared_differences": shared_list,
-            "reviews": reviews}
+    return {"summary_expert_id": int(summary["expert_id"]), "summary_opinion_id": int(summary["id"]),
+            "summary_updated_at": str(summary.get("updated_at") or ""), "is_preliminary": summary_opinion_id is None,
+            "group": group, "shared_differences": shared_list, "reviews": reviews}
 
 
 class PrimaryReviewPipeline:
     """Загрузка заключений из внешней БД и оценка первичных экспертов."""
 
-    def __init__(self, http_manager: "HTTPClientManager", expertise_id: int, environment: Optional[str] = None):
+    def __init__(self, http_manager: "HTTPClientManager", expertise_id: int, environment: Optional[str] = None,
+                 summary_opinion_id: Optional[int] = None):
         """Создаёт загрузчик данных по настройкам окружения (как :class:`RaoConclusionPipeline`)."""
         from configs.config import Config
         from configs.data_fetcher import DataFetcher
@@ -206,6 +221,7 @@ class PrimaryReviewPipeline:
         self.data_fetcher = DataFetcher(db_config.url, db_config.headers, http_manager)
         self.expertise_id = expertise_id
         self.environment = environment
+        self.summary_opinion_id = summary_opinion_id    # None — последняя сохранённая версия итогового ЭЗ (расчёт предварительный)
 
     async def fetch_rows(self) -> List[dict]:
         """Загружает заключения экспертизы вместе с признаком назначения.
@@ -254,7 +270,7 @@ class PrimaryReviewPipeline:
         from knowledge_store import primary_llm_review
         from risk_monitoring.llm_json import LLMJson
 
-        parts = split_opinions(rows)
+        parts = split_opinions(rows, self.summary_opinion_id)
         if not parts["summary"]:
             return {}
         categories = tuple(getattr(settings, "PRIMARY_REVIEW_LLM_CATEGORIES", ("FORMAL",)))
@@ -290,6 +306,7 @@ class PrimaryReviewPipeline:
         if not rows:
             raise PrimaryReviewError(404, "Заключения по экспертизе не найдены")
         extra = await self.llm_issues(rows) if with_llm else None
-        result = review_expertise(rows, await self.labels_for(rows), extra_issues=extra)
+        result = review_expertise(rows, await self.labels_for(rows), extra_issues=extra,
+                                  summary_opinion_id=self.summary_opinion_id)
         logger.info(f"Оценка первичных экспертов expertise_id={self.expertise_id}: {len(result['reviews'])} заключений")
         return {"expertise_id": self.expertise_id, **result}

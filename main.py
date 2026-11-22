@@ -452,12 +452,13 @@ async def evaluate_primary_opinions(
 
     Raises:
         HTTPException: 404 — нет заключений первичных экспертов; 409 — сводное заключение ещё не заполнено;
-            500 — внутренняя ошибка.
+            404 также — версия ``summary_opinion_id`` не найдена; 500 — внутренняя ошибка.
     """
     from conclusion.primary_review_pipeline import PrimaryReviewError, PrimaryReviewPipeline
 
     try:
-        return await PrimaryReviewPipeline(http_manager, request.expertise_id, x_api_database).run(with_llm=request.with_llm)
+        return await PrimaryReviewPipeline(http_manager, request.expertise_id, x_api_database,
+                                         request.summary_opinion_id).run(with_llm=request.with_llm)
     except PrimaryReviewError as e:
         raise HTTPException(status_code=e.http_status, detail=e.message)
     except Exception as e:

@@ -144,9 +144,12 @@ class PrimaryReviewRequest(BaseModel):
     Attributes:
         expertise_id: Экспертиза, по которой сводное заключение уже заполнено.
         with_llm: Добавить замечания модели к тексту заключений (формальные недостатки); медленнее, по умолчанию включено (``false`` отключает).
+        summary_opinion_id: ``id`` версии итогового заключения (``expertise_expert_opinion7s.id``), с которой сравнивать, например
+            подтверждённой человеком. Не задан — берётся последняя сохранённая версия, расчёт помечается ``is_preliminary = true``.
     """
     expertise_id: int
     with_llm: bool = True
+    summary_opinion_id: Optional[int] = None
 
 
 class ViolationsReportRequest(BaseModel):
