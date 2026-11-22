@@ -46,7 +46,18 @@ class LoopBoundOpenAI:
         for k, (lp, _) in list(self._clients.items()):
             if lp is not None and lp.is_closed():
                 del self._clients[k]
-        client = AsyncOpenAI(**self._kwargs)
+        kwargs = dict(self._kwargs)
+        if "http_client" not in kwargs:
+            # Свой HTTP-клиент без автозакрытия: по умолчанию AsyncOpenAI берёт AsyncHttpxClientWrapper, чей __del__
+            # ставит aclose() в ТЕКУЩИЙ цикл — для клиента закрытого цикла это «Task exception was never retrieved …
+            # Event loop is closed» на каждое соединение (прод, 22.11.2026, после c283591). У DefaultAsyncHttpxClient
+            # (обычный httpx.AsyncClient с настройками openai) __del__ нет: сокеты закрывает сборщик мусора.
+            import openai
+
+            factory = getattr(openai, "DefaultAsyncHttpxClient", None)
+            if factory is not None:
+                kwargs["http_client"] = factory()
+        client = AsyncOpenAI(**kwargs)
         self._clients[key] = (loop, client)
         return client
 

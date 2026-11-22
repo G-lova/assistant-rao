@@ -28,6 +28,21 @@ class LoopBoundTest(unittest.TestCase):
         self.assertIn("llm.example", url)
         self.assertEqual(len(c._clients), 1)   # клиенты закрытых циклов отброшены
 
+    def test_http_client_without_autoclose(self):
+        """Каждому циклу — свой ``DefaultAsyncHttpxClient`` (без ``__del__`` с ``aclose()`` в чужом цикле)."""
+        import openai
+
+        if not hasattr(openai, "DefaultAsyncHttpxClient"):
+            self.skipTest("в этой версии openai нет DefaultAsyncHttpxClient")
+        c = self.cls(base_url="http://llm.example/v1", api_key="k", timeout=5)
+
+        async def http():
+            return c._client()._client
+
+        h1, h2 = asyncio.run(http()), asyncio.run(http())
+        self.assertIsNot(h1, h2)
+        self.assertNotIn("__del__", type(h1).__dict__)
+
     def test_with_options_and_resilient(self):
         from configs.llm_resilience import ResilientClient
 
