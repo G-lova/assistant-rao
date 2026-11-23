@@ -112,7 +112,7 @@ class PaymentOrderTest(unittest.TestCase):
         res = parse_payment_order(PAYMENT_TEXT)
         self.assertTrue(res["complete"])
         raw = res["raw_data"]
-        self.assertEqual(raw["document_name"]["value"], "Платёжное поручение № 4137")
+        self.assertEqual(raw["document_name"]["value"], "Платежное поручение от 20.10.2025 № 4137")
         self.assertEqual([(f["kind"], f["value"]) for f in raw["finances"]], [("payment", 2076618.96)])
         self.assertEqual([(d["kind"], d["value"]) for d in raw["dates"]], [("payment", "2025-10-20")])
         self.assertEqual(raw["contract_number"]["value"], "ЗА-8/487/25")

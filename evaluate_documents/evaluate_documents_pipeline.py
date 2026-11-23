@@ -18,6 +18,7 @@ from configs.utils import load_sql_query, split_large_text
 from configs.working_with_db import save_evaluation_result
 from evaluate_documents.completeness_checker import CompletenessChecker
 from evaluate_documents.consistency_checker import ConsistencyChecker
+from evaluate_documents.doc_names import is_unsupported_text
 from evaluate_documents.evidence_check import verify_extraction
 from configs.parsing import CloudStorageParser
 from evaluate_documents.send_subject_service import SendSubjectService
@@ -287,6 +288,11 @@ class TasksPipeline:
             dict: Результат ``TypeDataExtractor`` (``type_compliance``, ``readability``, ``raw_data``).
         """
         cached = await ks_hooks.find_cached_text(file_path, force=self.force)
+        if cached and is_unsupported_text(cached.get("text")):
+            # в хранилище — служебная строка «Бинарный файл …» от прежнего чтения (печатные формы ЕИС без
+            # расширения не читались до 23.11.2026): читаем файл заново
+            logger.info(f"Текст '{filename}' в хранилище — строка о неподдерживаемом формате, читаю файл заново")
+            cached = None
         if cached:
             logger.info(f"Текст '{filename}' взят из хранилища (документ {cached['id']}, {cached.get('reader')}), OCR не нужен")
             extracted_text = cached["text"]
@@ -324,7 +330,14 @@ class TasksPipeline:
         if extracted_data is not None:
             logger.info(f"Извлечённые данные '{filename}' взяты из кэша общего документа")
         else:
-            extracted_data = await self.type_data_extractor.extract_data_from_document(chunks, filename, link.doc_code, link.object)
+            # настоящий формат файла (по содержимому) — для названия документа: «печатная форма ЕИС», «формат XML»
+            try:
+                source_format = await self.file_reader.source_format(file_path, filename)
+            except Exception as e:  # noqa: BLE001 — формат нужен только для названия, его отсутствие не мешает разбору
+                logger.warning(f"Формат файла '{filename}' не определён: {type(e).__name__}: {e}")
+                source_format = None
+            extracted_data = await self.type_data_extractor.extract_data_from_document(
+                chunks, filename, link.doc_code, link.object, source_format=source_format)
             if isinstance(extracted_data, str):
                 extracted_data = json.loads(extracted_data)
             await ks_hooks.save_extraction(ks_doc_id, version, model, extracted_data)
