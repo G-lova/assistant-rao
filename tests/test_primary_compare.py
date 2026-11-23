@@ -152,3 +152,18 @@ class CriterionNumberTests(unittest.TestCase):
         self.assertEqual(pc.criterion_number("field3_2", labels), "3.1")
         self.assertEqual(pc.criterion_number("field5_0", labels), "«Есть ли в контракте требования к привлечению субподрядчиков?»")
         self.assertNotIn("field", pc.criterion_number("field4_3", {}))
+
+
+class LabelForTests(unittest.TestCase):
+    """Название критерия в ответе никогда не пустое."""
+
+    def test_own_label_children_prefix_and_digits(self):
+        """Своё название; общее начало названий вложенных полей; иначе номер из ключа."""
+        labels = {"field2_2_7": "2.2.7. Соответствие",
+                  "field2_2_24_0": "2.2.7. Соответствие законодательству расчета НМЦК нормативным методом",
+                  "field2_2_24_1": "2.2.7. Соответствие законодательству расчета НМЦК затратным методом"}
+        self.assertEqual(pc.label_for("field2_2_7", labels), "2.2.7. Соответствие")
+        self.assertEqual(pc.label_for("field2_2_24", labels), "2.2.7. Соответствие законодательству расчета НМЦК")
+        self.assertEqual(pc.label_for("field2_2_30", labels), "Критерий 2.2.30")
+        self.assertEqual(pc.label_for("field2_2_30", None), "Критерий 2.2.30")
+        self.assertEqual(pc.label_for("field2_2_30", {"field2_2_30": None}), "Критерий 2.2.30")

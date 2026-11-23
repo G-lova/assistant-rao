@@ -151,6 +151,28 @@ def suggest_range(cmp: Comparison, thresholds: Optional[Sequence[int]] = None,
     return 1.0 if n < t[0] else 0.75 if n < t[1] else 0.5 if n < t[2] else 0.0
 
 
+def label_for(key: str, labels: Optional[Dict[str, str]]) -> str:
+    """Непустое название критерия для ответа сервиса (портал отклоняет результат с ``label: null``).
+
+    Порядок: название из справочника; общее начало названий вложенных полей (``key_*``), если у самого поля названия нет
+    («2.2.7. Соответствие законодательству расчета НМЦК нормативным методом» и «… затратным методом» →
+    «2.2.7. Соответствие законодательству расчета НМЦК»); иначе «Критерий N.N» по цифрам ключа.
+    """
+    labels = labels or {}
+    own = (labels.get(key) or "").strip()
+    if own:
+        return own
+    children = [v.strip() for k, v in labels.items() if k.startswith(key + "_") and v and v.strip()]
+    if children:
+        prefix = os.path.commonprefix(children)
+        prefix = re.sub(r"\s+\S*$", "", prefix) if prefix and prefix not in children else prefix   # без обрезанного слова
+        prefix = prefix.rstrip(" ,;:—-")
+        if len(prefix) >= 8:
+            return prefix
+    digits = re.findall(r"\d+", key)
+    return "Критерий " + ".".join(digits) if digits else "Критерий формы"
+
+
 def criterion_number(key: str, labels: Dict[str, str]) -> str:
     """Номер критерия для комментария; технический ключ поля (``field3_2``) в текст не попадает.
 
