@@ -1,16 +1,17 @@
 import asyncio
+import re
 from collections import Counter
 import time
 import copy
 import json
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 import pandas as pd
 import asyncio
 import datetime
 
 from configs.config import Config
 from configs.data_fetcher import DataFetcher
-from configs.file_reader import FileReader
+from configs.file_reader import FileReader, name_for_reading
 from configs.http_client_manager import HTTPClientManager
 from configs.llm_client import get_llm
 from configs.logger import brief, get_logger, log_context
@@ -38,6 +39,35 @@ LLM_CHUNK_SIZE = 10000  # размер блока текста для TypeDataEx
 async def _ready(value):
     """Корутина, сразу возвращающая ``value`` (готовый результат в общем списке задач ``asyncio.gather``)."""
     return value
+
+
+
+def media_id_from_url(url) -> Optional[str]:
+    """Id файла портала из ссылки ``…/media/<id>/<имя>`` или ``…/api/media/<id>``; ``None`` для прочих ссылок."""
+    m = re.search(r"/media/(\d+)(?:/|$|\?)", str(url or ""))
+    return m.group(1) if m else None
+
+
+def media_mime_map(df: pd.DataFrame) -> Dict[str, str]:
+    """``{id файла: MIME-тип}`` из колонки ``file_mime`` (JSON-объект по типу документа) запроса экспертизы.
+
+    Args:
+        df: Строки ``evaluate_docs_script.sql``.
+
+    Returns:
+        dict: Id (строкой) → MIME-тип; пустой, если колонки нет (старый запрос) или значения пустые.
+    """
+    out: Dict[str, str] = {}
+    if "file_mime" not in getattr(df, "columns", []):
+        return out
+    for value in df["file_mime"].dropna():
+        try:
+            data = json.loads(value) if isinstance(value, str) else value
+        except (TypeError, ValueError):
+            continue
+        if isinstance(data, dict):
+            out.update({str(k): v for k, v in data.items() if v})
+    return out
 
 
 def _status(result: dict, key: str) -> str:
@@ -103,6 +133,7 @@ class TasksPipeline:
         self.link_semaphore = asyncio.Semaphore(self.config.EVAL_LINK_CONCURRENCY)   # скачивание ссылок
         self.type_data_extractor.semaphore = self.llm_semaphore                      # блоки текста — под общим лимитом
         self._stats = Counter()     # счётчики прогона для итоговой строки журнала
+        self.media_mime: Dict[str, str] = {}   # id файла портала → MIME-тип (load_expertise)
         self._timings = {}          # время этапов, с
 
 
@@ -143,6 +174,7 @@ class TasksPipeline:
         if df is None or df.empty:
             raise ValueError(f"Нет данных по экспертизе {self.expertise_id}")
         self.df = df
+        self.media_mime = media_mime_map(df)
         self.cloud_parser = CloudStorageParser(self.http_manager, self.df['object'].iloc[0])
         return df
 
@@ -164,7 +196,12 @@ class TasksPipeline:
                 if parse_result.get("status") == "success":
                     file_path = file_info.get("file_path")
                     filename = file_info.get("filename", f"doc_from_link_{file_info.get('original_url')}")
-                    tasks.append(self._limited(self.file_semaphore, self.process_parse_result(file_path, filename, link)))
+                    # MIME-тип из БД портала (media.mime_type) — по id файла в ссылке …/media/<id>/…; только если ссылка
+                    # дала один файл: у файлов, распакованных из архива, тип архива, а не их собственный
+                    mime = getattr(self, "media_mime", {}).get(
+                        media_id_from_url(file_info.get("original_url") or link.media_links)) if len(files) == 1 else None
+                    tasks.append(self._limited(self.file_semaphore,
+                                               self.process_parse_result(file_path, filename, link, mime_type=mime)))
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
             # Обрабатываем результаты
@@ -273,7 +310,7 @@ class TasksPipeline:
         async with semaphore:
             return await coro
 
-    async def process_parse_result(self, file_path, filename, link):
+    async def process_parse_result(self, file_path, filename, link, mime_type=None):
         """Читает один файл, определяет тип документа и извлекает ключевые данные.
 
         Если включено повторное использование общего документа (``DOC_DEDUP_ENABLED``), текст файла с тем же
@@ -283,10 +320,16 @@ class TasksPipeline:
             file_path: Локальный путь к скачанному файлу.
             filename: Имя файла.
             link: Строка ссылки (``doc_code``, ``object``, ``media_links``).
+            mime_type: MIME-тип файла из БД портала (``media.mime_type``): если в имени нет понятного расширения
+                (печатные формы ЕИС), файл читается с расширением по этому типу.
 
         Returns:
             dict: Результат ``TypeDataExtractor`` (``type_compliance``, ``readability``, ``raw_data``).
         """
+        # имя для чтения: «…(версия-0,-док.-1540…)» + text/html → «….html»; в ответе остаётся исходное имя
+        read_name = name_for_reading(filename, mime_type)
+        if read_name != filename:
+            logger.info(f"Файл '{filename}': расширение по MIME-типу {mime_type} из БД портала — читаю как '{read_name}'")
         cached = await ks_hooks.find_cached_text(file_path, force=self.force)
         if cached and is_unsupported_text(cached.get("text")):
             # в хранилище — служебная строка «Бинарный файл …» от прежнего чтения (печатные формы ЕИС без
@@ -298,7 +341,7 @@ class TasksPipeline:
             extracted_text = cached["text"]
         else:
             read_started = time.monotonic()
-            extracted_text = await self.file_reader.read_file(file_path, filename)
+            extracted_text = await self.file_reader.read_file(file_path, read_name)
             logger.info(f"Текст '{filename}' прочитан за {time.monotonic() - read_started:.1f} с: "
                         f"{len(extracted_text or '')} символов")
         if not extracted_text or "[Нет читаемого текста]" in extracted_text:
@@ -332,7 +375,7 @@ class TasksPipeline:
         else:
             # настоящий формат файла (по содержимому) — для названия документа: «печатная форма ЕИС», «формат XML»
             try:
-                source_format = await self.file_reader.source_format(file_path, filename)
+                source_format = await self.file_reader.source_format(file_path, read_name)
             except Exception as e:  # noqa: BLE001 — формат нужен только для названия, его отсутствие не мешает разбору
                 logger.warning(f"Формат файла '{filename}' не определён: {type(e).__name__}: {e}")
                 source_format = None

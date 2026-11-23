@@ -182,6 +182,7 @@ SELECT
     	WHEN CAST(m.file_path AS JSON) = CAST('[]' AS JSON) THEN NULL
         ELSE m.file_path
 	END AS file_path, 
+    m.file_mime AS file_mime,
     CASE
     	WHEN doc_codes.d IN ('linkDocs') AND e.linkDocs IS NOT NULL THEN JSON_ARRAY(e.linkDocs)
     	WHEN doc_codes.d IN ('docDopMaterialsFiles') AND e.dopMaterials IS NOT NULL AND e.dopMaterials NOT IN (CAST('[]' AS JSON), CAST('[null]' AS JSON)) THEN e.dopMaterials
@@ -215,7 +216,9 @@ LEFT JOIN JSON_TABLE(
         '$[*]' COLUMNS (c VARCHAR(255) PATH '$')
      ) AS empty_comment
      ON empty_comment.c = doc_codes.d
-LEFT JOIN (SELECT model_id, collection_name, CASE WHEN disk LIKE 'media' THEN JSON_ARRAYAGG(CONCAT(?, id, '/', file_name)) ELSE JSON_ARRAYAGG(CONCAT(?, id, '/', file_name)) END AS file_path
+LEFT JOIN (SELECT model_id, collection_name, CASE WHEN disk LIKE 'media' THEN JSON_ARRAYAGG(CONCAT(?, id, '/', file_name)) ELSE JSON_ARRAYAGG(CONCAT(?, id, '/', file_name)) END AS file_path,
+                  -- MIME-тип файла по id media: у печатных форм ЕИС в имени нет расширения (23.11.2026)
+                  JSON_OBJECTAGG(id, mime_type) AS file_mime
            FROM media
      	   WHERE model_type LIKE '%Expertise'
            GROUP BY model_id, collection_name, disk) m

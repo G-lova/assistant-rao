@@ -10,6 +10,9 @@
 * даты — ``ДД.ММ.ГГГГ`` («2026-03-24», «24 марта 2026 г.» → «24.03.2026»), «N 146» → «№ 146», «№ 5486 от 24.03.2026» →
   «от 24.03.2026 № 5486»;
 * название целиком заглавными буквами — с заглавной только первой буквы (аббревиатуры остаются);
+* реквизиты — если модель их не написала, а они есть: «Товарная накладная» + шапка формы «Номер документа 5486,
+  Дата составления 24.03.2026» → «Товарная накладная от 24.03.2026 № 5486»; электронный контракт — номер договора
+  и дата заключения из извлечённых данных;
 * формат файла — дописывается: «(формат XML)», «, печатная форма ЕИС» / «(печатная форма)», «(архив XML, HTML и файлов
   электронной подписи)»; модель формат не пишет;
 * служебная строка, имя временного файла или пустое название — заменяются названием из имени файла.
@@ -152,6 +155,115 @@ def format_suffix(source_format: Optional[str], filename: str, text: str, name: 
     return ""
 
 
+DATE_RX = r"(\d{2}\.\d{2}\.\d{4}|\d{4}-\d{2}-\d{2})"
+NUM_RX = r"([A-Za-zА-ЯЁа-яё0-9][\wА-ЯЁа-яё\-/.()]{0,40}?)"
+# Унифицированные формы (ТОРГ-12, УПД, КС-2/КС-3): «Номер документа | Дата составления» и под ними значения
+FORM_REQ_RE = re.compile(r"Номер\s+документа\W{1,40}Дата\s+составления\W{1,60}?([\wА-ЯЁа-яё\-/]{1,30})\W{1,20}?"
+                         + DATE_RX, re.I)
+CONTRACT_WORD_RE = re.compile(r"\b(контракт|договор)", re.I)
+# Документы, у которых свои номер и дата (не договора): им номер договора не подставляется.
+# «Сведения о заключенном контракте» (печатная форма ЕИС) — подставляется: это сведения о самом договоре
+NOT_CONTRACT_RE = re.compile(r"\b(акт|накладн|счет|счёт|фактур|протокол|сведени\w*\s+об\s+исполнени|соглашени|"
+                             r"поручени|сертификат|удостоверени|спецификац|по\s+(?:договору|контракту))", re.I)
+
+
+def _iso_to_ru(value: str) -> str:
+    """«2026-03-23» → «23.03.2026» (прочее — как есть)."""
+    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", value or "")
+    return f"{m.group(3)}.{m.group(2)}.{m.group(1)}" if m else value
+
+
+def _has_date(name: str) -> bool:
+    """В названии есть дата ДД.ММ.ГГГГ."""
+    return bool(re.search(r"\d{2}\.\d{2}\.\d{4}", name))
+
+
+def _has_number(name: str) -> bool:
+    """В названии есть «№ …»."""
+    return "№" in name
+
+
+def requisites_from_text(name: str, text: str) -> tuple:
+    """Номер и дата самого документа из текста: рядом с заголовком или в шапке унифицированной формы.
+
+    * «ТОВАРНАЯ НАКЛАДНАЯ № 5486 от 24.03.2026» — по первым словам названия;
+    * «Номер документа | Дата составления | 5486 | 24.03.2026» (ТОРГ-12, УПД, КС-2, КС-3).
+
+    Args:
+        name: Название документа (по первым словам ищется заголовок).
+        text: Текст документа.
+
+    Returns:
+        tuple: (номер или None, дата «ДД.ММ.ГГГГ» или None).
+    """
+    if not text:
+        return None, None
+    head = text[:30000]
+    words = re.findall(r"[А-ЯЁа-яёA-Za-z\-]{3,}", name or "")[:2]
+    if words:
+        title = r"\s+".join(re.escape(w) for w in words)
+        for rx in (rf"{title}[^\n]{{0,80}}?№\s*{NUM_RX}\s+от\s+{DATE_RX}",
+                   rf"{title}[^\n]{{0,80}}?от\s+{DATE_RX}\s*(?:г\.?\s*)?№\s*{NUM_RX}(?=[\s,;.]|$)"):
+            m = re.search(rx, head, re.I)
+            if m:
+                a, b = m.group(1), m.group(2)
+                number, date = (a, b) if "№" in m.group(0).split("от")[0] else (b, a)
+                return number.rstrip(".,;"), _iso_to_ru(date)
+    m = FORM_REQ_RE.search(head)
+    if m:
+        return m.group(1), _iso_to_ru(m.group(2))
+    return None, None
+
+
+def contract_requisites(raw: Dict[str, Any]) -> tuple:
+    """Номер и дата заключения договора из извлечённых данных (``contract_number``, дата вида ``signing``)."""
+    cn = raw.get("contract_number") if isinstance(raw, dict) else None
+    number = cn.get("value") if isinstance(cn, dict) else None
+    date = None
+    for d in (raw.get("dates") or []) if isinstance(raw, dict) else []:
+        if isinstance(d, dict) and d.get("kind") == "signing" and d.get("value"):
+            date = _iso_to_ru(str(d["value"])[:10])
+            break
+    if date is None:
+        for d in (raw.get("dates") or []) if isinstance(raw, dict) else []:
+            ctx = str(d.get("context") or "").lower() if isinstance(d, dict) else ""
+            if isinstance(d, dict) and d.get("value") and re.search(r"заключени|подписани\w* (договор|контракт)", ctx):
+                date = _iso_to_ru(str(d["value"])[:10])
+                break
+    return (str(number).strip() if number else None), date
+
+
+def add_requisites(name: str, raw: Dict[str, Any], text: str) -> str:
+    """Дописывает к названию «от ДД.ММ.ГГГГ № номер», если их нет, а в документе они есть.
+
+    Сначала — реквизиты самого документа из текста (заголовок, шапка формы); для самого договора/контракта
+    (электронный контракт в XML, печатная форма) — номер договора и дата заключения из извлечённых данных.
+
+    Args:
+        name: Название после :func:`normalize_name`.
+        raw: ``raw_data`` документа.
+        text: Текст документа.
+
+    Returns:
+        str: Название с реквизитами (или прежнее, если реквизитов не нашлось).
+    """
+    if _has_date(name) and _has_number(name):
+        return name
+    number, date = requisites_from_text(name, text)
+    if not (number or date) and CONTRACT_WORD_RE.search(name) and not NOT_CONTRACT_RE.search(name):
+        number, date = contract_requisites(raw)
+    tail = ""
+    if date and not _has_date(name):
+        tail += f" от {date}"
+    if number and not _has_number(name):
+        tail += f" № {number}"
+    if not tail:
+        return name
+    # реквизиты — сразу после вида документа, до уточнений в скобках / через запятую
+    m = re.search(r"\s*[(,]", name)
+    return (name[:m.start()] + tail + name[m.start():]) if m else name + tail
+
+
 def finalize_document_name(raw: Dict[str, Any], filename: str, source_format: Optional[str] = None,
                            text: str = "") -> Optional[str]:
     """Доводит ``raw_data.document_name.value`` до единого вида (на месте) и возвращает прежнее значение.
@@ -178,6 +290,9 @@ def finalize_document_name(raw: Dict[str, Any], filename: str, source_format: Op
         name = name_from_filename(filename) or str(name or "")
         dn["confidence"] = min(float(dn.get("confidence") or 0.5), 0.5)
     name = normalize_name(name)
+    if not is_unsupported_text(text):
+        # электронный контракт, товарная накладная и т. п. — с реквизитами «от ДД.ММ.ГГГГ № номер»
+        name = add_requisites(name, raw, text)
     if is_unsupported_text(text):
         name += " (формат файла не поддерживается)"
     else:

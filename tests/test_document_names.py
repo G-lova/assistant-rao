@@ -111,6 +111,84 @@ def _fake_aiofiles():
     return module
 
 
+class RequisitesTest(unittest.TestCase):
+    """Реквизиты «от ДД.ММ.ГГГГ № номер» в названии, если модель их не написала."""
+
+    def test_form_header_and_title(self):
+        """Товарная накладная: шапка формы «Номер документа | Дата составления» или заголовок «№ … от …»."""
+        form = ("Страница 1 (OCR):\nТОВАРНАЯ НАКЛАДНАЯ | Номер документа | Дата составления |\n| | 5486 | 24.03.2026 |\n"
+                "Поставщик ООО «Медипал-Онко»")
+        self.assertEqual(_final("ТОВАРНАЯ НАКЛАДНАЯ", "ТН_.pdf", ".pdf", form), "Товарная накладная от 24.03.2026 № 5486")
+        self.assertEqual(_final("Товарная накладная", "ТН_.pdf", ".pdf", "ТОВАРНАЯ НАКЛАДНАЯ № 5486 от 24.03.2026"),
+                         "Товарная накладная от 24.03.2026 № 5486")
+
+    def test_contract_from_extracted(self):
+        """Электронный контракт и сведения о заключённом контракте — номер договора и дата заключения из данных."""
+        raw = {"contract_number": {"value": "146"}, "dates": [{"value": "2026-03-23", "kind": "signing"}]}
+
+        def named(name, filename, fmt, text=""):
+            """Название с извлечёнными данными договора."""
+            data = {**raw, "document_name": {"value": name, "confidence": 0.9}}
+            finalize_document_name(data, filename, fmt, text)
+            return data["document_name"]["value"]
+
+        self.assertEqual(named("146 Договор Медипал-ОНКО энтивио.docx", "Электронный-контракт.xml", ".xml"),
+                         "Электронный контракт от 23.03.2026 № 146 (формат XML)")
+        self.assertEqual(named("Сведения о заключенном контракте, реестровый номер 1540601076026000160", EIS_FILE,
+                               ".html", "zakupki.gov.ru"),
+                         "Сведения о заключенном контракте от 23.03.2026 № 146, реестровый номер 1540601076026000160, "
+                         "печатная форма ЕИС")
+        # у акта и сведений об исполнении свои реквизиты — номер договора им не подставляется
+        self.assertEqual(named("Акт приема-передачи товара", "Акт.pdf", ".pdf", "АКТ ПРИЕМА-ПЕРЕДАЧИ ТОВАРА"),
+                         "Акт приема-передачи товара")
+        self.assertEqual(named("Сведения об исполнении контракта", EIS_FILE, ".html", "zakupki.gov.ru"),
+                         "Сведения об исполнении контракта, печатная форма ЕИС")
+
+
+class MimeTest(unittest.TestCase):
+    """Расширение по MIME-типу из БД портала (media.mime_type)."""
+
+    def setUp(self):
+        """Модуль file_reader (aiofiles — настоящий или упрощённый)."""
+        try:
+            import aiofiles  # noqa: F401
+        except ImportError:
+            sys.modules["aiofiles"] = _fake_aiofiles()
+            self.addCleanup(sys.modules.pop, "aiofiles", None)
+        ctx = stubbed_import("configs.file_reader")
+        self.module = ctx.__enter__()
+        self.addCleanup(ctx.__exit__, None, None, None)
+
+    def test_extension_and_name(self):
+        """text/html → .html; octet-stream и пусто — ничего; понятное расширение в имени не меняется."""
+        m = self.module
+        self.assertEqual(m.extension_from_mime("text/html; charset=UTF-8"), ".html")
+        self.assertEqual(m.extension_from_mime("application/xml"), ".xml")
+        self.assertIsNone(m.extension_from_mime("application/octet-stream"))
+        self.assertIsNone(m.extension_from_mime(None))
+        self.assertEqual(m.name_for_reading(EIS_FILE, "text/html"), EIS_FILE + ".html")
+        self.assertEqual(m.name_for_reading("Договор.docx", "text/html"), "Договор.docx")
+        self.assertEqual(m.name_for_reading(EIS_FILE, None), EIS_FILE)
+        self.assertEqual(m.name_for_reading("чертёж.dwg", "application/pdf"), "чертёж.dwg.pdf")
+
+
+class MediaMimeMapTest(unittest.TestCase):
+    """Карта «id файла → MIME-тип» из запроса экспертизы и id из ссылки."""
+
+    def test_map_and_id(self):
+        """JSON-объекты колонки file_mime объединяются; id берётся из …/media/<id>/…."""
+        import pandas as pd
+        with stubbed_import("evaluate_documents.evaluate_documents_pipeline") as module:
+            df = pd.DataFrame({"file_mime": ['{"54600": "text/html", "54601": "application/pdf"}', None,
+                                             '{"54613": "text/html", "1": null}']})
+            self.assertEqual(module.media_mime_map(df), {"54600": "text/html", "54601": "application/pdf",
+                                                         "54613": "text/html"})
+            self.assertEqual(module.media_mime_map(pd.DataFrame({"x": [1]})), {})
+            self.assertEqual(module.media_id_from_url("https://expert.rusacademedu.ru/media/54600/Печатная"), "54600")
+            self.assertEqual(module.media_id_from_url("https://x.ru/api/media/54613"), "54613")
+            self.assertIsNone(module.media_id_from_url("https://zakupki.gov.ru/epz/order"))
+
+
 class FileReaderFormatTest(unittest.TestCase):
     """Расширение из имени и формат по содержимому."""
 

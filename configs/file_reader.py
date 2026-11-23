@@ -1437,3 +1437,55 @@ class FileReader:
         except Exception as e:
             logger.error(f"Ошибка определения типа бинарного файла {file_path}: {str(e)}")
             return '.bin'
+
+# MIME-тип (поле media.mime_type портала) → расширение для чтения файла
+_MIME_EXT = {
+    "text/html": ".html", "application/xhtml+xml": ".html", "text/xml": ".xml", "application/xml": ".xml",
+    "application/pdf": ".pdf", "text/plain": ".txt", "text/csv": ".csv", "application/json": ".json",
+    "application/msword": ".doc", "application/rtf": ".rtf", "text/rtf": ".rtf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.ms-excel": ".xls", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/vnd.oasis.opendocument.text": ".odt",
+    "application/zip": ".zip", "application/x-zip-compressed": ".zip", "application/x-rar-compressed": ".rar",
+    "application/vnd.rar": ".rar", "application/x-7z-compressed": ".7z", "application/gzip": ".gz",
+    "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/bmp": ".bmp", "image/tiff": ".tiff",
+    "application/pkcs7-signature": ".sig", "application/x-pkcs7-signature": ".sig",
+}
+
+
+def extension_from_mime(mime_type: Optional[str]) -> Optional[str]:
+    """Расширение по MIME-типу (``text/html; charset=utf-8`` → ``.html``); ``None`` — тип неизвестен или общий.
+
+    ``application/octet-stream`` и пустое значение ничего не говорят о формате — тогда формат определяется по
+    содержимому файла.
+
+    Args:
+        mime_type: MIME-тип (поле ``media.mime_type`` портала).
+
+    Returns:
+        str | None: Расширение с точкой или ``None``.
+    """
+    if not mime_type:
+        return None
+    return _MIME_EXT.get(str(mime_type).split(";")[0].strip().lower())
+
+
+def name_for_reading(filename: str, mime_type: Optional[str]) -> str:
+    """Имя файла для чтения: если в имени нет понятного расширения, а MIME-тип известен — дописывает расширение.
+
+    «Печатная-форма-контракта-№-…-(версия-0,-док.-15406010760260001600001)» + ``text/html`` →
+    «…-15406010760260001600001).html». Имя в ответе эндпоинта не меняется — это имя только для ``read_file``.
+
+    Args:
+        filename: Имя файла.
+        mime_type: MIME-тип из БД портала.
+
+    Returns:
+        str: Имя для чтения (исходное, если расширение уже понятное или тип неизвестен).
+    """
+    ext = FileReader.get_extension(None, filename)
+    mime_ext = extension_from_mime(mime_type)
+    if mime_ext and (not ext or ext not in _READABLE_EXT or ext == ".bin"):
+        return f"{filename}{mime_ext}"
+    return filename
