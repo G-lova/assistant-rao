@@ -53,7 +53,8 @@ def build_source(docs: Dict[str, str], limit: int = MAX_TEXT) -> str:
     """Склеивает документы закупки (имя → текст) в один текст с заголовками «=== файл», не длиннее ``limit``."""
     parts, left = [], limit
     for name, text in docs.items():
-        chunk = f"=== файл: {name}\n{re.sub(r'[ \t]+', ' ', text or '').strip()}"[:max(left, 0)]
+        body = re.sub(r"[ \t]+", " ", text or "").strip()      # вне f-строки: в Python 3.11 в выражении f-строки нельзя обратную косую
+        chunk = f"=== файл: {name}\n{body}"[:max(left, 0)]
         if not chunk:
             break
         parts.append(chunk)
