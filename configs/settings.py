@@ -725,3 +725,15 @@ PRIMARY_REVIEW_TEST_EXPERT_IDS = frozenset({2, 3, 4, 8, 75, 203, 977, 1538, 1584
 # 58,6% без правила и 43,3% с «any», зато доля верных среди выданных 1.00 растёт с 67% до 84%, а попадание в пределах
 # одной ступени — с 92,6% до 95,8% (оценивающие на практике ставят 1.00 и при отклонениях).
 PRIMARY_REVIEW_FULL_MATCH_RULE = "any"
+
+# ── Доставка результата оценки первичных экспертов в портал (conclusion/primary_review_delivery.py), по согласованию с
+# разработчиками РАО (РАО-ОЦЕНКА-2011-01). Адрес = SYSTEM_URL_<среда> + путь; ключ — Config.PRIMARY_REVIEW_API_KEY
+PRIMARY_REVIEW_DELIVERY_PATH = "/api/expertise/set-hints-for-primary-experts"
+# Окно доставки с момента запуска расчёта (портал принимает первую доставку в течение 10 минут), секунд
+PRIMARY_REVIEW_DELIVERY_WINDOW = 600
+# Паузы между повторами при 429, 5xx и обрыве связи, секунд (сумма меньше окна); тот же результат и тот же UUID
+PRIMARY_REVIEW_DELIVERY_RETRY_DELAYS = (5, 15, 45, 120, 300)
+# Таймаут одной попытки доставки, секунд
+PRIMARY_REVIEW_DELIVERY_TIMEOUT = 60
+# Предел тела запроса приёмника, байт (1 МиБ)
+PRIMARY_REVIEW_DELIVERY_MAX_BYTES = 1024 * 1024

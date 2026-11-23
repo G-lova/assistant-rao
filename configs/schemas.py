@@ -146,10 +146,16 @@ class PrimaryReviewRequest(BaseModel):
         with_llm: Добавить замечания модели к тексту заключений (формальные недостатки); медленнее, по умолчанию включено (``false`` отключает).
         summary_opinion_id: ``id`` версии итогового заключения (``expertise_expert_opinion7s.id``), с которой сравнивать, например
             подтверждённой человеком. Не задан — берётся последняя сохранённая версия, расчёт помечается ``is_preliminary = true``.
+        send_to_external: Доставить результат в портал отдельным POST (``set-hints-for-primary-experts``); ответ на запуск —
+            202 без результата. ``false`` — прежний синхронный ответ.
+        request_id: UUID, который создаёт портал при каждом новом расчёте; обязателен при ``send_to_external = true``,
+            возвращается приёмнику без изменений при каждой попытке доставки.
     """
     expertise_id: int
     with_llm: bool = True
     summary_opinion_id: Optional[int] = None
+    send_to_external: bool = False
+    request_id: Optional[str] = None
 
 
 class ViolationsReportRequest(BaseModel):

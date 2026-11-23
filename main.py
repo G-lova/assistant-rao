@@ -10,7 +10,7 @@ import zipfile
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Body, Header, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from typing import Any, Dict, Optional
 from celery.result import AsyncResult
 
@@ -454,16 +454,39 @@ async def evaluate_primary_opinions(
         HTTPException: 404 — нет заключений первичных экспертов; 409 — сводное заключение ещё не заполнено;
             404 также — версия ``summary_opinion_id`` не найдена; 500 — внутренняя ошибка.
     """
+    from conclusion import primary_review_delivery as delivery
     from conclusion.primary_review_pipeline import PrimaryReviewError, PrimaryReviewPipeline
 
     try:
-        return await PrimaryReviewPipeline(http_manager, request.expertise_id, x_api_database,
-                                         request.summary_opinion_id).run(with_llm=request.with_llm)
+        pipeline = PrimaryReviewPipeline(http_manager, request.expertise_id, x_api_database, request.summary_opinion_id)
+        if request.send_to_external:
+            # расчёт и доставка в фоне: портал получает 202 сразу и результат отдельным POST
+            return JSONResponse(status_code=202, content=delivery.start(
+                lambda: pipeline.run(with_llm=request.with_llm), http_manager.get_session(), request.expertise_id,
+                request.request_id, x_api_database))
+        return await pipeline.run(with_llm=request.with_llm)
+    except delivery.DeliveryError as e:
+        raise HTTPException(status_code=e.http_status, detail=e.message)
     except PrimaryReviewError as e:
         raise HTTPException(status_code=e.http_status, detail=e.message)
     except Exception as e:
         logger.error(f"Ошибка оценки первичных экспертов: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Ошибка оценки первичных экспертов: {str(e)}")
+
+
+@app.get("/evaluate-primary-opinions/{request_id}")
+async def primary_opinions_delivery_status(request_id: str):
+    """Статус доставки результата оценки в портал по ``request_id``: ``calculating``/``delivering``/``delivered``/``failed``.
+
+    Показывает число попыток, последний HTTP-код приёмника и причину ошибки; тело результата и ключи не отдаёт.
+    Статус хранится в памяти процесса (последние 200 запусков).
+    """
+    from conclusion import primary_review_delivery as delivery
+
+    state = delivery.get_delivery(request_id.lower())
+    if state is None:
+        raise HTTPException(status_code=404, detail="Запуск с таким request_id не найден")
+    return state
 
 
 @app.post("/get-violations-report")
