@@ -38,6 +38,11 @@ DEFAULT_WEIGHTS = {"procurement": (3, 1, 1), "report": (1, 1, 1)}   # (проп�
 DEFAULT_MIN_COMMON = 5
 # Итоговые флаги отчётных документов (объект 7): field3_0, field4_2 …; подкритерии field3_0_3 — тоже
 _REPORT_KEY_RE = re.compile(r"^field[345]_\d+(?:_\d+)?$")
+# Флаги критериев отчётных форм (field3_0, field4_2, field4_0_1, field4_4_1): в форме эксперта переключатель подписан
+# «Выявлены недостатки и замечания?» — True означает «замечания есть». В сравнении все критерии приводятся к единой
+# шкале закупок «1 — соответствует / 0 — нарушение», поэтому эти флаги переворачиваются (прочие поля field5_* и
+# служебные подполя — не критерии соответствия — остаются как есть).
+_REPORT_FLAG_RE = re.compile(r"^field[34]_\d+(?:_1)?$")
 POSITIVE_COMMENT = "ЭЗ соответствует требованиям"
 
 
@@ -97,9 +102,13 @@ def comparable(data: Dict[str, Any]) -> Dict[str, int]:
     """Критерии заключения, пригодные для сравнения: ``ключ → 1/0/2`` (пустые и нечисловые пропускаются).
 
     Для закупок это листовые критерии раздела 2; для отчётных документов — булевы флаги ``field3_*``/``field4_*``/``field5_*``.
+    Флаги критериев отчётных документов (``field3_N``, ``field4_N``, ``field4_N_1``) хранятся как «замечания выявлены» и
+    здесь инвертируются, чтобы 1 везде означало «соответствует», а 0 — «нарушение».
     """
     if primary_review.is_report_data(data):
         raw = {k: v for k, v in data.items() if _REPORT_KEY_RE.match(k) and isinstance(v, (bool, int))}
+        # True = «замечания есть» → 0 («нарушение выявлено»), False → 1 («замечаний нет»)
+        raw = {k: (int(not v) if _REPORT_FLAG_RE.match(k) and v in (0, 1) else v) for k, v in raw.items()}
     else:
         raw = primary_review.criteria(data)
     return {k: n for k, v in raw.items() if (n := normalize(v)) is not None}
