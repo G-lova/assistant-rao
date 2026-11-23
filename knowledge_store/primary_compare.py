@@ -154,7 +154,7 @@ def suggest_range(cmp: Comparison, thresholds: Optional[Sequence[int]] = None,
 def label_for(key: str, labels: Optional[Dict[str, str]]) -> str:
     """Непустое название критерия для ответа сервиса (портал отклоняет результат с ``label: null``).
 
-    Порядок: название из справочника; общее начало названий вложенных полей (``key_*``), если у самого поля названия нет
+    Порядок: название из справочника; название устаревшего ключа (``PRIMARY_REVIEW_LEGACY_LABELS``); общее начало названий вложенных полей (``key_*``), если у самого поля названия нет
     («2.2.7. Соответствие законодательству расчета НМЦК нормативным методом» и «… затратным методом» →
     «2.2.7. Соответствие законодательству расчета НМЦК»); иначе «Критерий N.N» по цифрам ключа.
     """
@@ -162,6 +162,9 @@ def label_for(key: str, labels: Optional[Dict[str, str]]) -> str:
     own = (labels.get(key) or "").strip()
     if own:
         return own
+    legacy = (getattr(settings, "PRIMARY_REVIEW_LEGACY_LABELS", {}) or {}).get(key)
+    if legacy:
+        return legacy
     children = [v.strip() for k, v in labels.items() if k.startswith(key + "_") and v and v.strip()]
     if children:
         prefix = os.path.commonprefix(children)

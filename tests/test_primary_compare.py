@@ -167,3 +167,10 @@ class LabelForTests(unittest.TestCase):
         self.assertEqual(pc.label_for("field2_2_30", labels), "Критерий 2.2.30")
         self.assertEqual(pc.label_for("field2_2_30", None), "Критерий 2.2.30")
         self.assertEqual(pc.label_for("field2_2_30", {"field2_2_30": None}), "Критерий 2.2.30")
+
+
+class LegacyLabelTests(unittest.TestCase):
+    def test_legacy_key_gets_configured_title(self):
+        """Устаревший ключ field2_2_24 получает название из настроек, а справочник имеет приоритет."""
+        self.assertEqual(pc.label_for("field2_2_24", {}), "2.2.7. Соответствие законодательству расчета НМЦК")
+        self.assertEqual(pc.label_for("field2_2_24", {"field2_2_24": "Своё"}), "Своё")
