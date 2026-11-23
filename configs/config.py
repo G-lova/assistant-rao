@@ -104,6 +104,8 @@ class Config:
     SYSTEM_URL_PROD = os.getenv("SYSTEM_URL_PROD")
     SYSTEM_URL_NEURO = os.getenv("SYSTEM_URL_NEURO")
     SYSTEM_API_KEY = os.getenv("SYSTEM_API_KEY")
+    # Ключ входящего API портала для доставки оценки первичных экспертов; не задан — берётся SYSTEM_API_KEY
+    PRIMARY_REVIEW_API_KEY = os.getenv("PRIMARY_REVIEW_API_KEY") or os.getenv("SYSTEM_API_KEY")
     SYSTEM_BEARER_KEY = os.getenv("SYSTEM_BEARER_KEY")
     
     # LLM API settings

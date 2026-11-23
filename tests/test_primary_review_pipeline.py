@@ -89,3 +89,33 @@ class PrimaryReviewPipelineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SummaryVersionTests(unittest.TestCase):
+    """Выбор версии итогового заключения и пометка предварительного расчёта."""
+
+    def _rows(self):
+        old = {**SUMMARY, "field2_1_2": 1}
+        return [row(1, SUMMARY),
+                {**row(9, old, "raoExpert", updated="2026-10-01"), "id": 901},
+                {**row(9, SUMMARY, "raoExpert", updated="2026-10-05"), "id": 905}]
+
+    def test_default_is_latest_and_preliminary(self):
+        """Без summary_opinion_id берётся последняя версия, расчёт предварительный."""
+        result = review_expertise(self._rows())
+        self.assertEqual(result["summary_opinion_id"], 905)
+        self.assertEqual(result["summary_updated_at"], "2026-10-05")
+        self.assertTrue(result["is_preliminary"])
+
+    def test_explicit_version_is_used(self):
+        """Указанная версия сравнивается вместо последней и не считается предварительной."""
+        result = review_expertise(self._rows(), summary_opinion_id=901)
+        self.assertEqual(result["summary_opinion_id"], 901)
+        self.assertFalse(result["is_preliminary"])
+        self.assertEqual(result["reviews"][0]["suggested_range"], 1.0)    # первичный совпал со старой версией
+
+    def test_unknown_version_is_404(self):
+        """Версии нет среди сводных заключений экспертизы — 404."""
+        with self.assertRaises(PrimaryReviewError) as ctx:
+            review_expertise(self._rows(), summary_opinion_id=12345)
+        self.assertEqual(ctx.exception.http_status, 404)
