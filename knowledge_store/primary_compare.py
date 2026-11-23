@@ -160,6 +160,9 @@ def label_for(key: str, labels: Optional[Dict[str, str]]) -> str:
     """
     labels = labels or {}
     own = (labels.get(key) or "").strip()
+    generic = re.match(r"(?i)итоговое поле \(field(\d+)_", own)     # служебное название, достроенное по ключу: ключ в текст не пускаем
+    if generic:
+        return f"Итоговое поле раздела {generic.group(1)}"
     if own:
         return own
     legacy = (getattr(settings, "PRIMARY_REVIEW_LEGACY_LABELS", {}) or {}).get(key)
@@ -183,10 +186,12 @@ def criterion_number(key: str, labels: Dict[str, str]) -> str:
     (``Итог по критерию: Подраздел 3.1 …`` → ``3.1``); название без номера, сокращённое до 70 символов, в кавычках;
     без названия — цифры ключа через точку (``field2_1_4`` → ``2.1.4``).
     """
-    label = (labels.get(key) or "").strip()
+    label = label_for(key, labels)
     match = re.match(r"(\d+(?:\.\d+)+)\.?\s", label) or re.search(r"подраздел\s+(\d+(?:\.\d+)+)", label, re.I)
     if match:
         return match.group(1)
+    if label.startswith("Критерий "):          # запасное название по цифрам ключа: в комментарии достаточно номера
+        return label[len("Критерий "):]
     if label:
         return "«" + (label if len(label) <= 70 else label[:67].rstrip() + "…") + "»"
     digits = re.findall(r"\d+", key)

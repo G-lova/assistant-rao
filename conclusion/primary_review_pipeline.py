@@ -250,7 +250,11 @@ class PrimaryReviewPipeline:
                                            available=await repository.list_form_codes(conn))
                 if not code:
                     return {}
-                return {f["field_key"]: f["label"] for f in await repository.get_form_fields(conn, code)}
+                labels = {f["field_key"]: f["label"] for f in await repository.get_form_fields(conn, code)}
+            for suffix, fixes in (getattr(settings, "PRIMARY_REVIEW_LABEL_OVERRIDES", {}) or {}).items():
+                if code.endswith(suffix):         # известные ошибки справочника: см. комментарий в configs/settings.py
+                    labels.update(fixes)
+            return labels
         except Exception as exc:  # noqa: BLE001 — названия необязательны, оценка важнее
             logger.warning(f"Не удалось получить названия критериев: {exc}")
             return {}

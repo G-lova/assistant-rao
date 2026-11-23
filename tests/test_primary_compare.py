@@ -174,3 +174,19 @@ class LegacyLabelTests(unittest.TestCase):
         """Устаревший ключ field2_2_24 получает название из настроек, а справочник имеет приоритет."""
         self.assertEqual(pc.label_for("field2_2_24", {}), "2.2.7. Соответствие законодательству расчета НМЦК")
         self.assertEqual(pc.label_for("field2_2_24", {"field2_2_24": "Своё"}), "Своё")
+
+
+class GenericAndOverrideLabelTests(unittest.TestCase):
+    def test_generic_derived_label_hides_field_key(self):
+        """«Итоговое поле (field3_2)» из справочника не выводит ключ ни в названии, ни в комментарии."""
+        labels = {"field3_2": "Итоговое поле (field3_2)"}
+        self.assertEqual(pc.label_for("field3_2", labels), "Итоговое поле раздела 3")
+        self.assertNotIn("field", pc.criterion_number("field3_2", labels))
+
+    def test_goods_overrides_in_settings(self):
+        """В настройках исправлены названия field4_3 (место поставки) и field4_4 (сроки передачи) формы «поставка товаров»."""
+        from configs import settings
+        fixes = settings.PRIMARY_REVIEW_LABEL_OVERRIDES["goods_obj7"]
+        self.assertIn("4.4.", fixes["field4_3"])
+        self.assertIn("4.5.1", fixes["field4_4"])
+        self.assertEqual(pc.criterion_number("field4_3", fixes), "4.4")
