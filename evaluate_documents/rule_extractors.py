@@ -84,7 +84,7 @@ def parse_payment_order(text: str, filename: str = "") -> Optional[Dict[str, Any
         return None
     raw: Dict[str, Any] = {"dates": [], "finances": [], "organizations": [], "other_data": []}
     number = title.group(1)
-    raw["document_name"] = {"value": f"Платёжное поручение № {number}", "confidence": 1.0}
+    raw["document_name"] = {"value": f"Платежное поручение № {number}", "confidence": 1.0}
 
     pay_date = None
     m = DATE_RE.search(text, title.end(), title.end() + 120)
@@ -93,6 +93,9 @@ def parse_payment_order(text: str, filename: str = "") -> Optional[Dict[str, Any
         if pay_date:
             raw["dates"].append({"evidence": _evidence(_line_with(text, title.start(), m.end())), "kind": "payment",
                                  "value": pay_date, "context": "Дата платёжного поручения"})
+            # название в едином виде «Вид от ДД.ММ.ГГГГ № номер» (evaluate_documents.doc_names)
+            d = pay_date.split("-")
+            raw["document_name"]["value"] = f"Платежное поручение от {d[2]}.{d[1]}.{d[0]} № {number}"
 
     amount = None
     m = AMOUNT_RE.search(text)

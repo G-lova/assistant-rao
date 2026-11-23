@@ -152,3 +152,46 @@ class CriterionNumberTests(unittest.TestCase):
         self.assertEqual(pc.criterion_number("field3_2", labels), "3.1")
         self.assertEqual(pc.criterion_number("field5_0", labels), "«Есть ли в контракте требования к привлечению субподрядчиков?»")
         self.assertNotIn("field", pc.criterion_number("field4_3", {}))
+
+    def test_number_after_service_prefix(self):
+        """Название без слова «Подраздел» («Итог по критерию: 4.5.2. По критерию …») даёт номер 4.5.2, а не обрезанное название."""
+        labels = {"field4_4_1": "Итог по критерию: 4.5.2. По критерию «Соответствие сроков совершения отдельных действий установленным срокам»"}
+        self.assertEqual(pc.criterion_number("field4_4_1", labels), "4.5.2")
+
+
+class LabelForTests(unittest.TestCase):
+    """Название критерия в ответе никогда не пустое."""
+
+    def test_own_label_children_prefix_and_digits(self):
+        """Своё название; общее начало названий вложенных полей; иначе номер из ключа."""
+        labels = {"field2_2_7": "2.2.7. Соответствие",
+                  "field2_2_24_0": "2.2.7. Соответствие законодательству расчета НМЦК нормативным методом",
+                  "field2_2_24_1": "2.2.7. Соответствие законодательству расчета НМЦК затратным методом"}
+        self.assertEqual(pc.label_for("field2_2_7", labels), "2.2.7. Соответствие")
+        self.assertEqual(pc.label_for("field2_2_24", labels), "2.2.7. Соответствие законодательству расчета НМЦК")
+        self.assertEqual(pc.label_for("field2_2_30", labels), "Критерий 2.2.30")
+        self.assertEqual(pc.label_for("field2_2_30", None), "Критерий 2.2.30")
+        self.assertEqual(pc.label_for("field2_2_30", {"field2_2_30": None}), "Критерий 2.2.30")
+
+
+class LegacyLabelTests(unittest.TestCase):
+    def test_legacy_key_gets_configured_title(self):
+        """Устаревший ключ field2_2_24 получает название из настроек, а справочник имеет приоритет."""
+        self.assertEqual(pc.label_for("field2_2_24", {}), "2.2.7. Соответствие законодательству расчета НМЦК")
+        self.assertEqual(pc.label_for("field2_2_24", {"field2_2_24": "Своё"}), "Своё")
+
+
+class GenericAndOverrideLabelTests(unittest.TestCase):
+    def test_generic_derived_label_hides_field_key(self):
+        """«Итоговое поле (field3_2)» из справочника не выводит ключ ни в названии, ни в комментарии."""
+        labels = {"field3_2": "Итоговое поле (field3_2)"}
+        self.assertEqual(pc.label_for("field3_2", labels), "Итоговое поле раздела 3")
+        self.assertNotIn("field", pc.criterion_number("field3_2", labels))
+
+    def test_goods_overrides_in_settings(self):
+        """В настройках исправлены названия field4_3 (место поставки) и field4_4 (сроки передачи) формы «поставка товаров»."""
+        from configs import settings
+        fixes = settings.PRIMARY_REVIEW_LABEL_OVERRIDES["goods_obj7"]
+        self.assertIn("4.4.", fixes["field4_3"])
+        self.assertIn("4.5.1", fixes["field4_4"])
+        self.assertEqual(pc.criterion_number("field4_3", fixes), "4.4")

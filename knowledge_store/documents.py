@@ -26,7 +26,8 @@ EXTRACTION_SOURCES = ("prompts/type_detector_prompt.txt", "schemas/type_detector
                       "prompts/data_extractor_prompt.txt", "schemas/data_extractor_schema.json",
                       "evaluate_documents/type_data_extractor.py", "evaluate_documents/type_detector.py",
                       "evaluate_documents/data_extractor.py", "evaluate_documents/doc_profiles.py",
-                      "evaluate_documents/rule_extractors.py", "evaluate_documents/merge_utils.py")
+                      "evaluate_documents/rule_extractors.py", "evaluate_documents/merge_utils.py",
+                      "evaluate_documents/doc_names.py")
 """Файлы, от которых зависит результат извлечения: правка любого из них — новая версия кэша."""
 
 SQL_FIND_BY_SHA = """

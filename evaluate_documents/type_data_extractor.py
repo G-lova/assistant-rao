@@ -25,6 +25,7 @@ from configs import settings
 from configs.logger import brief, get_logger
 from evaluate_documents import rule_extractors
 from evaluate_documents.data_extractor import DataExtractor
+from evaluate_documents.doc_names import finalize_document_name
 from evaluate_documents.doc_profiles import (
     PAYMENT_RE, PROFILE_TITLES, annotate_pages, describe_raw_data, format_raw_data_for_log, profile_fields,
     profile_for, profile_hint,
@@ -85,7 +86,7 @@ class TypeDataExtractor:
         self.data_extractor = DataExtractor(llm_client, model)
 
     async def extract_data_from_document(self, chunks: List[str], document_name: str, doc_type: str,
-                                         expertise_object: int) -> Dict[str, Any]:
+                                         expertise_object: int, source_format: Optional[str] = None) -> Dict[str, Any]:
         """Определяет тип документа, извлекает данные и оценивает читаемость.
 
         Args:
@@ -93,6 +94,8 @@ class TypeDataExtractor:
             document_name: Имя файла.
             doc_type: Ожидаемый тип (поле экспертизы, куда загружен файл).
             expertise_object: Объект экспертизы.
+            source_format: Настоящий формат файла по содержимому (``.html``, ``.xml``, ``.zip`` …); без него — по
+                расширению имени. Нужен для названия документа (:func:`doc_names.finalize_document_name`).
 
         Returns:
             dict: ``type_compliance``, ``readability``, ``raw_data`` (формат прежний). Если ни один блок не
@@ -127,6 +130,9 @@ class TypeDataExtractor:
         else:
             source = "модель"
             hint = profile_hint(profile, detected_type, DOCUMENT_TYPE_MAPPING.get(detected_type or "", ""))
+            # имя файла и формат — подсказка для названия документа (номер ЕИС, «печатная форма» и т. п.)
+            hint = f"Имя файла: {document_name}" + (f"; формат файла: {source_format}" if source_format else "") \
+                + ".\n" + hint
             chunk_results = await self._extract_chunks(chunks, document_name, profile, hint)
 
         if not chunk_results:
@@ -159,6 +165,10 @@ class TypeDataExtractor:
             rule_extractors.overlay(raw, xml)
             source += " + XML"
         removed = dedupe_raw_data(raw)
+        # название документа в едином виде «Вид от ДД.ММ.ГГГГ № номер» + формат файла (XML, печатная форма, архив)
+        name_before = finalize_document_name(raw, document_name, source_format, text)
+        if name_before != raw.get("document_name", {}).get("value"):
+            logger.info(f"Документ '{document_name}': название «{name_before}» → «{raw['document_name']['value']}»")
         if removed:
             logger.info(f"Документ '{document_name}': удалено дублей после объединения блоков: {removed}")
 

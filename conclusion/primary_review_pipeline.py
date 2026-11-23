@@ -166,7 +166,7 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
         reviews.append({
             "expert_id": int(row["expert_id"]),
             "common": cmp.common,
-            "differences": [{"key": d.key, "label": (labels or {}).get(d.key), "kind": d.kind,
+            "differences": [{"key": d.key, "label": primary_compare.label_for(d.key, labels), "kind": d.kind,
                              "primary": d.primary, "summary": d.summary, "shared": d.key in shared,
                              "mention_probability": mention.get(d.key)}
                             for d in cmp.differences],
@@ -182,7 +182,7 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
                              else ("thresholds" if threshold_range is not None else None)),
             # взвешенный процент сходства и вычеты по расхождениям (отрицательный вычет — расхождение, которое обычно прощают)
             "weighted_percent": weighted["percent"] if weighted else None,
-            "deductions": [{**d, "label": (labels or {}).get(d["key"]), "shared": d["key"] in shared}
+            "deductions": [{**d, "label": primary_compare.label_for(d["key"], labels), "shared": d["key"] in shared}
                            for d in weighted["deductions"]] if weighted else [],
             "probabilities": probs,
             "categories": primary_taxonomy.categorize(own, [i.code for i in issues], cmp.group),
@@ -199,7 +199,7 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
         })
     group = "report" if primary_review.is_report_data(summary["data"]) else "procurement"
     # критерии, по которым все первичные эксперты разошлись с итоговым одинаково (при двух и более первичных)
-    shared_list = [{"key": k, "label": (labels or {}).get(k), "primary": pv, "summary": sv}
+    shared_list = [{"key": k, "label": primary_compare.label_for(k, labels), "primary": pv, "summary": sv}
                    for k in sorted(shared, key=lambda x: [int(n) for n in re.findall(r"\d+", x)])
                    for pv, sv in [next((d.primary, d.summary) for d in comparisons[0].differences if d.key == k)]]
     return {"summary_expert_id": int(summary["expert_id"]), "summary_opinion_id": int(summary["id"]),
@@ -250,7 +250,11 @@ class PrimaryReviewPipeline:
                                            available=await repository.list_form_codes(conn))
                 if not code:
                     return {}
-                return {f["field_key"]: f["label"] for f in await repository.get_form_fields(conn, code)}
+                labels = {f["field_key"]: f["label"] for f in await repository.get_form_fields(conn, code)}
+            for suffix, fixes in (getattr(settings, "PRIMARY_REVIEW_LABEL_OVERRIDES", {}) or {}).items():
+                if code.endswith(suffix):         # известные ошибки справочника: см. комментарий в configs/settings.py
+                    labels.update(fixes)
+            return labels
         except Exception as exc:  # noqa: BLE001 — названия необязательны, оценка важнее
             logger.warning(f"Не удалось получить названия критериев: {exc}")
             return {}

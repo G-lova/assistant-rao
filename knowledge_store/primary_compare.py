@@ -151,6 +151,34 @@ def suggest_range(cmp: Comparison, thresholds: Optional[Sequence[int]] = None,
     return 1.0 if n < t[0] else 0.75 if n < t[1] else 0.5 if n < t[2] else 0.0
 
 
+def label_for(key: str, labels: Optional[Dict[str, str]]) -> str:
+    """Непустое название критерия для ответа сервиса (портал отклоняет результат с ``label: null``).
+
+    Порядок: название из справочника; название устаревшего ключа (``PRIMARY_REVIEW_LEGACY_LABELS``); общее начало названий вложенных полей (``key_*``), если у самого поля названия нет
+    («2.2.7. Соответствие законодательству расчета НМЦК нормативным методом» и «… затратным методом» →
+    «2.2.7. Соответствие законодательству расчета НМЦК»); иначе «Критерий N.N» по цифрам ключа.
+    """
+    labels = labels or {}
+    own = (labels.get(key) or "").strip()
+    generic = re.match(r"(?i)итоговое поле \(field(\d+)_", own)     # служебное название, достроенное по ключу: ключ в текст не пускаем
+    if generic:
+        return f"Итоговое поле раздела {generic.group(1)}"
+    if own:
+        return own
+    legacy = (getattr(settings, "PRIMARY_REVIEW_LEGACY_LABELS", {}) or {}).get(key)
+    if legacy:
+        return legacy
+    children = [v.strip() for k, v in labels.items() if k.startswith(key + "_") and v and v.strip()]
+    if children:
+        prefix = os.path.commonprefix(children)
+        prefix = re.sub(r"\s+\S*$", "", prefix) if prefix and prefix not in children else prefix   # без обрезанного слова
+        prefix = prefix.rstrip(" ,;:—-")
+        if len(prefix) >= 8:
+            return prefix
+    digits = re.findall(r"\d+", key)
+    return "Критерий " + ".".join(digits) if digits else "Критерий формы"
+
+
 def criterion_number(key: str, labels: Dict[str, str]) -> str:
     """Номер критерия для комментария; технический ключ поля (``field3_2``) в текст не попадает.
 
@@ -158,10 +186,14 @@ def criterion_number(key: str, labels: Dict[str, str]) -> str:
     (``Итог по критерию: Подраздел 3.1 …`` → ``3.1``); название без номера, сокращённое до 70 символов, в кавычках;
     без названия — цифры ключа через точку (``field2_1_4`` → ``2.1.4``).
     """
-    label = (labels.get(key) or "").strip()
-    match = re.match(r"(\d+(?:\.\d+)+)\.?\s", label) or re.search(r"подраздел\s+(\d+(?:\.\d+)+)", label, re.I)
+    label = label_for(key, labels)
+    # номер в начале названия, в том числе после служебного «Итог по критерию:» («Итог по критерию: 4.5.2. По критерию …»)
+    match = (re.match(r"(?:итог по критерию:\s*)?(\d+(?:\.\d+)+)\.?\s", label, re.I)
+             or re.search(r"подраздел\s+(\d+(?:\.\d+)+)", label, re.I))
     if match:
         return match.group(1)
+    if label.startswith("Критерий "):          # запасное название по цифрам ключа: в комментарии достаточно номера
+        return label[len("Критерий "):]
     if label:
         return "«" + (label if len(label) <= 70 else label[:67].rstrip() + "…") + "»"
     digits = re.findall(r"\d+", key)

@@ -1030,9 +1030,21 @@ class FileReader:
 
 
     async def read_html(self, html_path: str) -> str:
+        """Текст HTML-файла (печатные формы ЕИС, платёжки из банка) без служебных тегов.
 
-        async with aiofiles.open(html_path, 'r', encoding='utf-8') as f:
-            html_content = await f.read()
+        Args:
+            html_path: Путь к файлу.
+
+        Returns:
+            str: Текст по строкам, без пустых строк.
+        """
+        async with aiofiles.open(html_path, 'rb') as f:
+            raw_html = await f.read()
+        # кодировка: UTF-8, а если не декодируется — windows-1251 (старые печатные формы)
+        try:
+            html_content = raw_html.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            html_content = raw_html.decode("cp1251", errors="replace")
 
         soup = BeautifulSoup(html_content, 'html.parser')
 
@@ -1131,7 +1143,21 @@ class FileReader:
 
 
     def get_extension(self, filename: str) -> str:
-        filename = filename.lower()
+        """Расширение файла в нижнем регистре (``.pdf``, ``.tar.gz``) или пустая строка.
+
+        Печатные формы ЕИС скачиваются с именем без расширения, но с точкой внутри:
+        «Печатная-форма-контракта-№-…-(версия-0,-док.-15406010760260001600001)». ``os.path.splitext`` давал
+        «расширение» ``.-15406010760260001600001)``, файл считался неподдерживаемым и превращался в строку
+        «Бинарный файл tmp…» (19.10.2026). Теперь такое «расширение» не считается расширением, и формат
+        определяется по содержимому.
+
+        Args:
+            filename: Имя файла.
+
+        Returns:
+            str: Расширение с точкой или ``""``.
+        """
+        filename = (filename or "").lower()
 
         for ext in (
             ".tar.gz",
@@ -1144,7 +1170,30 @@ class FileReader:
             if filename.endswith(ext):
                 return ext
 
-        return os.path.splitext(filename)[1]
+        ext = os.path.splitext(filename)[1]
+        # настоящее расширение — точка и 1–5 латинских букв/цифр; «.-1540…)» и «. док» — часть имени
+        return ext if re.fullmatch(r"\.[a-z0-9]{1,5}", ext) else ""
+
+    async def source_format(self, file_path: str, filename: str) -> str:
+        """Настоящий формат файла: по расширению имени, а если его нет или оно незнакомое — по содержимому.
+
+        Нужен для названия документа («…, печатная форма ЕИС», «(формат XML)»): у печатных форм ЕИС расширения в
+        имени нет, а текст HTML после чтения уже не отличить от текста PDF.
+
+        Args:
+            file_path: Путь к файлу на диске.
+            filename: Имя файла.
+
+        Returns:
+            str: Расширение с точкой (``.html``, ``.xml``, ``.pdf`` …) или ``.bin``.
+        """
+        ext = self.get_extension(filename)
+        if ext and ext in _READABLE_EXT and ext not in (".bin", ".txt"):
+            return ext
+        try:
+            return await self.detect_binary_file_type(file_path)
+        except Exception:  # noqa: BLE001 — формат нужен только для названия
+            return ext or ".bin"
 
 
     async def read_file(self, file_path: str, original_filename: str = None) -> str:
@@ -1167,17 +1216,18 @@ class FileReader:
         logger.info(f"Чтение файла: {original_filename} (расширение: {ext})")
 
         try:
-            # Если расширение .bin, пробуем определить реальный тип
-            if ext == ".bin":
+            # Нет расширения, .bin или незнакомое расширение — определяем настоящий тип по содержимому
+            # (печатные формы ЕИС приходят без расширения, а внутри это HTML)
+            if ext == ".bin" or ext not in _READABLE_EXT:
                 real_extension = await self.detect_binary_file_type(file_path)
                 logger.info(f"Определен реальный тип бинарного файла: {real_extension}")
                 
                 # Создаем копию файла с правильным расширением для обработки
-                if real_extension != ".bin":
+                if real_extension not in (".bin", ext):
                     new_path = file_path + real_extension
                     shutil.copy2(file_path, new_path)
                     try:
-                        result = await self.read_file(new_path, original_filename + real_extension)
+                        result = await self.read_file(new_path, (original_filename or "file") + real_extension)
                         os.unlink(new_path)
                         return result
                     except Exception as e:
@@ -1231,11 +1281,14 @@ class FileReader:
                     return f"Изображение {os.path.basename(file_path)} (текст не распознан)"
             else:
                 # Для неизвестных форматов пробуем определить тип и обработать
-                if ext == ".bin":
-                    # Уже пробовали определить тип выше, если дошли сюда - не удалось
-                    msg = f"Бинарный файл {os.path.basename(file_path)} (не удалось определить формат)"
+                # Имя — исходное, а не временного файла: строка попадает в текст документа, и модель «называла»
+                # документ «Бинарный файл tmp61wjkjn9». Начало «Бинарный файл» сохранено — по нему код узнаёт
+                # такие строки (evaluate_documents.doc_names.is_unsupported_text)
+                shown = original_filename or os.path.basename(file_path)
+                if ext in (".bin", ""):
+                    msg = f"Бинарный файл «{shown}» (не удалось определить формат)"
                 else:
-                    msg = f"Бинарный файл {os.path.basename(file_path)} (формат {ext})"
+                    msg = f"Бинарный файл «{shown}» (формат {ext} не поддерживается)"
                 
                 logger.warning(f"Неподдерживаемый формат файла: {original_filename}")
                 return msg
@@ -1248,6 +1301,39 @@ class FileReader:
             logger.error(f"Ошибка чтения файла {original_filename}: {str(e)}", exc_info=True)
             raise ValueError(f"Ошибка чтения файла: {str(e)}")
 
+
+    async def _sniff_markup(self, file_path: str) -> Optional[str]:
+        """``.html`` / ``.xml`` по началу файла (BOM, пробелы, ``<?xml``, ``<!DOCTYPE html``, ``<html``) или ``None``.
+
+        Args:
+            file_path: Путь к файлу.
+
+        Returns:
+            str | None: Расширение разметки или ``None``.
+        """
+        try:
+            async with aiofiles.open(file_path, 'rb') as f:
+                head = await f.read(4096)
+        except Exception:  # noqa: BLE001
+            return None
+        for bom in (b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff"):
+            if head.startswith(bom):
+                head = head[len(bom):]
+                break
+        text = ""
+        for encoding in ("utf-8", "cp1251", "utf-16"):
+            try:
+                text = head.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        text = text.lstrip().lower()
+        if text.startswith("<!doctype html") or text.startswith("<html") or (
+                text.startswith("<") and "<html" in text[:1500]):
+            return ".html"
+        if text.startswith("<?xml"):
+            return ".html" if "<html" in text[:1500] else ".xml"
+        return None
 
     async def detect_binary_file_type(self, file_path: str) -> str:
         """
@@ -1312,6 +1398,10 @@ class FileReader:
             # Windows Executable
             if header.startswith(b'MZ'):
                 return '.exe'
+            # Текст разметки: HTML (печатные формы ЕИС) и XML — до проверки BOM, иначе они читались бы как .txt
+            markup = await self._sniff_markup(file_path)
+            if markup:
+                return markup
             # UTF-8/16 text files with BOM
             if header.startswith(b'\xEF\xBB\xBF'):  # UTF-8 BOM
                 return '.txt'
@@ -1347,3 +1437,55 @@ class FileReader:
         except Exception as e:
             logger.error(f"Ошибка определения типа бинарного файла {file_path}: {str(e)}")
             return '.bin'
+
+# MIME-тип (поле media.mime_type портала) → расширение для чтения файла
+_MIME_EXT = {
+    "text/html": ".html", "application/xhtml+xml": ".html", "text/xml": ".xml", "application/xml": ".xml",
+    "application/pdf": ".pdf", "text/plain": ".txt", "text/csv": ".csv", "application/json": ".json",
+    "application/msword": ".doc", "application/rtf": ".rtf", "text/rtf": ".rtf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.ms-excel": ".xls", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/vnd.oasis.opendocument.text": ".odt",
+    "application/zip": ".zip", "application/x-zip-compressed": ".zip", "application/x-rar-compressed": ".rar",
+    "application/vnd.rar": ".rar", "application/x-7z-compressed": ".7z", "application/gzip": ".gz",
+    "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/bmp": ".bmp", "image/tiff": ".tiff",
+    "application/pkcs7-signature": ".sig", "application/x-pkcs7-signature": ".sig",
+}
+
+
+def extension_from_mime(mime_type: Optional[str]) -> Optional[str]:
+    """Расширение по MIME-типу (``text/html; charset=utf-8`` → ``.html``); ``None`` — тип неизвестен или общий.
+
+    ``application/octet-stream`` и пустое значение ничего не говорят о формате — тогда формат определяется по
+    содержимому файла.
+
+    Args:
+        mime_type: MIME-тип (поле ``media.mime_type`` портала).
+
+    Returns:
+        str | None: Расширение с точкой или ``None``.
+    """
+    if not mime_type:
+        return None
+    return _MIME_EXT.get(str(mime_type).split(";")[0].strip().lower())
+
+
+def name_for_reading(filename: str, mime_type: Optional[str]) -> str:
+    """Имя файла для чтения: если в имени нет понятного расширения, а MIME-тип известен — дописывает расширение.
+
+    «Печатная-форма-контракта-№-…-(версия-0,-док.-15406010760260001600001)» + ``text/html`` →
+    «…-15406010760260001600001).html». Имя в ответе эндпоинта не меняется — это имя только для ``read_file``.
+
+    Args:
+        filename: Имя файла.
+        mime_type: MIME-тип из БД портала.
+
+    Returns:
+        str: Имя для чтения (исходное, если расширение уже понятное или тип неизвестен).
+    """
+    ext = FileReader.get_extension(None, filename)
+    mime_ext = extension_from_mime(mime_type)
+    if mime_ext and (not ext or ext not in _READABLE_EXT or ext == ".bin"):
+        return f"{filename}{mime_ext}"
+    return filename
