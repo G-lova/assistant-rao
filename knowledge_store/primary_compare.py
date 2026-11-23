@@ -187,7 +187,9 @@ def criterion_number(key: str, labels: Dict[str, str]) -> str:
     без названия — цифры ключа через точку (``field2_1_4`` → ``2.1.4``).
     """
     label = label_for(key, labels)
-    match = re.match(r"(\d+(?:\.\d+)+)\.?\s", label) or re.search(r"подраздел\s+(\d+(?:\.\d+)+)", label, re.I)
+    # номер в начале названия, в том числе после служебного «Итог по критерию:» («Итог по критерию: 4.5.2. По критерию …»)
+    match = (re.match(r"(?:итог по критерию:\s*)?(\d+(?:\.\d+)+)\.?\s", label, re.I)
+             or re.search(r"подраздел\s+(\d+(?:\.\d+)+)", label, re.I))
     if match:
         return match.group(1)
     if label.startswith("Критерий "):          # запасное название по цифрам ключа: в комментарии достаточно номера

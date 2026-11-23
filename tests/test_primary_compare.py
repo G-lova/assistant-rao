@@ -153,6 +153,11 @@ class CriterionNumberTests(unittest.TestCase):
         self.assertEqual(pc.criterion_number("field5_0", labels), "«Есть ли в контракте требования к привлечению субподрядчиков?»")
         self.assertNotIn("field", pc.criterion_number("field4_3", {}))
 
+    def test_number_after_service_prefix(self):
+        """Название без слова «Подраздел» («Итог по критерию: 4.5.2. По критерию …») даёт номер 4.5.2, а не обрезанное название."""
+        labels = {"field4_4_1": "Итог по критерию: 4.5.2. По критерию «Соответствие сроков совершения отдельных действий установленным срокам»"}
+        self.assertEqual(pc.criterion_number("field4_4_1", labels), "4.5.2")
+
 
 class LabelForTests(unittest.TestCase):
     """Название критерия в ответе никогда не пустое."""
