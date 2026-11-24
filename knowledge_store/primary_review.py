@@ -169,8 +169,10 @@ def compare_report_facts(primary: Dict[str, Any], summary: Dict[str, Any],
                          labels: Optional[Dict[str, str]] = None) -> List[Issue]:
     """Сверяет с итоговым заключением не-критериальные поля отчётных документов (объект 7).
 
-    * **Анкетные факты** (``PRIMARY_REVIEW_FACT_FIELDS``: СМП-исполнитель, требуется ли расчёт неустойки): ответ — факт,
-      а не оценка, поэтому сравнивается на равенство; расхождение — ``FACT_MISMATCH``.
+    * **Анкетные факты** (``PRIMARY_REVIEW_FACT_FIELDS``: требование субподряда из СМП, СМП-исполнитель в работах/НИР,
+      требуется ли расчёт неустойки): ответ — факт, а не оценка, поэтому сравнивается на равенство; расхождение —
+      ``FACT_MISMATCH``. Зависимые вопросы сравниваются, только если родитель «да» у обоих заключений
+      (``PRIMARY_REVIEW_FACT_PARENT``), поля одной формы — при наличии маркера формы (``PRIMARY_REVIEW_FACT_REQUIRES``).
     * **Суммы неустойки** (``PRIMARY_REVIEW_PENALTY_FIELDS``: пени, штрафы, суммы заказчика): расхождение больше допуска
       ``PRIMARY_REVIEW_PENALTY_TOLERANCE`` — ``PENALTY_MISMATCH``. Если по одному из заключений расчёт неустойки не требуется
       (``field*_1_11`` = «нет»), суммы не сверяются — расхождение уже названо в ``FACT_MISMATCH``. Пустая сумма = 0.
@@ -193,7 +195,15 @@ def compare_report_facts(primary: Dict[str, Any], summary: Dict[str, Any],
     tolerance = float(getattr(settings, "PRIMARY_REVIEW_PENALTY_TOLERANCE", 1.0)) if settings else 1.0
     out: List[Issue] = []
     answer = {1: "«да»", 0: "«нет»"}
+    requires = getattr(settings, "PRIMARY_REVIEW_FACT_REQUIRES", {}) if settings else {}
+    parents = getattr(settings, "PRIMARY_REVIEW_FACT_PARENT", {}) if settings else {}
     for key, default in facts.items():
+        marker = requires.get(key)           # поле одной формы: в другой тот же ключ означает иное (field5_0_1)
+        if marker and not (marker in primary and marker in summary):
+            continue
+        parent = parents.get(key)            # зависимый вопрос показывается, только если родитель «да» у обоих
+        if parent and not (normalize(primary.get(parent)) == 1 and normalize(summary.get(parent)) == 1):
+            continue
         ours, theirs = normalize(primary.get(key)), normalize(summary.get(key))
         if ours is None or theirs is None or ours == theirs or ours not in answer or theirs not in answer:
             continue

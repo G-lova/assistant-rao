@@ -68,8 +68,14 @@ class FindTestExpertsTests(unittest.TestCase):
                 "field5_1_10": 3000, "field6_1_4_1": "", "field5_1_8_0": True}
         # одинаковые данные — замечаний нет; служебное поле (автозаполнение) не сравнивается
         self.assertEqual(pr.compare_report_facts(base, {**base, "field5_1_8_0": False}), [])
-        # скрытый флаг «заполнить автоматически» (field5_0_1 / field6_0_1) зависит от версии формы и не сравнивается
+        # в товарах field5_0_1 — скрытый флаг «заполнить автоматически» (нет маркера формы работ field6_0_0): не сравнивается
         self.assertEqual(pr.compare_report_facts({**base, "field5_0_1": True, "field6_0_1": True}, base), [])
+        # в работах/НИР field5_0_1 — «исполнитель — СМП?»: сравнивается, если родитель field5_0 «да» у обоих
+        smp = {"field1_3": [], "field6_0_0": "", "field5_0": True, "field5_0_1": True}
+        self.assertEqual([i.code for i in pr.compare_report_facts({**smp, "field5_0_1": False}, smp)], ["FACT_MISMATCH"])
+        # родитель «нет» у одного заключения: названо только расхождение родителя, зависимый вопрос не сравнивается
+        got = pr.compare_report_facts({**smp, "field5_0": False, "field5_0_1": False}, smp)
+        self.assertEqual([i.keys for i in got], [["field5_0"]])
         # неверный ответ о требовании субподряда из СМП → FACT_MISMATCH с названием поля
         got = pr.compare_report_facts({**base, "field5_0": True}, base)
         self.assertEqual([i.code for i in got], ["FACT_MISMATCH"])
