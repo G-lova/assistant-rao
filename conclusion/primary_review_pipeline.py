@@ -135,6 +135,8 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
         method_issue = primary_review.compare_method(row["data"], summary["data"])   # методологическая ошибка: метод НМЦК
         if method_issue:
             issues.append(method_issue)
+        # анкетные факты и суммы неустойки отчётных документов: только в комментарий, в оценку не входят
+        issues.extend(primary_review.compare_report_facts(row["data"], summary["data"], labels))
         issues.extend((extra_issues or {}).get(int(row["expert_id"]), []))
         current = row.get("current_range")
         feats = primary_compare.features(row["data"], summary["data"], cmp)

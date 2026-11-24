@@ -62,6 +62,31 @@ class FindTestExpertsTests(unittest.TestCase):
         self.assertIsNone(pr.compare_method({**base, "field2_2_2_0": "1"}, {**base, "field2_2_2_0": 1}))
         self.assertIsNone(pr.compare_method(base, {**base, "field2_2_2_0": 1}))
 
+    def test_report_facts_and_penalty(self):
+        """Анкетные факты и суммы неустойки отчётных документов сравниваются отдельно от критериев."""
+        base = {"field1_3": [], "field5_0_1": False, "field5_1_11": True, "field5_1_4": 241.04, "field5_1_7": "1 288,97",
+                "field5_1_10": 3000, "field6_1_4_1": "", "field5_1_8_0": True}
+        # одинаковые данные — замечаний нет; служебное поле (автозаполнение) не сравнивается
+        self.assertEqual(pr.compare_report_facts(base, {**base, "field5_1_8_0": False}), [])
+        # неверный ответ о СМП → FACT_MISMATCH с названием поля
+        got = pr.compare_report_facts({**base, "field5_0_1": True}, base)
+        self.assertEqual([i.code for i in got], ["FACT_MISMATCH"])
+        self.assertIn("СМП", got[0].message)
+        # сумма пеней отличается больше допуска (1 руб.) → PENALTY_MISMATCH; в пределах допуска — нет
+        got = pr.compare_report_facts({**base, "field5_1_4": 300}, base)
+        self.assertEqual([i.code for i in got], ["PENALTY_MISMATCH"])
+        self.assertEqual(pr.compare_report_facts({**base, "field5_1_4": 241.9}, base), [])
+        # сумма заказчика: пусто = 0; работы/НИР хранят суммы под field6_1_*
+        self.assertEqual(len(pr.compare_report_facts({**base, "field6_1_4_1": "500,00"}, base)), 1)
+        works = {"field1_3": [], "field6_1_11": True, "field6_1_4": 100, "field6_1_7": 0, "field6_1_10": 0}
+        self.assertEqual([i.code for i in pr.compare_report_facts({**works, "field6_1_4": 150}, works)], ["PENALTY_MISMATCH"])
+        # расчёт не требуется у одного заключения: суммы не сверяются, остаётся только расхождение факта
+        got = pr.compare_report_facts({**base, "field5_1_11": False, "field5_1_4": 0}, base)
+        self.assertEqual([i.code for i in got], ["FACT_MISMATCH"])
+        # закупки и пустые значения — без замечаний
+        self.assertEqual(pr.compare_report_facts({"field2_1_1": 1}, {"field2_1_1": 0}), [])
+        self.assertEqual(pr.compare_report_facts({"field1_3": [], "field5_0_1": None}, {"field1_3": [], "field5_0_1": True}), [])
+
 
 if __name__ == "__main__":
     unittest.main()
