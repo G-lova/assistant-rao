@@ -316,3 +316,35 @@ class PrimaryReviewPipeline:
                                   summary_opinion_id=self.summary_opinion_id)
         logger.info(f"Оценка первичных экспертов expertise_id={self.expertise_id}: {len(result['reviews'])} заключений")
         return {"expertise_id": self.expertise_id, **result}
+
+
+def make_rao_comments(http_manager: "HTTPClientManager", expertise_id: int, environment: Optional[str] = None):
+    """Фабрика комментариев РАО для :func:`knowledge_store.summary.generate_summary`.
+
+    Заключения первичных экспертов берутся из внешней БД; сравниваются с **собранным** ``data`` (а не с сохранённым
+    заключением сводного эксперта), по расхождениям строится черновик ``rao_comment`` (:mod:`knowledge_store.rao_comments`).
+
+    Args:
+        http_manager: Менеджер HTTP-клиентов задачи.
+        expertise_id: ID экспертизы.
+        environment: Окружение (``X-API-Database``).
+
+    Returns:
+        Корутина ``data → {"<поле>-<expert_id>": текст}`` (пустой словарь, если первичных заключений нет).
+    """
+    from knowledge_store import rao_comments
+
+    async def build(data: Dict[str, Any]) -> Dict[str, str]:
+        """Сравнивает первичные заключения экспертизы с ``data`` и возвращает комментарии РАО."""
+        pipeline = PrimaryReviewPipeline(http_manager, expertise_id, environment)
+        primary = [r for r in await pipeline.fetch_rows() if r.get("expert_role") == PRIMARY_ROLE]
+        if not primary:
+            return {}
+        first = primary[0]
+        # собранное заключение выступает «итоговым»: сохранённые заключения сводного эксперта в сравнение не берём
+        summary = {"id": 0, "expert_id": 0, "expert_role": SUMMARY_ROLE, "data": data, "updated_at": "",
+                   "object": first["object"], "type_orig": first["type_orig"], "checkType2": first["checkType2"]}
+        result = review_expertise(primary + [summary], await pipeline.labels_for(primary))
+        return rao_comments.from_reviews(result["reviews"])
+
+    return build

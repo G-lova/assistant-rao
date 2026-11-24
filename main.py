@@ -115,6 +115,8 @@ async def generate_summary_opinion(
 ):
     """Запускает генерацию сводного экспертного заключения («РАО Эксперт») из хранилища знаний.
 
+    С ``with_rao_comments=true`` собирается сводное ЭЗ вместе с черновиком ``rao_comment`` (комментарии РАО к заключениям
+    первичных экспертов); без него ``rao_comment`` в ответе нет — заключение служит подсказкой первичному эксперту.
     Статус и результат — через существующий ``GET /task/{task_id}``. Если по экспертизе нет данных
     (``/evaluate-documents`` не выполнялся), тексты очищены политикой хранения или форма не
     поддерживается — сразу возвращается 409/422 с пояснением, задача не создаётся.
@@ -140,7 +142,7 @@ async def generate_summary_opinion(
         raise HTTPException(status_code=500, detail="Не удалось проверить данные экспертизы")
 
     task = generate_summary_opinion_task.delay(
-        request.expertise_id, x_api_database, request.send_draft, request.rebuild_facts)
+        request.expertise_id, x_api_database, request.send_draft, request.rebuild_facts, request.with_rao_comments)
     return {"task_id": task.id, "status": "processing", "message": "Задача запущена"}
 
 

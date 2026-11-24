@@ -35,6 +35,7 @@ BLOCK_TITLES = {"field3": "вывод", "field4": "заключение"}  # «�
 
 LlmCall = Callable[[List[dict], dict], Awaitable[str]]
 FactsBuilder = Callable[[], Awaitable[Any]]
+RaoComments = Callable[[Dict[str, Any]], Awaitable[Dict[str, str]]]    # data сводного ЭЗ → {"<поле>-<expert_id>": комментарий РАО}
 
 
 class SummaryError(Exception):
@@ -1284,6 +1285,8 @@ def validate(data: Dict[str, Any], fields: Sequence[dict]) -> List[str]:
             problems.append(f"{key}: недопустимое значение {value!r}")
         if kind == forms.KIND_SECTION and value not in (0, 1):
             problems.append(f"{key}: недопустимый итог подраздела {value!r}")
+        if key == "rao_comment" and isinstance(value, dict):      # у сводного эксперта: {"<поле>-<expert_id>": текст}
+            continue
         if kind == forms.KIND_TEXT and not isinstance(value, str):
             problems.append(f"{key}: ожидается текст")
     return problems
@@ -1342,7 +1345,25 @@ async def precheck(conn, scope: Scope) -> Dict[str, Any]:
     return {"form_code": code, "passport": passport, "documents": docs}
 
 
-async def generate_report_summary(conn, scope: Scope, ready: Dict[str, Any], llm_call: Optional[LlmCall]) -> Dict[str, Any]:
+async def add_rao_comments(data: Dict[str, Any], rao_comments: Optional[RaoComments]) -> None:
+    """Кладёт в ``data["rao_comment"]`` черновик комментариев РАО, если он запрошен.
+
+    Сбой построения не прерывает сборку заключения: комментарии необязательны (предупреждение в логе).
+
+    Args:
+        data: Собранный ``data`` (изменяется на месте).
+        rao_comments: Корутина-фабрика ``data → {"<поле>-<expert_id>": текст}`` или ``None`` (комментарии не запрошены).
+    """
+    if rao_comments is None or "rao_comment" not in data:
+        return
+    try:
+        data["rao_comment"] = await rao_comments(data) or None
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"knowledge_store: комментарии РАО не построены: {type(e).__name__}: {e}")
+
+
+async def generate_report_summary(conn, scope: Scope, ready: Dict[str, Any], llm_call: Optional[LlmCall],
+                                  rao_comments: Optional[RaoComments] = None) -> Dict[str, Any]:
     """Черновик заключения по форме объекта 7 (отчётные документы по контракту/договору).
 
     Из документов берётся только перечень поступивших материалов (``field1_1``, как в :func:`fill_documents_list`).
@@ -1354,6 +1375,7 @@ async def generate_report_summary(conn, scope: Scope, ready: Dict[str, Any], llm
         scope: Экспертиза в окружении.
         ready: Результат :func:`precheck`.
         llm_call: Функция вызова LLM для названий документов или ``None``.
+        rao_comments: Фабрика комментариев РАО (см. :func:`add_rao_comments`) или ``None``.
 
     Returns:
         dict: Как у :func:`generate_summary`; статус всегда ``needs_review``.
@@ -1376,6 +1398,7 @@ async def generate_report_summary(conn, scope: Scope, ready: Dict[str, Any], llm
         trace["field1_1"] = {"status": "derived", "rule": "названия документов из самих документов (XML ЕИС, начало текста)",
                              "sources": {i["title"]: i["source"] for i in items}}
     problems = validate(data, fields)
+    await add_rao_comments(data, rao_comments)
     unresolved = [k for k, v in data.items() if v is None and k != "rao_comment"]
     trace["_summary"] = {"unresolved": unresolved, "proposed": [], "suspected": [], "problems": problems,
                          "note": "формы объекта 7: автоматически заполняется только перечень документов; остальное — эксперту"}
@@ -1389,7 +1412,8 @@ async def generate_report_summary(conn, scope: Scope, ready: Dict[str, Any], llm
 
 
 async def generate_summary(conn, scope: Scope, llm_call: Optional[LlmCall],
-                           build_facts: Optional[FactsBuilder] = None, rebuild_facts: bool = False) -> Dict[str, Any]:
+                           build_facts: Optional[FactsBuilder] = None, rebuild_facts: bool = False,
+                           rao_comments: Optional[RaoComments] = None) -> Dict[str, Any]:
     """Собирает и сохраняет сводное ЭЗ экспертизы.
 
     Args:
@@ -1398,6 +1422,9 @@ async def generate_summary(conn, scope: Scope, llm_call: Optional[LlmCall],
         llm_call: Функция вызова LLM для блоков III–IV (``None`` — только шаблонные тексты).
         build_facts: Корутина-фабрика построения фактов; вызывается, если фактов ещё нет (или ``rebuild_facts``).
         rebuild_facts: Пересчитать факты перед сборкой, даже если они уже есть.
+        rao_comments: Корутина-фабрика ``data → {"<поле>-<expert_id>": текст}``: если задана, ``data["rao_comment"]`` заполняется
+            черновиком комментариев РАО к заключениям первичных экспертов (см. :mod:`knowledge_store.rao_comments`);
+            ``None`` — комментариев нет, заключение служит подсказкой первичному эксперту.
 
     Returns:
         dict: ``summary_id``, ``form_code``, ``status`` (``draft`` / ``needs_review``), ``data``
@@ -1409,7 +1436,7 @@ async def generate_summary(conn, scope: Scope, llm_call: Optional[LlmCall],
     ready = await precheck(conn, scope)
     code = ready["form_code"]
     if forms.is_report_form(code):        # объект 7: отдельный, облегчённый путь без фактов и оценок по критериям
-        return await generate_report_summary(conn, scope, ready, llm_call)
+        return await generate_report_summary(conn, scope, ready, llm_call, rao_comments)
     law_context.set_from_form(code)       # 44-ФЗ или 223-ФЗ: промпты, чек-листы, правила проекта контракта
     # факты раздела 1 из XML/печатной формы дёшевы и детерминированы — обновляются при каждой сборке
     eis_stats = await facts_mod.extract_facts(conn, scope, code, None)
@@ -1454,6 +1481,7 @@ async def generate_summary(conn, scope: Scope, llm_call: Optional[LlmCall],
     trace["_summary"] = {"unresolved": unresolved, "proposed": proposed, "suspected": suspected, "problems": problems}
     trace["_rm_findings"] = await rm_findings_safe(conn, scope)
     data = value_format.to_form_format(code, data, trace)       # true/false там, где так хранят эксперты
+    await add_rao_comments(data, rao_comments)                  # только по запросу: сводное ЭЗ с комментариями РАО
     async with conn.transaction():
         summary_id = await repo.insert_summary(conn, scope, code, data, trace, status)
         await repo.touch_expiry(conn, scope, Config.PE_TEXT_RETENTION_DAYS)
