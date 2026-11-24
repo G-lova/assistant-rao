@@ -260,6 +260,8 @@ class PrimaryReviewPipeline:
                 if not code:
                     return {}
                 labels = {f["field_key"]: f["label"] for f in await repository.get_form_fields(conn, code)}
+            from knowledge_store import form_labels
+            labels.update(form_labels.labels_for_form(code))     # названия из справочника полей, едут с кодом (без БД)
             for suffix, fixes in (getattr(settings, "PRIMARY_REVIEW_LABEL_OVERRIDES", {}) or {}).items():
                 if code.endswith(suffix):         # известные ошибки справочника: см. комментарий в configs/settings.py
                     labels.update(fixes)
