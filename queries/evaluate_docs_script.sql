@@ -217,7 +217,6 @@ LEFT JOIN JSON_TABLE(
      ) AS empty_comment
      ON empty_comment.c = doc_codes.d
 LEFT JOIN (SELECT model_id, collection_name, CASE WHEN disk LIKE 'media' THEN JSON_ARRAYAGG(CONCAT(?, id, '/', file_name)) ELSE JSON_ARRAYAGG(CONCAT(?, id, '/', file_name)) END AS file_path,
-                  -- MIME-тип файла по id media: у печатных форм ЕИС в имени нет расширения (23.11.2026)
                   JSON_OBJECTAGG(id, mime_type) AS file_mime
            FROM media
      	   WHERE model_type LIKE '%Expertise'
