@@ -237,10 +237,13 @@ class EisArchiveTest(unittest.TestCase):
             self.assertEqual(f.read(), b"abcde")
         self.assertEqual(size, 5)
         os.remove(path)
-        before = set(os.listdir(tempfile.gettempdir()))
-        with self.assertRaises(ConnectionError):
-            asyncio.run(ea.download_to_tempfile(response([b"ab"], fail=True)))
-        self.assertEqual(set(os.listdir(tempfile.gettempdir())) - before, set())
+        # Обрыв проверяем в отдельном пустом каталоге: общий /tmp в CI меняют посторонние процессы
+        # (например, runc создаёт там runc-process* во время docker compose run), и сравнение списков
+        # файлов всего /tmp давало ложные падения (24.11.2026). mkstemp без dir берёт tempfile.tempdir.
+        with tempfile.TemporaryDirectory() as isolated, mock.patch.object(tempfile, "tempdir", isolated):
+            with self.assertRaises(ConnectionError):
+                asyncio.run(ea.download_to_tempfile(response([b"ab"], fail=True)))
+            self.assertEqual(os.listdir(isolated), [])
 
     def test_bad_zip(self):
         """Не ZIP — ошибка в ответе, без исключения."""
