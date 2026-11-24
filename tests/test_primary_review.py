@@ -99,6 +99,22 @@ class FindTestExpertsTests(unittest.TestCase):
         self.assertEqual(pr.compare_report_facts({"field2_1_1": 1}, {"field2_1_1": 0}), [])
         self.assertEqual(pr.compare_report_facts({"field1_3": [], "field5_0": None}, {"field1_3": [], "field5_0": True}), [])
 
+    def test_issue_penalty(self):
+        """Замечания к заключению снижают оценку по ступеням шкалы: по категории — шаг, всего не больше предела."""
+        mk = lambda code: pr.Issue(code, pr.MAJOR, "x", [])
+        self.assertEqual(pr.issue_penalty(1.0, []), (1.0, 0))
+        self.assertEqual(pr.issue_penalty(1.0, [mk("PENALTY_MISMATCH")]), (0.75, 1))
+        # две замечания одной категории — один шаг; две категории — два шага
+        self.assertEqual(pr.issue_penalty(1.0, [mk("PENALTY_MISMATCH"), mk("FACT_MISMATCH")]), (0.75, 1))
+        self.assertEqual(pr.issue_penalty(1.0, [mk("PENALTY_MISMATCH"), mk("JUNK_TEXT")]), (0.5, 2))
+        # предел шагов и нижняя граница шкалы
+        three = [mk("PENALTY_MISMATCH"), mk("JUNK_TEXT"), mk("EMPTY_DOCS")]
+        self.assertEqual(pr.issue_penalty(1.0, three), (0.5, 2))
+        self.assertEqual(pr.issue_penalty(0.5, three), (0.0, 1))   # со ступени 0.5 доступен один шаг вниз
+        self.assertEqual(pr.issue_penalty(0.0, three), (0.0, 0))
+        self.assertEqual(pr.issue_penalty(None, three), (None, 0))
+        self.assertEqual(pr.issue_penalty(0.75, [mk("UNKNOWN_CODE")]), (0.75, 0))
+
 
 if __name__ == "__main__":
     unittest.main()

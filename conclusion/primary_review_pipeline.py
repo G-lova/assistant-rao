@@ -115,7 +115,7 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
     Returns:
         dict: ``expertise_id`` не входит (добавляет вызывающий); ``summary_expert_id``, ``summary_opinion_id`` и ``summary_updated_at`` (версия итогового заключения, с которой сравнивали; по ним портал определяет, что подсказка устарела), ``is_preliminary`` (``True``, если версия не была указана явно и взята последняя сохранённая), ``group``, ``shared_differences`` (критерии, по которым все первичные эксперты расходятся с итоговым одинаково — вероятно, решение сводного эксперта; в комментарии они не упоминаются и помечены ``shared`` в ``differences``) и ``reviews`` —
         по записи на первичного эксперта: ``expert_id``, ``common``, ``differences`` (по видам), ``issues``,
-        ``suggested_range`` (модель; ``None`` при малом числе общих критериев) с ``range_source`` и ``probabilities``, ``categories`` (замечания по таксономии), ``range_by_thresholds``, ``weighted_percent`` и ``deductions`` (взвешенный процент сходства и вычеты по расхождениям; по нему при ``range_source = weighted_percent`` определяется оценка), ``match_percent`` и ``range_by_scale`` (шкала аналитика), ``comment`` (согласован с оценкой, без нумерации; при 1.00 равен ``comment_details``), ``comment_details`` (полный перечень расхождений), ``alternative_range``, ``confidence``, ``model_range`` (до постпроверки по порядку) и ``rule_applied``, ``current_range``.
+        ``suggested_range`` (модель; ``None`` при малом числе общих критериев; снижена за замечания к заключению — ``issue_penalty_steps`` ступеней, прежняя оценка в ``range_before_issues`` и ``alternative_range``) с ``range_source`` и ``probabilities``, ``categories`` (замечания по таксономии), ``range_by_thresholds``, ``weighted_percent`` и ``deductions`` (взвешенный процент сходства и вычеты по расхождениям; по нему при ``range_source = weighted_percent`` определяется оценка), ``match_percent`` и ``range_by_scale`` (шкала аналитика), ``comment`` (согласован с оценкой, без нумерации; при 1.00 равен ``comment_details``), ``comment_details`` (полный перечень расхождений), ``alternative_range``, ``confidence``, ``model_range`` (до постпроверки по порядку) и ``rule_applied``, ``current_range``.
 
     Raises:
         PrimaryReviewError: 404 — первичных заключений нет; 409 — сводное заключение ещё не заполнено.
@@ -151,10 +151,15 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
             model_grade = model["range"] if model and threshold_range is not None else threshold_range
         grade, rule_applied = primary_compare.apply_full_match_rule(
             model_grade, cmp, shared, percent=weighted["percent"] if weighted else None)   # 1.00 только при полном соответствии
+        # замечания к самому заключению (факты, суммы, заглушки и т. п.) снижают оценку; прежняя оценка остаётся как вторая
+        grade_before_issues = grade
+        grade, issue_steps = primary_review.issue_penalty(grade, issues)
         probs = model["probabilities"] if model and threshold_range is not None else None
         ranked = sorted(probs.items(), key=lambda kv: -kv[1]) if probs else []
         # две соседние оценки почти равновероятны (разница меньше 0.1): показываем вторую, чтобы эксперт решил сам
-        if weighted:       # пограничный процент: вторая оценка — в сторону ближайшего порога
+        if issue_steps:     # оценка снижена за замечания: эксперт видит, какой она была бы без них
+            alternative = grade_before_issues
+        elif weighted:       # пограничный процент: вторая оценка — в сторону ближайшего порога
             alternative = (None if rule_applied else primary_score.neighbour_grade(
                 weighted["percent"], weighted["spec"], getattr(settings, "PRIMARY_REVIEW_PERCENT_MARGIN", 2.0)))
         else:
@@ -176,6 +181,8 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
             # обученная модель точнее порогов (на кросс-валидации 58% / 55% против 41% / 52%); без модели или при малом
             # числе общих критериев — пороги
             "suggested_range": grade,
+            "range_before_issues": grade_before_issues,      # оценка до снижения за замечания (совпадает с suggested_range без штрафа)
+            "issue_penalty_steps": issue_steps,
             "alternative_range": alternative,
             "model_range": model_grade,
             "rule_applied": rule_applied,

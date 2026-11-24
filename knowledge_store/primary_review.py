@@ -224,6 +224,34 @@ def compare_report_facts(primary: Dict[str, Any], summary: Dict[str, Any],
     return out
 
 
+def issue_penalty(grade: Optional[float], issues: List[Issue]) -> tuple:
+    """Снижает предлагаемую оценку за замечания к заключению первичного эксперта.
+
+    За каждую категорию таксономии с хотя бы одним замечанием (``PRIMARY_REVIEW_ISSUE_STEPS``) оценка опускается на
+    заданное число ступеней шкалы ``0 → 0.5 → 0.75 → 1.0``, суммарно не более ``PRIMARY_REVIEW_ISSUE_MAX_STEPS``.
+
+    Args:
+        grade: Оценка до штрафа (``None`` — оценки нет, штраф не применяется).
+        issues: Замечания к заключению (``review_opinion``, ``compare_*``, замечания модели).
+
+    Returns:
+        tuple: ``(оценка после штрафа, число снятых ступеней)``.
+    """
+    from knowledge_store import primary_score, primary_taxonomy
+
+    steps_by_category = getattr(settings, "PRIMARY_REVIEW_ISSUE_STEPS", {}) if settings else {}
+    if grade is None or not steps_by_category:
+        return grade, 0
+    categories = {primary_taxonomy.CODE[i.code] for i in issues if i.code in primary_taxonomy.CODE}
+    steps = min(sum(steps_by_category.get(c, 0) for c in categories),
+                int(getattr(settings, "PRIMARY_REVIEW_ISSUE_MAX_STEPS", 2)))
+    if steps <= 0:
+        return grade, 0
+    grades = primary_score.GRADES
+    index = min(range(len(grades)), key=lambda k: abs(grades[k] - grade))      # ближайшая ступень шкалы
+    return grades[max(0, index - steps)], min(steps, index)
+
+
 def review_opinion(data: Dict[str, Any]) -> List[Issue]:
     """Находит объективные дефекты заключения первичного эксперта.
 
