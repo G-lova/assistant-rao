@@ -224,32 +224,45 @@ def compare_report_facts(primary: Dict[str, Any], summary: Dict[str, Any],
     return out
 
 
-def issue_penalty(grade: Optional[float], issues: List[Issue]) -> tuple:
-    """Снижает предлагаемую оценку за замечания к заключению первичного эксперта.
+def issue_penalty(grade: Optional[float], issues: List[Issue], percent: Optional[float] = None,
+                  spec: Optional[dict] = None) -> tuple:
+    """Снижает предлагаемую оценку за серьёзные замечания к заключению первичного эксперта.
 
-    За каждую категорию таксономии с хотя бы одним замечанием (``PRIMARY_REVIEW_ISSUE_STEPS``) оценка опускается на
-    заданное число ступеней шкалы ``0 → 0.5 → 0.75 → 1.0``, суммарно не более ``PRIMARY_REVIEW_ISSUE_MAX_STEPS``.
+    Три ограничения, чтобы штраф не был грубым:
+
+    1. влияют только серьёзные замечания (``MAJOR``); мелкие (в том числе замечания модели к тексту) идут лишь в комментарий;
+    2. замечание — вычет в процентных пунктах из взвешенного процента сходства (``PRIMARY_REVIEW_ISSUE_PERCENT`` по коду,
+       иначе ``PRIMARY_REVIEW_ISSUE_PERCENT_DEFAULT``); замечания одного кода считаются один раз; сумма вычетов не больше
+       ``PRIMARY_REVIEW_ISSUE_MAX_PERCENT``;
+    3. оценка меняется, только если процент после вычета ушёл ниже порога текущей ступени, то есть замечание «добивает»
+       пограничную оценку; больше чем на одну ступень оценка не снижается.
 
     Args:
         grade: Оценка до штрафа (``None`` — оценки нет, штраф не применяется).
         issues: Замечания к заключению (``review_opinion``, ``compare_*``, замечания модели).
+        percent: Взвешенный процент сходства (``None`` — процента нет, штраф не применяется).
+        spec: Параметры группы из :func:`primary_score.load_model` (нужны пороги).
 
     Returns:
-        tuple: ``(оценка после штрафа, число снятых ступеней)``.
+        tuple: ``(оценка после штрафа, вычет в п. п., число снятых ступеней 0/1)``.
     """
-    from knowledge_store import primary_score, primary_taxonomy
+    from knowledge_store import primary_score
 
-    steps_by_category = getattr(settings, "PRIMARY_REVIEW_ISSUE_STEPS", {}) if settings else {}
-    if grade is None or not steps_by_category:
-        return grade, 0
-    categories = {primary_taxonomy.CODE[i.code] for i in issues if i.code in primary_taxonomy.CODE}
-    steps = min(sum(steps_by_category.get(c, 0) for c in categories),
-                int(getattr(settings, "PRIMARY_REVIEW_ISSUE_MAX_STEPS", 2)))
-    if steps <= 0:
-        return grade, 0
+    if grade is None or percent is None or not spec or not settings:
+        return grade, 0.0, 0
+    by_code = getattr(settings, "PRIMARY_REVIEW_ISSUE_PERCENT", {}) or {}
+    default = float(getattr(settings, "PRIMARY_REVIEW_ISSUE_PERCENT_DEFAULT", 0.0))
+    codes = {i.code for i in issues if i.severity == MAJOR}                   # (1) только серьёзные, (2) код — один раз
+    deduction = min(sum(float(by_code.get(code, default)) for code in codes),
+                    float(getattr(settings, "PRIMARY_REVIEW_ISSUE_MAX_PERCENT", 5.0)))
+    if deduction <= 0:
+        return grade, 0.0, 0
+    lowered = primary_score.grade_by_percent(percent - deduction, spec)       # (3) оценка по порогам после вычета
     grades = primary_score.GRADES
-    index = min(range(len(grades)), key=lambda k: abs(grades[k] - grade))      # ближайшая ступень шкалы
-    return grades[max(0, index - steps)], min(steps, index)
+    index = min(range(len(grades)), key=lambda k: abs(grades[k] - grade))
+    new_grade = max(lowered, grades[max(0, index - 1)])                       # не ниже чем на одну ступень
+    new_grade = min(new_grade, grade)                                         # штраф оценку не повышает
+    return new_grade, round(deduction, 1), int(new_grade < grade)
 
 
 def review_opinion(data: Dict[str, Any]) -> List[Issue]:

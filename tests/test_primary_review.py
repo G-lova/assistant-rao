@@ -100,20 +100,25 @@ class FindTestExpertsTests(unittest.TestCase):
         self.assertEqual(pr.compare_report_facts({"field1_3": [], "field5_0": None}, {"field1_3": [], "field5_0": True}), [])
 
     def test_issue_penalty(self):
-        """Замечания к заключению снижают оценку по ступеням шкалы: по категории — шаг, всего не больше предела."""
-        mk = lambda code: pr.Issue(code, pr.MAJOR, "x", [])
-        self.assertEqual(pr.issue_penalty(1.0, []), (1.0, 0))
-        self.assertEqual(pr.issue_penalty(1.0, [mk("PENALTY_MISMATCH")]), (0.75, 1))
-        # две замечания одной категории — один шаг; две категории — два шага
-        self.assertEqual(pr.issue_penalty(1.0, [mk("PENALTY_MISMATCH"), mk("FACT_MISMATCH")]), (0.75, 1))
-        self.assertEqual(pr.issue_penalty(1.0, [mk("PENALTY_MISMATCH"), mk("JUNK_TEXT")]), (0.5, 2))
-        # предел шагов и нижняя граница шкалы
-        three = [mk("PENALTY_MISMATCH"), mk("JUNK_TEXT"), mk("EMPTY_DOCS")]
-        self.assertEqual(pr.issue_penalty(1.0, three), (0.5, 2))
-        self.assertEqual(pr.issue_penalty(0.5, three), (0.0, 1))   # со ступени 0.5 доступен один шаг вниз
-        self.assertEqual(pr.issue_penalty(0.0, three), (0.0, 0))
-        self.assertEqual(pr.issue_penalty(None, three), (None, 0))
-        self.assertEqual(pr.issue_penalty(0.75, [mk("UNKNOWN_CODE")]), (0.75, 0))
+        """Штраф за замечания: только серьёзные, вычет в п. п., оценка снижается лишь у порога и не более чем на ступень."""
+        mk = lambda code, sev=pr.MAJOR: pr.Issue(code, sev, "x", [])
+        spec = {"thresholds": [71.1, 86.9, 93.2]}
+        # без процента или модели штрафа нет
+        self.assertEqual(pr.issue_penalty(1.0, [mk("FACT_MISMATCH")], None, spec), (1.0, 0.0, 0))
+        self.assertEqual(pr.issue_penalty(None, [mk("FACT_MISMATCH")], 94.0, spec), (None, 0.0, 0))
+        # далеко от порога: вычет есть, оценка прежняя
+        self.assertEqual(pr.issue_penalty(1.0, [mk("FACT_MISMATCH")], 99.0, spec), (1.0, 3.0, 0))
+        # у порога: замечание «добивает» пограничную оценку
+        self.assertEqual(pr.issue_penalty(1.0, [mk("FACT_MISMATCH")], 94.0, spec), (0.75, 3.0, 1))
+        # мелкие замечания и замечания модели на оценку не влияют
+        self.assertEqual(pr.issue_penalty(1.0, [mk("JUNK_TEXT", pr.MINOR), mk("LLM_X", pr.MINOR)], 94.0, spec), (1.0, 0.0, 0))
+        # замечания одного кода считаются один раз; сумма вычетов ограничена пределом
+        self.assertEqual(pr.issue_penalty(1.0, [mk("FACT_MISMATCH")] * 3, 94.0, spec)[1], 3.0)
+        self.assertEqual(pr.issue_penalty(1.0, [mk("FACT_MISMATCH"), mk("PENALTY_MISMATCH")], 94.0, spec)[1], 5.0)
+        # не больше одной ступени, даже если процент ушёл через два порога
+        self.assertEqual(pr.issue_penalty(1.0, [mk("FACT_MISMATCH")], 84.5, {"thresholds": [80, 82, 84]}), (0.75, 3.0, 1))
+        # оценка не повышается
+        self.assertEqual(pr.issue_penalty(0.5, [mk("FACT_MISMATCH")], 99.0, spec)[0], 0.5)
 
 
 if __name__ == "__main__":
