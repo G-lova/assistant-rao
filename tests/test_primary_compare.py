@@ -119,6 +119,20 @@ class CompareTests(unittest.TestCase):
         self.assertEqual((cmp.group, cmp.common, cmp.count()), ("report", 5, 1))
         self.assertEqual(pc.suggest_range(cmp), 1.0)
 
+    def test_report_flags_are_inverted(self):
+        """Флаг критерия отчётной формы — «замечания выявлены»: True → 0 (нарушение), False → 1; field5_* — не критерии и в сравнение не входят."""
+        data = {"field1_3": [], "field3_0": True, "field4_2": False, "field4_4_1": True, "field5_2_0": True}
+        self.assertEqual(pc.comparable(data), {"field3_0": 0, "field4_2": 1, "field4_4_1": 0})
+
+    def test_report_missed_means_primary_without_remarks(self):
+        """Пропуск нарушения: у сводного замечания есть (True), у первичного нет (False)."""
+        primary = {"field1_3": [], "field4_0": False}
+        summary = {"field1_3": [], "field4_0": True}
+        diff = pc.compare(primary, summary).differences[0]
+        self.assertEqual((diff.key, diff.kind), ("field4_0", "missed"))
+        # и наоборот — первичный увидел замечание, которого нет в сводном
+        self.assertEqual(pc.compare(summary, primary).differences[0].kind, "false_alarm")
+
 
 if __name__ == "__main__":
     unittest.main()

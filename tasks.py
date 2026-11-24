@@ -154,7 +154,7 @@ async def _purge_text_embeddings():
 
 @celery_app.task(bind=True, name="generate_summary_opinion_task", **LONG_TASK_LIMITS)
 def generate_summary_opinion_task(self, expertise_id: int, environment: str, send_draft: bool = False,
-                                  rebuild_facts: bool = False):
+                                  rebuild_facts: bool = False, with_rao_comments: bool = False):
     """Генерирует сводное ЭЗ из хранилища знаний (факты → ``data`` по ключам формы, ``trace`` отдельно).
 
     Если фактов ещё нет и они включены (``PE_FACTS_ENABLED``), строит их по сохранённым текстам.
@@ -165,6 +165,8 @@ def generate_summary_opinion_task(self, expertise_id: int, environment: str, sen
         environment: Окружение (``X-API-Database``).
         send_draft: Отправлять ли черновик в основную БД.
         rebuild_facts: Пересчитать факты по сохранённым текстам перед сборкой.
+        with_rao_comments: Заполнить ``data["rao_comment"]`` черновиком комментариев РАО к заключениям первичных экспертов
+            (формирование сводного ЭЗ). Иначе ``rao_comment`` в ``data`` нет — заключение служит подсказкой первичному эксперту.
 
     Returns:
         dict: ``summary_id``, ``form_code``, ``status``, ``data``, ``trace``, ``stats``, ``problems``,
@@ -189,11 +191,17 @@ def generate_summary_opinion_task(self, expertise_id: int, environment: str, sen
                 if runner.facts_enabled():
                     await runner.build_facts(scope, indexer.build_embedder(mgr), client, model)
 
+            rao = None
+            if with_rao_comments:
+                from conclusion.primary_review_pipeline import make_rao_comments
+                rao = make_rao_comments(mgr, int(expertise_id), environment)
             try:
                 async with db.connection() as conn:
-                    result = await summary.generate_summary(conn, scope, llm_call, build_facts, rebuild_facts)
+                    result = await summary.generate_summary(conn, scope, llm_call, build_facts, rebuild_facts, rao)
             except summary.SummaryError as e:
                 return {"error": e.message, "http_status": e.http_status}
+            if not with_rao_comments:
+                result["data"].pop("rao_comment", None)      # подсказка первичному эксперту: комментариев РАО нет
             if send_draft:
                 result["draft_sent"] = await export.send_draft(mgr, int(expertise_id), result["data"], environment)
             return result

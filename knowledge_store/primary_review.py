@@ -16,6 +16,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+try:
+    from configs import settings
+except ImportError:   # модуль работает и без настроек (тесты, скрипты)
+    settings = None
+
 MINOR = "minor"
 MAJOR = "major"
 
@@ -140,6 +145,79 @@ def compare_method(primary: Dict[str, Any], summary: Dict[str, Any]) -> Optional
     if not ours or not theirs or ours == theirs:
         return None
     return Issue("METHOD_MISMATCH", MAJOR, "метод обоснования НМЦК выбран иначе, чем в итоговом заключении", ["field2_2_2_0"])
+
+
+def _number(value: Any) -> Optional[float]:
+    """Число из значения поля (``1 288,97`` → 1288.97); пусто и не число → ``None``."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = re.sub(r"[\s\u00a0]", "", str(value or "")).replace(",", ".")
+    try:
+        return float(text) if text else None
+    except ValueError:
+        return None
+
+
+def _first(data: Dict[str, Any], keys) -> Any:
+    """Значение первого заполненного ключа из списка (товары и работы хранят одно и то же под разными ключами)."""
+    return next((data[k] for k in keys if data.get(k) not in (None, "")), None)
+
+
+def compare_report_facts(primary: Dict[str, Any], summary: Dict[str, Any],
+                         labels: Optional[Dict[str, str]] = None) -> List[Issue]:
+    """Сверяет с итоговым заключением не-критериальные поля отчётных документов (объект 7).
+
+    * **Анкетные факты** (``PRIMARY_REVIEW_FACT_FIELDS``: требование субподряда из СМП, СМП-исполнитель в работах/НИР,
+      требуется ли расчёт неустойки): ответ — факт, а не оценка, поэтому сравнивается на равенство; расхождение —
+      ``FACT_MISMATCH``. Зависимые вопросы сравниваются, только если родитель «да» у обоих заключений
+      (``PRIMARY_REVIEW_FACT_PARENT``), поля одной формы — при наличии маркера формы (``PRIMARY_REVIEW_FACT_REQUIRES``).
+    * **Суммы неустойки** (``PRIMARY_REVIEW_PENALTY_FIELDS``: пени, штрафы, суммы заказчика): расхождение больше допуска
+      ``PRIMARY_REVIEW_PENALTY_TOLERANCE`` — ``PENALTY_MISMATCH``. Если по одному из заключений расчёт неустойки не требуется
+      (``field*_1_11`` = «нет»), суммы не сверяются — расхождение уже названо в ``FACT_MISMATCH``. Пустая сумма = 0.
+
+    В оценку (``range``) результат не входит — только в комментарий и ``issues``.
+
+    Args:
+        primary: ``data`` заключения первичного эксперта.
+        summary: ``data`` итогового заключения.
+        labels: ``ключ → название поля`` формы (необязательно); без названия берётся из настроек.
+
+    Returns:
+        list[Issue]: Расхождения; для закупок и при пустых полях — пустой список.
+    """
+    if not (is_report_data(primary) and is_report_data(summary)):
+        return []
+    labels = labels or {}
+    facts = getattr(settings, "PRIMARY_REVIEW_FACT_FIELDS", {}) if settings else {}
+    penalty = getattr(settings, "PRIMARY_REVIEW_PENALTY_FIELDS", {}) if settings else {}
+    tolerance = float(getattr(settings, "PRIMARY_REVIEW_PENALTY_TOLERANCE", 1.0)) if settings else 1.0
+    out: List[Issue] = []
+    answer = {1: "«да»", 0: "«нет»"}
+    requires = getattr(settings, "PRIMARY_REVIEW_FACT_REQUIRES", {}) if settings else {}
+    parents = getattr(settings, "PRIMARY_REVIEW_FACT_PARENT", {}) if settings else {}
+    for key, default in facts.items():
+        marker = requires.get(key)           # поле одной формы: в другой тот же ключ означает иное (field5_0_1)
+        if marker and not (marker in primary and marker in summary):
+            continue
+        parent = parents.get(key)            # зависимый вопрос показывается, только если родитель «да» у обоих
+        if parent and not (normalize(primary.get(parent)) == 1 and normalize(summary.get(parent)) == 1):
+            continue
+        ours, theirs = normalize(primary.get(key)), normalize(summary.get(key))
+        if ours is None or theirs is None or ours == theirs or ours not in answer or theirs not in answer:
+            continue
+        name = re.sub(r"\s+", " ", labels.get(key) or default).strip().rstrip("?:")
+        out.append(Issue("FACT_MISMATCH", MAJOR, f"неверно указан ответ на вопрос «{name}»: у вас {answer[ours]}, в итоговом заключении {answer[theirs]}", [key]))
+    required = [normalize(_first(d, ("field5_1_11", "field6_1_11"))) for d in (primary, summary)]
+    if 0 in required:         # расчёт неустойки не требуется хотя бы по одному заключению: суммы не сравниваем
+        return out
+    for name, keys in penalty.items():
+        ours, theirs = (_number(_first(d, keys)) or 0.0 for d in (primary, summary))
+        if abs(ours - theirs) > tolerance:
+            out.append(Issue("PENALTY_MISMATCH", MAJOR, f"неверная сумма в расчёте неустойки ({name}): у вас {ours:.2f} руб., в итоговом заключении {theirs:.2f} руб.",
+                             [k for k in keys if k in primary or k in summary][:2]))
+    return out
 
 
 def review_opinion(data: Dict[str, Any]) -> List[Issue]:

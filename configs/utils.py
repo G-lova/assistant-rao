@@ -131,6 +131,55 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             )
 
 
+def strip_sql_line_comments(sql: str) -> str:
+    """Убирает строчные комментарии ``-- …`` и ``# …`` (MySQL) вне строковых литералов.
+
+    Нужен до склейки запроса в одну строку: иначе всё после ``--`` до конца запроса становится комментарием.
+    24.11.2026 комментарий в ``evaluate_docs_script.sql`` обрезал запрос перед ``WHERE e.id = ?`` — портал
+    отвечал 500 «You have an error in your SQL syntax … near ''», и проверка экспертиз не запускалась.
+
+    Литералы в одинарных и двойных кавычках и в обратных апострофах не трогаются (``'%Expertise'``,
+    ``'$[*]'``, ``'--'`` внутри строки). ``/* … */`` остаются: после склейки они безопасны.
+
+    Args:
+        sql: Текст SQL.
+
+    Returns:
+        str: Текст без строчных комментариев (переводы строк сохраняются).
+    """
+    out, quote, i, n = [], None, 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and quote != "`" and i + 1 < n:   # экранированный символ внутри строки
+                out.append(sql[i + 1])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+            out.append(ch)
+            i += 1
+            continue
+        # MySQL: «-- » (с пробелом или концом строки после) и «#» — до конца строки
+        if (ch == "-" and sql.startswith("--", i) and (i + 2 >= n or sql[i + 2] in " \t\r\n")) or ch == "#":
+            while i < n and sql[i] != "\n":
+                i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def normalize_sql(sql: str) -> str:
+    """SQL в одну строку для HTTP-запроса: без строчных комментариев и лишних пробелов."""
+    return " ".join(strip_sql_line_comments(sql).split())
+
+
 def load_sql_query(file_name: str) -> str:
     """
     Загружает и нормализует SQL-запрос из файла.
@@ -145,7 +194,7 @@ def load_sql_query(file_name: str) -> str:
         str: SQL-запрос в виде одной строки без лишних пробельных символов.
     """
     sql_query = read_text(f"{Config().get_paths_config().sql_queries}{file_name}")   # от корня репозитория, кэш
-    return " ".join(sql_query.split())
+    return normalize_sql(sql_query)
 
     
 
@@ -163,7 +212,7 @@ async def load_sql_query_async(file_name: str) -> str:
         str: SQL-запрос в виде одной строки без лишних пробельных символов.
     """
     sql_query = read_text(f"{Config().get_paths_config().sql_queries}{file_name}")   # кэш: с диска — один раз
-    return " ".join(sql_query.split())
+    return normalize_sql(sql_query)
 
 
 def get_file_extension(
