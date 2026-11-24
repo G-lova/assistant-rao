@@ -43,6 +43,18 @@ class RatingStartTest(unittest.TestCase):
         self.assertNotIn("e1.status = 2", self.sql)
         self.assertIn("AND ee1.group_formed_at IS NULL AND ee1.deleted_at IS NULL AND e1.deleted_at IS NULL", self.sql)
 
+    def test_week_workload_in_work_during_week(self):
+        """currentWeekWorkload — экспертизы, бывшие в работе у эксперта за последние 7 дней (24.11.2026).
+
+        Группа сформирована, строка эксперта не удалена, а заключение ещё не загружено или загружено
+        за последние 7 дней. Статус экспертизы (e.status) больше не учитывается.
+        """
+        start = self.sql.index("COUNT(CASE\n            WHEN ee.group_formed_at IS NOT NULL")
+        block = self.sql[start:self.sql.index("AS currentWeekWorkload", start)]
+        self.assertIn("ee.deleted_at IS NULL", block)
+        self.assertIn("(ee.uploadExpertDate IS NULL OR ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 7 DAY))", block)
+        self.assertNotIn("e.status IN (3)", self.sql)
+
     def test_apply(self):
         """Подставляется дата из настроек; число привязок «?» не меняется; кривая дата — ошибка."""
         with stubbed_import("search_experts.pipeline") as m:
