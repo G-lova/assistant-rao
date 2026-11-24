@@ -84,6 +84,10 @@ class FindTestExpertsTests(unittest.TestCase):
         got = pr.compare_report_facts({**base, "field5_1_4": 300}, base)
         self.assertEqual([i.code for i in got], ["PENALTY_MISMATCH"])
         self.assertEqual(pr.compare_report_facts({**base, "field5_1_4": 241.9}, base), [])
+        # сумма не заполнена у первичного: так и сказано («не заполнено»), без точки на конце (её снимает build_comment)
+        got = pr.compare_report_facts({k: v for k, v in base.items() if k != "field5_1_4"}, base)
+        self.assertIn("не заполнено", got[0].message)
+        self.assertFalse(got[0].message.endswith("."))
         # сумма заказчика: пусто = 0; работы/НИР хранят суммы под field6_1_*
         self.assertEqual(len(pr.compare_report_facts({**base, "field6_1_4_1": "500,00"}, base)), 1)
         works = {"field1_3": [], "field6_1_11": True, "field6_1_4": 100, "field6_1_7": 0, "field6_1_10": 0}
@@ -94,6 +98,27 @@ class FindTestExpertsTests(unittest.TestCase):
         # закупки и пустые значения — без замечаний
         self.assertEqual(pr.compare_report_facts({"field2_1_1": 1}, {"field2_1_1": 0}), [])
         self.assertEqual(pr.compare_report_facts({"field1_3": [], "field5_0": None}, {"field1_3": [], "field5_0": True}), [])
+
+    def test_issue_penalty(self):
+        """Штраф за замечания: только серьёзные, вычет в п. п., оценка снижается лишь у порога и не более чем на ступень."""
+        mk = lambda code, sev=pr.MAJOR: pr.Issue(code, sev, "x", [])
+        spec = {"thresholds": [71.1, 86.9, 93.2]}
+        # без процента или модели штрафа нет
+        self.assertEqual(pr.issue_penalty(1.0, [mk("FACT_MISMATCH")], None, spec), (1.0, 0.0, 0))
+        self.assertEqual(pr.issue_penalty(None, [mk("FACT_MISMATCH")], 94.0, spec), (None, 0.0, 0))
+        # далеко от порога: вычет есть, оценка прежняя
+        self.assertEqual(pr.issue_penalty(1.0, [mk("FACT_MISMATCH")], 99.0, spec), (1.0, 3.0, 0))
+        # у порога: замечание «добивает» пограничную оценку
+        self.assertEqual(pr.issue_penalty(1.0, [mk("FACT_MISMATCH")], 94.0, spec), (0.75, 3.0, 1))
+        # мелкие замечания и замечания модели на оценку не влияют
+        self.assertEqual(pr.issue_penalty(1.0, [mk("JUNK_TEXT", pr.MINOR), mk("LLM_X", pr.MINOR)], 94.0, spec), (1.0, 0.0, 0))
+        # замечания одного кода считаются один раз; сумма вычетов ограничена пределом
+        self.assertEqual(pr.issue_penalty(1.0, [mk("FACT_MISMATCH")] * 3, 94.0, spec)[1], 3.0)
+        self.assertEqual(pr.issue_penalty(1.0, [mk("FACT_MISMATCH"), mk("PENALTY_MISMATCH")], 94.0, spec)[1], 5.0)
+        # не больше одной ступени, даже если процент ушёл через два порога
+        self.assertEqual(pr.issue_penalty(1.0, [mk("FACT_MISMATCH")], 84.5, {"thresholds": [80, 82, 84]}), (0.75, 3.0, 1))
+        # оценка не повышается
+        self.assertEqual(pr.issue_penalty(0.5, [mk("FACT_MISMATCH")], 99.0, spec)[0], 0.5)
 
 
 if __name__ == "__main__":

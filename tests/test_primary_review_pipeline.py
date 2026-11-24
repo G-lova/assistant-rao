@@ -64,6 +64,16 @@ class PrimaryReviewPipelineTests(unittest.TestCase):
         self.assertNotIn("MISSED_VIOLATION", [c["code"] for c in by_expert[2]["categories"]])
         self.assertNotIn("substantial_risk", first)
 
+    def test_issue_penalty_fields(self):
+        """В ответе есть поля штрафа; без серьёзных замечаний вычета нет, прежняя оценка равна итоговой."""
+        by_expert = {r["expert_id"]: r for r in review_expertise(
+            [row(1, SUMMARY), row(99, SUMMARY, role="raoExpert")])["reviews"]}
+        first = by_expert[1]
+        self.assertEqual((first["issue_penalty_steps"], first["range_before_issues"]), (0, first["suggested_range"]))
+        self.assertGreaterEqual(first["issue_penalty_percent"], 0.0)
+        if first["issue_penalty_steps"]:
+            self.assertEqual(first["alternative_range"], first["range_before_issues"])
+
     def test_shared_difference_is_not_blamed(self):
         """Расхождение, одинаковое у всех первичных, выделяется и не попадает в комментарий; у одного эксперта — остаётся."""
         both = {**SUMMARY, "field2_1_3": 0}             # итоговое: 1, оба первичных: 0

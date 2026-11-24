@@ -213,11 +213,56 @@ def compare_report_facts(primary: Dict[str, Any], summary: Dict[str, Any],
     if 0 in required:         # расчёт неустойки не требуется хотя бы по одному заключению: суммы не сравниваем
         return out
     for name, keys in penalty.items():
-        ours, theirs = (_number(_first(d, keys)) or 0.0 for d in (primary, summary))
+        raw_ours, raw_theirs = _number(_first(primary, keys)), _number(_first(summary, keys))
+        ours, theirs = raw_ours or 0.0, raw_theirs or 0.0
         if abs(ours - theirs) > tolerance:
-            out.append(Issue("PENALTY_MISMATCH", MAJOR, f"неверная сумма в расчёте неустойки ({name}): у вас {ours:.2f} руб., в итоговом заключении {theirs:.2f} руб.",
+            # «рублей» без точки: build_comment снимает точку в конце замечания, «руб» без точки выглядит небрежно
+            mine = "не заполнено" if raw_ours is None else f"{ours:.2f} рублей"
+            out.append(Issue("PENALTY_MISMATCH", MAJOR,
+                             f"неверная сумма в расчёте неустойки ({name}): у вас {mine}, в итоговом заключении {theirs:.2f} рублей",
                              [k for k in keys if k in primary or k in summary][:2]))
     return out
+
+
+def issue_penalty(grade: Optional[float], issues: List[Issue], percent: Optional[float] = None,
+                  spec: Optional[dict] = None) -> tuple:
+    """Снижает предлагаемую оценку за серьёзные замечания к заключению первичного эксперта.
+
+    Три ограничения, чтобы штраф не был грубым:
+
+    1. влияют только серьёзные замечания (``MAJOR``); мелкие (в том числе замечания модели к тексту) идут лишь в комментарий;
+    2. замечание — вычет в процентных пунктах из взвешенного процента сходства (``PRIMARY_REVIEW_ISSUE_PERCENT`` по коду,
+       иначе ``PRIMARY_REVIEW_ISSUE_PERCENT_DEFAULT``); замечания одного кода считаются один раз; сумма вычетов не больше
+       ``PRIMARY_REVIEW_ISSUE_MAX_PERCENT``;
+    3. оценка меняется, только если процент после вычета ушёл ниже порога текущей ступени, то есть замечание «добивает»
+       пограничную оценку; больше чем на одну ступень оценка не снижается.
+
+    Args:
+        grade: Оценка до штрафа (``None`` — оценки нет, штраф не применяется).
+        issues: Замечания к заключению (``review_opinion``, ``compare_*``, замечания модели).
+        percent: Взвешенный процент сходства (``None`` — процента нет, штраф не применяется).
+        spec: Параметры группы из :func:`primary_score.load_model` (нужны пороги).
+
+    Returns:
+        tuple: ``(оценка после штрафа, вычет в п. п., число снятых ступеней 0/1)``.
+    """
+    from knowledge_store import primary_score
+
+    if grade is None or percent is None or not spec or not settings:
+        return grade, 0.0, 0
+    by_code = getattr(settings, "PRIMARY_REVIEW_ISSUE_PERCENT", {}) or {}
+    default = float(getattr(settings, "PRIMARY_REVIEW_ISSUE_PERCENT_DEFAULT", 0.0))
+    codes = {i.code for i in issues if i.severity == MAJOR}                   # (1) только серьёзные, (2) код — один раз
+    deduction = min(sum(float(by_code.get(code, default)) for code in codes),
+                    float(getattr(settings, "PRIMARY_REVIEW_ISSUE_MAX_PERCENT", 5.0)))
+    if deduction <= 0:
+        return grade, 0.0, 0
+    lowered = primary_score.grade_by_percent(percent - deduction, spec)       # (3) оценка по порогам после вычета
+    grades = primary_score.GRADES
+    index = min(range(len(grades)), key=lambda k: abs(grades[k] - grade))
+    new_grade = max(lowered, grades[max(0, index - 1)])                       # не ниже чем на одну ступень
+    new_grade = min(new_grade, grade)                                         # штраф оценку не повышает
+    return new_grade, round(deduction, 1), int(new_grade < grade)
 
 
 def review_opinion(data: Dict[str, Any]) -> List[Issue]:
