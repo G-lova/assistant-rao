@@ -64,12 +64,14 @@ class FindTestExpertsTests(unittest.TestCase):
 
     def test_report_facts_and_penalty(self):
         """Анкетные факты и суммы неустойки отчётных документов сравниваются отдельно от критериев."""
-        base = {"field1_3": [], "field5_0_1": False, "field5_1_11": True, "field5_1_4": 241.04, "field5_1_7": "1 288,97",
+        base = {"field1_3": [], "field5_0": False, "field5_0_1": False, "field5_1_11": True, "field5_1_4": 241.04, "field5_1_7": "1 288,97",
                 "field5_1_10": 3000, "field6_1_4_1": "", "field5_1_8_0": True}
         # одинаковые данные — замечаний нет; служебное поле (автозаполнение) не сравнивается
         self.assertEqual(pr.compare_report_facts(base, {**base, "field5_1_8_0": False}), [])
-        # неверный ответ о СМП → FACT_MISMATCH с названием поля
-        got = pr.compare_report_facts({**base, "field5_0_1": True}, base)
+        # скрытый флаг «заполнить автоматически» (field5_0_1 / field6_0_1) зависит от версии формы и не сравнивается
+        self.assertEqual(pr.compare_report_facts({**base, "field5_0_1": True, "field6_0_1": True}, base), [])
+        # неверный ответ о требовании субподряда из СМП → FACT_MISMATCH с названием поля
+        got = pr.compare_report_facts({**base, "field5_0": True}, base)
         self.assertEqual([i.code for i in got], ["FACT_MISMATCH"])
         self.assertIn("СМП", got[0].message)
         # сумма пеней отличается больше допуска (1 руб.) → PENALTY_MISMATCH; в пределах допуска — нет
@@ -85,7 +87,7 @@ class FindTestExpertsTests(unittest.TestCase):
         self.assertEqual([i.code for i in got], ["FACT_MISMATCH"])
         # закупки и пустые значения — без замечаний
         self.assertEqual(pr.compare_report_facts({"field2_1_1": 1}, {"field2_1_1": 0}), [])
-        self.assertEqual(pr.compare_report_facts({"field1_3": [], "field5_0_1": None}, {"field1_3": [], "field5_0_1": True}), [])
+        self.assertEqual(pr.compare_report_facts({"field1_3": [], "field5_0": None}, {"field1_3": [], "field5_0": True}), [])
 
 
 if __name__ == "__main__":
