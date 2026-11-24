@@ -213,9 +213,13 @@ def compare_report_facts(primary: Dict[str, Any], summary: Dict[str, Any],
     if 0 in required:         # расчёт неустойки не требуется хотя бы по одному заключению: суммы не сравниваем
         return out
     for name, keys in penalty.items():
-        ours, theirs = (_number(_first(d, keys)) or 0.0 for d in (primary, summary))
+        raw_ours, raw_theirs = _number(_first(primary, keys)), _number(_first(summary, keys))
+        ours, theirs = raw_ours or 0.0, raw_theirs or 0.0
         if abs(ours - theirs) > tolerance:
-            out.append(Issue("PENALTY_MISMATCH", MAJOR, f"неверная сумма в расчёте неустойки ({name}): у вас {ours:.2f} руб., в итоговом заключении {theirs:.2f} руб.",
+            # «рублей» без точки: build_comment снимает точку в конце замечания, «руб» без точки выглядит небрежно
+            mine = "не заполнено" if raw_ours is None else f"{ours:.2f} рублей"
+            out.append(Issue("PENALTY_MISMATCH", MAJOR,
+                             f"неверная сумма в расчёте неустойки ({name}): у вас {mine}, в итоговом заключении {theirs:.2f} рублей",
                              [k for k in keys if k in primary or k in summary][:2]))
     return out
 

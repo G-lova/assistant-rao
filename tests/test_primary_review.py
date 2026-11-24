@@ -84,6 +84,10 @@ class FindTestExpertsTests(unittest.TestCase):
         got = pr.compare_report_facts({**base, "field5_1_4": 300}, base)
         self.assertEqual([i.code for i in got], ["PENALTY_MISMATCH"])
         self.assertEqual(pr.compare_report_facts({**base, "field5_1_4": 241.9}, base), [])
+        # сумма не заполнена у первичного: так и сказано («не заполнено»), без точки на конце (её снимает build_comment)
+        got = pr.compare_report_facts({k: v for k, v in base.items() if k != "field5_1_4"}, base)
+        self.assertIn("не заполнено", got[0].message)
+        self.assertFalse(got[0].message.endswith("."))
         # сумма заказчика: пусто = 0; работы/НИР хранят суммы под field6_1_*
         self.assertEqual(len(pr.compare_report_facts({**base, "field6_1_4_1": "500,00"}, base)), 1)
         works = {"field1_3": [], "field6_1_11": True, "field6_1_4": 100, "field6_1_7": 0, "field6_1_10": 0}
