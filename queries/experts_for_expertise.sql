@@ -534,8 +534,8 @@ blocked_experts AS (
 		END), 3) AS criterion5,
         COUNT(CASE
             WHEN ee.group_formed_at IS NOT NULL
-             AND (ee.deleted_at IS NULL OR ee.deleted_at >= DATE_SUB(NOW(), INTERVAL 7 DAY))
-             AND (ee.uploadExpertDate IS NULL OR ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 7 DAY))
+             AND (COALESCE(ee.uploadExpertDate, ee.deleted_at) IS NULL
+                  OR COALESCE(ee.uploadExpertDate, ee.deleted_at) >= DATE_SUB(NOW(), INTERVAL 7 DAY))
             THEN 1
         END) AS currentWeekWorkload
 	FROM users u 
