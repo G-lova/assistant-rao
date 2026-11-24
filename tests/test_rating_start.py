@@ -46,12 +46,13 @@ class RatingStartTest(unittest.TestCase):
     def test_week_workload_in_work_during_week(self):
         """currentWeekWorkload — экспертизы, бывшие в работе у эксперта за последние 7 дней (24.11.2026).
 
-        Группа сформирована, строка эксперта не удалена, а заключение ещё не загружено или загружено
-        за последние 7 дней. Статус экспертизы (e.status) больше не учитывается.
+        Группа сформирована; строка эксперта не удалена или снята за последние 7 дней (эксперт успел
+        поработать); заключение ещё не загружено или загружено за последние 7 дней. Статус экспертизы
+        (e.status) больше не учитывается.
         """
         start = self.sql.index("COUNT(CASE\n            WHEN ee.group_formed_at IS NOT NULL")
         block = self.sql[start:self.sql.index("AS currentWeekWorkload", start)]
-        self.assertIn("ee.deleted_at IS NULL", block)
+        self.assertIn("(ee.deleted_at IS NULL OR ee.deleted_at >= DATE_SUB(NOW(), INTERVAL 7 DAY))", block)
         self.assertIn("(ee.uploadExpertDate IS NULL OR ee.uploadExpertDate >= DATE_SUB(NOW(), INTERVAL 7 DAY))", block)
         self.assertNotIn("e.status IN (3)", self.sql)
 
