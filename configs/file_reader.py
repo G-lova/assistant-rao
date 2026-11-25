@@ -790,7 +790,10 @@ class FileReader:
         """
         temp_dir = tempfile.mkdtemp()
         try:
-            for target in ('csv:Text - txt - csv (StarCalc):44,34,76,1,,0,false,true,false,false,false,-1', 'csv'):
+            # кодировка вывода — явно UTF-8 (76) в обоих вариантах: без параметров фильтра LibreOffice пишет CSV в
+            # кодировке системы, и в контейнере (без локали UTF-8) кириллица превращалась в «Ð¨Ð¿…» (CI 25.11.2026)
+            for target in ('csv:Text - txt - csv (StarCalc):44,34,76,1,,0,false,true,false,false,false,-1',
+                           'csv:Text - txt - csv (StarCalc):44,34,76,1'):
                 try:
                     await run_soffice(['--convert-to', target, '--outdir', temp_dir, file_path])
                 except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:

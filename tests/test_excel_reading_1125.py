@@ -74,11 +74,15 @@ class LibreOfficeCsvTest(unittest.TestCase):
     def test_ods_named_xls(self):
         """ODS с расширением .xls (ZIP без части workbook — как «Обоснование НМЦК 87-ЭА 2026.xls»)."""
         with _module() as fr, tempfile.TemporaryDirectory() as d:
-            src = os.path.join(d, "t.csv")
+            # исходная таблица — HTML с явной кодировкой: CSV LibreOffice читает в кодировке системы, и в контейнере
+            # CI без локали UTF-8 кириллица портилась уже в исходной таблице теста (25.11.2026)
+            src = os.path.join(d, "t.html")
             with open(src, "w", encoding="utf-8") as f:
-                f.write("Наименование,Цена\nШприц,12.5\n")
-            subprocess.run(["soffice", "--headless", "--convert-to", "ods", "--outdir", d, src],
-                           check=True, capture_output=True, timeout=120)
+                f.write('<html><head><meta charset="utf-8"></head><body><table>'
+                        '<tr><td>Наименование</td><td>Цена</td></tr><tr><td>Шприц</td><td>12.5</td></tr>'
+                        '</table></body></html>')
+            subprocess.run(["soffice", "--headless", "--infilter=HTML (StarCalc)", "--convert-to", "ods",
+                            "--outdir", d, src], check=True, capture_output=True, timeout=120)
             path = os.path.join(d, "Обоснование.xls")
             os.rename(os.path.join(d, "t.ods"), path)
             self.assertEqual(fr.sniff_spreadsheet(path), "zip")
