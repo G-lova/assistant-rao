@@ -915,6 +915,7 @@ class AIFileAnalyzer:
             diff = version_diff.text_diff(prev_ctx["text"], text)
 
         extraction_meta: Optional[Dict[str, Any]] = None   # откуда извлечение (pipeline.extraction), см. _extract
+        lite = False   # паспорт без модели (документ исполнения, RM_LITE_EXECUTION_DOCS)
         if print_kind:
             mode = "print_form"
             xml_body = await self._owner_xml_body(row) if print_kind.get("group") == "contract" else None
@@ -982,9 +983,18 @@ class AIFileAnalyzer:
             allowed = ([] if doc_kind.no_risk_by_name(file_name) or doc_kind.is_execution_document(row)
                        else doc_kind.allowed_codes(type_info["detected_type"], None,
                                                    post_award=doc_kind.is_post_award(row, type_info["detected_type"])))
-            profile = await self._cached(document_id, "document_profile",
-                                         lambda: self.profiler.profile(text, file_name, type_decode, summary, purchase),
-                                         model=self.model, fallback_doc=reuse_doc)
+            # документ исполнения / без поиска рисков по имени — без паспорта моделью (RM_LITE_EXECUTION_DOCS,
+            # 25.11.2026: паспорт — 22 % времени файлов, а у актов, УПД, платёжек он пересказывает извлечение)
+            lite = bool(getattr(settings, "RM_LITE_EXECUTION_DOCS", False)) and (
+                doc_kind.is_execution_document(row) or doc_kind.no_risk_by_name(file_name))
+            if lite:
+                profile = None
+                progress.note("документ исполнения — паспорт без модели (по извлечению)")
+            else:
+                profile = await self._cached(document_id, "document_profile",
+                                             lambda: self.profiler.profile(text, file_name, type_decode, summary,
+                                                                           purchase),
+                                             model=self.model, fallback_doc=reuse_doc)
             blocks = (await self._law_blocks(document_id, fz, on, type_info.get("detected_type"), row, embeddings_ok)
                       if allowed else {"context": {}, "version": "", "meta": None})
             risk_context = {"detected_type": type_info.get("detected_type"), "type_decode": type_decode,
@@ -1065,6 +1075,8 @@ class AIFileAnalyzer:
         pipeline["mode"] = mode
         if extraction_meta:
             pipeline["extraction"] = extraction_meta
+        if mode != "print_form" and lite:
+            pipeline["lite"] = "execution"   # паспорт без модели (RM_LITE_EXECUTION_DOCS)
         if blocks.get("meta"):
             pipeline["law_context"] = blocks["meta"]
         if getattr(self, "stats", None) is not None:
@@ -1617,9 +1629,27 @@ class AIFileAnalyzer:
 
         Returns:
             Any: Результат (``None``, если анализ не дал результата).
+
+        Один и тот же документ (``ai_documents`` по SHA-256) в двух файлах одной волны: шаг выполняется под замком
+        ``(документ, тип, версия)`` — второй файл ждёт первый и берёт его результат из кэша, а не запрашивает
+        модель параллельно (24.11.2026: два файла «ДС1 0373100029525000624.doc» — 364 + 332 с).
         """
         version = version or self.versions[version_key or analysis_type]
         model = model or self.extraction_model
+        if document_id:
+            locks = self.__dict__.setdefault("_cache_locks", {})
+            lock = locks.setdefault((document_id, analysis_type, version, model), asyncio.Lock())
+            async with lock:
+                return await self._cached_unlocked(document_id, analysis_type, produce, compact, keep, version,
+                                                   model, fallback_doc, reuse_if, also_versions)
+        return await self._cached_unlocked(document_id, analysis_type, produce, compact, keep, version, model,
+                                           fallback_doc, reuse_if, also_versions)
+
+    async def _cached_unlocked(self, document_id: Any, analysis_type: str, produce: Callable[[], Awaitable[Any]],
+                               compact: Optional[Callable[[Any], Any]], keep: Optional[Callable[[Any], bool]],
+                               version: str, model: str, fallback_doc: Optional[int],
+                               reuse_if: Optional[Callable[[Any], bool]], also_versions: Sequence[str]) -> Any:
+        """Тело :meth:`_cached` (версия и модель уже определены): кэш → прошлая редакция → модель → сохранение."""
         title = progress.analysis_title(analysis_type)
         if not self.recompute:
             cached = await self.repo.get_analysis(document_id, analysis_type, version, model)
