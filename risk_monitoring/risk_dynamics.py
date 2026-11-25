@@ -218,7 +218,12 @@ def priority(score: Optional[float], delta: Optional[float], nmck: Optional[floa
     value = round(base * (0.5 + 0.5 * conf), 1)
     reasons = []
     if growth >= 40:
-        reasons.append(f"балл вырос на {float(delta):g}")
+        # прошлый балл 0 (delta = score) — первая оценка по документам, а не рост (сводка 24.11.2026);
+        # дробная часть — через запятую, как баллы в сводке
+        if score is not None and abs(float(score) - float(delta)) < 0.05:
+            reasons.append("первая оценка по документам")
+        else:
+            reasons.append("балл вырос на " + f"{float(delta):g}".replace(".", ","))
     if "RSK-001" in kinds:
         reasons.append("новые риски")
     elif "RSK-002" in kinds:

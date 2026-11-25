@@ -23,6 +23,7 @@
 """
 import asyncio
 import json
+import re
 import time
 from datetime import date, datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -55,6 +56,11 @@ RED = "red"
 HEARTBEAT_SECONDS = 120
 RUNNING_STALE_SECONDS = 10 * 60
 DAILY_LOW_CONFIDENCE_TOP = 10      # среди скольких первых по приоритету отмечать низкое доверие
+
+# Подсказка модели к фактам (раньше стояла в самом факте «Требуют внимания» и попадала в текст сводки шаблоном,
+# 24.11.2026): пункты внимания перечислены не все
+RESUME_NOTE = ("В факте «Требуют внимания» — точные числа по видам; пункты «Внимание: …» ниже перечислены не все — "
+               "называй числа из факта, а не считай пункты.")
 
 RESUME_SYSTEM = (
     "Ты — аналитик риск-мониторинга госзакупок организаций, подведомственных Минобрнауки России. Тебе дан список "
@@ -128,6 +134,63 @@ def _sc(v: Optional[float]) -> str:
     return "—" if v is None else f"{v:g}".replace(".", ",")
 
 
+def first_scored(item: Dict[str, Any]) -> bool:
+    """Закупка пересчитана, прошлый балл 0, а новый — нет: первая оценка по документам, а не рост балла."""
+    return bool(item.get("changed")) and item.get("previous_score") == 0 and bool(item.get("score"))
+
+
+def event_date_note(event_at: Any, export_date: str, days: int = 7) -> str:
+    """« (событие от ДД.ММ.ГГГГ)», если событие старше выгрузки больше чем на ``days`` дней: поздно выгруженное
+    допсоглашение от 14.01 в сводке за 24.11 читалось как вчерашнее (24.11.2026)."""
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", str(event_at or ""))
+    if not m:
+        return ""
+    try:
+        gap = (date.fromisoformat(str(export_date)[:10]) - date(int(m[1]), int(m[2]), int(m[3]))).days
+    except ValueError:
+        return ""
+    return f" (событие от {m[3]}.{m[2]}.{m[1]})" if gap > days else ""
+
+
+def short_org_name(name: Any) -> Optional[str]:
+    """Одно название организации вместо перечня вариантов из справочника.
+
+    В ``risk_monitoring_organisations.short_name`` встречаются все варианты названия через «;» или «,»: «ФИЦ КНЦ
+    СО РАН; КНЦ СО РАН», «ИРНИТУ, ФГБОУ ВО "ИРНИТУ", "ИРКУТСКИЙ ПОЛИТЕХ"» — в сводке они читались как перечень
+    заказчиков (24.11.2026). Берётся первый вариант; запятая внутри кавычек («ООО "Ромашка, Плюс"») — не разделитель,
+    а запятая — разделитель, только если все части похожи на варианты (в кавычках или прописными, до 80 символов), а не
+    на части полного названия («…учреждение науки Институт химии, физики…»).
+    """
+    if not name:
+        return None
+    text = str(name).strip()
+    seps = ";" if ";" in text else ";,"
+    parts, buf, in_quotes, guill = [], "", False, 0
+    for ch in text:
+        if ch == '"':
+            in_quotes = not in_quotes
+        elif ch in "«“":
+            guill += 1
+        elif ch in "»”":
+            guill = max(0, guill - 1)
+        if ch in seps and not in_quotes and not guill:
+            parts.append(buf.strip())
+            buf = ""
+        else:
+            buf += ch
+    parts.append(buf.strip())
+    parts = [x for x in parts if x]
+    def variant(x: str) -> bool:
+        """Похоже на вариант названия из справочника: в кавычках или прописными (не часть полного названия)."""
+        letters = [c for c in x if c.isalpha()]
+        upper = sum(1 for c in letters if c.isupper()) / len(letters) if letters else 0
+        return len(x) <= 80 and ('"' in x or "«" in x or upper >= 0.7)
+
+    if len(parts) < 2 or (seps == ";," and not all(variant(x) for x in parts)):
+        return text
+    return parts[0]
+
+
 def contract_item(card: Dict[str, Any], ai: Dict[str, Any], changed: bool) -> Dict[str, Any]:
     """Закупка для сводки: номер, заказчик, предмет, балл, зона, изменение балла, главные риски.
 
@@ -143,7 +206,7 @@ def contract_item(card: Dict[str, Any], ai: Dict[str, Any], changed: bool) -> Di
         "card_id": int(card["id"]),
         "purchase_number": pas.get("purchase_number") or card.get("number"),
         "contract_number": pas.get("contract_number"),
-        "customer": card.get("customer_name") or (pas.get("customer") or {}).get("name"),
+        "customer": short_org_name(card.get("customer_name") or (pas.get("customer") or {}).get("name")),
         "organisation_id": card.get("organisation_id"),
         "customer_inn": (pas.get("customer") or {}).get("inn"),
         "customer_kpp": (pas.get("customer") or {}).get("kpp"),
@@ -174,7 +237,7 @@ def event_item(xml_id: int, card: Optional[Dict[str, Any]], ai: Dict[str, Any]) 
         "xml_id": int(xml_id),
         "card_id": int(card["id"]) if card else None,
         "purchase_number": (card or {}).get("number"),
-        "customer": (card or {}).get("customer_name"),
+        "customer": short_org_name((card or {}).get("customer_name")),
         "monitoring": monitored(card) if card else False,
         "code": ev.get("code"),
         "title": ev.get("title"),
@@ -297,7 +360,12 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
     red_line = cfg.SCORE_ZONES[1]
     became_red = [i for i in items if i["zone"] == RED and i["changed"]
                   and (i["previous_score"] is None or i["previous_score"] < red_line)]
-    jumps = sorted([i for i in items if (i["delta"] or 0) >= cfg.DAILY_SCORE_JUMP], key=lambda i: -(i["delta"] or 0))
+    # прошлый балл 0 — закупка раньше оценивалась без документов (только карточка); «балл вырос на 63,1 — до 63,1»
+    # — это первая оценка по документам, а не рост (24.11.2026: такие шли в «резкий рост балла»)
+    first = sorted([i for i in items if (i["delta"] or 0) >= cfg.DAILY_SCORE_JUMP and first_scored(i)],
+                   key=lambda i: -(i["score"] or 0))
+    jumps = sorted([i for i in items if (i["delta"] or 0) >= cfg.DAILY_SCORE_JUMP and not first_scored(i)],
+                   key=lambda i: -(i["delta"] or 0))
     red = sorted([i for i in items if i["zone"] == RED], key=lambda i: -(i["score"] or 0))
     registry = [i for i in items if i["registry_1928"]]
 
@@ -328,15 +396,18 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
     for i in registry:
         add("registry_1928", i, "Поставщик в реестре лиц, привлечённых по ст. 19.28 КоАП РФ")
     for i in became_red:
-        if i["previous_score"] is None:
+        if i["previous_score"] is None or first_scored(i):
             # первая оценка закупки — «перешла в красную зону» вводило в заблуждение (21.10.2026: все 17 — первые)
             add("red_first", i, f"В красной зоне при первой оценке: балл {_sc(i['score'])}")
         else:
             add("became_red", i, f"Закупка перешла в красную зону: балл {_sc(i['score'])} (был {_sc(i['previous_score'])})")
     for i in jumps:
         add("score_jump", i, f"Балл вырос на {_sc(i['delta'])} — до {_sc(i['score'])}")
+    for i in first:
+        add("first_scored", i, f"Первая оценка по документам: балл {_sc(i['score'])}")
     for e in important[:cfg.DAILY_TOP]:
-        add("event", e, f"{e['title'] or 'событие ЕИС'}" + (f"; признаки риска: {risk_names(e['risks'][:4])}" if e["risks"] else ""))
+        add("event", e, f"{e['title'] or 'событие ЕИС'}" + event_date_note(e.get("event_at"), export_date)
+            + (f"; признаки риска: {risk_names(e['risks'][:4])}" if e["risks"] else ""))
 
     cust = []
     for r in customers:
@@ -382,7 +453,8 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
                                               if i["monitoring"] and i.get("organisation_id")})},
         "stages": stages,
         "contracts": {"by_zone": by_zone, "changed": sum(1 for i in items if i["changed"]),
-                      "became_red": became_red[:top], "score_jump": jumps[:top], "red": red[:top]},
+                      "became_red": became_red[:top], "score_jump": jumps[:top], "first_scored": first[:top],
+                      "red": red[:top]},
         "events": {"total": len(ev_items), "by_type": dict(sorted(by_code.items(), key=lambda kv: -kv[1])),
                    "important": important[:top]},
         "customers": cust,
@@ -398,6 +470,7 @@ def build_summary(*, export_date: str, environment: str, cards: Dict[int, Dict[s
                                     for i, c in closed_risks[:top]]},
         # контракты, у которых плановый срок прошёл, а сведений о завершении в ЕИС нет (профиль исполнения)
         "execution_open_past_plan": sum(1 for i in items if i["plan_passed_open"]),
+        "execution_open_past_plan_list": [i["purchase_number"] for i in items if i["plan_passed_open"]][:top],
         # составные риски (CR-*): сколько закупок с каждым сочетанием признаков
         "composite_risks": dict(sorted(comp.items(), key=lambda kv: -kv[1])),
         "priorities": [{k: i.get(k) for k in ("card_id", "purchase_number", "customer", "score", "zone", "priority",
@@ -457,14 +530,20 @@ def summary_facts(s: Dict[str, Any]) -> List[str]:
         facts.append("Изменения рисков в пересчитанных закупках: " + ", ".join(
             f"{names[k]} — {v}" for k, v in sorted(by.items()) if k in names) + ".")
         if rc.get("new"):
+            # по закупке: одна закупка с четырьмя новыми рисками — одна строка, а не четыре (24.11.2026)
+            grouped: Dict[str, List[str]] = {}
+            for x in rc["new"]:
+                grouped.setdefault(x["purchase_number"], []).append(x["rule_id"])
             facts.append("Новые риски: " + "; ".join(
-                f"{risk_names([x['rule_id']])} — закупка {x['purchase_number']}" for x in rc["new"][:5]) + ".")
+                f"закупка {num} — {risk_names(codes)}" for num, codes in list(grouped.items())[:5]) + ".")
         if rc.get("closed"):
             facts.append("Сняты риски: " + "; ".join(
                 f"{risk_names([x['rule_id']])} — закупка {x['purchase_number']}" for x in rc["closed"][:5]) + ".")
     if s.get("execution_open_past_plan"):
+        nums = [n for n in s.get("execution_open_past_plan_list") or [] if n]
         facts.append(f"Плановый срок исполнения прошёл, а сведений о завершении в ЕИС нет — контрактов "
-                     f"{s['execution_open_past_plan']}: проверить исполнение и полноту сведений в реестре контрактов.")
+                     f"{s['execution_open_past_plan']}" + (f" (закупки {', '.join(nums[:5])})" if nums else "")
+                     + ": проверить исполнение и полноту сведений в реестре контрактов.")
     comp = s.get("composite_risks") or {}
     if comp:
         facts.append("Сочетания признаков риска (опаснее, чем каждый признак по отдельности): " + "; ".join(
@@ -486,10 +565,10 @@ def summary_facts(s: Dict[str, Any]) -> List[str]:
     if kinds:
         names = {"registry_1928": "поставщик в реестре 19.28", "became_red": "перешли в красную зону",
                  "red_first": "в красной зоне при первой оценке", "score_jump": "резкий рост балла",
+                 "first_scored": "первая оценка по документам",
                  "event": "важные события", "supplier_registry": "поставщики в реестрах"}
         facts.append("Требуют внимания (всего " + str(len(s["attention"])) + "): " +
-                     "; ".join(f"{names.get(k, k)} — {v}" for k, v in kinds.items()) +
-                     ". Ниже перечислены первые из них; называй числа из этой строки, а не считай пункты.")
+                     "; ".join(f"{names.get(k, k)} — {v}" for k, v in kinds.items()) + ".")
     for a in s["attention"][:10]:
         who = ", ".join(x for x in (f"закупка {a['purchase_number']}" if a.get("purchase_number") else None,
                                     a.get("customer")) if x)
@@ -513,8 +592,8 @@ def summary_facts(s: Dict[str, Any]) -> List[str]:
     partial = {k: v for k, v in (s.get("stages") or {}).items() if (v or {}).get("status") == "partial"}
     if partial:
         left = max((v or {}).get("xml_left") or 0 for v in partial.values())
-        facts.append(f"Прогон не успел обработать все документы (осталось XML: {left}) — сводка предварительная, "
-                     "прогон за эту дату нужно повторить.")
+        facts.append(f"Обработаны ещё не все документы (осталось XML: {left}) — сводка предварительная, прогон "
+                     "за эту дату продолжается автоматически.")
     deferred = [k for k, v in (s.get("stages") or {}).items() if (v or {}).get("status") == "deferred"]
     if deferred:
         names = {"customers": "заказчики", "suppliers": "поставщики"}
@@ -1188,7 +1267,7 @@ class DailyRun:
 
             client, model = reasoning_llm(*get_llm())
             text = await LLMJson(client, model, concurrency=1).ask_text(
-                RESUME_SYSTEM, json.dumps({"facts": summary_facts(summary)}, ensure_ascii=False),
+                RESUME_SYSTEM, json.dumps({"facts": summary_facts(summary), "note": RESUME_NOTE}, ensure_ascii=False),
                 max_tokens=1500, temperature=0.2)
             return (text, True) if text else (default_resume(summary), False)
         except Exception as e:  # noqa: BLE001
