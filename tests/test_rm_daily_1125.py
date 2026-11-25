@@ -119,6 +119,12 @@ class SameDocumentLockTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(a, b)
 
+        # force (кэш не читается): второй файл берёт результат этого запуска, а не пересчитывает
+        fa.recompute = True
+        calls.clear()
+        asyncio.run(main())
+        self.assertEqual(len(calls), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
