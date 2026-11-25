@@ -1638,7 +1638,11 @@ class AIFileAnalyzer:
         model = model or self.extraction_model
         if document_id:
             key = (document_id, analysis_type, version, model)
-            lock = self.__dict__.setdefault("_cache_locks", {}).setdefault(key, asyncio.Lock())
+            # замки — на текущий цикл событий (анализатор может пережить asyncio.run: замок чужого цикла не годится)
+            loop = asyncio.get_running_loop()
+            if self.__dict__.get("_cache_locks_loop") is not loop:
+                self._cache_locks_loop, self._cache_locks = loop, {}
+            lock = self._cache_locks.setdefault(key, asyncio.Lock())
             async with lock:
                 # при force (recompute) кэш не читается — результат, полученный в этом запуске, второй файл берёт
                 # отсюда, иначе он пересчитал бы его после ожидания (дольше, чем параллельно)
