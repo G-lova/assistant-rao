@@ -1637,11 +1637,23 @@ class AIFileAnalyzer:
         version = version or self.versions[version_key or analysis_type]
         model = model or self.extraction_model
         if document_id:
-            locks = self.__dict__.setdefault("_cache_locks", {})
-            lock = locks.setdefault((document_id, analysis_type, version, model), asyncio.Lock())
+            key = (document_id, analysis_type, version, model)
+            # замки — на текущий цикл событий (анализатор может пережить asyncio.run: замок чужого цикла не годится)
+            loop = asyncio.get_running_loop()
+            if self.__dict__.get("_cache_locks_loop") is not loop:
+                self._cache_locks_loop, self._cache_locks = loop, {}
+            lock = self._cache_locks.setdefault(key, asyncio.Lock())
             async with lock:
-                return await self._cached_unlocked(document_id, analysis_type, produce, compact, keep, version,
-                                                   model, fallback_doc, reuse_if, also_versions)
+                # при force (recompute) кэш не читается — результат, полученный в этом запуске, второй файл берёт
+                # отсюда, иначе он пересчитал бы его после ожидания (дольше, чем параллельно)
+                memo = self.__dict__.setdefault("_produced", {}) if self.recompute else None
+                if memo is not None and key in memo:
+                    return memo[key]
+                result = await self._cached_unlocked(document_id, analysis_type, produce, compact, keep, version,
+                                                     model, fallback_doc, reuse_if, also_versions)
+                if memo is not None and result is not None:
+                    memo[key] = result
+                return result
         return await self._cached_unlocked(document_id, analysis_type, produce, compact, keep, version, model,
                                            fallback_doc, reuse_if, also_versions)
 
