@@ -94,6 +94,103 @@ def xlsx_text_limited(path: str, max_rows: int = 500, max_cols: int = 60, max_sh
     return "\n\n".join(out)[:max_chars].strip()
 
 
+def sniff_spreadsheet(path: str) -> str:
+    """Настоящий формат таблицы по первым байтам (расширение .xls / .xlsx часто не соответствует содержимому).
+
+    Returns:
+        str: ``ole2`` — двоичный Excel 97–2003; ``zip`` — OOXML (.xlsx) или OpenDocument (.ods); ``markup`` — HTML или
+        XML-таблица Excel 2003 (выгрузки 1С, ЕИС, банков с расширением .xls); ``unknown``.
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(512)
+    except OSError:
+        return "unknown"
+    if head.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        return "ole2"
+    if head.startswith(b"PK\x03\x04"):
+        return "zip"
+    if head.lstrip(b"\xef\xbb\xbf \t\r\n").startswith(b"<"):
+        return "markup"
+    return "unknown"
+
+
+def _cell_text(value) -> str:
+    """Значение ячейки строкой: 123.0 → «123», пустые — «»."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
+def xls_text_limited(path: str, max_rows: int = 500, max_cols: int = 60, max_sheets: int = 20,
+                     max_chars: int = 300_000) -> str:
+    """Текст двоичного .xls напрямую через ``xlrd`` — с теми же ограничениями, что :func:`xlsx_text_limited`.
+
+    25.11.2026: pandas 2.x требует xlrd ≥ 2.0.1, а в окружении xlrd 1.2.0 — ``pd.read_excel(engine="xlrd")`` не
+    работал ни для одного .xls («Обоснование НМЦК 87-ЭА 2026.xls», попытка 3). ``xlrd.open_workbook`` читает .xls в
+    обеих версиях xlrd.
+    """
+    import xlrd
+
+    book = xlrd.open_workbook(path, on_demand=True)
+    out, size = [], 0
+    try:
+        for n in range(book.nsheets):
+            if n >= max_sheets:
+                out.append(f"[Листов больше {max_sheets}, остальные не прочитаны]")
+                break
+            sh = book.sheet_by_index(n)
+            lines = []
+            for r in range(min(sh.nrows, max_rows * 20)):
+                cells = [_cell_text(v) for v in sh.row_values(r, 0, min(sh.ncols, max_cols))]
+                cells = [c for c in cells if c]
+                if cells:
+                    lines.append(" | ".join(cells))
+                    if len(lines) >= max_rows:
+                        lines.append(f"[Лист обрезан: прочитано {max_rows} строк]")
+                        break
+            if lines:
+                block = f"Лист: {sh.name}\n" + "\n".join(lines)
+                out.append(block)
+                size += len(block)
+                if size >= max_chars:
+                    break
+            book.unload_sheet(n)
+    finally:
+        book.release_resources()
+    return "\n\n".join(out)[:max_chars].strip()
+
+
+def csv_files_text(paths: list, max_rows: int = 500, max_cols: int = 60, max_sheets: int = 20,
+                   max_chars: int = 300_000) -> str:
+    """Текст CSV-файлов (листов, выгруженных LibreOffice) с ограничениями, как у :func:`xlsx_text_limited`."""
+    import csv
+
+    out, size = [], 0
+    for n, path in enumerate(sorted(paths)):
+        if n >= max_sheets:
+            break
+        lines = []
+        with open(path, encoding="utf-8", errors="replace", newline="") as f:
+            for row in csv.reader(f):
+                cells = [c.strip() for c in row[:max_cols] if c and c.strip()]
+                if cells:
+                    lines.append(" | ".join(cells))
+                    if len(lines) >= max_rows:
+                        lines.append(f"[Лист обрезан: прочитано {max_rows} строк]")
+                        break
+        if lines:
+            name = os.path.splitext(os.path.basename(path))[0]
+            block = f"Лист: {name}\n" + "\n".join(lines)
+            out.append(block)
+            size += len(block)
+            if size >= max_chars:
+                break
+    return "\n\n".join(out)[:max_chars].strip()
+
+
 SOFFICE_TIMEOUT = 60
 
 
@@ -258,20 +355,6 @@ def pdf_page_count(path: str) -> int:
     except Exception as e:  # noqa: BLE001
         logger.warning(f"PDF {path}: число страниц не определено: {type(e).__name__}: {e}")
         return 0
-
-
-def _frames_text(excel_data: dict) -> str:
-    """Текст листов, прочитанных pandas (.xls): «Лист: имя» и таблица (до 20 строк), пробелы схлопнуты."""
-    result = []
-    for sheet_name, df in excel_data.items():
-        result.append(f"Лист: {sheet_name}")
-        df = df.fillna('').astype(str)
-        for col in df.columns:
-            if 'unnamed' in str(col).lower():
-                df = df.rename(columns={col: f'Колонка_{df.columns.get_loc(col)}'})
-        result.append(df.to_string(index=False, max_rows=20))
-        result.append("")
-    return re.sub(r'\s+', ' ', "\n".join(result).strip())
 
 
 # Служебные файлы в архивах: не документы (временные файлы Word/Excel «~$…», метаданные macOS и Windows)
@@ -655,35 +738,70 @@ class FileReader:
         if not os.path.exists(file_path):
             raise ValueError(f"Файл не найден: {file_path}")
         limits = excel_limits()
+        if ext not in ('.xls', '.xlsx'):
+            raise ValueError("Поддерживаются только файлы .xls и .xlsx")
+        # формат — по содержимому, а не по расширению (25.11.2026): .xls бывает OOXML/ODS-архивом или HTML-таблицей,
+        # .xlsx — ODS; прежняя цепочка «openpyxl → pandas + xlrd → LibreOffice» для .xls не работала вовсе
+        # (pandas 2.x не принимает xlrd 1.2.0), а нечитаемый файл давал ошибку анализа с повторами
+        kind = sniff_spreadsheet(file_path)
+        errors = []
+        full_text = ""
         try:
-            if ext == '.xlsx':
-                # Потоковое чтение с ограничением строк и столбцов: полная загрузка pandas/openpyxl книги-сметы
-                # (2 МБ, лист размечен до 1 048 576 строк) занимала гигабайты памяти и подвешивала прогон
-                # (РМ 31.10.2026: три сметы ТГУ одновременно — воркер завис на 1,5 ч без логов)
+            if kind == "ole2":
+                full_text = await asyncio.to_thread(xls_text_limited, file_path, **limits)
+            elif kind == "zip":
+                # потоково, с ограничениями: полная загрузка книги-сметы (лист размечен до 1 048 576 строк) занимала
+                # гигабайты памяти и подвешивала прогон (РМ 31.10.2026)
                 full_text = await asyncio.to_thread(xlsx_text_limited, file_path, **limits)
-                if not full_text:
-                    raise ValueError("в книге нет листов с текстом")
-            elif ext == '.xls':
-                try:
-                    excel_data = await asyncio.to_thread(
-                        pd.read_excel, file_path, sheet_name=None, engine="openpyxl", nrows=limits["max_rows"])
-                except Exception as openpyxl_error:
-                    logger.warning(f"openpyxl не смог прочитать .xls файл: {openpyxl_error}. Пробуем xlrd...")
-                    try:
-                        excel_data = await asyncio.to_thread(
-                            pd.read_excel, file_path, sheet_name=None, engine='xlrd', nrows=limits["max_rows"])
-                    except Exception as xlrd_error:
-                        logger.warning(f"xlrd также не сработал: {xlrd_error}. Пробуем LibreOffice...")
-                        return await self.read_excel_with_libreoffice(file_path)
-                full_text = await asyncio.to_thread(_frames_text, excel_data)
-            else:
-                raise ValueError("Поддерживаются только файлы .xls и .xlsx")
-            logger.info(f"Успешно извлечен текст из Excel: {len(full_text)} символов")
+            elif kind == "markup":
+                full_text = await self.read_html(file_path)
+        except Exception as e:  # noqa: BLE001 — дальше LibreOffice
+            errors.append(f"{kind}: {type(e).__name__}: {e}")
+            logger.warning(f"Таблица {os.path.basename(file_path)} ({kind}) не прочитана напрямую: {e} — LibreOffice")
+        if full_text and full_text.strip():
+            logger.info(f"Успешно извлечен текст из Excel ({kind}): {len(full_text)} символов")
             return full_text
+        if kind != "markup":
+            try:
+                full_text = await self.read_excel_with_libreoffice(file_path)
+                if full_text and full_text.strip():
+                    return full_text
+            except Exception as e:  # noqa: BLE001 — дальше CSV
+                errors.append(f"LibreOffice→xlsx: {e}")
+            try:
+                full_text = await self.read_spreadsheet_csv_libreoffice(file_path)
+                if full_text and full_text.strip():
+                    logger.info(f"Таблица прочитана через LibreOffice → CSV: {len(full_text)} символов")
+                    return full_text
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"LibreOffice→csv: {e}")
+        # повреждённый или пустой файл: не ошибка анализа с повторами (повторное чтение ничего не даст), а документ
+        # «нет текста» (ai_file_analyzer._load_document, BrokenFile) — сначала пробуется ссылка ЕИС
+        raise BrokenFile("таблица не читается (" + "; ".join(errors)[:400] + ")" if errors
+                         else "в таблице нет текста")
 
-        except Exception as e:
-            logger.error(f"Критическая ошибка при обработке Excel файла: {str(e)}")
-            raise RuntimeError(f"Не удалось прочитать Excel файл: {str(e)}")
+    async def read_spreadsheet_csv_libreoffice(self, file_path: str) -> str:
+        """Таблица через LibreOffice в CSV — без разбора XML (последняя попытка, когда xlsx после конвертации не
+        читается: «StartTag: invalid element name», 25.11.2026). Сначала все листы (LibreOffice ≥ 7.2, лист ``-1``),
+        иначе первый лист.
+
+        Returns:
+            str: Текст листов (:func:`csv_files_text`) или пустая строка.
+        """
+        temp_dir = tempfile.mkdtemp()
+        try:
+            for target in ('csv:Text - txt - csv (StarCalc):44,34,76,1,,0,false,true,false,false,false,-1', 'csv'):
+                try:
+                    await run_soffice(['--convert-to', target, '--outdir', temp_dir, file_path])
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                    logger.warning(f"LibreOffice → CSV ({target[:3]}…): {type(e).__name__}")
+                    continue
+                files = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir) if f.endswith('.csv')]
+                if files:
+                    return await asyncio.to_thread(csv_files_text, files, **excel_limits())
+            return ""
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
     async def read_excel_with_libreoffice(self, file_path: str) -> str:
