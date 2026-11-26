@@ -97,17 +97,13 @@ class OrgAnalyzer:
         return ((today or date.today()) - timedelta(days=round(30.44 * self.period_months))).isoformat()
 
     # ------------------------------------------------------------------ вход
-    async def analyze_ids(self, org_ids: List[int]) -> List[Dict[str, Any]]:
-        """Аналитика организаций по id.
-
-        Args:
-            org_ids: id ``risk_monitoring_organisations`` (любая строка группы — по году или дубль).
+    async def _resolve(self, ids: List[int]) -> Tuple[Dict[int, Dict[str, Any]], Dict[int, Dict[str, Any]], Dict[int, int]]:
+        """Строки организаций и их группы (строки по годам, дубли) → каноническая организация.
 
         Returns:
-            List[Dict[str, Any]]: ``organisation_id``, ``canonical_id``, ``status``, баллы секций, ``ai_analysis``.
+            Tuple: ``rows`` (id → строка), ``targets`` (канонический id → строка, ``customer_rows``,
+            ``supplier_rows``, ``inn``), ``result_for`` (запрошенный id → канонический).
         """
-        ids = list(dict.fromkeys(int(i) for i in org_ids))
-        progress.subject(f"Организации ({len(ids)})")
         async with progress.step("чтение организаций и их строк по годам"):
             rows = {int(r["id"]): r for r in await self._query("org_rows.sql", ids=ids)}
         inns = sorted({str(r.get("inn")).strip() for r in rows.values() if r.get("inn")})
@@ -125,6 +121,41 @@ class OrgAnalyzer:
             targets.setdefault(int(canon["id"]), {"row": canon, "customer_rows": cust_rows or [r], "inn": inn,
                                                   "supplier_rows": sup_rows or [r]})
             result_for[oid] = int(canon["id"])
+        return rows, targets, result_for
+
+    async def contract_ids(self, org_ids: List[int]) -> List[int]:
+        """id карточек закупок организаций за период аналитики — те же, что войдут в аналитику (по ``roles``):
+        как заказчика (``customer_contracts.sql``, все строки группы) и как поставщика (``supplier_contracts.sql``,
+        по ИНН). Для ``analyze_contracts`` (25.11.2026): сначала анализируются закупки, потом организация.
+
+        Returns:
+            List[int]: id ``risk_monitoring_contracts`` по дате публикации (старые первыми), без повторов.
+        """
+        ids = list(dict.fromkeys(int(i) for i in org_ids))
+        _, targets, _ = await self._resolve(ids)
+        since = self.since()
+        cards: List[Dict[str, Any]] = []
+        cust_ids = sorted({int(g["id"]) for t in targets.values() for g in t["customer_rows"]})
+        if "customer" in self.roles and cust_ids:
+            cards += await self._query("customer_contracts.sql", head=[since], ids=cust_ids)
+        sup_inns = sorted({t["inn"] for t in targets.values()})
+        if "supplier" in self.roles and sup_inns:
+            cards += await self._query("supplier_contracts.sql", head=[since], inns=sup_inns)
+        cards.sort(key=lambda c: (str(c.get("date_public") or ""), int(c["id"])))
+        return list(dict.fromkeys(int(c["id"]) for c in cards if c.get("id") is not None))
+
+    async def analyze_ids(self, org_ids: List[int]) -> List[Dict[str, Any]]:
+        """Аналитика организаций по id.
+
+        Args:
+            org_ids: id ``risk_monitoring_organisations`` (любая строка группы — по году или дубль).
+
+        Returns:
+            List[Dict[str, Any]]: ``organisation_id``, ``canonical_id``, ``status``, баллы секций, ``ai_analysis``.
+        """
+        ids = list(dict.fromkeys(int(i) for i in org_ids))
+        progress.subject(f"Организации ({len(ids)})")
+        rows, targets, result_for = await self._resolve(ids)
         since = self.since()
         async with progress.step(f"чтение закупок заказчиков и контрактов поставщиков с {since}") as st:
             cust_ids = sorted({int(g["id"]) for t in targets.values() for g in t["customer_rows"]})

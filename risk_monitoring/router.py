@@ -133,10 +133,15 @@ class PackageRequest(AnalysisRequest):
             БД, ни у нас (``false`` — только сборка по готовым результатам).
         roles: Только для организаций — секции ``customer`` и/или ``supplier``.
         period_months: Только для организаций — период аналитики, месяцев (по умолчанию 12).
+        analyze_contracts: Только для организаций — сначала закупки организации за период: анализ файлов и XML без
+            результата и сборка закупок (порциями, отдельными задачами), затем аналитика. Для новой организации
+            (дозагрузка из ЕИС): без него аналитика собирается только из уже готовых результатов закупок. Уже
+            проанализированное не пересчитывается. По умолчанию ``false`` — как раньше.
     """
 
     use_llm: bool = True
     analyze_documents: bool = True
+    analyze_contracts: bool = False
     roles: List[str] = Field(default_factory=lambda: ["customer", "supplier"])
     period_months: Optional[int] = Field(default=None, ge=1, le=60)
 
@@ -186,6 +191,11 @@ async def analyze_organisations(req: PackageRequest, x_api_database: str = Heade
     ``risk_monitoring_organisations.ai_analysis`` (``settings.ORG_PUSH_ENABLED``), хранится у нас и возвращается
     в задаче (``include_analysis``).
 
+    ``analyze_contracts`` — дозагрузка организации: задача находит закупки организаций за период, ставит их анализ
+    порциями по ``ORG_CONTRACTS_PORTION`` (с анализом недостающих файлов и XML; при незавершённом ежедневном прогоне
+    порции ждут — ``ORG_BACKFILL_YIELD_TO_DAILY``), последней — аналитику организаций. Результат задачи —
+    ``status = scheduled``, ``contracts``, ``portions``, ``organisations_task`` (id задачи аналитики) и ``tasks``.
+
     Args:
         req: id организаций, ``roles``, ``period_months`` и режимы.
         x_api_database: Окружение внешней системы.
@@ -198,7 +208,7 @@ async def analyze_organisations(req: PackageRequest, x_api_database: str = Heade
     task = rm_analyze_orgs_task.apply_async(
         args=[req.ids, x_api_database],
         kwargs={"roles": req.roles, "period_months": req.period_months, "push": req.push, "use_llm": req.use_llm,
-                "include_analysis": req.include_analysis},
+                "include_analysis": req.include_analysis, "analyze_contracts": req.analyze_contracts},
         queue="risk_monitoring")
     return {"task_id": task.id, "count": len(req.ids), "status": "queued"}
 

@@ -211,6 +211,14 @@ def rm_analyze_contracts_task(self, card_ids: List[int], environment: str, force
 
     if already_succeeded(self):
         return self.AsyncResult(self.request.id).result
+    return _analyze_contracts(card_ids, environment, force, push, use_llm, include_analysis, analyze_documents,
+                              self.name, self.request.id)
+
+
+def _analyze_contracts(card_ids: List[int], environment: str, force: bool, push: bool, use_llm: bool,
+                       include_analysis: bool, analyze_documents: bool, task_name: str,
+                       task_id: Optional[str]) -> Dict[str, Any]:
+    """Тело ``rm_analyze_contracts_task`` (и порции дозагрузки организации, :func:`rm_org_contracts_step_task`)."""
     from configs.ai_repo import AIRepo
     from configs.http_client_manager import HTTPClientManager
     from risk_monitoring.contract_analyzer import ContractAnalyzer
@@ -230,7 +238,7 @@ def rm_analyze_contracts_task(self, card_ids: List[int], environment: str, force
                 documents.update(analyzer.documents)
 
     documents: Dict[str, Any] = {}
-    results = asyncio.run(_pulsed(run(), self.name, self.request.id))
+    results = asyncio.run(_pulsed(run(), task_name, task_id))
     summary = _summary(results)
     summary["llm"] = _llm_summary(before, stats)
     logger.info(f"Риск-мониторинг, закупки: {summary}; документы: {documents}")
@@ -240,7 +248,7 @@ def rm_analyze_contracts_task(self, card_ids: List[int], environment: str, force
 @celery_app.task(bind=True, name="rm_analyze_orgs_task", soft_time_limit=3300, time_limit=3600)
 def rm_analyze_orgs_task(self, org_ids: List[int], environment: str, roles: List[str] = ("customer", "supplier"),
                          period_months: int = None, push: bool = True, use_llm: bool = True,
-                         include_analysis: bool = False) -> Dict[str, Any]:
+                         include_analysis: bool = False, analyze_contracts: bool = False) -> Dict[str, Any]:
     """Аналитика организаций как заказчика и поставщика.
 
     Args:
@@ -251,14 +259,21 @@ def rm_analyze_orgs_task(self, org_ids: List[int], environment: str, roles: List
         push: Записывать во внешнюю БД (только при ``settings.ORG_PUSH_ENABLED``).
         use_llm: Резюме пишет модель.
         include_analysis: Вернуть ``ai_analysis`` в результате задачи.
+        analyze_contracts: Сначала закупки организаций за период с анализом недостающих файлов и XML
+            (:func:`_schedule_org_contracts`: цепочка задач порциями, последней — эта же аналитика без
+            ``analyze_contracts``); задача сразу возвращает план.
 
     Returns:
-        Dict[str, Any]: ``summary`` и ``results`` по организациям.
+        Dict[str, Any]: ``summary`` и ``results`` по организациям; при ``analyze_contracts`` — ``status = scheduled``,
+        число закупок и порций, id задач цепочки.
     """
     from celery_app import already_succeeded
 
     if already_succeeded(self):
         return self.AsyncResult(self.request.id).result
+    if analyze_contracts:
+        return _schedule_org_contracts(org_ids, environment, list(roles), period_months, push, use_llm,
+                                       include_analysis)
     from configs.ai_repo import AIRepo
     from configs.http_client_manager import HTTPClientManager
     from risk_monitoring.llm_json import CALLS
@@ -281,6 +296,118 @@ def rm_analyze_orgs_task(self, org_ids: List[int], environment: str, roles: List
     summary["llm"] = _llm_summary(before, stats)
     logger.info(f"Риск-мониторинг, организации: {summary}")
     return {"summary": summary, "results": _strip(results, include_analysis)}
+
+
+def _schedule_org_contracts(org_ids: List[int], environment: str, roles: List[str], period_months: Optional[int],
+                            push: bool, use_llm: bool, include_analysis: bool) -> Dict[str, Any]:
+    """Дозагрузка организации (25.11.2026): закупки за период — порциями, затем аналитика организации.
+
+    Аналитика организации собирается из готовых результатов закупок (``contracts.ai_analysis.profile``) и сама
+    документы не анализирует; у новой организации (дозагрузка из ЕИС) их ещё нет. Поэтому — цепочка Celery:
+    :func:`rm_org_contracts_step_task` по ``ORG_CONTRACTS_PORTION`` карточек (анализ недостающих файлов и XML,
+    сборка закупки; уже собранные с неизменными данными пропускаются), последней — ``rm_analyze_orgs_task`` без
+    ``analyze_contracts``. Одна задача на всё не годится: предел задачи 3 ч, у крупной организации тысячи файлов.
+
+    Returns:
+        Dict[str, Any]: ``status = scheduled``, ``contracts``, ``portions``, ``tasks`` (id задач цепочки по порядку;
+        последняя — аналитика организаций).
+    """
+    from celery import chain
+    from configs import settings
+    from configs.http_client_manager import HTTPClientManager
+    from risk_monitoring.org_analyzer import OrgAnalyzer
+
+    async def cards() -> List[int]:
+        """id карточек организаций за период (без пула Postgres: только внешняя БД)."""
+        async with HTTPClientManager(timeout=180.0) as mgr:
+            return await OrgAnalyzer(mgr, environment, None, push_results=False, use_llm=False, roles=tuple(roles),
+                                     period_months=period_months).contract_ids(org_ids)
+
+    ids = asyncio.run(cards())
+    size = max(1, int(getattr(settings, "ORG_CONTRACTS_PORTION", 30)))
+    portions = [ids[i:i + size] for i in range(0, len(ids), size)]
+    steps = [rm_org_contracts_step_task.si(p, environment, push, use_llm, n + 1, len(portions))
+             .set(queue="risk_monitoring") for n, p in enumerate(portions)]
+    steps.append(rm_analyze_orgs_task.si(org_ids, environment, roles, period_months, push, use_llm, include_analysis,
+                                         False).set(queue="risk_monitoring"))
+    res = chain(*steps).apply_async()
+    task_ids = []
+    r = res
+    while r is not None:
+        task_ids.append(r.id)
+        r = r.parent
+    logger.info(f"Организации {org_ids}: закупок за период {len(ids)}, порций {len(portions)} — анализ закупок, "
+                f"затем аналитика организаций (задача {res.id})")
+    return {"status": "scheduled", "organisations": org_ids, "contracts": len(ids), "portions": len(portions),
+            "tasks": list(reversed(task_ids)), "organisations_task": res.id}
+
+
+async def _daily_busy(environment: str) -> Optional[str]:
+    """Ежедневный прогон не доделан (``ORG_BACKFILL_YIELD_TO_DAILY``): незавершённая дата за
+    ``DAILY_RESUME_LOOKBACK_HOURS`` часов, у которой ещё есть запуски, — её дата, иначе ``None``.
+
+    Дозагрузка организации и прогон делят одну модель; при отставании прогона свежие сводки важнее.
+    """
+    from configs import settings
+    from configs.ai_repo import AIRepo
+    from risk_monitoring import daily
+
+    try:
+        async with AIRepo() as repo:
+            rows = await repo.list_rm_unfinished(str(environment).lower(), daily.KIND,
+                                                 settings.DAILY_RESUME_LOOKBACK_HOURS)
+    except Exception as e:  # noqa: BLE001 — без проверки не задерживаем
+        logger.warning(f"Незавершённые прогоны не проверены: {type(e).__name__}: {e}")
+        return None
+    for r in rows:
+        ai = r.get("ai_analysis") or {}
+        if int((ai.get("pipeline") or {}).get("attempt") or 0) < int(settings.DAILY_CONTINUE_MAX_ATTEMPTS):
+            return str(ai.get("date") or daily.key_date(r["external_id"]))[:10]
+    return None
+
+
+@celery_app.task(bind=True, name="rm_org_contracts_step_task", soft_time_limit=10500, time_limit=10800,
+                 max_retries=None)
+def rm_org_contracts_step_task(self, card_ids: List[int], environment: str, push: bool = True, use_llm: bool = True,
+                               portion: int = 1, portions: int = 1) -> Dict[str, Any]:
+    """Порция закупок дозагрузки организации (:func:`_schedule_org_contracts`): анализ недостающих файлов и XML,
+    сборка закупок — как ``rm_analyze_contracts_task``.
+
+    * Ежедневный прогон не доделан (``ORG_BACKFILL_YIELD_TO_DAILY``) — повтор через ``DAILY_WAIT_OTHER_DATE_SEC``
+      (цепочка ждёт, следующие порции не начинаются).
+    * Ошибка или предел времени порции не обрывает цепочку: готовые документы сохранены (при следующем вызове
+      пропустятся), остальные порции и аналитика организации выполняются.
+
+    Returns:
+        Dict[str, Any]: Итог порции (``summary``) или ``error``.
+    """
+    out = _org_contracts_step(card_ids, environment, push, use_llm, portion, portions, self.name, self.request.id)
+    if out.get("busy"):
+        raise self.retry(countdown=out["wait"])
+    return out
+
+
+def _org_contracts_step(card_ids: List[int], environment: str, push: bool, use_llm: bool, portion: int,
+                        portions: int, task_name: str, task_id: Optional[str]) -> Dict[str, Any]:
+    """Тело :func:`rm_org_contracts_step_task`: ``busy`` + ``wait`` — прогон не доделан (повтор задачи), иначе итог
+    порции или ``error`` (цепочка продолжается)."""
+    from configs import settings
+
+    if getattr(settings, "ORG_BACKFILL_YIELD_TO_DAILY", False):
+        busy = asyncio.run(_daily_busy(environment))
+        if busy:
+            wait = int(getattr(settings, "DAILY_WAIT_OTHER_DATE_SEC", 600))
+            logger.info(f"Дозагрузка организации, порция {portion}/{portions}: ежедневный прогон за {busy} не доделан "
+                        f"— повтор через {wait} с")
+            return {"busy": busy, "wait": wait}
+    logger.info(f"Дозагрузка организации, порция {portion}/{portions}: закупок {len(card_ids)}")
+    try:
+        out = _analyze_contracts(card_ids, environment, False, push, use_llm, False, True, task_name, task_id)
+        return {"portion": portion, "portions": portions, "summary": (out or {}).get("summary"),
+                "documents": (out or {}).get("documents")}
+    except Exception as e:  # noqa: BLE001 — цепочка продолжается (SoftTimeLimitExceeded тоже)
+        logger.warning(f"Дозагрузка организации, порция {portion}/{portions}: {type(e).__name__}: {e}")
+        return {"portion": portion, "portions": portions, "error": f"{type(e).__name__}: {e}"}
 
 
 @celery_app.task(bind=True, name="rm_typal_clauses_task", soft_time_limit=7000, time_limit=7200)
