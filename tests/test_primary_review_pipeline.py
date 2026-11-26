@@ -85,6 +85,14 @@ class PrimaryReviewPipelineTests(unittest.TestCase):
         self.assertEqual(result["reviews"][0]["common"], 4)
         self.assertEqual([d["key"] for d in result["reviews"][0]["differences"]], ["field3_0"])
 
+    def test_range_reason_when_too_few_criteria(self):
+        """Мало общих критериев: оценки нет, причина — в ``range_reason`` и в комментарии (а не «ЭЗ соответствует»)."""
+        rows = [row(1, {"field2_1_1": 1}), row(99, {"field2_1_1": 1}, role="raoExpert")]
+        review = review_expertise(rows)["reviews"][0]
+        self.assertIsNone(review["suggested_range"])
+        self.assertIn("не рассчитана", review["range_reason"])
+        self.assertTrue(review["comment"].startswith(review["range_reason"]))
+
     def test_shared_difference_is_not_blamed(self):
         """Расхождение, одинаковое у всех первичных, выделяется и не попадает в комментарий; у одного эксперта — остаётся."""
         both = {**SUMMARY, "field2_1_3": 0}             # итоговое: 1, оба первичных: 0

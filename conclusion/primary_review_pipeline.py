@@ -115,7 +115,7 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
     Returns:
         dict: ``expertise_id`` не входит (добавляет вызывающий); ``summary_expert_id``, ``summary_opinion_id`` и ``summary_updated_at`` (версия итогового заключения, с которой сравнивали; по ним портал определяет, что подсказка устарела), ``is_preliminary`` (``True``, если версия не была указана явно и взята последняя сохранённая), ``group``, ``shared_differences`` (критерии, по которым все первичные эксперты расходятся с итоговым одинаково — вероятно, решение сводного эксперта; в комментарии они не упоминаются и помечены ``shared`` в ``differences``) и ``reviews`` —
         по записи на первичного эксперта: ``expert_id``, ``common``, ``differences`` (по видам), ``issues``,
-        ``suggested_range`` (модель; ``None`` при малом числе общих критериев; снижена за серьёзные замечания к заключению: вычет ``issue_penalty_percent`` п. п. из процента, ``issue_penalty_steps`` 0/1; прежняя оценка в ``range_before_issues`` и ``alternative_range``) с ``range_source`` и ``probabilities``, ``categories`` (замечания по таксономии), ``range_by_thresholds``, ``weighted_percent`` и ``deductions`` (взвешенный процент сходства и вычеты по расхождениям; по нему при ``range_source = weighted_percent`` определяется оценка), ``match_percent`` и ``range_by_scale`` (шкала аналитика), ``comment`` (согласован с оценкой, без нумерации; при 1.00 равен ``comment_details``), ``comment_details`` (полный перечень расхождений), ``alternative_range``, ``confidence``, ``model_range`` (до постпроверки по порядку) и ``rule_applied``, ``current_range``.
+        ``suggested_range`` (модель; ``None`` при малом числе общих критериев; ``range_reason`` (причина, если оценки нет), снижена за серьёзные замечания к заключению: вычет ``issue_penalty_percent`` п. п. из процента, ``issue_penalty_steps`` 0/1; прежняя оценка в ``range_before_issues`` и ``alternative_range``) с ``range_source`` и ``probabilities``, ``categories`` (замечания по таксономии), ``range_by_thresholds``, ``weighted_percent`` и ``deductions`` (взвешенный процент сходства и вычеты по расхождениям; по нему при ``range_source = weighted_percent`` определяется оценка), ``match_percent`` и ``range_by_scale`` (шкала аналитика), ``comment`` (согласован с оценкой, без нумерации; при 1.00 равен ``comment_details``), ``comment_details`` (полный перечень расхождений), ``alternative_range``, ``confidence``, ``model_range`` (до постпроверки по порядку) и ``rule_applied``, ``current_range``.
 
     Raises:
         PrimaryReviewError: 404 — первичных заключений нет; 409 — сводное заключение ещё не заполнено.
@@ -166,6 +166,10 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
         else:
             alternative = (float(ranked[1][0]) if len(ranked) > 1 and ranked[0][1] - ranked[1][1] < AMBIGUITY_GAP
                            and not rule_applied else None)   # после постпроверки по порядку оценка определена правилом
+        min_common = int(getattr(settings, "PRIMARY_REVIEW_MIN_COMMON", 5))
+        range_reason = None if grade is not None else (
+            f"оценка не рассчитана: в итоговом заключении заполнено слишком мало критериев для сравнения "
+            f"(общих с первичным {cmp.common}, нужно не менее {min_common}); заполните и утвердите итоговое заключение")
         mention = primary_mention.probabilities(cmp.group, cmp.differences)        # вероятность упоминания критерия сводным
         mention_min = float(primary_mention.load_model().get(cmp.group, {}).get("min_probability", 0.0)) \
             if getattr(settings, "PRIMARY_REVIEW_MENTION_FILTER", True) else 0.0
@@ -186,6 +190,7 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
             "issue_penalty_steps": issue_steps,            # 1, если вычет за замечания снизил оценку на ступень
             "issue_penalty_percent": issue_percent,        # вычет за серьёзные замечания, п. п. (0 — штрафа нет)
             "alternative_range": alternative,
+            "range_reason": range_reason,                  # почему оценки нет (None, если оценка рассчитана)
             "model_range": model_grade,
             "rule_applied": rule_applied,
             "confidence": ranked[0][1] if ranked else None,
@@ -202,10 +207,10 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
             "range_by_scale": primary_compare.range_by_scale(cmp.match_percent),
             # при 1.00 в комментарий идёт полный перечень расхождений (comment_details), при остальных оценках — только
             # вероятные (отбор по mention_probability) с вводной фразой по оценке
-            "comment": details if grade == 1.0 else primary_compare.build_comment(
+            "comment": _with_reason(range_reason, details) if grade is None else details if grade == 1.0 else primary_compare.build_comment(
                 cmp, labels, issues, shared=shared, grade=grade, mention=mention, mention_min=mention_min),
             # полный перечень расхождений (без отбора и вводной фразы)
-            "comment_details": details,
+            "comment_details": _with_reason(range_reason, details) if range_reason else details,
             "current_range": None if _is_blank(current) else float(current),
         })
     group = "report" if primary_review.is_report_data(summary["data"]) else "procurement"
@@ -216,6 +221,11 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
     return {"summary_expert_id": int(summary["expert_id"]), "summary_opinion_id": int(summary["id"]),
             "summary_updated_at": str(summary.get("updated_at") or ""), "is_preliminary": summary_opinion_id is None,
             "group": group, "shared_differences": shared_list, "reviews": reviews}
+
+
+def _with_reason(reason: str, details: str) -> str:
+    """Причина отсутствия оценки; если есть замечания к заключению (не «соответствует»), они дописываются следом."""
+    return reason if details == "ЭЗ соответствует требованиям" else f"{reason}\n{details}"
 
 
 class PrimaryReviewPipeline:
