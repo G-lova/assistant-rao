@@ -106,6 +106,11 @@ class LlmReviewTests(unittest.TestCase):
         clipped = pl._clip("слово " * 50, 20)
         self.assertTrue(clipped.endswith("слово…"))
 
+    def test_field_keys_are_removed_from_explanation(self):
+        """Ключи полей в пояснении модели («(поле [field1_1])») в комментарий не попадают."""
+        text = "В перечне документов (поле [field1_1]) пункт 1 содержит ссылку. См. [field5_0_0] выше."
+        self.assertEqual(pl._strip_field_refs(text), "В перечне документов пункт 1 содержит ссылку. См. выше.")
+
     def test_score_precision_recall(self):
         """Точность — доля найденных категорий с темой в комментарии; полнота — доля тем, которые нашла модель."""
         rows = [{"found": {"FORMAL"}, "topics": {"FORMAL"}}, {"found": {"FORMAL"}, "topics": set()},
