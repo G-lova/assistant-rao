@@ -68,9 +68,18 @@ def _text(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+# Ключи, которые бывают только в формах отчётных документов (в закупках field3/field4 — текстовые поля без суффикса).
+_REPORT_MARKERS = ("field3_0", "field5_0_0")
+
+
 def is_report_data(data: Dict[str, Any]) -> bool:
-    """Заключение по отчётным документам (объект 7): ``field1_3`` — список элементов, а не строка способа финансирования."""
-    return isinstance(data.get("field1_3"), list)
+    """Заключение по отчётным документам (объект 7).
+
+    Признак — ``field1_3`` как список элементов (а не строка способа финансирования) либо ключи, существующие только в
+    этих формах (``field3_0``, ``field5_0_0``): в сводном заключении списка ``field1_3`` может не быть, и без второго
+    признака оно ошибочно принималось за закупочное, а общих критериев с первичным не находилось.
+    """
+    return isinstance(data.get("field1_3"), list) or any(k in data for k in _REPORT_MARKERS)
 
 
 def criteria(data: Dict[str, Any]) -> Dict[str, Optional[int]]:
@@ -265,18 +274,19 @@ def issue_penalty(grade: Optional[float], issues: List[Issue], percent: Optional
     return new_grade, round(deduction, 1), int(new_grade < grade)
 
 
-def review_opinion(data: Dict[str, Any]) -> List[Issue]:
+def review_opinion(data: Dict[str, Any], report: Optional[bool] = None) -> List[Issue]:
     """Находит объективные дефекты заключения первичного эксперта.
 
     Args:
         data: ``expertise_expert_opinion7s.data`` (``dict``).
+        report: Объект экспертизы 7 по ``expertises.object``; ``None`` — определить по данным.
 
     Returns:
         list[Issue]: Дефекты; пустой список — замечаний нет.
     """
     out: List[Issue] = []
     _check_texts(data, out)
-    if is_report_data(data):
+    if is_report_data(data) if report is None else report:
         _check_report(data, out)
     else:
         _check_remarks(data, _count_zeros(data), out)

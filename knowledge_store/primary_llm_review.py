@@ -51,7 +51,29 @@ SYSTEM = (
       "замечание ни в одном месте не поясняет, в чём нарушение, и не ссылается ни на пункт документа, ни на норму; по одной сути "
       "недостатка — одно замечание, не повторяй однотипные цитаты. Если недостатков нет, верни пустой список findings. "
       "Не придумывай недостатки. Ответ — строго JSON "
-      '{"findings": [{"category": "...", "quote": "...", "explanation": "..."}]}; пояснение — одно-два предложения без рассуждений.')
+      '{"findings": [{"category": "...", "quote": "...", "explanation": "..."}]}; пояснение — одно-два предложения без рассуждений, '
+      'без служебных обозначений полей в квадратных скобках (пиши «в перечне документов», а не «[field1_1]»).')
+
+
+# Поля отчётных форм, которые не проверяются моделью: перечень документов подтягивается из портала (ссылки ЕИС, имена файлов),
+# замечания к нему были бы замечаниями к исходным данным, а не к работе эксперта.
+LLM_SKIP_FIELDS = ("field1_1",)
+
+
+_FIELD_REF = re.compile(r"\s*\(?(?:в поле |поле |полях )?\[field\w*\]\)?")
+
+
+def _strip_field_refs(text: str) -> str:
+    """Убирает служебные ссылки на ключи полей (``[field1_1]``, «поле [field5_0_0]»): заключение читает эксперт, не разработчик."""
+    return re.sub(r"\s{2,}", " ", _FIELD_REF.sub("", text)).strip()
+
+
+def _clip(text: str, limit: int) -> str:
+    """Обрезает текст по границе слова и добавляет «…», а не рвёт фразу на середине."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:") + "…"
 
 
 def opinion_text(data: Dict[str, Any], limit: int = MAX_TEXT, report: bool = False) -> str:
@@ -77,7 +99,7 @@ def opinion_text(data: Dict[str, Any], limit: int = MAX_TEXT, report: bool = Fal
     if report:
         for key in sorted(data):
             value = data[key]
-            if (key.startswith("field") and key not in ("field3", "field4") and not key.endswith("_text")
+            if (key.startswith("field") and key not in ("field3", "field4") + LLM_SKIP_FIELDS and not key.endswith("_text")
                     and isinstance(value, str) and len(value.strip()) >= MIN_FIELD_TEXT):
                 parts.append(f"[{key}] {value.strip()}")
     return "\n".join(parts)[:limit]
@@ -149,5 +171,5 @@ def to_issues(findings: List[Dict[str, str]], categories: Optional[Any] = None) 
         findings: Результат :func:`review`.
         categories: Какие категории оставить (``settings.PRIMARY_REVIEW_LLM_CATEGORIES``); ``None`` — все.
     """
-    return [primary_review.Issue(f"LLM_{f['category']}", "minor", f"«{f['quote'][:80].strip()}»: {f['explanation'][:200]}".strip(), [])
+    return [primary_review.Issue(f"LLM_{f['category']}", "minor", f"«{_clip(f['quote'], 80)}»: {_clip(_strip_field_refs(f['explanation']), 200)}", [])
             for f in findings if categories is None or f["category"] in categories]

@@ -99,14 +99,18 @@ class Comparison:
         return w[0] * self.count("missed") + w[1] * self.count("false_alarm") + w[2] * self.count("other")
 
 
-def comparable(data: Dict[str, Any]) -> Dict[str, int]:
+def comparable(data: Dict[str, Any], report: Optional[bool] = None) -> Dict[str, int]:
     """Критерии заключения, пригодные для сравнения: ``ключ → 1/0/2`` (пустые и нечисловые пропускаются).
 
     Для закупок это листовые критерии раздела 2; для отчётных документов — булевы флаги ``field3_*``/``field4_*`` (поля ``field5_*`` — не критерии, см. ``primary_review.compare_report_facts``).
     Флаги критериев отчётных документов (``field3_N``, ``field4_N``, ``field4_N_1``) хранятся как «замечания выявлены» и
     здесь инвертируются, чтобы 1 везде означало «соответствует», а 0 — «нарушение».
+
+    Args:
+        data: ``data`` заключения.
+        report: Объект экспертизы 7 (отчётные документы) по ``expertises.object``; ``None`` — определить по самим данным.
     """
-    if primary_review.is_report_data(data):
+    if primary_review.is_report_data(data) if report is None else report:
         raw = {k: v for k, v in data.items() if _REPORT_KEY_RE.match(k) and isinstance(v, (bool, int))}
         # True = «замечания есть» → 0 («нарушение выявлено»), False → 1 («замечаний нет»)
         raw = {k: (int(not v) if _REPORT_FLAG_RE.match(k) and v in (0, 1) else v) for k, v in raw.items()}
@@ -118,21 +122,22 @@ def comparable(data: Dict[str, Any]) -> Dict[str, int]:
 _ORDER = {"missed": 0, "false_alarm": 1, "other": 2}
 
 
-def compare(primary: Dict[str, Any], summary: Dict[str, Any]) -> Comparison:
+def compare(primary: Dict[str, Any], summary: Dict[str, Any], report: Optional[bool] = None) -> Comparison:
     """Сравнивает критерии первичного заключения с итоговым.
 
     Args:
         primary: ``data`` заключения первичного эксперта.
         summary: ``data`` итогового сводного заключения.
+        report: Объект экспертизы 7 по ``expertises.object`` (надёжнее признаков в данных); ``None`` — по данным.
 
     Returns:
         Comparison: Число общих критериев и расхождения, отсортированные: пропуск нарушения → ложное нарушение → прочее.
     """
-    a, b = comparable(primary), comparable(summary)
+    a, b = comparable(primary, report), comparable(summary, report)
     common = sorted(set(a) & set(b), key=_key_order)
     diffs = [Difference(k, a[k], b[k]) for k in common if a[k] != b[k]]
     diffs.sort(key=lambda d: (_ORDER[d.kind], _key_order(d.key)))
-    return Comparison(len(common), diffs, "report" if primary_review.is_report_data(primary) else "procurement")
+    return Comparison(len(common), diffs, "report" if (primary_review.is_report_data(primary) if report is None else report) else "procurement")
 
 
 def _key_order(key: str) -> List[int]:
@@ -400,7 +405,8 @@ def _similarity(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, a[:_TEXT_LIMIT], b[:_TEXT_LIMIT]).ratio()
 
 
-def features(primary: Dict[str, Any], summary: Dict[str, Any], cmp: Optional[Comparison] = None) -> Dict[str, float]:
+def features(primary: Dict[str, Any], summary: Dict[str, Any], cmp: Optional[Comparison] = None,
+             report: Optional[bool] = None) -> Dict[str, float]:
     """Признаки пары «первичное заключение — итоговое» для обученной модели.
 
     Args:
@@ -411,7 +417,7 @@ def features(primary: Dict[str, Any], summary: Dict[str, Any], cmp: Optional[Com
     Returns:
         dict: ``имя признака → число``; расхождения по критериям — ``missed:ключ`` / ``false_alarm:ключ`` / ``other:ключ``.
     """
-    cmp = cmp or compare(primary, summary)
+    cmp = cmp or compare(primary, summary, report)
     out: Dict[str, float] = {"n_missed": cmp.count("missed"), "n_false_alarm": cmp.count("false_alarm"),
                              "n_other": cmp.count("other"), "match_percent": cmp.match_percent or 0.0}
     for d in cmp.differences:
@@ -421,8 +427,8 @@ def features(primary: Dict[str, Any], summary: Dict[str, Any], cmp: Optional[Com
         out[f"sim_{key}"] = _similarity(a, b)
         out[f"len_{key}"] = min(len(a), _LEN_NORM) / _LEN_NORM
         out[f"empty_{key}"] = float(not a)
-    out["primary_zeros"] = sum(1 for v in comparable(primary).values() if v == 0)
-    out["summary_zeros"] = sum(1 for v in comparable(summary).values() if v == 0)
+    out["primary_zeros"] = sum(1 for v in comparable(primary, report).values() if v == 0)
+    out["summary_zeros"] = sum(1 for v in comparable(summary, report).values() if v == 0)
     return out
 
 

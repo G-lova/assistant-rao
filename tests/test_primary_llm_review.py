@@ -60,7 +60,7 @@ class LlmReviewTests(unittest.TestCase):
         data = {"field1_1": "1. Договор от 01.02.2025 № 5, акт от 02.03.2025 № 7 и иные документы", "field5_3_3": "Комментарий по разделу " * 3,
                 "field5_0": "ok", "documents": "x" * 100}
         text = pl.opinion_text(data, report=True)
-        self.assertIn("[field1_1]", text)
+        self.assertNotIn("[field1_1]", text)      # перечень документов подтягивается из портала и моделью не проверяется
         self.assertIn("[field5_3_3]", text)
         self.assertNotIn("[field5_0]", text)
         self.assertEqual(pl.opinion_text(data), "")
@@ -96,6 +96,20 @@ class LlmReviewTests(unittest.TestCase):
         self.assertIn("Формальные недостатки", review["comment"])
         self.assertIn("опечатка", review["comment"])
         self.assertIn("FORMAL", [c["code"] for c in review["categories"]])
+
+    def test_report_text_skips_documents_list_and_clip_keeps_words(self):
+        """Перечень документов (field1_1) не уходит в модель; длинные цитаты и пояснения режутся по границе слова."""
+        data = {"field1_1": "1. Ссылка на ЕИС " * 10, "field5_0_0": "Недостатки: отсутствует подпись заказчика на акте"}
+        text = pl.opinion_text(data, report=True)
+        self.assertNotIn("field1_1", text)
+        self.assertIn("field5_0_0", text)
+        clipped = pl._clip("слово " * 50, 20)
+        self.assertTrue(clipped.endswith("слово…"))
+
+    def test_field_keys_are_removed_from_explanation(self):
+        """Ключи полей в пояснении модели («(поле [field1_1])») в комментарий не попадают."""
+        text = "В перечне документов (поле [field1_1]) пункт 1 содержит ссылку. См. [field5_0_0] выше."
+        self.assertEqual(pl._strip_field_refs(text), "В перечне документов пункт 1 содержит ссылку. См. выше.")
 
     def test_score_precision_recall(self):
         """Точность — доля найденных категорий с темой в комментарии; полнота — доля тем, которые нашла модель."""
