@@ -74,6 +74,17 @@ class PrimaryReviewPipelineTests(unittest.TestCase):
         if first["issue_penalty_steps"]:
             self.assertEqual(first["alternative_range"], first["range_before_issues"])
 
+    def test_report_summary_without_items_list(self):
+        """Сводное заключение объекта 7 без ``field1_3`` всё равно распознаётся как отчётное и сравнивается с первичным."""
+        flags = {"field3_0": False, "field3_1": False, "field4_0": False, "field4_1": False}
+        primary = {**flags, "field1_3": [{"name": "товар"}], "field3_0": True}
+        summary = dict(flags)                                   # как в экспертизе 6490: списка field1_3 нет
+        rows = [{**row(1, primary), "object": 7, "checkType2": 14}, {**row(99, summary, role="raoExpert"), "object": 7, "checkType2": 14}]
+        result = review_expertise(rows)
+        self.assertEqual(result["group"], "report")
+        self.assertEqual(result["reviews"][0]["common"], 4)
+        self.assertEqual([d["key"] for d in result["reviews"][0]["differences"]], ["field3_0"])
+
     def test_shared_difference_is_not_blamed(self):
         """Расхождение, одинаковое у всех первичных, выделяется и не попадает в комментарий; у одного эксперта — остаётся."""
         both = {**SUMMARY, "field2_1_3": 0}             # итоговое: 1, оба первичных: 0
