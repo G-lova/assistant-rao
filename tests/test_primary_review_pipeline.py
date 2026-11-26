@@ -85,6 +85,14 @@ class PrimaryReviewPipelineTests(unittest.TestCase):
         self.assertEqual(result["reviews"][0]["common"], 4)
         self.assertEqual([d["key"] for d in result["reviews"][0]["differences"]], ["field3_0"])
 
+    def test_form_type_comes_from_object(self):
+        """Тип формы берётся из expertises.object: у объекта 7 флаги сравниваются, даже если маркеров отчётной формы в данных нет."""
+        flags = {f"field4_{i}": False for i in range(5)}
+        rows = [{**row(1, {**flags, "field4_0": True}), "object": 7, "checkType2": 14},
+                {**row(99, flags, role="raoExpert"), "object": 7, "checkType2": 14}]
+        result = review_expertise(rows)
+        self.assertEqual((result["group"], result["reviews"][0]["common"]), ("report", 5))
+
     def test_range_reason_when_too_few_criteria(self):
         """Мало общих критериев: оценки нет, причина — в ``range_reason`` и в комментарии (а не «ЭЗ соответствует»)."""
         rows = [row(1, {"field2_1_1": 1}), row(99, {"field2_1_1": 1}, role="raoExpert")]

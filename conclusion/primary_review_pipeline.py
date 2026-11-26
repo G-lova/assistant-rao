@@ -128,10 +128,12 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
     summary = parts["summary"]
     reviews = []
     ordered = sorted(parts["primary"], key=lambda r: int(r["expert_id"]))
-    comparisons = [primary_compare.compare(row["data"], summary["data"]) for row in ordered]
+    # тип формы — по expertises.object (строка SQL), а не по составу полей: в сводном черновике часть полей может отсутствовать
+    report = _is_report_object(ordered[0].get("object")) if ordered else None
+    comparisons = [primary_compare.compare(row["data"], summary["data"], report) for row in ordered]
     shared = primary_compare.shared_keys(comparisons)      # одинаковое расхождение у всех первичных: проверить итоговое
     for row, cmp in zip(ordered, comparisons):
-        issues = primary_review.review_opinion(row["data"])
+        issues = primary_review.review_opinion(row["data"], report)
         method_issue = primary_review.compare_method(row["data"], summary["data"])   # методологическая ошибка: метод НМЦК
         if method_issue:
             issues.append(method_issue)
@@ -139,7 +141,7 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
         issues.extend(primary_review.compare_report_facts(row["data"], summary["data"], labels))
         issues.extend((extra_issues or {}).get(int(row["expert_id"]), []))
         current = row.get("current_range")
-        feats = primary_compare.features(row["data"], summary["data"], cmp)
+        feats = primary_compare.features(row["data"], summary["data"], cmp, report)
         model = primary_compare.predict_range(feats, cmp.group)
         threshold_range = primary_compare.suggest_range(cmp)
         # основной способ — взвешенный процент сходства и пороги по истории; многоклассовая модель и пороги числа расхождений — запасные
@@ -213,7 +215,7 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
             "comment_details": _with_reason(range_reason, details) if range_reason else details,
             "current_range": None if _is_blank(current) else float(current),
         })
-    group = "report" if primary_review.is_report_data(summary["data"]) else "procurement"
+    group = "report" if (primary_review.is_report_data(summary["data"]) if report is None else report) else "procurement"
     # критерии, по которым все первичные эксперты разошлись с итоговым одинаково (при двух и более первичных)
     shared_list = [{"key": k, "label": primary_compare.label_for(k, labels), "primary": pv, "summary": sv}
                    for k in sorted(shared, key=lambda x: [int(n) for n in re.findall(r"\d+", x)])
@@ -221,6 +223,14 @@ def review_expertise(rows: List[dict], labels: Optional[Dict[str, str]] = None,
     return {"summary_expert_id": int(summary["expert_id"]), "summary_opinion_id": int(summary["id"]),
             "summary_updated_at": str(summary.get("updated_at") or ""), "is_preliminary": summary_opinion_id is None,
             "group": group, "shared_differences": shared_list, "reviews": reviews}
+
+
+def _is_report_object(object_code: Any) -> Optional[bool]:
+    """``True`` для объекта 7 (отчётные документы), ``False`` для прочих объектов, ``None`` — объект неизвестен."""
+    try:
+        return int(object_code) == forms.OBJECT_REPORT
+    except (TypeError, ValueError):
+        return None
 
 
 def _with_reason(reason: str, details: str) -> str:

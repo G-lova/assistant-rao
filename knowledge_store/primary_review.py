@@ -274,18 +274,19 @@ def issue_penalty(grade: Optional[float], issues: List[Issue], percent: Optional
     return new_grade, round(deduction, 1), int(new_grade < grade)
 
 
-def review_opinion(data: Dict[str, Any]) -> List[Issue]:
+def review_opinion(data: Dict[str, Any], report: Optional[bool] = None) -> List[Issue]:
     """Находит объективные дефекты заключения первичного эксперта.
 
     Args:
         data: ``expertise_expert_opinion7s.data`` (``dict``).
+        report: Объект экспертизы 7 по ``expertises.object``; ``None`` — определить по данным.
 
     Returns:
         list[Issue]: Дефекты; пустой список — замечаний нет.
     """
     out: List[Issue] = []
     _check_texts(data, out)
-    if is_report_data(data):
+    if is_report_data(data) if report is None else report:
         _check_report(data, out)
     else:
         _check_remarks(data, _count_zeros(data), out)
